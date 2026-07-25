@@ -705,6 +705,8 @@ mod tests {
                 default_vault: Some("mystore".to_string()),
                 encrypt_metadata: None,
                 opaque_filenames: None,
+                audit: None,
+                git: None,
             }),
             ..Default::default()
         };

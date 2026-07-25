@@ -798,6 +798,8 @@ fn get_corrupt_envelope_fails_loud() {
         default_vault: Some("default".to_string()),
         encrypt_metadata: None,
         opaque_filenames: None,
+        audit: None,
+        git: None,
     };
 
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -881,6 +883,8 @@ fn get_unknown_type_degrades() {
         default_vault: Some("default".to_string()),
         encrypt_metadata: None,
         opaque_filenames: None,
+        audit: None,
+        git: None,
     };
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
@@ -2796,6 +2800,8 @@ fn update_positional_value_on_corrupt_envelope_fails_loud_without_writing() {
         default_vault: Some("default".to_string()),
         encrypt_metadata: None,
         opaque_filenames: None,
+        audit: None,
+        git: None,
     };
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
@@ -2883,6 +2889,8 @@ fn update_positional_value_on_unknown_type_record_errors_without_writing() {
         default_vault: Some("default".to_string()),
         encrypt_metadata: None,
         opaque_filenames: None,
+        audit: None,
+        git: None,
     };
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {

@@ -7,7 +7,7 @@
 
 #![allow(dead_code)] // each test file imports a subset of helpers
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
 
@@ -104,6 +104,58 @@ default_vault = "default"
         .env("NO_COLOR", "1")
         .current_dir(temp.path());
     (cmd, temp)
+}
+
+/// Isolated local-backend `xv` command with the audit and/or git-versioning
+/// options enabled under `[local]`.
+///
+/// Same hermetic setup as [`xv_isolated_local`]; returns the store path too,
+/// since these tests assert on the on-disk store (audit log, `.git/`).
+pub fn xv_isolated_local_with_opts(audit: bool, git: bool) -> (Command, TempDir, PathBuf) {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config_dir = temp.path().join(".config");
+    let store_dir = temp.path().join("store");
+    let key_file = temp.path().join("key.txt");
+    let xv_dir = config_dir.join("xv");
+    std::fs::create_dir_all(&xv_dir).expect("create config dir");
+    std::fs::create_dir_all(&store_dir).expect("create store dir");
+
+    let config_content = format!(
+        r#"backend = "local"
+debug = false
+subscription_id = ""
+default_vault = "default"
+default_resource_group = ""
+default_location = ""
+tenant_id = ""
+output_json = false
+no_color = true
+cache_enabled = false
+cache_ttl_secs = 0
+clipboard_timeout = 0
+
+[local]
+store_path = "{store}"
+key_file = "{key}"
+default_vault = "default"
+audit = {audit}
+git = {git}
+"#,
+        store = store_dir.display(),
+        key = key_file.display(),
+    );
+    std::fs::write(xv_dir.join("xv.conf"), config_content).expect("write config");
+
+    let mut cmd = xv();
+    cmd.env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", temp.path())
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .env("XV_NO_PARENT_CONFIG", "1")
+        .env("XV_BACKEND", "local")
+        .env("NO_COLOR", "1")
+        .current_dir(temp.path());
+    (cmd, temp, store_dir)
 }
 
 /// Build an isolated `xv` command backed by the **local** backend (same

@@ -21,10 +21,12 @@
 //! Key files (`key.txt`, `recipients.txt`) are stored alongside the store
 //! or at a user-configured path.
 
+pub mod audit;
 pub mod config;
 pub mod crypto;
 #[cfg(feature = "file-ops")]
 pub mod files;
+pub mod git;
 pub mod opaque;
 pub mod paths;
 pub mod secrets;
@@ -37,16 +39,23 @@ use crate::utils::helpers::{create_private_dir, write_private};
 use async_trait::async_trait;
 
 use super::error::BackendError;
-use super::{Backend, BackendCapabilities, BackendKind, NameCharset, SecretBackend, VaultBackend};
+use super::{
+    AuditBackend, Backend, BackendCapabilities, BackendKind, NameCharset, SecretBackend,
+    VaultBackend,
+};
 
 #[cfg(feature = "file-ops")]
 use super::FileBackend;
 
+use self::audit::LocalAuditLog;
 use self::config::ResolvedLocalConfig;
 #[cfg(feature = "file-ops")]
 use self::files::LocalFileBackend;
+use self::git::LocalGitStore;
 use self::secrets::LocalSecretBackend;
 use self::vaults::LocalVaultBackend;
+
+use std::sync::Arc;
 
 /// The local age-encrypted file backend.
 pub struct LocalBackend {
@@ -55,6 +64,13 @@ pub struct LocalBackend {
     vault_backend: LocalVaultBackend,
     #[cfg(feature = "file-ops")]
     file_backend: LocalFileBackend,
+    /// Hash-chained audit log. `Some` only when `[local].audit` is on, which is
+    /// also what drives the `has_audit` capability flag — so the flag can never
+    /// claim an audit trail that is not actually being written.
+    audit_log: Option<Arc<LocalAuditLog>>,
+    /// Git store for the versioned-store commands. `Some` only when
+    /// `[local].git` is on.
+    git_store: Option<Arc<LocalGitStore>>,
 }
 
 impl LocalBackend {
@@ -113,13 +129,38 @@ impl LocalBackend {
             .map_err(|e| BackendError::Internal(format!("write default vault meta: {e}")))?;
         }
 
-        let secret_backend = LocalSecretBackend::with_options(
+        let mut secret_backend = LocalSecretBackend::with_options(
             config.store_path.clone(),
             identity.clone(),
             recipients.clone(),
             config.encrypt_metadata,
             config.opaque_filenames,
         );
+
+        let audit_log = if config.audit {
+            let log = Arc::new(LocalAuditLog::new(config.store_path.clone(), &identity));
+            secret_backend = secret_backend.with_audit_log(Arc::clone(&log));
+            Some(log)
+        } else {
+            None
+        };
+
+        let git_store = if config.git {
+            let git = Arc::new(LocalGitStore::new(
+                config.store_path.clone(),
+                config.key_file.clone(),
+                config.recipients_file.clone(),
+            ));
+            // Initialize eagerly so a misconfiguration (e.g. key_file inside the
+            // store, or git missing from PATH) surfaces at startup rather than
+            // midway through the first write.
+            git.ensure_repo()?;
+            secret_backend = secret_backend.with_git_store(Arc::clone(&git));
+            Some(git)
+        } else {
+            None
+        };
+
         let vault_backend = LocalVaultBackend::new(config.store_path.clone());
 
         #[cfg(feature = "file-ops")]
@@ -131,7 +172,35 @@ impl LocalBackend {
             vault_backend,
             #[cfg(feature = "file-ops")]
             file_backend,
+            audit_log,
+            git_store,
         })
+    }
+
+    /// The hash-chained audit log, when `[local].audit` is enabled.
+    ///
+    /// Exposed for `xv audit --verify`, which needs the concrete type's
+    /// `verify_chain` rather than the backend-agnostic [`AuditBackend`] trait.
+    pub fn audit_log(&self) -> Option<&Arc<LocalAuditLog>> {
+        self.audit_log.as_ref()
+    }
+
+    /// The git store, when `[local].git` is enabled.
+    pub fn git_store(&self) -> Option<&Arc<LocalGitStore>> {
+        self.git_store.as_ref()
+    }
+
+    /// A git store for this configuration regardless of whether `[local].git`
+    /// is enabled.
+    ///
+    /// `xv git init` has to work *before* the flag is turned on — otherwise
+    /// enabling versioning would be a chicken-and-egg problem.
+    pub fn git_store_unconditional(&self) -> LocalGitStore {
+        LocalGitStore::new(
+            self.config.store_path.clone(),
+            self.config.key_file.clone(),
+            self.config.recipients_file.clone(),
+        )
     }
 
     /// Whether this backend was configured to encrypt metadata at rest.
@@ -223,7 +292,10 @@ impl Backend for LocalBackend {
             has_vaults: true,
             has_file_storage: cfg!(feature = "file-ops"),
             has_rbac: false,
-            has_audit: false,
+            // Only true when the log is actually being written — see the
+            // `audit_log` field. A blanket `true` here would repeat the
+            // `has_audit` inconsistency closed for Azure in v0.21.
+            has_audit: self.audit_log.is_some(),
             has_versioning: true,
             has_soft_delete: true,
             has_restore: true,
@@ -248,6 +320,12 @@ impl Backend for LocalBackend {
 
     fn vaults(&self) -> Option<&dyn VaultBackend> {
         Some(&self.vault_backend)
+    }
+
+    fn audit(&self) -> Option<&dyn AuditBackend> {
+        self.audit_log
+            .as_deref()
+            .map(|log| log as &dyn AuditBackend)
     }
 
     #[cfg(feature = "file-ops")]
@@ -289,6 +367,8 @@ mod tests {
             default_vault: Some("default".into()),
             encrypt_metadata: None,
             opaque_filenames: None,
+            audit: None,
+            git: None,
         }
     }
 

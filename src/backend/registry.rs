@@ -447,6 +447,8 @@ mod tests {
                 default_vault: Some("default".into()),
                 encrypt_metadata: None,
                 opaque_filenames: None,
+                audit: None,
+                git: None,
             }),
             ..Default::default()
         };
@@ -496,6 +498,8 @@ mod tests {
                 default_vault: Some("default".into()),
                 encrypt_metadata: None,
                 opaque_filenames: None,
+                audit: None,
+                git: None,
             }),
         );
         named_backends.insert(
@@ -506,6 +510,8 @@ mod tests {
                 default_vault: Some("default".into()),
                 encrypt_metadata: None,
                 opaque_filenames: None,
+                audit: None,
+                git: None,
             }),
         );
 
@@ -590,6 +596,8 @@ mod tests {
                 default_vault: Some("default".into()),
                 encrypt_metadata: None,
                 opaque_filenames: None,
+                audit: None,
+                git: None,
             }),
             ..Default::default()
         };

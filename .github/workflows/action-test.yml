@@ -1,0 +1,110 @@
+name: Action Smoke Test
+
+# Exercises the install path of `action.yml` on every runner we publish
+# binaries for. The action's shell logic is unit-tested in
+# `tests/action_yml_tests.rs`; what only a real runner can prove is that the
+# platform→archive mapping, checksum verification, unpack, and PATH export
+# actually work on each OS.
+#
+# Deliberately does not authenticate or read secrets: that needs a federated
+# app registration and a live vault, which a public smoke test should not
+# depend on. `auth: none` covers everything up to the point where credentials
+# would be required.
+
+on:
+  pull_request:
+    paths:
+      - 'action.yml'
+      - '.github/workflows/action-test.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'action.yml'
+      - '.github/workflows/action-test.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    name: Install via action (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-latest is ARM64, macos-13 is Intel — both archives get exercised.
+        os: [ubuntu-latest, macos-latest, macos-13, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install xv through the action
+        id: setup
+        uses: ./
+        with:
+          auth: none
+
+      - name: Verify the binary is on PATH and runnable
+        shell: bash
+        # Step outputs are passed through env rather than interpolated into the
+        # script body — the safe default for any `${{ }}` value in a `run:`.
+        env:
+          XV_VERSION: ${{ steps.setup.outputs.version }}
+          XV_PATH: ${{ steps.setup.outputs.path }}
+        run: |
+          set -euo pipefail
+          xv --version
+          test -n "${XV_VERSION}"
+          test -x "${XV_PATH}"
+          echo "Installed ${XV_VERSION}"
+
+      - name: Verify the second run hits the tool cache
+        uses: ./
+        with:
+          auth: none
+
+  local-backend-round-trip:
+    name: Local-backend round trip via action
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install xv through the action
+        uses: ./
+        with:
+          backend: local
+          auth: none
+
+      - name: Write and read a secret with no cloud credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          export XDG_CONFIG_HOME="${RUNNER_TEMP}/config"
+          mkdir -p "${XDG_CONFIG_HOME}/xv"
+          cat > "${XDG_CONFIG_HOME}/xv/xv.conf" <<EOF
+          backend = "local"
+          debug = false
+          subscription_id = ""
+          default_vault = "default"
+          default_resource_group = ""
+          default_location = ""
+          tenant_id = ""
+          output_json = false
+          no_color = true
+          cache_enabled = false
+          cache_ttl_secs = 0
+          clipboard_timeout = 0
+
+          [local]
+          store_path = "${RUNNER_TEMP}/store"
+          key_file = "${RUNNER_TEMP}/key.txt"
+          default_vault = "default"
+          EOF
+
+          xv set CI_TOKEN --value "round-trip-value"
+          got="$(xv get CI_TOKEN --raw)"
+          if [[ "${got}" != "round-trip-value" ]]; then
+            echo "::error::expected 'round-trip-value', got '${got}'" >&2
+            exit 1
+          fi
+          echo "Local backend round trip succeeded"

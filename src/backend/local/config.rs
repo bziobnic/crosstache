@@ -28,6 +28,13 @@ pub struct ResolvedLocalConfig {
     /// index). Defaults to `false`, leaving existing stores byte-for-byte
     /// unchanged until migrated.
     pub opaque_filenames: bool,
+    /// Whether to append to the hash-chained audit log on every operation.
+    /// Defaults to `false`; enabling it makes audit-append failures fatal to
+    /// the triggering operation.
+    pub audit: bool,
+    /// Whether the store is tracked as a git repository with an auto-commit
+    /// after every mutation. Defaults to `false`.
+    pub git: bool,
 }
 
 impl ResolvedLocalConfig {
@@ -60,6 +67,8 @@ impl ResolvedLocalConfig {
 
         let encrypt_metadata = raw.and_then(|c| c.encrypt_metadata).unwrap_or(false);
         let opaque_filenames = raw.and_then(|c| c.opaque_filenames).unwrap_or(false);
+        let audit = raw.and_then(|c| c.audit).unwrap_or(false);
+        let git = raw.and_then(|c| c.git).unwrap_or(false);
 
         Self {
             store_path,
@@ -68,6 +77,8 @@ impl ResolvedLocalConfig {
             default_vault,
             encrypt_metadata,
             opaque_filenames,
+            audit,
+            git,
         }
     }
 
@@ -320,6 +331,8 @@ mod tests {
             default_vault: Some("staging".into()),
             encrypt_metadata: None,
             opaque_filenames: None,
+            audit: None,
+            git: None,
         };
         let cfg = ResolvedLocalConfig::from_raw(Some(&raw));
         assert_eq!(cfg.store_path, PathBuf::from("/tmp/my-store"));
@@ -336,6 +349,8 @@ mod tests {
             default_vault: None,
             encrypt_metadata: Some(true),
             opaque_filenames: None,
+            audit: None,
+            git: None,
         };
         let cfg = ResolvedLocalConfig::from_raw(Some(&raw));
         assert!(cfg.encrypt_metadata);
@@ -351,6 +366,8 @@ mod tests {
             default_vault: Some("default".into()),
             encrypt_metadata: None,
             opaque_filenames: None,
+            audit: None,
+            git: None,
         };
         let config = ResolvedLocalConfig::from_raw(Some(&raw));
 
@@ -393,6 +410,8 @@ mod tests {
                 default_vault: Some("default".into()),
                 encrypt_metadata: None,
                 opaque_filenames: None,
+                audit: None,
+                git: None,
             };
             let error = ResolvedLocalConfig::from_raw(Some(&raw))
                 .validate()

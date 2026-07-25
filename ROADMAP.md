@@ -117,6 +117,77 @@ low-confidence (`src/scan/patterns.rs:62`).
 
 ---
 
+## Rotation, audit, and CI/CD (2026-07-24)
+
+Four capability gaps from the competitive feature review closed this pass; see
+`CHANGELOG.md` § Unreleased for the user-visible list. Remaining follow-ups:
+
+### ~~P2 — Local audit log records successes only~~ — closed
+✅ **Closed 2026-07-24.** All nine audited operations now record failures as well
+as successes, with status tokens from a closed set keyed off the error variant
+(`failure_status`). `BackendError::Decryption` was split out of `Internal` so a
+failed decryption is its own status. Metadata-only probes remain unlogged on both
+paths.
+
+### P2 — No off-box audit sink
+The hash chain is tamper-evident but not tamper-proof: whoever holds the age
+identity can rewrite it wholesale, and anyone who can write the file can truncate
+the tail. `[local].git` plus a remote is the current answer (the remote holds
+copies a local attacker cannot reach), which requires the operator to push.
+A native append-only sink (syslog, an HTTP endpoint, a WORM bucket) would close
+it properly.
+
+### ~~P2 — No first-party scheduling for due rotation~~ — closed
+✅ **Closed 2026-07-24.** `xv schedule install|status|uninstall` manages a
+per-user job in the platform scheduler (launchd / systemd user timer / Task
+Scheduler). See `src/schedule/mod.rs`. Remaining: no cron fallback is installed
+automatically on systemd-less Linux (a diagnostic error prints the line to add),
+and lifecycle verification on Windows and systemd is untested in CI — the unit
+tests cover rendering and command sequencing against a fake runner, but no test
+registers a real job, by design.
+
+### P2 — Rotation policy has no external-system hook
+`xv rotate` replaces the stored value; it does not change the password on the
+database. `--generator` can wrap a script that does both, and AWS `--native`
+delegates to a Lambda, but there is no first-class "rotate this, then run this"
+step, and no rollout coordination — a rotated credential that an app read at
+startup needs a restart. Worth a design pass before adding surface.
+
+### P3 — Scheduler lifecycle is not exercised on a real runner
+`src/schedule/mod.rs` unit-tests rendering and command sequencing against a fake
+`CommandRunner`, and `tests/schedule_cli_tests.rs` covers `--print` and argument
+validation. Nothing installs a real job: `launchctl`, `systemctl --user`, and
+`schtasks` act on the invoking user's live session regardless of `HOME`, so a test
+that installed would leave a rotation job on the developer's machine. A container
+or VM job could cover systemd end-to-end; launchd and Task Scheduler would need
+dedicated runners. The macOS path was verified manually (install → reinstall →
+status → uninstall, with `plutil -lint` on the plist).
+
+### P3 — `xv rotate --check` emits two JSON documents on stdout
+With an explicit `--format json`, a non-zero exit also writes the machine-readable
+error envelope to stdout (`print_user_friendly_error`), so `--check` output is
+rows followed by the envelope and `| jq` sees two documents. This matches
+`xv scan --format json`, which has behaved this way since it shipped — the
+inconsistency is in the framework's error path, not in either command, so fixing
+it means deciding the contract for the whole 50–59 exit-code family at once
+rather than special-casing one command.
+
+### P3 — No first-party GitLab / CircleCI integration
+`action.yml` covers GitHub. GitLab and CircleCI work via a documented plain
+install step (`docs/ci-cd.md`), but there is no CI component or orb, and no
+OIDC-native path for GitLab's `CI_JOB_JWT_V2` (the exchange in
+`src/backend/azure/oidc.rs` is generic; only the token-fetch step is
+GitHub-specific, so this is a small addition).
+
+### P3 — Git versioning is local-only by design
+Deliberate, not an omission: mirroring Azure/AWS secret values into a git history
+would create a second, effectively permanent copy of every secret version. If a
+cloud mirror is ever wanted, it needs its own design pass covering key custody
+for the mirror and a redaction story — not a straight extension of the local
+implementation.
+
+---
+
 ## Backend ecosystem
 
 ### P1 — AWS capability matrix gaps (deferred from v0.10.0)
@@ -154,6 +225,16 @@ manager retirement (see § above). Azure `xv audit`/`--resource-group` now
 dispatches through the `AuditBackend` trait exactly like AWS; the legacy
 Activity Log client is deleted, so `has_audit: true` for Azure is no longer a
 lie. Retained here for traceability; details in `CHANGELOG.md` § Unreleased.
+
+### ~~P1 — Rotation limited to AWS native / manual value replacement~~ — closed
+✅ **Closed 2026-07-24.** Rotation policies (`xv:rotate_every` +
+`xv:rotated_at`), `xv rotate --due`, and `xv rotate --check` work on Azure, AWS,
+and local; `--native` remains the AWS server-side path. See § Rotation, audit,
+and CI/CD above for remaining follow-ups.
+
+### ~~P2 — Local backend has no audit trail~~ — closed
+✅ **Closed 2026-07-24.** `[local].audit` writes a hash-chained log verified by
+`xv audit --verify`. Scope limits and the missing off-box sink are tracked above.
 
 ### P3 — Additional backends
 Open ground from `2026-04-29-strategic-improvements-phase-1-design.md`:

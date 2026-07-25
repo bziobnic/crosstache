@@ -81,6 +81,17 @@ pub enum BackendError {
         cause: Box<BackendError>,
     },
 
+    /// Decryption failed: the wrong key, or ciphertext that has been altered
+    /// or truncated.
+    ///
+    /// Distinct from [`Internal`](Self::Internal) so an audit trail can record
+    /// "a read was attempted and the material could not be decrypted" as its own
+    /// status. That is the single most security-relevant local failure, and it is
+    /// indistinguishable from an unrelated I/O fault once both collapse into
+    /// `Internal`.
+    #[error("decryption failed: {0}")]
+    Decryption(String),
+
     /// An internal error inside the backend implementation.
     #[error("backend internal error: {0}")]
     Internal(String),
@@ -134,6 +145,10 @@ impl From<BackendError> for CrosstacheError {
                 vault,
                 cause: Box::new((*cause).into()),
             },
+            BackendError::Decryption(msg) => CrosstacheError::Unknown(format!(
+                "decryption failed: {msg}. The age identity may not match this store, or the \
+                 ciphertext may have been altered."
+            )),
             BackendError::Internal(msg) => CrosstacheError::Unknown(msg),
             BackendError::Other(err) => CrosstacheError::Unknown(err.to_string()),
         }

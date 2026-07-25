@@ -1,5 +1,135 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **First-party GitHub Action** (`action.yml`): `uses: bziobnic/crosstache@v1`
+  installs the CLI (per-platform release archive, SHA-256 verified fail-closed,
+  cached in the runner tool cache) and optionally fetches secrets into
+  `GITHUB_ENV` with `::add-mask::` applied per line before anything logs.
+  Optional `verify-signature: true` checks the release `.minisig` against the
+  same minisign key embedded in `xv upgrade`. Outputs `version` and `path`.
+  Guide: `docs/ci-cd.md`.
+
+- **OIDC-native Azure authentication**: `AZURE_CREDENTIAL_PRIORITY=oidc` (or
+  `--credential-type oidc`) federates a GitHub Actions OIDC token into Azure AD
+  as a `client_assertion`, so CI needs no stored client secret and no
+  `azure/login` step. The `default` credential chain now also prefers OIDC when
+  the Actions runtime variables are present, falling back silently if federation
+  is incompletely configured; the explicit `oidc` selection never falls back, so
+  a misconfiguration cannot authenticate as a different identity. Azure AD
+  rejections surface the `AADSTS…` description with the actionable first line.
+
+- **Rotation policies on every backend** (closes the Azure/local rotation gap):
+  a policy is stored with the secret as the `xv:rotate_every` interval plus
+  `xv:rotated_at` timestamp.
+  - `xv update <name> --rotate-every 90d` sets a policy without rotating (clock
+    starts now); `--clear-rotate-every` removes it. Standalone, like `--field`.
+  - `xv rotate <name> --every 90d` rotates and sets/refreshes the policy.
+  - `xv rotate --due` rotates everything currently due; `--force` for cron/CI.
+  - `xv rotate --check` reports status and changes nothing, exiting **51**
+    (`xv-rotation-due`) when any secret is due, so a pipeline can gate on
+    staleness. Honors `--format`.
+  - Every rotation, `--every` or not, restamps `xv:rotated_at`, so `--due` cannot
+    re-rotate the same secret on every run.
+  - An unparseable interval is reported as `invalid` by `--check` and **fails**
+    `--due` rather than being skipped: unknown due-ness must not look like a
+    clean run. Intervals require a unit (`m`/`h`/`d`/`w`); a bare `90` is
+    rejected rather than guessed. Guide: `docs/rotation.md`.
+  - Not a scheduler: nothing rotates unless cron, a systemd timer, or CI invokes
+    `xv`. `--native` (AWS server-side Lambda rotation) is unchanged.
+
+- **Automatic rotation scheduling** (`xv schedule install|status|uninstall`):
+  installs and manages a **per-user** job in the platform's own scheduler that
+  runs `xv rotate --due --force` on a cadence — launchd agent on macOS, systemd
+  **user** timer on Linux, Task Scheduler task on Windows. Nothing system-wide,
+  no root, and no daemon: a resident process would reimplement reboot survival,
+  sleep catch-up, and log capture worse than the OS already does, while holding
+  decryption credentials for its whole lifetime.
+  - `--interval hourly|daily|weekly` and `--at HH:MM` (default daily 03:00);
+    `HH:MM` is strict, so `3:0` is rejected rather than landing an hour off.
+  - `--print` renders the unit and the exact command line without writing or
+    registering anything — also how to drive a scheduler `xv` does not manage
+    (cron, Kubernetes CronJob, CI schedule).
+  - `--vault` pins the target; without it the scheduled run re-resolves whatever
+    context it finds at fire time, and install warns about that.
+  - Units carry only an absolute binary path, the rotate arguments, a log path,
+    and `HOME`/`XDG_CONFIG_HOME` — **never credentials or secret values**. The env
+    pair is what stops a scheduled run from resolving a different config than the
+    user tested against.
+  - The scheduled command is always `rotate --due --force`: bounded to secrets
+    that already carry a policy and are already past it, and `--every` is never
+    passed, so a schedule cannot redefine what it sweeps.
+  - Install requires confirmation (or `--force`) and states plainly that
+    unattended rotation breaks anything that does not re-read its secrets. On a
+    non-TTY without `--force` it errors naming `--force`/`--print` instead of
+    surfacing a generic "not a terminal" I/O failure.
+  - Output is captured to `$XDG_STATE_HOME/xv/rotate.log` (else
+    `~/.local/state/xv/rotate.log`) on every platform. Reinstall is idempotent;
+    uninstall converges on "absent" and succeeds when nothing was installed.
+  - A Linux host with no systemd gets a diagnostic error plus the cron line to
+    use, not a silently-absent schedule. Guide: `docs/rotation.md`.
+
+- **Failed local operations are now audited.** The local trail records attempts,
+  not just outcomes: a missing secret, a denied path, or ciphertext that would not
+  decrypt each produce a record. Status tokens come from a **closed set** derived
+  from the error's variant, never its message, so no future error string can widen
+  what the log captures. Secret values never appear; secret *names* do, exactly as
+  for successful operations.
+  - New `BackendError::Decryption` variant, so a read that reached a secret's
+    ciphertext and could not open it records as `DecryptionFailed` rather than
+    collapsing into a generic internal error. That is the one status worth
+    alerting on — it means the wrong age identity, or altered material.
+  - Metadata-only probes stay unlogged on the failure path too, matching the
+    success path: a `NotFound` from an existence check is normal listing traffic.
+  - If the audit append for a failure itself fails, both failures are reported
+    rather than the original error being replaced or the record silently dropped.
+
+- **Audit trail for the local backend** (`[local].audit = true`): append-only
+  hash-chained log at `<store>/vaults/<vault>/.audit/log.jsonl`, surfaced through
+  the existing `xv audit`. Records `PutSecretValue`, `GetSecretValue`,
+  `UpdateSecret`, `DeleteSecret`, `RestoreSecret`, `PurgeSecret`,
+  `RollbackSecret`, and vault-wide `ListSecrets`; only reads that actually
+  decrypt a value count as `GetSecretValue`. Each record carries
+  `HMAC-SHA256(chain_key, prev_mac || record)` with the key HKDF-derived from the
+  age identity, and `xv audit --verify` recomputes the chain and exits non-zero
+  on a break. Fail-closed: a failed append fails the triggering operation.
+  `has_audit` is true only when the log is actually being written.
+  **Tamper-evident, not tamper-proof** — anyone holding the age identity can
+  rewrite the chain, and anyone who can write the file can truncate it; push the
+  store to a remote for off-box copies. Guide: `docs/git-versioning.md`.
+
+- **Git-native versioning for the local store** (`[local].git = true`): the store
+  becomes a real git repository committed after every mutation, so `git log`,
+  `git diff`, `git bisect`, and `git push` operate on actual history.
+  `xv git init|log|status|diff|push|pull`. Only age **ciphertext** and metadata
+  are committed; the age identity and recipients files are excluded by a managed
+  `.gitignore` *and* by a pre-commit staged-path check that refuses the commit
+  outright (`.gitignore` alone is defeatable with `git add -f`). `xv git diff`
+  reports names only, never contents. `xv git pull` is fast-forward only, since a
+  merge conflict inside age ciphertext is unresolvable. Additive:
+  `xv history`/`xv rollback` are unchanged on every backend. Azure and AWS are
+  excluded by design — mirroring cloud secret values into git would create a
+  second, effectively permanent copy of every version.
+
+### Changed
+
+- `xv rotate`'s secret name is now optional, since `--due` and `--check` are
+  vault-scoped. Invoking `xv rotate` with neither a name nor a mode flag errors
+  and names the alternatives.
+- The local backend's `has_audit` capability reflects `[local].audit` rather than
+  being hard-coded `false`.
+- New `[local]` config keys: `audit`, `git` (both default `false`, so existing
+  stores are byte-for-byte unchanged until opted in).
+- New `AzureCredentialType::Oidc` variant (`oidc`, `github-oidc`,
+  `workload-identity`).
+- New `BackendError::Decryption` variant, split out of `Internal`, so decryption
+  failures are distinguishable by callers and by the audit trail. It converts to
+  `CrosstacheError::Unknown` with a message naming the two likely causes.
+- New exit code **52** (`xv-audit-chain-broken`) for `xv audit --verify` on an
+  altered chain. It previously reported as `xv-config-invalid` (exit 3), which
+  misdescribed an integrity failure as a configuration problem.
 ## v0.29.0 — App UX modernization (2026-07-24)
 
 ### Added

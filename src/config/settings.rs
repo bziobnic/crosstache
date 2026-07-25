@@ -42,6 +42,23 @@ pub struct LocalConfig {
     #[serde(default)]
     pub encrypt_metadata: Option<bool>,
 
+    /// Record an append-only, hash-chained audit trail under
+    /// `<store>/vaults/<vault>/.audit/log.jsonl`. Off by default. When on, a
+    /// failed audit append fails the operation that triggered it, so the log
+    /// can never be silently incomplete. The chain is tamper-*evident* (verify
+    /// with `xv audit --verify`), not tamper-proof: anyone holding the age
+    /// identity can rewrite it wholesale. See
+    /// `crate::backend::local::audit` for the full threat model.
+    #[serde(default)]
+    pub audit: Option<bool>,
+
+    /// Track the store as a git repository, committing after every mutation.
+    /// Off by default. Only age *ciphertext* and metadata are committed; the
+    /// identity and recipients files are force-excluded and a commit is
+    /// refused if they would be captured. See `crate::backend::local::git`.
+    #[serde(default)]
+    pub git: Option<bool>,
+
     /// Make on-disk filenames opaque so a directory listing reveals no secret
     /// names. When `false` (the default, for backward compatibility), secret
     /// names are stored verbatim as URL-encoded filenames. When `true`, each
@@ -105,6 +122,10 @@ pub enum AzureCredentialType {
     ManagedIdentity,
     /// Use environment variable credentials first
     Environment,
+    /// Federate a GitHub Actions OIDC token into Azure AD (workload identity),
+    /// with no stored secret and no `azure/login` step. Requires the job to
+    /// declare `permissions: id-token: write`.
+    Oidc,
     /// Use the default credential chain order
     #[default]
     Default,
@@ -116,6 +137,7 @@ impl fmt::Display for AzureCredentialType {
             Self::Cli => write!(f, "cli"),
             Self::ManagedIdentity => write!(f, "managed_identity"),
             Self::Environment => write!(f, "environment"),
+            Self::Oidc => write!(f, "oidc"),
             Self::Default => write!(f, "default"),
         }
     }
@@ -129,8 +151,9 @@ impl std::str::FromStr for AzureCredentialType {
             "cli" | "azure-cli" | "az" => Ok(Self::Cli),
             "managed_identity" | "managed-identity" | "msi" => Ok(Self::ManagedIdentity),
             "environment" | "env" => Ok(Self::Environment),
+            "oidc" | "github-oidc" | "workload-identity" => Ok(Self::Oidc),
             "default" => Ok(Self::Default),
-            _ => Err(format!("Invalid credential type: {s}. Valid options: cli, managed_identity, environment, default")),
+            _ => Err(format!("Invalid credential type: {s}. Valid options: cli, managed_identity, environment, oidc, default")),
         }
     }
 }

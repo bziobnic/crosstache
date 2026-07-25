@@ -10,6 +10,7 @@
 pub mod audit;
 pub mod auth;
 pub mod detect;
+pub mod oidc;
 #[allow(clippy::module_inception)]
 pub mod secrets;
 pub mod types;

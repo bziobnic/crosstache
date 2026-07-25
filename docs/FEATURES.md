@@ -12,8 +12,11 @@
 |------|-------|-----|-------|
 | Secrets CRUD, groups, notes, folders, expiry | Native Key Vault secrets + tags | Secrets Manager + tags/description | age-encrypted files |
 | Vaults | Azure Key Vault resources | Prefix-based virtual vaults (`<vault>/.xv-vault`) | Directories under the local store |
-| Audit | Azure Activity Log path | CloudTrail `LookupEvents` (`cloudtrail:LookupEvents` required) | Unsupported |
+| Audit | Azure Activity Log path | CloudTrail `LookupEvents` (`cloudtrail:LookupEvents` required) | Opt-in hash-chained log (`[local].audit`), verify with `xv audit --verify` |
 | Native rotation | Unsupported (`xv rotate` generates a new value) | `xv rotate --native` calls `RotateSecret` and requires a rotation Lambda | Unsupported |
+| Rotation policies | `xv:rotate_every` tag + `xv rotate --due`/`--check` | Same, plus native rotation | Same |
+| Automatic rotation | `xv schedule` (OS scheduler) | `xv schedule`, or AWS server-side `--native` | `xv schedule` |
+| Git-native versioning | Unsupported by design (would mirror cloud secrets into permanent git history) | Unsupported by design | `[local].git` + `xv git log/diff/push/pull` |
 | Sharing / RBAC commands | Azure RBAC | Unsupported; commands return IAM resource-policy hints | Unsupported |
 | File storage | Azure Blob Storage; includes `xv file sync` | S3 when `[aws].s3_bucket` or `XV_AWS_S3_BUCKET` is set; sync unsupported | age-encrypted per-vault files; includes `xv file sync` |
 
@@ -28,13 +31,19 @@
 | `xv get <name>` | Retrieve a secret (clipboard by default; `--raw` for stdout) |
 | `xv list` (alias `xv ls`) | List secrets. Default TTY output is a folder-aware grid (folders first, shown as `prod/`); pass a `[FOLDER]` positional to list inside a folder. `-l` for a long listing (name, updated, groups, note), `-r` to recurse (folder-qualified names in the grid/long/`--names-only` views), `--format table` for the classic table. Filters: `--group`, `--all` (include disabled), `--expiring <period>`, `--expired`, `--deleted` (soft-deleted secrets; conflicts with `FOLDER`, `-r`, `--group`, `--all`, `--expiring`, `--expired`). `--sort name\|updated` (default `name`). `--names-only`, `--page-size`, `--page`, `--pager [auto\|always\|never]`, `--no-cache` |
 | `xv delete <name>` | Soft-delete a secret (`--force` to skip confirmation) |
+| `xv update <name> --rotate-every <interval>` | Set a rotation policy without rotating the value; the clock starts now. `--clear-rotate-every` removes it. Standalone, like `--field`. See [rotation.md](rotation.md) |
 | `xv update <name>` | Update value, groups, folder, note, tags, expiry; supports `--rename`, `--tag`/`--tags`, `--enabled <true\|false>` (disable/enable — disabled secrets are excluded from `xv ls` and `xv group list` by default, `--all` reveals them), and clear flags such as `--clear-note` |
 | `xv update <name> --rename <new>` | Rename a secret on any backend: creates `<new>` with the current value and metadata (tags, groups, note, folder, content type, expiry — not version history), then deletes `<name>` via the backend's normal delete (Azure: soft-deleted; AWS: 30-day recovery window; local: trash). Combined with other update flags, in-place updates apply first, then the rename. Renaming onto an existing name is refused (`xv-conflict`). Partial failure (new secret created, old one not deleted) exits `43` (`xv-rename-incomplete`) and never rolls back the new secret. Combining `--enabled false` with `--rename` fails on Azure (the disable applies first, then the rename's read gets a 403) — re-enable first or rename before disabling |
 | `xv purge <name>` | Permanently delete a soft-deleted secret |
 | `xv restore <name>` | Restore a soft-deleted secret |
 | `xv history <name>` | Show version history |
 | `xv rollback <name>` | Restore a previous version (`--version <id>`) |
-| `xv rotate <name>` | Generate new random value (`--length`, `--charset`, `--generator`); `--native` triggers AWS Secrets Manager rotation |
+| `xv rotate <name>` | Generate new random value (`--length`, `--charset`, `--generator`); `--native` triggers AWS Secrets Manager rotation; `--every <interval>` also sets the rotation policy |
+| `xv rotate --check` | Report which secrets are past their rotation policy, changing nothing. Exits `51` when any is due, so CI can gate on staleness. Honors `--format` |
+| `xv rotate --due` | Rotate every secret whose rotation policy has come due (`--force` for unattended cron/CI). Fails rather than skipping when a policy tag is unparseable |
+| `xv schedule install` | Install a per-user job in the OS scheduler (launchd / systemd user timer / Task Scheduler) that runs `xv rotate --due --force` on a cadence. `--interval hourly\|daily\|weekly`, `--at HH:MM`, `--vault`, `--log-file`, `--print` to render without installing, `--force` to skip confirmation. No daemon; nothing system-wide |
+| `xv schedule status` | Whether a schedule is installed, what the scheduler reports, and where the log is |
+| `xv schedule uninstall` | Remove the schedule; succeeds when none is installed |
 | `xv copy <name>` | Copy a secret between vaults (`--from`, `--to`) |
 | `xv move <name>` | Move a secret between vaults (`--from`, `--to`) |
 | `xv group list` | List secret groups with member counts, derived from the `groups` metadata (`--no-cache`; full `--format`/`--columns` support) |
@@ -274,11 +283,54 @@ JSON/YAML keep the full-fidelity serialization (etags, raw byte sizes, extra met
 | Command | Description |
 |---------|-------------|
 | `xv whoami` | Show authenticated identity and context |
-| `xv audit <name>` | Access/change history for a secret or vault (Azure Activity Log or AWS CloudTrail; unsupported on local); `--vault`, `--days`, `--operation`; honors the global `--format` (JSON = array of `{timestamp, operation, resource, caller, status}` rows). |
+| `xv audit <name>` | Access/change history for a secret or vault (Azure Activity Log, AWS CloudTrail, or the local hash-chained log when `[local].audit` is on); `--vault`, `--days`, `--operation`; honors the global `--format` (JSON = array of `{timestamp, operation, resource, caller, status}` rows). |
+| `xv audit --operation DecryptionFailed` | Filter the local trail to failed decryptions — a caller that reached a secret's ciphertext and could not open it (wrong age identity, or altered material) |
+| `xv audit --verify` | Recompute the local audit log's hash chain and report the first break; exits non-zero when it has been altered. Local backend only — cloud trails are held by the platform, so there is no client-side chain to verify. See [git-versioning.md](git-versioning.md) |
 | `xv info <resource>` | Auto-detect and display info for a vault or secret |
 | `xv parse <conn-string>` | Parse and display connection string components |
 | `xv completion <shell>` | Generate shell completions (bash, zsh, fish, powershell) |
 | `xv version` | Build info (version, git hash, target) |
+
+## Git-native versioning (local backend)
+
+Enable with `git = true` under `[local]`. Every mutation commits the store, so
+`git log`/`git diff`/`git push` work on real history. Only age **ciphertext** and
+metadata are committed — the identity and recipients files are excluded by a
+managed `.gitignore` *and* by a pre-commit check that refuses the commit outright.
+Additive: `xv history`/`xv rollback` are unchanged on every backend.
+
+| Command | Description |
+|---------|-------------|
+| `xv git init` | Create the repository and write the managed `.gitignore`. Works before `git = true` is set; idempotent |
+| `xv git log [secret]` | Commit history, newest first; a secret name filters to commits touching it (`--limit`, `--format`) |
+| `xv git status` | Uncommitted changes in the store |
+| `xv git diff [rev]` | Which files a commit changed — names only, never contents |
+| `xv git push [remote]` | Push the store to a remote (`--branch`) |
+| `xv git pull [remote]` | Pull from a remote, fast-forward only (`--branch`) |
+
+Azure and AWS are excluded by design: mirroring cloud secret values into git
+would create a second, effectively permanent copy of every version. Full guide in
+[git-versioning.md](git-versioning.md).
+
+## CI/CD
+
+A first-party GitHub Action installs the CLI and can fetch secrets with no stored
+credential, federating the job's OIDC token into Azure AD:
+
+```yaml
+- uses: bziobnic/crosstache@v1
+  with:
+    version: v0.28.0
+    vault: myproj-prod-kv
+    client-id: ${{ vars.AZURE_CLIENT_ID }}
+    tenant-id: ${{ vars.AZURE_TENANT_ID }}
+    secrets: |
+      DEPLOY_TOKEN=deploy-token
+```
+
+`AZURE_CREDENTIAL_PRIORITY=oidc` selects the same credential outside the Action.
+Full guide, federated-credential setup, and troubleshooting in
+[ci-cd.md](ci-cd.md).
 
 ### Local backend maintenance
 
@@ -350,6 +402,8 @@ key_file = "~/.xv/key.txt"
 default_vault = "default"
 encrypt_metadata = false   # when true, run `xv local encrypt-metadata`
 opaque_filenames = false   # when true, run `xv local migrate` to hide names on disk
+audit = false              # hash-chained audit log; verify with `xv audit --verify`
+git = false                # commit the store on every write; run `xv git init` first
 ```
 
 ---
