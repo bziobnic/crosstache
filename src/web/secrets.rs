@@ -589,6 +589,8 @@ mod tests {
             default_vault: Some("default".to_string()),
             encrypt_metadata: None,
             opaque_filenames: None,
+            audit: None,
+            git: None,
         }))
         .unwrap();
         let backend: Arc<dyn crate::backend::Backend> = Arc::new(backend);

@@ -41,11 +41,14 @@ pre-commit leak scanner that matches files against your *actual* vault values.
 - [Vault management](#vault-management)
 - [Cross-vault operations — diff, copy, move](#cross-vault-operations--diff-copy-move)
 - [Files (blob storage)](#files-blob-storage)
+- [Rotation & rotation policies](#rotation--rotation-policies) — `xv schedule` for automatic sweeps
+- [Git-native versioning & local audit trail](#git-native-versioning--local-audit-trail)
 - [Pre-commit leak scanner — `xv scan`](#pre-commit-leak-scanner--xv-scan)
 - [Terminal UI — `xv tui`](#terminal-ui--xv-tui)
 - [Web UI — `xv ui`](#web-ui--xv-ui)
 - [Desktop app](#desktop-app)
 - [Scripting & CI](#scripting--ci) — exit codes, JSON envelope, examples
+- [GitHub Action & OIDC](#github-action--oidc) — no stored credentials in CI
 - [Configuration](#configuration)
 - [Authentication](#authentication)
 - [Troubleshooting](#troubleshooting)
@@ -161,8 +164,12 @@ backend = "local"
 
 [local]
 store_path = "~/.xv/store"
-key_file = "~/.xv/key.txt"
+key_file = "~/.xv/key.txt"     # keep this OUTSIDE store_path
 default_vault = "default"
+encrypt_metadata = false       # `xv local encrypt-metadata` after enabling
+opaque_filenames = false       # `xv local migrate` after enabling
+audit = false                  # hash-chained audit log; `xv audit --verify`
+git = false                    # commit the store on every write; `xv git init` first
 # Encrypt secret metadata (notes, tags, folders, expiry) at rest with the
 # same age key as the values. Default false. Secret *names* stay visible as
 # on-disk filenames unless opaque_filenames is also enabled. After enabling on
@@ -526,6 +533,9 @@ xv rotate API_KEY --charset hex              # hex / base64 / numeric / uppercas
 xv rotate API_KEY --generator ./mygen.sh     # custom generator (validated for ownership + 0700 perms)
 xv rotate API_KEY --show-value               # echo the new value to stdout (otherwise silent)
 ```
+
+See [Rotation & rotation policies](#rotation--rotation-policies) for scheduling
+rotation across a vault.
 
 ---
 
@@ -1271,6 +1281,139 @@ xv file sync ./mydir --prefix backup/ --delete   # mirror; remove extra remote b
 
 ---
 
+## Rotation & rotation policies
+
+`xv rotate NAME` replaces a value. A **rotation policy** records how often that
+should happen, so a vault can be swept in one command.
+
+```bash
+xv update DB_PASSWORD --rotate-every 90d   # set a policy; does NOT rotate. Clock starts now.
+xv rotate DB_PASSWORD --every 90d          # rotate now AND set the policy
+xv update DB_PASSWORD --clear-rotate-every # remove the policy
+
+xv rotate --check                          # report what is due; changes nothing; exits 51 if any is due
+xv rotate --due --force                    # rotate everything due (cron/CI)
+```
+
+```console
+$ xv rotate --check
+ Name          Status  Interval  Due
+ API_KEY       ok                in 74 days (2026-10-07)
+ DB_PASSWORD   due               12 days ago (2026-07-13)
+```
+
+Works on **every backend** — the policy is two tags on the secret
+(`xv:rotate_every`, `xv:rotated_at`), so it travels with the secret and is
+visible to anything else reading its metadata. Intervals are `<n>m|h|d|w`; the
+unit is required, because guessing minutes vs. days is the difference between
+rotating constantly and never rotating.
+
+Azure Key Vault has no server-side rotation for secret values, and a local
+directory has no scheduler at all, so the cadence has to come from outside the
+vault. `xv schedule` puts it in the host's scheduler:
+
+```bash
+xv schedule install --vault myproj-prod-kv       # daily at 03:00
+xv schedule install --vault v --interval hourly --at 00:15
+xv schedule status
+xv schedule uninstall
+```
+
+`xv schedule` installs a **per-user** job in the platform's own scheduler —
+launchd on macOS, a systemd user timer on Linux, Task Scheduler on Windows — that
+runs `xv rotate --due --force`. No daemon, nothing system-wide, no root. The unit
+holds only a binary path, those arguments, a log path, and `HOME`/`XDG_CONFIG_HOME`
+— never credentials.
+
+```bash
+xv schedule install --vault v --print   # render the unit, write nothing
+```
+
+`--print` also gives you the exact command line for a scheduler `xv` does not
+manage (cron, a Kubernetes CronJob, a CI schedule).
+
+One thing to plan around: a scheduled run has no terminal, so a credential that
+needs interaction fails there even though it works for you now. Verify with
+`xv rotate --due --force` in a clean shell, then watch
+`~/.local/state/xv/rotate.log` after the first firing.
+
+On AWS, `xv rotate --native` instead hands the whole job to Secrets Manager's
+rotation Lambda, which *is* server-side.
+
+Also worth knowing: rotation replaces the stored value, not the password on the
+database, and an app that read the secret at startup keeps the old value until
+it restarts. Full detail, including the `--due` fail-closed behavior on an
+unparseable policy, in [`docs/rotation.md`](docs/rotation.md).
+
+---
+
+## Git-native versioning & local audit trail
+
+Two opt-in features for the local age-encrypted backend.
+
+### Git-native versioning
+
+```toml
+[local]
+git = true
+```
+
+```bash
+xv git init                    # create the repo (works before the flag is on)
+xv set DB_PASSWORD --value x   # → commit "set DB_PASSWORD"
+xv git log DB_PASSWORD         # one secret's timeline
+xv git push origin --branch main
+```
+
+The store becomes a real git repository, so `git log`, `git diff`, `git bisect`,
+and `git push` operate on actual history — the `pass` model. Only age
+**ciphertext** and metadata are committed. The age identity is protected twice:
+a managed `.gitignore`, *and* a pre-commit check that refuses the commit outright
+if key material is staged (`.gitignore` alone is defeatable with `git add -f`).
+
+Additive — `xv history` and `xv rollback` are unchanged on every backend.
+`xv git pull` is fast-forward only, because a merge conflict inside age
+ciphertext is not resolvable.
+
+Local backend only, deliberately: mirroring Azure or AWS secret values into a git
+history would create a second, effectively permanent copy of every version.
+
+### Local audit trail
+
+```toml
+[local]
+audit = true
+```
+
+```bash
+xv audit --vault default    # same output as the Azure/AWS trails
+xv audit --verify           # recompute the hash chain; non-zero on tampering
+```
+
+An append-only log at `<store>/vaults/<vault>/.audit/log.jsonl`, each record
+chained by `HMAC-SHA256(key, prev_mac || record)` with the key derived from the
+age identity. Fail-closed: if the append fails, the operation fails.
+
+Failed attempts are recorded too, with a status token from a closed set
+(`NotFound`, `AccessDenied`, `DecryptionFailed`, …) derived from the error type
+rather than its message. `DecryptionFailed` is the one to watch — someone reached
+a secret's ciphertext and could not open it. Secret values never appear in a
+record; names do, exactly as for successful operations.
+
+```bash
+xv audit --operation DecryptionFailed
+```
+
+**Tamper-evident, not tamper-proof.** It detects edits, reordering, and deletions.
+It cannot stop someone holding the age identity from rewriting the chain, or
+anyone who can write the file from truncating it — unlike Azure Activity Log and
+CloudTrail, which the platform holds rather than the caller. Pushing the store to
+a git remote gets you off-box copies a local attacker cannot reach.
+
+Full detail in [`docs/git-versioning.md`](docs/git-versioning.md).
+
+---
+
 ## Pre-commit leak scanner — `xv scan`
 
 `xv scan` is unique because it matches files against your **actual vault values**, not just generic regex patterns. When you accidentally paste `DB_PASSWORD`'s real value into a config file, it tells you *"this file contains the value of secret DB_PASSWORD from vault dev-kv"* — not just "high-entropy string."
@@ -1565,6 +1708,42 @@ token=$(xv get DEPLOY_TOKEN --raw 2>&1) || {
 }
 ```
 
+### GitHub Action & OIDC
+
+```yaml
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write        # required for OIDC
+      contents: read
+    steps:
+      - uses: bziobnic/crosstache@v1
+        with:
+          version: v0.28.0
+          vault: myproj-prod-kv
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          secrets: |
+            DEPLOY_TOKEN=deploy-token
+      - run: ./scripts/deploy.sh     # $DEPLOY_TOKEN is set and masked
+```
+
+No client secret is stored anywhere: the job's OIDC token is federated into
+Azure AD as a `client_assertion`, and no `azure/login` step is needed. The action
+verifies the release archive's SHA-256 fail-closed and caches the binary in the
+runner tool cache.
+
+Outside the action, the same credential is selected with:
+
+```bash
+export AZURE_CREDENTIAL_PRIORITY=oidc
+export AZURE_CLIENT_ID=<app-id> AZURE_TENANT_ID=<tenant-id>
+```
+
+Federated-credential setup, subject scoping, what the checksum does and does not
+prove, and troubleshooting for the `AADSTS…` errors: [`docs/ci-cd.md`](docs/ci-cd.md).
+
 ### `xv scan` in CI
 
 ```bash
@@ -1615,7 +1794,7 @@ configuration error.
 | `AZURE_SUBSCRIPTION_ID` | Azure subscription |
 | `AZURE_TENANT_ID` | Azure tenant |
 | `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` | Service-principal auth |
-| `AZURE_CREDENTIAL_PRIORITY` | `cli` / `managed_identity` / `environment` / `default` |
+| `AZURE_CREDENTIAL_PRIORITY` | `cli` / `managed_identity` / `environment` / `oidc` / `default` |
 | `DEFAULT_VAULT` | Default vault name |
 | `DEFAULT_RESOURCE_GROUP` | Default resource group |
 | `DEFAULT_LOCATION` | Default Azure location (e.g., `eastus`) |
@@ -1643,7 +1822,7 @@ These work with any command:
 |------|---------|
 | `--format <FORMAT>` | `table` / `json` / `yaml` / `csv` / `plain` / `raw` / `template` (default: `auto` — table on TTY, json for pipes) |
 | `--columns <COLS>` | Comma-separated column names for `table`/`plain`/`csv` output, in order (case-insensitive, e.g. `--columns Name,Updated`); unknown names error |
-| `--credential-type <TYPE>` | Azure credential type (`cli`, `managed_identity`, `environment`, `default`) |
+| `--credential-type <TYPE>` | Azure credential type (`cli`, `managed_identity`, `environment`, `oidc`, `default`) |
 | `--template <TEMPLATE>` | Custom template string for template format |
 | `--no-color` | Disable colored output (same effect as the `NO_COLOR` env var) |
 | `--env <NAME>` | Active env from `.xv.toml` (overridden by `XV_ENV`) |

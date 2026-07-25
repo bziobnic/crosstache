@@ -7,3 +7,4 @@ pub mod attachments;
 pub mod manager;
 pub mod models;
 pub mod name_manager;
+pub mod rotation;

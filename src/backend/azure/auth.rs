@@ -306,8 +306,32 @@ impl DefaultAzureCredentialProvider {
                     }
                 }
             }
+            AzureCredentialType::Oidc => {
+                // Federate a GitHub Actions OIDC token into Azure AD. No
+                // fallback: the user asked for OIDC explicitly, and silently
+                // dropping to another credential would either fail later with a
+                // confusing error or — worse — succeed as the wrong identity.
+                let config = super::oidc::OidcConfig::from_env(None, None)?;
+                Ok(Arc::new(super::oidc::GithubOidcCredential::new(config)?)
+                    as Arc<dyn TokenCredential>)
+            }
             AzureCredentialType::Default => {
-                // Use the default credential chain
+                // Prefer OIDC when the workflow environment offers it: inside a
+                // GitHub Actions job with `id-token: write`, federation is both
+                // available and strictly better than anything else in the chain
+                // (no stored secret). Outside that environment the check is a
+                // cheap env-var read and the behavior is unchanged.
+                if super::oidc::OidcConfig::available_in_env() {
+                    if let Ok(config) = super::oidc::OidcConfig::from_env(None, None) {
+                        if let Ok(cred) = super::oidc::GithubOidcCredential::new(config) {
+                            return Ok(Arc::new(cred) as Arc<dyn TokenCredential>);
+                        }
+                    }
+                    // Falling through is correct here, unlike the explicit
+                    // `Oidc` arm: the user did not ask for OIDC, so an
+                    // incomplete federation setup should not break a job where
+                    // `azure/login` has already provided env credentials.
+                }
                 Ok(Arc::new(
                     DefaultAzureCredential::create(TokenCredentialOptions::default())
                         .map_err(create_user_friendly_credential_error)?,

@@ -227,6 +227,8 @@ pub fn build_setup_config(request: &SetupRequest, mut base: Config) -> Result<Co
                 default_vault: Some(vault.clone()),
                 encrypt_metadata: None,
                 opaque_filenames: None,
+                audit: None,
+                git: None,
             };
             crate::backend::local::config::ResolvedLocalConfig::from_raw(Some(&local))
                 .validate()?;

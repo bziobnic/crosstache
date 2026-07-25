@@ -13,6 +13,7 @@ pub mod config;
 pub mod error;
 pub mod records;
 pub mod scan;
+pub mod schedule;
 pub mod secret;
 #[cfg(feature = "tui")]
 pub mod tui;

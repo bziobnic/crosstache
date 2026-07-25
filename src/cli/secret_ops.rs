@@ -3089,6 +3089,7 @@ pub(crate) async fn execute_secret_rotate_direct(
     native: bool,
     show_value: bool,
     force: bool,
+    every: Option<String>,
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
@@ -3096,6 +3097,13 @@ pub(crate) async fn execute_secret_rotate_direct(
     if native {
         return execute_secret_rotate_native(name, vault, force, config, registry).await;
     }
+
+    // Parse the policy interval up front: a typo must fail before anything
+    // rotates, not after the value has already been replaced.
+    let interval = every
+        .as_deref()
+        .map(crate::secret::rotation::parse_interval)
+        .transpose()?;
 
     // Route through the active backend trait so default (client-side) rotation
     // works on every backend; the Azure trait impl delegates to the same ops.
@@ -3129,6 +3137,7 @@ pub(crate) async fn execute_secret_rotate_direct(
         generator,
         show_value,
         force,
+        interval,
         &config,
     )
     .await?;
@@ -3146,6 +3155,431 @@ pub(crate) async fn execute_secret_rotate_direct(
     });
 
     Ok(())
+}
+
+/// `xv update <name> --rotate-every <interval>` / `--clear-rotate-every`.
+///
+/// Sets or removes a rotation policy without rotating the value. Setting one
+/// also stamps `xv:rotated_at = now`, so the interval is measured from the
+/// moment the policy was established rather than reporting the secret as
+/// immediately due.
+///
+/// Implemented as a read-modify-write with `replace_tags`, because removing a
+/// single tag is not otherwise expressible: merge semantics can only add or
+/// overwrite. Every unrelated tag is carried across verbatim.
+pub(crate) async fn execute_rotation_policy_update(
+    name: &str,
+    rotate_every: Option<String>,
+    clear: bool,
+    config: Config,
+    registry: Option<&BackendRegistry>,
+) -> Result<()> {
+    use crate::secret::manager::{FieldUpdate, SecretUpdateRequest};
+    use crate::secret::rotation::{
+        format_interval, parse_interval, TAG_ROTATED_AT, TAG_ROTATE_EVERY,
+    };
+
+    let reg = registry.ok_or_else(|| {
+        CrosstacheError::config(
+            "No backend registry available. Run 'xv config show' to check your configuration.",
+        )
+    })?;
+
+    // Validate before touching the backend.
+    let interval = rotate_every.as_deref().map(parse_interval).transpose()?;
+
+    let (backend, backend_name, vault_name, resolved_name) =
+        resolve_rotate_target(name, None, &config, reg).await?;
+    let name = resolved_name.as_str();
+
+    // Read current tags (metadata only — no value is decrypted, so this does
+    // not register as secret-value access in an audit trail).
+    let existing = backend
+        .secrets()
+        .get_secret(&vault_name, name, false)
+        .await
+        .map_err(CrosstacheError::from)?;
+
+    let mut tags = existing.tags;
+    let had_policy = tags.contains_key(TAG_ROTATE_EVERY);
+
+    if clear {
+        if !had_policy {
+            output::info(&format!(
+                "Secret '{name}' has no rotation policy; nothing to clear."
+            ));
+            return Ok(());
+        }
+        tags.remove(TAG_ROTATE_EVERY);
+        tags.remove(TAG_ROTATED_AT);
+    } else if let Some(interval) = interval {
+        tags.insert(TAG_ROTATE_EVERY.to_string(), format_interval(interval));
+        tags.insert(TAG_ROTATED_AT.to_string(), chrono::Utc::now().to_rfc3339());
+    }
+
+    let request = SecretUpdateRequest {
+        name: name.to_string(),
+        value: None,
+        content_type: None,
+        enabled: None,
+        expires_on: FieldUpdate::Unchanged,
+        not_before: FieldUpdate::Unchanged,
+        tags: Some(tags.into_iter().collect()),
+        groups: None,
+        note: FieldUpdate::Unchanged,
+        folder: FieldUpdate::Unchanged,
+        // Authoritative rewrite: this is the only way to drop a tag.
+        replace_tags: true,
+        replace_groups: false,
+        expected_revision: None,
+    };
+
+    backend
+        .secrets()
+        .update_secret(&vault_name, name, request)
+        .await
+        .map_err(CrosstacheError::from)?;
+
+    let cache_manager = crate::cache::CacheManager::from_config(&config);
+    cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
+        backend: backend_name,
+        vault_name: vault_name.clone(),
+    });
+
+    if clear {
+        output::success(&format!("Removed the rotation policy from '{name}'."));
+    } else {
+        let rendered = format_interval(interval.expect("validated above"));
+        output::success(&format!(
+            "Rotation policy for '{name}' set to every {rendered}; the clock starts now."
+        ));
+        output::hint(
+            "Nothing rotates on its own — run 'xv rotate --due' from cron, a systemd timer, or \
+             CI. 'xv rotate --check' reports status and exits 51 when something is due.",
+        );
+    }
+    Ok(())
+}
+
+/// `xv rotate` entry point: dispatches between single-secret rotation, the
+/// batch `--due` run, and the read-only `--check` report.
+///
+/// `name` is optional because `--due`/`--check` are vault-scoped; clap enforces
+/// the mutual exclusions, and this rejects the one combination it cannot
+/// express (no name and no mode flag).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn execute_rotate(
+    name: Option<String>,
+    vault: Option<String>,
+    length: usize,
+    charset: CharsetType,
+    generator: Option<String>,
+    native: bool,
+    show_value: bool,
+    force: bool,
+    every: Option<String>,
+    due: bool,
+    check: bool,
+    config: Config,
+    registry: Option<&BackendRegistry>,
+) -> Result<()> {
+    if check {
+        return execute_rotate_check(vault, config, registry).await;
+    }
+    if due {
+        return execute_rotate_due(vault, length, charset, generator, force, config, registry)
+            .await;
+    }
+
+    let name = name.ok_or_else(|| {
+        CrosstacheError::InvalidArgument(
+            "a secret name is required. Pass a name to rotate one secret, --due to rotate \
+             everything whose policy has come due, or --check to report status without rotating."
+                .to_string(),
+        )
+    })?;
+
+    execute_secret_rotate_direct(
+        &name, vault, length, charset, generator, native, show_value, force, every, config,
+        registry,
+    )
+    .await
+}
+
+/// One row of `xv rotate --check`.
+#[derive(tabled::Tabled, serde::Serialize)]
+struct RotationRow {
+    #[tabled(rename = "Name")]
+    name: String,
+    #[tabled(rename = "Status")]
+    status: String,
+    #[tabled(rename = "Interval")]
+    interval: String,
+    #[tabled(rename = "Due")]
+    due: String,
+}
+
+/// Evaluate every secret in the resolved vault against its rotation policy.
+///
+/// Returns `(vault_name, rows)` where each row pairs a secret with its
+/// [`RotationStatus`]. Only policy-bearing secrets are included — an unmanaged
+/// secret is not "ok", it is simply out of scope.
+async fn collect_rotation_status(
+    vault: Option<String>,
+    config: &Config,
+    registry: Option<&BackendRegistry>,
+) -> Result<(
+    String,
+    Vec<(String, crate::secret::rotation::RotationStatus)>,
+)> {
+    use crate::secret::rotation::{evaluate, RotationStatus};
+
+    let reg = registry.ok_or_else(|| {
+        CrosstacheError::config(
+            "No backend registry available. Run 'xv config show' to check your configuration.",
+        )
+    })?;
+
+    // Same resolution as a single-secret rotate, minus the name: `--due` and
+    // `--check` are vault-scoped, and a write verb never searches attached
+    // vaults, so the default entry (or explicit `--vault`) is the target.
+    let (backend, _backend_name, vault_name, _resolved) =
+        resolve_rotate_target("", vault, config, reg).await?;
+
+    let secrets = backend
+        .secrets()
+        .list_secrets(&vault_name, None)
+        .await
+        .map_err(CrosstacheError::from)?;
+
+    let now = chrono::Utc::now();
+    let mut rows: Vec<(String, RotationStatus)> = secrets
+        .into_iter()
+        .map(|s| {
+            // `updated_on` on a summary is a display string (and empty on some
+            // backends), so it is not usable as a machine baseline. A policy
+            // with no `xv:rotated_at` therefore evaluates as due-once, which
+            // then stamps a real timestamp. `xv update --rotate-every` stamps
+            // one at policy-set time so this is not the normal path.
+            let status = evaluate(&s.tags, None, now);
+            (s.name, status)
+        })
+        .filter(|(_, status)| !matches!(status, RotationStatus::NoPolicy))
+        .collect();
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok((vault_name, rows))
+}
+
+/// `xv rotate --check` — report rotation status without changing anything.
+///
+/// Exits 51 (`xv-rotation-due`) when at least one secret is due, so a pipeline
+/// can gate on staleness.
+async fn execute_rotate_check(
+    vault: Option<String>,
+    config: Config,
+    registry: Option<&BackendRegistry>,
+) -> Result<()> {
+    use crate::secret::rotation::{humanize, RotationStatus, TAG_ROTATE_EVERY};
+    use crate::utils::format::{OutputFormat, TableFormatter};
+
+    let (vault_name, statuses) = collect_rotation_status(vault, &config, registry).await?;
+
+    let rows: Vec<RotationRow> = statuses
+        .iter()
+        .map(|(name, status)| match status {
+            RotationStatus::Ok { due_in, due_at } => RotationRow {
+                name: name.clone(),
+                status: "ok".to_string(),
+                interval: String::new(),
+                due: format!("in {} ({})", humanize(*due_in), due_at.format("%Y-%m-%d")),
+            },
+            RotationStatus::Due { overdue_by, due_at } => RotationRow {
+                name: name.clone(),
+                status: "due".to_string(),
+                interval: String::new(),
+                due: format!(
+                    "{} ago ({})",
+                    humanize(*overdue_by),
+                    due_at.format("%Y-%m-%d")
+                ),
+            },
+            RotationStatus::Invalid { value, .. } => RotationRow {
+                name: name.clone(),
+                status: "invalid".to_string(),
+                interval: value.clone(),
+                due: format!("unparseable {TAG_ROTATE_EVERY}"),
+            },
+            RotationStatus::NoPolicy => unreachable!("filtered out by collect_rotation_status"),
+        })
+        .collect();
+
+    let fmt = config.runtime_output_format;
+    let human_table_like = matches!(
+        fmt,
+        OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw
+    );
+    let formatter = TableFormatter::new(
+        fmt,
+        config.no_color,
+        config.template.clone(),
+        config.runtime_columns.clone(),
+    );
+
+    if rows.is_empty() {
+        if human_table_like {
+            formatter.validate_columns::<RotationRow>()?;
+            output::info(&format!(
+                "No secrets in '{vault_name}' have a rotation policy. Set one with \
+                 'xv update <name> --rotate-every 90d'."
+            ));
+        } else {
+            println!("{}", formatter.format_table(&rows)?);
+        }
+        return Ok(());
+    }
+
+    println!("{}", formatter.format_table(&rows)?);
+
+    let due: Vec<&str> = statuses
+        .iter()
+        .filter(|(_, s)| s.is_due())
+        .map(|(n, _)| n.as_str())
+        .collect();
+    let invalid = statuses.iter().filter(|(_, s)| s.is_invalid()).count();
+
+    if invalid > 0 {
+        output::warn(&format!(
+            "{invalid} secret(s) have an unparseable {TAG_ROTATE_EVERY} tag and are not being \
+             evaluated. Fix them with 'xv update <name> --rotate-every <interval>'."
+        ));
+    }
+
+    if due.is_empty() {
+        output::success(&format!(
+            "Nothing due in '{vault_name}' ({} policy-managed secret(s)).",
+            statuses.len()
+        ));
+        return Ok(());
+    }
+
+    output::warn(&format!(
+        "{} secret(s) due for rotation in '{vault_name}': {}",
+        due.len(),
+        due.join(", ")
+    ));
+    output::hint("Run 'xv rotate --due' to rotate them.");
+    Err(CrosstacheError::rotation_due(due.len()))
+}
+
+/// `xv rotate --due` — rotate every secret whose policy has come due.
+async fn execute_rotate_due(
+    vault: Option<String>,
+    length: usize,
+    charset: CharsetType,
+    generator: Option<String>,
+    force: bool,
+    config: Config,
+    registry: Option<&BackendRegistry>,
+) -> Result<()> {
+    use crate::utils::interactive::InteractivePrompt;
+
+    let (vault_name, statuses) = collect_rotation_status(vault.clone(), &config, registry).await?;
+
+    let invalid: Vec<&str> = statuses
+        .iter()
+        .filter(|(_, s)| s.is_invalid())
+        .map(|(n, _)| n.as_str())
+        .collect();
+    if !invalid.is_empty() {
+        // Fail rather than skip: an unreadable policy means we cannot know
+        // whether that secret is overdue, and silently passing over it would
+        // make a green `--due` run misleading.
+        return Err(CrosstacheError::InvalidArgument(format!(
+            "{} secret(s) in '{vault_name}' have an unparseable rotation interval: {}. Fix them \
+             with 'xv update <name> --rotate-every <interval>' before running --due, so this run \
+             cannot silently skip an overdue secret.",
+            invalid.len(),
+            invalid.join(", ")
+        )));
+    }
+
+    let due: Vec<String> = statuses
+        .iter()
+        .filter(|(_, s)| s.is_due())
+        .map(|(n, _)| n.clone())
+        .collect();
+
+    if due.is_empty() {
+        output::success(&format!(
+            "Nothing due in '{vault_name}' ({} policy-managed secret(s)).",
+            statuses.len()
+        ));
+        return Ok(());
+    }
+
+    output::info(&format!(
+        "{} secret(s) due for rotation in '{vault_name}': {}",
+        due.len(),
+        due.join(", ")
+    ));
+
+    // One confirmation for the batch, rather than per secret.
+    if !force {
+        let prompt = InteractivePrompt::new();
+        if !prompt.confirm(
+            &format!(
+                "Rotate {} secret(s)? Each gets a newly generated value and a new version.",
+                due.len()
+            ),
+            false,
+        )? {
+            output::info("Rotation cancelled.");
+            return Ok(());
+        }
+    }
+
+    let mut rotated = 0usize;
+    let mut failures: Vec<(String, String)> = Vec::new();
+
+    for name in &due {
+        // Rotate each secret through the same single-secret path, so record
+        // handling, reserved-key guards, and audit/git hooks all apply
+        // identically to a manual rotate. `--every` is not passed: `--due`
+        // acts on the existing policy and must never redefine it.
+        match execute_secret_rotate_direct(
+            name,
+            vault.clone(),
+            length,
+            charset,
+            generator.clone(),
+            false,
+            false,
+            true, // already confirmed for the batch
+            None,
+            config.clone(),
+            registry,
+        )
+        .await
+        {
+            Ok(()) => rotated += 1,
+            Err(e) => failures.push((name.clone(), e.to_string())),
+        }
+    }
+
+    if failures.is_empty() {
+        output::success(&format!("Rotated {rotated} secret(s) in '{vault_name}'."));
+        return Ok(());
+    }
+
+    // Report every failure — a partial batch must not look like a success.
+    for (name, err) in &failures {
+        output::error(&format!("  {name}: {err}"));
+    }
+    Err(CrosstacheError::config(format!(
+        "rotated {rotated} of {} due secret(s) in '{vault_name}'; {} failed (listed above)",
+        due.len(),
+        failures.len()
+    )))
 }
 
 /// Capability error for `xv rotate --native` on a backend without native
@@ -5329,6 +5763,8 @@ async fn execute_secret_rotate(
     custom_generator: Option<String>,
     show_value: bool,
     force: bool,
+    // When `Some`, also set/refresh the secret's rotation policy.
+    rotation_interval: Option<chrono::Duration>,
     config: &Config,
 ) -> Result<()> {
     use crate::config::ContextManager;
@@ -5410,7 +5846,14 @@ async fn execute_secret_rotate(
     // review NIT): the untyped path's `SecretRequest.enabled: Some(true)`
     // and this `SecretUpdateRequest.enabled` override are the same
     // deliberate choice, made consistent across both code shapes.
-    let new_version = if crate::records::is_record(&existing_secret.content_type) {
+    // Stamp the rotation bookkeeping tags. `xv:rotated_at` is refreshed on
+    // every rotation — including a plain `xv rotate` with no `--every` — so an
+    // existing policy's clock restarts from the rotation that actually
+    // happened. Without that, `--due` would re-rotate the same secret forever.
+    let stamp = crate::secret::rotation::rotation_tags(rotation_interval, chrono::Utc::now());
+    let is_record = crate::records::is_record(&existing_secret.content_type);
+
+    let new_version = if is_record {
         let props = execute_record_primary_update(
             name,
             new_value.as_str(),
@@ -5424,7 +5867,10 @@ async fn execute_secret_rotate(
         .await?;
         props.version
     } else {
-        // Preserve existing secret metadata
+        // Preserve existing secret metadata, with the rotation stamp merged
+        // over it so a refreshed interval replaces the old one.
+        let mut tags = existing_secret.tags;
+        tags.extend(stamp.clone());
         let set_request = SecretRequest {
             name: name.to_string(),
             value: new_value.clone(),
@@ -5436,11 +5882,7 @@ async fn execute_secret_rotate(
             enabled: Some(true),
             expires_on: existing_secret.expires_on,
             not_before: existing_secret.not_before,
-            tags: if existing_secret.tags.is_empty() {
-                None
-            } else {
-                Some(existing_secret.tags)
-            },
+            tags: Some(tags),
             groups: None, // Groups are managed via tags
             note: None,
             folder: None,
@@ -5455,6 +5897,33 @@ async fn execute_secret_rotate(
             .map_err(CrosstacheError::from)?;
         result.version
     };
+
+    // A record's value is rewritten through the envelope-aware update path,
+    // which owns its own tag handling, so the stamp is applied afterwards as a
+    // metadata-only update (merge semantics — no `replace_tags`). Metadata-only
+    // updates do not create a further version on any backend.
+    if is_record {
+        let stamp_request = crate::secret::manager::SecretUpdateRequest {
+            name: name.to_string(),
+            value: None,
+            content_type: None,
+            enabled: None,
+            expires_on: crate::secret::manager::FieldUpdate::Unchanged,
+            not_before: crate::secret::manager::FieldUpdate::Unchanged,
+            tags: Some(stamp.into_iter().collect()),
+            groups: None,
+            note: crate::secret::manager::FieldUpdate::Unchanged,
+            folder: crate::secret::manager::FieldUpdate::Unchanged,
+            replace_tags: false,
+            replace_groups: false,
+            expected_revision: None,
+        };
+        reg.active()
+            .secrets()
+            .update_secret(&vault_name, name, stamp_request)
+            .await
+            .map_err(CrosstacheError::from)?;
+    }
 
     output::success(&format!("Successfully rotated secret '{}'", name));
     println!("New version: {}", new_version);
@@ -7498,6 +7967,8 @@ mod tests {
                 default_vault: Some("local-vault".to_string()),
                 encrypt_metadata: None,
                 opaque_filenames: None,
+                audit: None,
+                git: None,
             }),
             ..Default::default()
         };
@@ -7664,6 +8135,8 @@ mod tests {
                 default_vault: Some("default".to_string()),
                 encrypt_metadata: None,
                 opaque_filenames: None,
+                audit: None,
+                git: None,
             }),
             ..Default::default()
         };
@@ -8127,6 +8600,8 @@ mod tests {
                 default_vault: Some(vault_name.clone()),
                 encrypt_metadata: None,
                 opaque_filenames: None,
+                audit: None,
+                git: None,
             }),
             ..Default::default()
         };

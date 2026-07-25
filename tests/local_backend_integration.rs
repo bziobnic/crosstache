@@ -26,6 +26,8 @@ fn make_backend(tmp: &TempDir) -> crosstache::backend::local::LocalBackend {
         default_vault: Some("default".into()),
         encrypt_metadata: None,
         opaque_filenames: None,
+        audit: None,
+        git: None,
     };
     crosstache::backend::local::LocalBackend::new(Some(&cfg)).expect("create backend")
 }

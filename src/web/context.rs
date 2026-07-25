@@ -573,6 +573,8 @@ vaults = [
                     default_vault: Some("config-local-vault".into()),
                     encrypt_metadata: None,
                     opaque_filenames: None,
+                    audit: None,
+                    git: None,
                 }),
             );
             let config = Config {
@@ -593,6 +595,8 @@ vaults = [
                     default_vault: Some("config-local-vault".into()),
                     encrypt_metadata: None,
                     opaque_filenames: None,
+                    audit: None,
+                    git: None,
                 }),
                 named_backends,
                 clipboard_timeout: 17,
@@ -1082,6 +1086,8 @@ vaults = [
             default_vault: None,
             encrypt_metadata: None,
             opaque_filenames: None,
+            audit: None,
+            git: None,
         });
         let config = Config {
             backend: Some("full".into()),
@@ -1325,6 +1331,8 @@ vaults = [
                 default_vault: Some("desktop-vault".into()),
                 encrypt_metadata: None,
                 opaque_filenames: None,
+                audit: None,
+                git: None,
             }),
             ..Default::default()
         };
@@ -1424,6 +1432,8 @@ vault = "single-vault"
                 default_vault: Some("single-vault".into()),
                 encrypt_metadata: None,
                 opaque_filenames: None,
+                audit: None,
+                git: None,
             }),
             ..Default::default()
         };

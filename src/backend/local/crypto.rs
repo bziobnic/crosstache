@@ -134,7 +134,7 @@ pub fn decrypt_bytes(
     identity: &age::x25519::Identity,
 ) -> Result<Zeroizing<Vec<u8>>, BackendError> {
     let decryptor = match age::Decryptor::new_buffered(data)
-        .map_err(|e| BackendError::Internal(format!("decrypt header: {e}")))?
+        .map_err(|e| BackendError::Decryption(format!("decrypt header: {e}")))?
     {
         age::Decryptor::Recipients(d) => d,
         _other => {
@@ -147,7 +147,7 @@ pub fn decrypt_bytes(
 
     let mut decrypted = decryptor
         .decrypt(std::iter::once(identity as &dyn age::Identity))
-        .map_err(|e| BackendError::Internal(format!("decrypt: {e}")))?;
+        .map_err(|e| BackendError::Decryption(format!("decrypt: {e}")))?;
 
     let mut buf = Zeroizing::new(Vec::new());
     decrypted
@@ -166,7 +166,7 @@ pub fn decrypt_from_reader<R: Read>(
     identity: &age::x25519::Identity,
 ) -> Result<Zeroizing<Vec<u8>>, BackendError> {
     let decryptor = match age::Decryptor::new_buffered(BufReader::new(reader))
-        .map_err(|e| BackendError::Internal(format!("decrypt header: {e}")))?
+        .map_err(|e| BackendError::Decryption(format!("decrypt header: {e}")))?
     {
         age::Decryptor::Recipients(d) => d,
         _other => {
@@ -177,7 +177,7 @@ pub fn decrypt_from_reader<R: Read>(
     };
     let mut decrypted = decryptor
         .decrypt(std::iter::once(identity as &dyn age::Identity))
-        .map_err(|e| BackendError::Internal(format!("decrypt: {e}")))?;
+        .map_err(|e| BackendError::Decryption(format!("decrypt: {e}")))?;
     let mut plaintext = Zeroizing::new(Vec::new());
     decrypted
         .read_to_end(&mut plaintext)
@@ -209,7 +209,7 @@ pub fn decrypt_from_file(
     let reader = BufReader::new(file);
 
     let decryptor = match age::Decryptor::new_buffered(reader)
-        .map_err(|e| BackendError::Internal(format!("decrypt header: {e}")))?
+        .map_err(|e| BackendError::Decryption(format!("decrypt header: {e}")))?
     {
         age::Decryptor::Recipients(d) => d,
         _other => {
@@ -222,7 +222,7 @@ pub fn decrypt_from_file(
 
     let mut decrypted = decryptor
         .decrypt(std::iter::once(identity as &dyn age::Identity))
-        .map_err(|e| BackendError::Internal(format!("decrypt: {e}")))?;
+        .map_err(|e| BackendError::Decryption(format!("decrypt: {e}")))?;
 
     let mut buf = String::new();
     decrypted

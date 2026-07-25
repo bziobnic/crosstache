@@ -481,6 +481,12 @@ pub enum CrosstacheError {
     #[error("Scan detected {count} potential leak(s)")]
     ScanLeakDetected { count: usize },
 
+    #[error("{count} secret(s) are due for rotation")]
+    RotationDue { count: usize },
+
+    #[error("audit chain verification failed at record {seq}: {reason}")]
+    AuditChainBroken { seq: u64, reason: String },
+
     #[error("Rename of secret '{source}' to '{destination}' in vault '{vault}' is incomplete: the new secret was created, but deleting the original failed: {cause}. Both secrets still exist and no secret material was lost. Next steps: with vault '{vault}' active, verify the new secret (`xv get {destination}`), then delete the original (`xv delete {source}`) or retry the deletion later.")]
     RenameIncomplete {
         source: String,
@@ -534,6 +540,8 @@ impl CrosstacheError {
             Self::InvalidArgument(_) => "xv-invalid-argument",
             Self::Upgrade(_) => "xv-upgrade",
             Self::ScanLeakDetected { .. } => "xv-scan-leak-detected",
+            Self::RotationDue { .. } => "xv-rotation-due",
+            Self::AuditChainBroken { .. } => "xv-audit-chain-broken",
             Self::RenameIncomplete { .. } => "xv-rename-incomplete",
             Self::AmbiguousSecret { .. } => "xv-ambiguous-secret",
             Self::Unknown(_) => "xv-unknown",
@@ -572,6 +580,8 @@ impl CrosstacheError {
 
             // 50–59 — policy/scan findings
             Self::ScanLeakDetected { .. } => 50,
+            Self::RotationDue { .. } => 51,
+            Self::AuditChainBroken { .. } => 52,
 
             Self::SerializationError(_)
             | Self::IoError(_)
@@ -652,6 +662,24 @@ impl CrosstacheError {
 
     pub fn scan_leak_detected(count: usize) -> Self {
         Self::ScanLeakDetected { count }
+    }
+
+    /// Build the `RotationDue` variant (exit 51, `xv-rotation-due`): at least
+    /// one secret's rotation policy has come due. Used by `xv rotate --check`
+    /// so a pipeline can fail on stale secrets.
+    pub fn rotation_due(count: usize) -> Self {
+        Self::RotationDue { count }
+    }
+
+    /// Build the `AuditChainBroken` variant (exit 52,
+    /// `xv-audit-chain-broken`): the local audit log's hash chain no longer
+    /// verifies. Distinct from a config error so a monitor can tell "the log was
+    /// altered" apart from "the log could not be read".
+    pub fn audit_chain_broken(seq: u64, reason: impl Into<String>) -> Self {
+        Self::AuditChainBroken {
+            seq,
+            reason: reason.into(),
+        }
     }
 
     /// Build the `AmbiguousSecret` variant (exit 13, `xv-ambiguous-secret`):
@@ -1330,6 +1358,18 @@ mod tests {
                 category: "error variant",
                 name: "ScanLeakDetected",
                 fields: &["count"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "error variant",
+                name: "RotationDue",
+                fields: &["count"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "error variant",
+                name: "AuditChainBroken",
+                fields: &["seq", "reason"],
                 allowed_value_like_fields: &[],
             },
             SecuritySurface {

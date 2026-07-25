@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
@@ -28,6 +29,8 @@ use crate::secret::manager::{
     DeletedSecretSummary, SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest,
 };
 
+use super::audit::{AuditOp, LocalAuditLog, RESOURCE_VAULT_WIDE};
+use super::git::LocalGitStore;
 use super::{crypto, opaque, paths};
 
 // ---------------------------------------------------------------------------
@@ -749,6 +752,11 @@ pub struct LocalSecretBackend {
     /// HMAC key for opaque stems, derived from `identity`. `None` when
     /// `opaque_filenames` is off, so the legacy path never computes it.
     index_key: Option<[u8; 32]>,
+    /// Hash-chained audit sink. `None` when `[local].audit` is off, so the
+    /// default path never touches the log.
+    audit: Option<Arc<LocalAuditLog>>,
+    /// Git auto-commit sink. `None` when `[local].git` is off.
+    git: Option<Arc<LocalGitStore>>,
 }
 
 impl LocalSecretBackend {
@@ -773,6 +781,75 @@ impl LocalSecretBackend {
             encrypt_metadata,
             opaque_filenames,
             index_key,
+            audit: None,
+            git: None,
+        }
+    }
+
+    /// Attach a hash-chained audit sink. Every audited operation then appends a
+    /// record, and a failed append fails the operation (see
+    /// [`super::audit`] on fail-closed behavior).
+    pub fn with_audit_log(mut self, log: Arc<LocalAuditLog>) -> Self {
+        self.audit = Some(log);
+        self
+    }
+
+    /// Attach a git store so mutations are committed as they happen.
+    pub fn with_git_store(mut self, git: Arc<LocalGitStore>) -> Self {
+        self.git = Some(git);
+        self
+    }
+
+    /// Append an audit record when auditing is enabled.
+    ///
+    /// Errors propagate: a mutation whose audit record could not be written is
+    /// reported as a failure rather than silently leaving a gap in the log.
+    fn audit_record(&self, vault: &str, op: AuditOp, resource: &str) -> Result<(), BackendError> {
+        match &self.audit {
+            Some(log) => log.record(vault, op, resource),
+            None => Ok(()),
+        }
+    }
+
+    /// Audit a failed operation, then hand the original error back unchanged.
+    ///
+    /// A no-op when auditing is off or the operation succeeded, so the normal
+    /// path pays nothing.
+    ///
+    /// If the audit append *itself* fails, both failures are reported: the
+    /// caller still needs the operation error, but a silently dropped record
+    /// would undermine the log's completeness exactly as it would on the success
+    /// path (see [`super::audit`] on fail-closed behavior).
+    fn audit_failure<T>(
+        &self,
+        vault: &str,
+        op: AuditOp,
+        resource: &str,
+        result: Result<T, BackendError>,
+    ) -> Result<T, BackendError> {
+        let Some(log) = self.audit.as_ref() else {
+            return result;
+        };
+        if let Err(err) = &result {
+            if let Err(audit_err) = log.record_failure(vault, op, resource, err) {
+                return Err(BackendError::Internal(format!(
+                    "{err} — additionally, the audit record for this failure could not be \
+                     written: {audit_err}"
+                )));
+            }
+        }
+        result
+    }
+
+    /// Commit the store after a mutation when git versioning is enabled.
+    ///
+    /// A commit failure is reported: the secret write already landed on disk,
+    /// but claiming git-native history while silently dropping commits would
+    /// leave a history with holes in it.
+    fn git_commit(&self, message: &str) -> Result<(), BackendError> {
+        match &self.git {
+            Some(git) => git.commit(message).map(|_| ()),
+            None => Ok(()),
         }
     }
 
@@ -2290,7 +2367,13 @@ impl SecretBackend for LocalSecretBackend {
         vault: &str,
         request: SecretRequest,
     ) -> Result<SecretProperties, BackendError> {
-        self.set_secret_with_mode(vault, request, false)
+        let __res_name = request.name.clone();
+        let __result = async { self.set_secret_with_mode(vault, request, false) }.await;
+        if __result.is_ok() {
+            self.audit_record(vault, AuditOp::PutSecretValue, &__res_name)?;
+            self.git_commit(&format!("set {__res_name}"))?;
+        }
+        self.audit_failure(vault, AuditOp::PutSecretValue, &__res_name, __result)
     }
 
     async fn create_secret_if_absent(
@@ -2298,7 +2381,13 @@ impl SecretBackend for LocalSecretBackend {
         vault: &str,
         request: SecretRequest,
     ) -> Result<SecretProperties, BackendError> {
-        self.set_secret_with_mode(vault, request, true)
+        let __res_name = request.name.clone();
+        let __result = async { self.set_secret_with_mode(vault, request, true) }.await;
+        if __result.is_ok() {
+            self.audit_record(vault, AuditOp::PutSecretValue, &__res_name)?;
+            self.git_commit(&format!("set {__res_name}"))?;
+        }
+        self.audit_failure(vault, AuditOp::PutSecretValue, &__res_name, __result)
     }
 
     async fn get_secret_snapshot(
@@ -2307,8 +2396,18 @@ impl SecretBackend for LocalSecretBackend {
         name: &str,
         include_value: bool,
     ) -> Result<SecretSnapshot, BackendError> {
-        let _lock = self.mutation_lock_for_name(vault, name)?;
-        self.get_secret_snapshot_locked(vault, name, include_value)
+        let __result = async {
+            let _lock = self.mutation_lock_for_name(vault, name)?;
+            self.get_secret_snapshot_locked(vault, name, include_value)
+        }
+        .await;
+        if include_value {
+            if __result.is_ok() {
+                self.audit_record(vault, AuditOp::GetSecretValue, name)?;
+            }
+            return self.audit_failure(vault, AuditOp::GetSecretValue, name, __result);
+        }
+        __result
     }
 
     async fn update_secret_if_revision(
@@ -2345,7 +2444,13 @@ impl SecretBackend for LocalSecretBackend {
         new_name: &str,
         expected_revision: &str,
     ) -> Result<SecretProperties, BackendError> {
-        self.atomic_rename(vault, name, new_name, Some(expected_revision))
+        let __result =
+            async { self.atomic_rename(vault, name, new_name, Some(expected_revision)) }.await;
+        if __result.is_ok() {
+            self.audit_record(vault, AuditOp::RenameSecret, name)?;
+            self.git_commit(&format!("rename {name} to {new_name}"))?;
+        }
+        self.audit_failure(vault, AuditOp::RenameSecret, name, __result)
     }
 
     async fn rename_secret(
@@ -2354,7 +2459,12 @@ impl SecretBackend for LocalSecretBackend {
         name: &str,
         new_name: &str,
     ) -> Result<SecretProperties, BackendError> {
-        self.atomic_rename(vault, name, new_name, None)
+        let __result = async { self.atomic_rename(vault, name, new_name, None) }.await;
+        if __result.is_ok() {
+            self.audit_record(vault, AuditOp::RenameSecret, name)?;
+            self.git_commit(&format!("rename {name} to {new_name}"))?;
+        }
+        self.audit_failure(vault, AuditOp::RenameSecret, name, __result)
     }
 
     async fn get_secret(
@@ -2363,54 +2473,64 @@ impl SecretBackend for LocalSecretBackend {
         name: &str,
         include_value: bool,
     ) -> Result<SecretProperties, BackendError> {
-        // The helper may briefly drop shared and take exclusive for recovery;
-        // it returns only a fresh shared lock with no transaction artifacts.
-        let _read_lock = self.read_lock_for_name(vault, name)?;
+        let __result = async {
+            // The helper may briefly drop shared and take exclusive for recovery;
+            // it returns only a fresh shared lock with no transaction artifacts.
+            let _read_lock = self.read_lock_for_name(vault, name)?;
 
-        // Resolve the on-disk stem (opaque, or legacy via the read-only
-        // back-compat fallback). Reads never create or upgrade legacy files.
-        let stem = self.resolve_active_stem(vault, name)?;
-        let mp = meta_path(&self.store_path, vault, &stem)?;
-        if !mp.exists() {
-            return Err(BackendError::NotFound {
-                name: name.to_string(),
-                suggestion: None,
-            });
-        }
+            // Resolve the on-disk stem (opaque, or legacy via the read-only
+            // back-compat fallback). Reads never create or upgrade legacy files.
+            let stem = self.resolve_active_stem(vault, name)?;
+            let mp = meta_path(&self.store_path, vault, &stem)?;
+            if !mp.exists() {
+                return Err(BackendError::NotFound {
+                    name: name.to_string(),
+                    suggestion: None,
+                });
+            }
 
-        // Reject symlinks to prevent attackers from redirecting reads to
-        // arbitrary files on the filesystem.
-        if fs::symlink_metadata(&mp)
-            .map(|m| m.is_symlink())
-            .unwrap_or(false)
-        {
-            return Err(BackendError::Internal(format!(
-                "refusing to read metadata file: {} is a symlink",
-                mp.display()
-            )));
-        }
-
-        let meta = read_meta(&mp, &self.identity)?;
-
-        let value = if include_value {
-            let ap = age_path(&self.store_path, vault, &stem)?;
-
-            if fs::symlink_metadata(&ap)
+            // Reject symlinks to prevent attackers from redirecting reads to
+            // arbitrary files on the filesystem.
+            if fs::symlink_metadata(&mp)
                 .map(|m| m.is_symlink())
                 .unwrap_or(false)
             {
                 return Err(BackendError::Internal(format!(
-                    "refusing to decrypt secret file: {} is a symlink",
-                    ap.display()
+                    "refusing to read metadata file: {} is a symlink",
+                    mp.display()
                 )));
             }
 
-            Some(crypto::decrypt_from_file(&ap, &self.identity)?)
-        } else {
-            None
-        };
+            let meta = read_meta(&mp, &self.identity)?;
 
-        Ok(meta_to_properties(&meta, value))
+            let value = if include_value {
+                let ap = age_path(&self.store_path, vault, &stem)?;
+
+                if fs::symlink_metadata(&ap)
+                    .map(|m| m.is_symlink())
+                    .unwrap_or(false)
+                {
+                    return Err(BackendError::Internal(format!(
+                        "refusing to decrypt secret file: {} is a symlink",
+                        ap.display()
+                    )));
+                }
+
+                Some(crypto::decrypt_from_file(&ap, &self.identity)?)
+            } else {
+                None
+            };
+
+            Ok(meta_to_properties(&meta, value))
+        }
+        .await;
+        if include_value {
+            if __result.is_ok() {
+                self.audit_record(vault, AuditOp::GetSecretValue, name)?;
+            }
+            return self.audit_failure(vault, AuditOp::GetSecretValue, name, __result);
+        }
+        __result
     }
 
     async fn get_secret_version(
@@ -2420,74 +2540,84 @@ impl SecretBackend for LocalSecretBackend {
         version: &str,
         include_value: bool,
     ) -> Result<SecretProperties, BackendError> {
-        let _read_lock = self.read_lock_for_name(vault, name)?;
+        let __result = async {
+            let _read_lock = self.read_lock_for_name(vault, name)?;
 
-        // First check if this is the current version.
-        let stem = self.resolve_active_stem(vault, name)?;
-        let mp = meta_path(&self.store_path, vault, &stem)?;
-        if mp.exists() {
-            let meta = read_meta(&mp, &self.identity)?;
-            if meta.version == version {
-                let value = if include_value {
-                    let age_file = age_path(&self.store_path, vault, &stem)?;
-                    if fs::symlink_metadata(&age_file)
-                        .map(|metadata| metadata.is_symlink())
-                        .unwrap_or(false)
-                    {
-                        return Err(BackendError::Internal(format!(
-                            "refusing to decrypt secret file: {} is a symlink",
-                            age_file.display()
-                        )));
-                    }
-                    Some(crypto::decrypt_from_file(&age_file, &self.identity)?)
-                } else {
-                    None
-                };
-                return Ok(meta_to_properties(&meta, value));
+            // First check if this is the current version.
+            let stem = self.resolve_active_stem(vault, name)?;
+            let mp = meta_path(&self.store_path, vault, &stem)?;
+            if mp.exists() {
+                let meta = read_meta(&mp, &self.identity)?;
+                if meta.version == version {
+                    let value = if include_value {
+                        let age_file = age_path(&self.store_path, vault, &stem)?;
+                        if fs::symlink_metadata(&age_file)
+                            .map(|metadata| metadata.is_symlink())
+                            .unwrap_or(false)
+                        {
+                            return Err(BackendError::Internal(format!(
+                                "refusing to decrypt secret file: {} is a symlink",
+                                age_file.display()
+                            )));
+                        }
+                        Some(crypto::decrypt_from_file(&age_file, &self.identity)?)
+                    } else {
+                        None
+                    };
+                    return Ok(meta_to_properties(&meta, value));
+                }
             }
-        }
 
-        // Look in .versions/ (opaque, or legacy via read fallback).
-        let vdir = self.resolve_versions_dir(vault, name)?;
-        let meta_file = vdir.join(format!("{version}.meta.json"));
-        if !meta_file.exists() {
-            return Err(BackendError::NotFound {
-                name: format!("{name}@{version}"),
-                suggestion: None,
-            });
-        }
+            // Look in .versions/ (opaque, or legacy via read fallback).
+            let vdir = self.resolve_versions_dir(vault, name)?;
+            let meta_file = vdir.join(format!("{version}.meta.json"));
+            if !meta_file.exists() {
+                return Err(BackendError::NotFound {
+                    name: format!("{name}@{version}"),
+                    suggestion: None,
+                });
+            }
 
-        if fs::symlink_metadata(&meta_file)
-            .map(|m| m.is_symlink())
-            .unwrap_or(false)
-        {
-            return Err(BackendError::Internal(format!(
-                "refusing to read metadata file: {} is a symlink",
-                meta_file.display()
-            )));
-        }
-
-        let meta = read_meta(&meta_file, &self.identity)?;
-
-        let value = if include_value {
-            let age_file = vdir.join(format!("{version}.age"));
-
-            if fs::symlink_metadata(&age_file)
+            if fs::symlink_metadata(&meta_file)
                 .map(|m| m.is_symlink())
                 .unwrap_or(false)
             {
                 return Err(BackendError::Internal(format!(
-                    "refusing to decrypt secret file: {} is a symlink",
-                    age_file.display()
+                    "refusing to read metadata file: {} is a symlink",
+                    meta_file.display()
                 )));
             }
 
-            Some(crypto::decrypt_from_file(&age_file, &self.identity)?)
-        } else {
-            None
-        };
+            let meta = read_meta(&meta_file, &self.identity)?;
 
-        Ok(meta_to_properties(&meta, value))
+            let value = if include_value {
+                let age_file = vdir.join(format!("{version}.age"));
+
+                if fs::symlink_metadata(&age_file)
+                    .map(|m| m.is_symlink())
+                    .unwrap_or(false)
+                {
+                    return Err(BackendError::Internal(format!(
+                        "refusing to decrypt secret file: {} is a symlink",
+                        age_file.display()
+                    )));
+                }
+
+                Some(crypto::decrypt_from_file(&age_file, &self.identity)?)
+            } else {
+                None
+            };
+
+            Ok(meta_to_properties(&meta, value))
+        }
+        .await;
+        if include_value {
+            if __result.is_ok() {
+                self.audit_record(vault, AuditOp::GetSecretValue, name)?;
+            }
+            return self.audit_failure(vault, AuditOp::GetSecretValue, name, __result);
+        }
+        __result
     }
 
     async fn list_secrets(
@@ -2495,99 +2625,116 @@ impl SecretBackend for LocalSecretBackend {
         vault: &str,
         group_filter: Option<&str>,
     ) -> Result<Vec<SecretSummary>, BackendError> {
-        let sdir = secrets_dir(&self.store_path, vault)?;
-        if !sdir.exists() {
-            return Ok(Vec::new());
-        }
-        let _read_lock = self.read_lock_for_vault(vault)?;
+        let __result = async {
+            let sdir = secrets_dir(&self.store_path, vault)?;
+            if !sdir.exists() {
+                return Ok(Vec::new());
+            }
+            let _read_lock = self.read_lock_for_vault(vault)?;
 
-        let mut results = Vec::new();
-        let push_meta = |meta: &SecretMeta, results: &mut Vec<SecretSummary>| {
-            if let Some(group) = group_filter {
-                if !meta.groups.iter().any(|g| g == group) {
-                    return;
+            let mut results = Vec::new();
+            let push_meta = |meta: &SecretMeta, results: &mut Vec<SecretSummary>| {
+                if let Some(group) = group_filter {
+                    if !meta.groups.iter().any(|g| g == group) {
+                        return;
+                    }
+                }
+                results.push(meta_to_summary(meta));
+            };
+
+            // Track stems already accounted for so reconciliation never
+            // double-counts a secret present both in the index and on disk.
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+            if self.opaque_filenames {
+                // Primary source: the decrypted reverse index.
+                let index = opaque::load_index(&sdir, &self.identity)?;
+                for stem in index.keys() {
+                    let mp = meta_path(&self.store_path, vault, stem)?;
+                    if !mp.exists() {
+                        continue;
+                    }
+                    match read_meta(&mp, &self.identity) {
+                        Ok(meta) => {
+                            seen.insert(stem.clone());
+                            push_meta(&meta, &mut results);
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "warning: indexed secret {stem:?} has corrupted metadata: {e}"
+                            );
+                        }
+                    }
                 }
             }
-            results.push(meta_to_summary(meta));
-        };
 
-        // Track stems already accounted for so reconciliation never
-        // double-counts a secret present both in the index and on disk.
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-        if self.opaque_filenames {
-            // Primary source: the decrypted reverse index.
-            let index = opaque::load_index(&sdir, &self.identity)?;
-            for stem in index.keys() {
-                let mp = meta_path(&self.store_path, vault, stem)?;
-                if !mp.exists() {
+            // Reconciliation (always for legacy mode; back-compat window for opaque
+            // mode): pick up any on-disk pair not already represented in the index —
+            // legacy `encode_name` pairs and orphan opaque-stem pairs alike. The
+            // real name comes from the decrypted metadata, never from the filename.
+            let entries = fs::read_dir(&sdir)
+                .map_err(|e| BackendError::Internal(format!("read secrets dir: {e}")))?;
+            for entry in entries.flatten() {
+                let fname = entry.file_name().to_string_lossy().to_string();
+                let Some(stem) = fname.strip_suffix(".meta.json") else {
+                    continue;
+                };
+                if seen.contains(stem) {
                     continue;
                 }
-                match read_meta(&mp, &self.identity) {
-                    Ok(meta) => {
-                        seen.insert(stem.clone());
-                        push_meta(&meta, &mut results);
-                    }
+
+                let meta = match read_meta(&entry.path(), &self.identity) {
+                    Ok(m) => m,
                     Err(e) => {
-                        eprintln!("warning: indexed secret {stem:?} has corrupted metadata: {e}");
+                        eprintln!(
+                            "warning: secret {:?} exists but has corrupted metadata: {}",
+                            fname, e
+                        );
+                        continue;
                     }
-                }
-            }
-        }
-
-        // Reconciliation (always for legacy mode; back-compat window for opaque
-        // mode): pick up any on-disk pair not already represented in the index —
-        // legacy `encode_name` pairs and orphan opaque-stem pairs alike. The
-        // real name comes from the decrypted metadata, never from the filename.
-        let entries = fs::read_dir(&sdir)
-            .map_err(|e| BackendError::Internal(format!("read secrets dir: {e}")))?;
-        for entry in entries.flatten() {
-            let fname = entry.file_name().to_string_lossy().to_string();
-            let Some(stem) = fname.strip_suffix(".meta.json") else {
-                continue;
-            };
-            if seen.contains(stem) {
-                continue;
+                };
+                seen.insert(stem.to_string());
+                push_meta(&meta, &mut results);
             }
 
-            let meta = match read_meta(&entry.path(), &self.identity) {
-                Ok(m) => m,
-                Err(e) => {
-                    eprintln!(
-                        "warning: secret {:?} exists but has corrupted metadata: {}",
-                        fname, e
-                    );
-                    continue;
-                }
-            };
-            seen.insert(stem.to_string());
-            push_meta(&meta, &mut results);
+            // Sort by name for deterministic output
+            results.sort_by(|a, b| a.name.cmp(&b.name));
+            Ok(results)
         }
-
-        // Sort by name for deterministic output
-        results.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(results)
+        .await;
+        if __result.is_ok() {
+            self.audit_record(vault, AuditOp::ListSecrets, RESOURCE_VAULT_WIDE)?;
+        }
+        self.audit_failure(vault, AuditOp::ListSecrets, RESOURCE_VAULT_WIDE, __result)
     }
 
     async fn delete_secret(&self, vault: &str, name: &str) -> Result<(), BackendError> {
-        let mut deleted_at_millis = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|e| BackendError::Internal(format!("clock error: {e}")))?
-            .as_millis();
+        let __result = async {
+            let mut deleted_at_millis = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|e| BackendError::Internal(format!("clock error: {e}")))?
+                .as_millis();
 
-        // Millisecond clocks can repeat during tight delete/recreate/delete
-        // cycles. Keep explicit timestamp collisions fail-closed in
-        // `delete_secret_at`, but make the normal API choose the next free
-        // suffix so rapid successive deletes preserve every trash snapshot.
-        for _ in 0..1000 {
-            match self.delete_secret_at(vault, name, deleted_at_millis) {
-                Err(BackendError::Conflict(_)) => deleted_at_millis += 1,
-                other => return other,
+            // Millisecond clocks can repeat during tight delete/recreate/delete
+            // cycles. Keep explicit timestamp collisions fail-closed in
+            // `delete_secret_at`, but make the normal API choose the next free
+            // suffix so rapid successive deletes preserve every trash snapshot.
+            for _ in 0..1000 {
+                match self.delete_secret_at(vault, name, deleted_at_millis) {
+                    Err(BackendError::Conflict(_)) => deleted_at_millis += 1,
+                    other => return other,
+                }
             }
+            Err(BackendError::Conflict(format!(
+                "could not allocate a unique trash entry timestamp for '{name}'"
+            )))
         }
-        Err(BackendError::Conflict(format!(
-            "could not allocate a unique trash entry timestamp for '{name}'"
-        )))
+        .await;
+        if __result.is_ok() {
+            self.audit_record(vault, AuditOp::DeleteSecret, name)?;
+            self.git_commit(&format!("delete {name}"))?;
+        }
+        self.audit_failure(vault, AuditOp::DeleteSecret, name, __result)
     }
 
     async fn update_secret(
@@ -2596,207 +2743,220 @@ impl SecretBackend for LocalSecretBackend {
         name: &str,
         request: SecretUpdateRequest,
     ) -> Result<SecretProperties, BackendError> {
-        // Acquire once and recover before inspecting the active/history pair.
-        let _lock = self.mutation_lock_for_name(vault, name)?;
+        let __result = async {
+            // Acquire once and recover before inspecting the active/history pair.
+            let _lock = self.mutation_lock_for_name(vault, name)?;
 
-        // Migrate any legacy layout before the transaction starts, so a later
-        // migration failure can never leave a successfully converted mixed state.
-        self.ensure_opaque_layout(vault, name)?;
-        let stem = self.resolve_active_stem(vault, name)?;
-        let mp = meta_path(&self.store_path, vault, &stem)?;
-        if !mp.exists() {
-            return Err(BackendError::NotFound {
-                name: name.to_string(),
-                suggestion: None,
-            });
-        }
-
-        let mut meta = read_meta(&mp, &self.identity)?;
-        if request
-            .expected_revision
-            .as_deref()
-            .is_some_and(|expected| meta.revision != expected)
-        {
-            return Err(BackendError::SourceRevisionConflict {
-                name: name.to_string(),
-            });
-        }
-        let old_meta = meta.clone();
-        let now = Utc::now();
-
-        if request.value.is_some() {
-            let old_num: u32 = meta
-                .version
-                .strip_prefix('v')
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0);
-            meta.version = format!("v{}", old_num + 1);
-        }
-        meta.revision = new_revision();
-
-        // Merge or replace tags
-        if let Some(new_tags) = &request.tags {
-            if request.replace_tags {
-                meta.tags = new_tags.clone();
-            } else {
-                for (k, v) in new_tags {
-                    meta.tags.insert(k.clone(), v.clone());
-                }
+            // Migrate any legacy layout before the transaction starts, so a later
+            // migration failure can never leave a successfully converted mixed state.
+            self.ensure_opaque_layout(vault, name)?;
+            let stem = self.resolve_active_stem(vault, name)?;
+            let mp = meta_path(&self.store_path, vault, &stem)?;
+            if !mp.exists() {
+                return Err(BackendError::NotFound {
+                    name: name.to_string(),
+                    suggestion: None,
+                });
             }
-        }
 
-        // Merge or replace groups
-        if let Some(new_groups) = &request.groups {
-            if request.replace_groups {
-                meta.groups = new_groups.clone();
-            } else {
-                for g in new_groups {
-                    if !meta.groups.contains(g) {
-                        meta.groups.push(g.clone());
+            let mut meta = read_meta(&mp, &self.identity)?;
+            if request
+                .expected_revision
+                .as_deref()
+                .is_some_and(|expected| meta.revision != expected)
+            {
+                return Err(BackendError::SourceRevisionConflict {
+                    name: name.to_string(),
+                });
+            }
+            let old_meta = meta.clone();
+            let now = Utc::now();
+
+            if request.value.is_some() {
+                let old_num: u32 = meta
+                    .version
+                    .strip_prefix('v')
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                meta.version = format!("v{}", old_num + 1);
+            }
+            meta.revision = new_revision();
+
+            // Merge or replace tags
+            if let Some(new_tags) = &request.tags {
+                if request.replace_tags {
+                    meta.tags = new_tags.clone();
+                } else {
+                    for (k, v) in new_tags {
+                        meta.tags.insert(k.clone(), v.clone());
                     }
                 }
             }
-        }
 
-        if let Some(ct) = &request.content_type {
-            meta.content_type = ct.clone();
-        }
-        if let Some(enabled) = request.enabled {
-            meta.enabled = enabled;
-        }
-        meta.expires_on = request.expires_on.apply(meta.expires_on);
-        meta.not_before = request.not_before.apply(meta.not_before);
-        meta.note = request.note.apply(meta.note.take());
-        meta.folder = request.folder.apply(meta.folder.take());
-
-        meta.updated_at = now;
-        let crypto_opts = MetaCrypto {
-            recipients: &self.recipients,
-            encrypt: self.encrypt_metadata,
-        };
-
-        if let Some(ref new_value) = request.value {
-            let ap = age_path(&self.store_path, vault, &stem)?;
-            let old_age = fs::read(&ap).map_err(|e| {
-                BackendError::Internal(format!("read existing age {}: {e}", ap.display()))
-            })?;
-            let old_meta_bytes = fs::read(&mp).map_err(|e| {
-                BackendError::Internal(format!("read existing meta {}: {e}", mp.display()))
-            })?;
-            let transaction = UpdateTransactionPaths::new(&self.store_path, vault, &stem)?;
-            create_private_dir(&transaction.dir).map_err(|e| {
-                BackendError::Internal(format!(
-                    "create transaction directory {}: {e}",
-                    transaction.dir.display()
-                ))
-            })?;
-            // No journal means any files here are residue from staging before
-            // the transaction became visible. They cannot describe an active
-            // mutation and are safe to replace.
-            self.cleanup_unjournaled_transaction_locked(&transaction)?;
-
-            durable_write_private(&transaction.old_age, &old_age)?;
-            durable_write_private(&transaction.old_meta, &old_meta_bytes)?;
-            crypto::encrypt_to_file(&transaction.new_age, new_value.as_bytes(), &self.recipients)?;
-            sync_file(&transaction.new_age)?;
-            write_meta(&transaction.new_meta, &meta, crypto_opts)?;
-            sync_file(&transaction.new_meta)?;
-            sync_directory(&transaction.dir)?;
-
-            let journal = UpdateJournal {
-                version: 1,
-                stem: stem.clone(),
-                old_version: old_meta.version.clone(),
-            };
-            let journal_bytes = serde_json::to_vec_pretty(&journal)
-                .map_err(|e| BackendError::Internal(format!("serialize update journal: {e}")))?;
-            let rollback = |cause: BackendError| -> Result<SecretProperties, BackendError> {
-                match self.recover_update_for_stem_locked(vault, &stem) {
-                    Ok(()) => Err(cause),
-                    Err(recovery) => Err(BackendError::Internal(format!(
-                        "{cause}; update recovery also failed: {recovery}"
-                    ))),
+            // Merge or replace groups
+            if let Some(new_groups) = &request.groups {
+                if request.replace_groups {
+                    meta.groups = new_groups.clone();
+                } else {
+                    for g in new_groups {
+                        if !meta.groups.contains(g) {
+                            meta.groups.push(g.clone());
+                        }
+                    }
                 }
+            }
+
+            if let Some(ct) = &request.content_type {
+                meta.content_type = ct.clone();
+            }
+            if let Some(enabled) = request.enabled {
+                meta.enabled = enabled;
+            }
+            meta.expires_on = request.expires_on.apply(meta.expires_on);
+            meta.not_before = request.not_before.apply(meta.not_before);
+            meta.note = request.note.apply(meta.note.take());
+            meta.folder = request.folder.apply(meta.folder.take());
+
+            meta.updated_at = now;
+            let crypto_opts = MetaCrypto {
+                recipients: &self.recipients,
+                encrypt: self.encrypt_metadata,
             };
 
-            // Publish via a synced temp and atomic rename. The final marker is
-            // never opened with truncate semantics.
-            match self.publish_update_journal_locked(&transaction, &journal_bytes) {
-                Ok(UpdateInterruption::None) => {}
-                Ok(UpdateInterruption::Rollback(error)) => {
-                    if transaction.journal.exists() {
-                        return rollback(error);
+            if let Some(ref new_value) = request.value {
+                let ap = age_path(&self.store_path, vault, &stem)?;
+                let old_age = fs::read(&ap).map_err(|e| {
+                    BackendError::Internal(format!("read existing age {}: {e}", ap.display()))
+                })?;
+                let old_meta_bytes = fs::read(&mp).map_err(|e| {
+                    BackendError::Internal(format!("read existing meta {}: {e}", mp.display()))
+                })?;
+                let transaction = UpdateTransactionPaths::new(&self.store_path, vault, &stem)?;
+                create_private_dir(&transaction.dir).map_err(|e| {
+                    BackendError::Internal(format!(
+                        "create transaction directory {}: {e}",
+                        transaction.dir.display()
+                    ))
+                })?;
+                // No journal means any files here are residue from staging before
+                // the transaction became visible. They cannot describe an active
+                // mutation and are safe to replace.
+                self.cleanup_unjournaled_transaction_locked(&transaction)?;
+
+                durable_write_private(&transaction.old_age, &old_age)?;
+                durable_write_private(&transaction.old_meta, &old_meta_bytes)?;
+                crypto::encrypt_to_file(
+                    &transaction.new_age,
+                    new_value.as_bytes(),
+                    &self.recipients,
+                )?;
+                sync_file(&transaction.new_age)?;
+                write_meta(&transaction.new_meta, &meta, crypto_opts)?;
+                sync_file(&transaction.new_meta)?;
+                sync_directory(&transaction.dir)?;
+
+                let journal = UpdateJournal {
+                    version: 1,
+                    stem: stem.clone(),
+                    old_version: old_meta.version.clone(),
+                };
+                let journal_bytes = serde_json::to_vec_pretty(&journal).map_err(|e| {
+                    BackendError::Internal(format!("serialize update journal: {e}"))
+                })?;
+                let rollback = |cause: BackendError| -> Result<SecretProperties, BackendError> {
+                    match self.recover_update_for_stem_locked(vault, &stem) {
+                        Ok(()) => Err(cause),
+                        Err(recovery) => Err(BackendError::Internal(format!(
+                            "{cause}; update recovery also failed: {recovery}"
+                        ))),
                     }
-                    self.cleanup_unjournaled_transaction_locked(&transaction)?;
-                    return Err(error);
-                }
-                Ok(UpdateInterruption::SimulatedCrash(error)) => return Err(error),
-                Err(error) => {
-                    if transaction.journal.exists() {
-                        return rollback(error);
+                };
+
+                // Publish via a synced temp and atomic rename. The final marker is
+                // never opened with truncate semantics.
+                match self.publish_update_journal_locked(&transaction, &journal_bytes) {
+                    Ok(UpdateInterruption::None) => {}
+                    Ok(UpdateInterruption::Rollback(error)) => {
+                        if transaction.journal.exists() {
+                            return rollback(error);
+                        }
+                        self.cleanup_unjournaled_transaction_locked(&transaction)?;
+                        return Err(error);
                     }
-                    self.cleanup_unjournaled_transaction_locked(&transaction)?;
-                    return Err(error);
+                    Ok(UpdateInterruption::SimulatedCrash(error)) => return Err(error),
+                    Err(error) => {
+                        if transaction.journal.exists() {
+                            return rollback(error);
+                        }
+                        self.cleanup_unjournaled_transaction_locked(&transaction)?;
+                        return Err(error);
+                    }
                 }
+
+                match self.update_interruption(0) {
+                    UpdateInterruption::None => {}
+                    UpdateInterruption::Rollback(error) => return rollback(error),
+                    UpdateInterruption::SimulatedCrash(error) => return Err(error),
+                }
+
+                if let Err(error) = fs::rename(&transaction.new_age, &ap).map_err(|e| {
+                    BackendError::Internal(format!("activate age {}: {e}", ap.display()))
+                }) {
+                    return rollback(error);
+                }
+                sync_directory(ap.parent().expect("active value has parent"))?;
+                match self.update_interruption(1) {
+                    UpdateInterruption::None => {}
+                    UpdateInterruption::Rollback(error) => return rollback(error),
+                    UpdateInterruption::SimulatedCrash(error) => return Err(error),
+                }
+
+                if let Err(error) = fs::rename(&transaction.new_meta, &mp).map_err(|e| {
+                    BackendError::Internal(format!("activate meta {}: {e}", mp.display()))
+                }) {
+                    return rollback(error);
+                }
+                sync_directory(mp.parent().expect("active metadata has parent"))?;
+                match self.update_interruption(2) {
+                    UpdateInterruption::None => {}
+                    UpdateInterruption::Rollback(error) => return rollback(error),
+                    UpdateInterruption::SimulatedCrash(error) => return Err(error),
+                }
+
+                if let Err(error) = archive_snapshot(
+                    &self.store_path,
+                    vault,
+                    &stem,
+                    &old_meta.version,
+                    &old_age,
+                    &old_meta,
+                    crypto_opts,
+                ) {
+                    return rollback(error);
+                }
+                let archive_dir = versions_dir(&self.store_path, vault, &stem)?;
+                sync_file(&archive_dir.join(format!("{}.age", old_meta.version)))?;
+                sync_file(&archive_dir.join(format!("{}.meta.json", old_meta.version)))?;
+                sync_directory(&archive_dir)?;
+                match self.update_interruption(3) {
+                    UpdateInterruption::None => {}
+                    UpdateInterruption::Rollback(error) => return rollback(error),
+                    UpdateInterruption::SimulatedCrash(error) => return Err(error),
+                }
+
+                self.finish_update_transaction_locked(&transaction)?;
+            } else {
+                write_meta(&mp, &meta, crypto_opts)?;
             }
 
-            match self.update_interruption(0) {
-                UpdateInterruption::None => {}
-                UpdateInterruption::Rollback(error) => return rollback(error),
-                UpdateInterruption::SimulatedCrash(error) => return Err(error),
-            }
-
-            if let Err(error) = fs::rename(&transaction.new_age, &ap)
-                .map_err(|e| BackendError::Internal(format!("activate age {}: {e}", ap.display())))
-            {
-                return rollback(error);
-            }
-            sync_directory(ap.parent().expect("active value has parent"))?;
-            match self.update_interruption(1) {
-                UpdateInterruption::None => {}
-                UpdateInterruption::Rollback(error) => return rollback(error),
-                UpdateInterruption::SimulatedCrash(error) => return Err(error),
-            }
-
-            if let Err(error) = fs::rename(&transaction.new_meta, &mp)
-                .map_err(|e| BackendError::Internal(format!("activate meta {}: {e}", mp.display())))
-            {
-                return rollback(error);
-            }
-            sync_directory(mp.parent().expect("active metadata has parent"))?;
-            match self.update_interruption(2) {
-                UpdateInterruption::None => {}
-                UpdateInterruption::Rollback(error) => return rollback(error),
-                UpdateInterruption::SimulatedCrash(error) => return Err(error),
-            }
-
-            if let Err(error) = archive_snapshot(
-                &self.store_path,
-                vault,
-                &stem,
-                &old_meta.version,
-                &old_age,
-                &old_meta,
-                crypto_opts,
-            ) {
-                return rollback(error);
-            }
-            let archive_dir = versions_dir(&self.store_path, vault, &stem)?;
-            sync_file(&archive_dir.join(format!("{}.age", old_meta.version)))?;
-            sync_file(&archive_dir.join(format!("{}.meta.json", old_meta.version)))?;
-            sync_directory(&archive_dir)?;
-            match self.update_interruption(3) {
-                UpdateInterruption::None => {}
-                UpdateInterruption::Rollback(error) => return rollback(error),
-                UpdateInterruption::SimulatedCrash(error) => return Err(error),
-            }
-
-            self.finish_update_transaction_locked(&transaction)?;
-        } else {
-            write_meta(&mp, &meta, crypto_opts)?;
+            Ok(meta_to_properties(&meta, None))
         }
-
-        Ok(meta_to_properties(&meta, None))
+        .await;
+        if __result.is_ok() {
+            self.audit_record(vault, AuditOp::UpdateSecret, name)?;
+            self.git_commit(&format!("update {name}"))?;
+        }
+        self.audit_failure(vault, AuditOp::UpdateSecret, name, __result)
     }
 
     // -----------------------------------------------------------------------
@@ -2854,60 +3014,68 @@ impl SecretBackend for LocalSecretBackend {
         name: &str,
         version: &str,
     ) -> Result<SecretProperties, BackendError> {
-        // Acquire once and recover before rollback inspects current/history.
-        let _lock = self.mutation_lock_for_name(vault, name)?;
+        let __result = async {
+            // Acquire once and recover before rollback inspects current/history.
+            let _lock = self.mutation_lock_for_name(vault, name)?;
 
-        // Operate on the stem where this secret currently lives (opaque, or
-        // legacy via the read fallback). `ensure_opaque_layout` migrates to
-        // opaque afterwards.
-        let stem = self.resolve_active_stem(vault, name)?;
+            // Operate on the stem where this secret currently lives (opaque, or
+            // legacy via the read fallback). `ensure_opaque_layout` migrates to
+            // opaque afterwards.
+            let stem = self.resolve_active_stem(vault, name)?;
 
-        // Find the target version (opaque or legacy archive dir — same fallback
-        // as get_secret_version / list_versions).
-        let vdir = self.resolve_versions_dir(vault, name)?;
-        let ver_age = vdir.join(format!("{version}.age"));
-        let ver_meta = vdir.join(format!("{version}.meta.json"));
+            // Find the target version (opaque or legacy archive dir — same fallback
+            // as get_secret_version / list_versions).
+            let vdir = self.resolve_versions_dir(vault, name)?;
+            let ver_age = vdir.join(format!("{version}.age"));
+            let ver_meta = vdir.join(format!("{version}.meta.json"));
 
-        if !ver_meta.exists() {
-            return Err(BackendError::NotFound {
-                name: format!("{name}@{version}"),
-                suggestion: None,
-            });
+            if !ver_meta.exists() {
+                return Err(BackendError::NotFound {
+                    name: format!("{name}@{version}"),
+                    suggestion: None,
+                });
+            }
+
+            // Archive current as the next version
+            archive_current(&self.store_path, vault, &stem)?;
+
+            // Copy the target version files to current
+            let ap = age_path(&self.store_path, vault, &stem)?;
+            let mp = meta_path(&self.store_path, vault, &stem)?;
+
+            if ver_age.exists() {
+                fs::copy(&ver_age, &ap)
+                    .map_err(|e| BackendError::Internal(format!("restore age: {e}")))?;
+            }
+            fs::copy(&ver_meta, &mp)
+                .map_err(|e| BackendError::Internal(format!("restore meta: {e}")))?;
+
+            // Update the version label to the next version number
+            let mut meta = read_meta(&mp, &self.identity)?;
+            let next_ver = next_version(&self.store_path, vault, &stem)?;
+            meta.version = format!("v{next_ver}");
+            meta.revision = new_revision();
+            meta.updated_at = Utc::now();
+            write_meta(
+                &mp,
+                &meta,
+                MetaCrypto {
+                    recipients: &self.recipients,
+                    encrypt: self.encrypt_metadata,
+                },
+            )?;
+
+            // Upgrade legacy layout → opaque and refresh the index entry.
+            self.ensure_opaque_layout(vault, name)?;
+
+            Ok(meta_to_properties(&meta, None))
         }
-
-        // Archive current as the next version
-        archive_current(&self.store_path, vault, &stem)?;
-
-        // Copy the target version files to current
-        let ap = age_path(&self.store_path, vault, &stem)?;
-        let mp = meta_path(&self.store_path, vault, &stem)?;
-
-        if ver_age.exists() {
-            fs::copy(&ver_age, &ap)
-                .map_err(|e| BackendError::Internal(format!("restore age: {e}")))?;
+        .await;
+        if let Ok(__props) = &__result {
+            self.audit_record(vault, AuditOp::RollbackSecret, name)?;
+            self.git_commit(&format!("rollback {name} to {}", __props.version))?;
         }
-        fs::copy(&ver_meta, &mp)
-            .map_err(|e| BackendError::Internal(format!("restore meta: {e}")))?;
-
-        // Update the version label to the next version number
-        let mut meta = read_meta(&mp, &self.identity)?;
-        let next_ver = next_version(&self.store_path, vault, &stem)?;
-        meta.version = format!("v{next_ver}");
-        meta.revision = new_revision();
-        meta.updated_at = Utc::now();
-        write_meta(
-            &mp,
-            &meta,
-            MetaCrypto {
-                recipients: &self.recipients,
-                encrypt: self.encrypt_metadata,
-            },
-        )?;
-
-        // Upgrade legacy layout → opaque and refresh the index entry.
-        self.ensure_opaque_layout(vault, name)?;
-
-        Ok(meta_to_properties(&meta, None))
+        self.audit_failure(vault, AuditOp::RollbackSecret, name, __result)
     }
 
     async fn restore_secret(
@@ -2915,147 +3083,163 @@ impl SecretBackend for LocalSecretBackend {
         vault: &str,
         name: &str,
     ) -> Result<SecretProperties, BackendError> {
-        let vault_dir = paths::vault_dir(&self.store_path, vault)?;
-        if !vault_dir.join(".vault.json").exists() {
-            return Err(BackendError::VaultNotFound {
-                name: vault.to_string(),
-                suggestion: None,
-            });
+        let __result = async {
+            let vault_dir = paths::vault_dir(&self.store_path, vault)?;
+            if !vault_dir.join(".vault.json").exists() {
+                return Err(BackendError::VaultNotFound {
+                    name: vault.to_string(),
+                    suggestion: None,
+                });
+            }
+            let _lock = self.mutation_lock_for_name(vault, name)?;
+
+            // Restore the most recent trash entry for this name (legacy un-suffixed
+            // entries sort as oldest). Ties on timestamp break by path so the
+            // choice is deterministic regardless of read_dir order. Covers both
+            // opaque and legacy trash stems.
+            let mut entries = self.trash_entries_for(vault, name)?;
+            entries.sort();
+            let Some((_, tdir)) = entries.pop() else {
+                return Err(BackendError::NotFound {
+                    name: format!("{name} (deleted)"),
+                    suggestion: Some("Secret is not in the trash".into()),
+                });
+            };
+
+            // Inner files may be named with an opaque or legacy stem; locate by
+            // extension rather than recomputing a stem.
+            let (trash_age, trash_meta) = trash_inner_files(&tdir);
+            let Some(trash_meta) = trash_meta.filter(|p| p.exists()) else {
+                return Err(BackendError::NotFound {
+                    name: format!("{name} (deleted)"),
+                    suggestion: Some("Trash metadata not found".into()),
+                });
+            };
+
+            // Move files back to secrets/ at the active (opaque when enabled) stem.
+            let sdir = secrets_dir(&self.store_path, vault)?;
+            fs::create_dir_all(&sdir)
+                .map_err(|e| BackendError::Internal(format!("mkdir secrets: {e}")))?;
+
+            let target_stem = self.active_stem(name);
+            let ap = age_path(&self.store_path, vault, &target_stem)?;
+            let mp = meta_path(&self.store_path, vault, &target_stem)?;
+
+            // A restore must never displace an active value. Leave both the live
+            // secret and trash entry untouched so the caller can resolve the
+            // collision explicitly.
+            let existing_stem = self.resolve_active_stem(vault, name)?;
+            let existing_ap = age_path(&self.store_path, vault, &existing_stem)?;
+            let existing_mp = meta_path(&self.store_path, vault, &existing_stem)?;
+            if existing_ap.exists() || existing_mp.exists() {
+                return Err(BackendError::Conflict(format!(
+                    "secret '{name}' already exists in vault '{vault}'"
+                )));
+            }
+
+            if let Some(trash_age) = trash_age.filter(|p| p.exists()) {
+                fs::rename(&trash_age, &ap)
+                    .map_err(|e| BackendError::Internal(format!("restore age from trash: {e}")))?;
+            }
+            fs::rename(&trash_meta, &mp)
+                .map_err(|e| BackendError::Internal(format!("restore meta from trash: {e}")))?;
+
+            // Remove the trash entry
+            fs::remove_dir_all(&tdir)
+                .map_err(|e| BackendError::Internal(format!("remove trash dir: {e}")))?;
+
+            let mut meta = read_meta(&mp, &self.identity)?;
+            meta.revision = new_revision();
+            meta.updated_at = Utc::now();
+            write_meta(
+                &mp,
+                &meta,
+                MetaCrypto {
+                    recipients: &self.recipients,
+                    encrypt: self.encrypt_metadata,
+                },
+            )?;
+            sync_file(&mp)?;
+            sync_directory(mp.parent().expect("restored metadata has parent"))?;
+
+            // Re-add the active index entry and upgrade any remaining legacy layout.
+            self.ensure_opaque_layout(vault, name)?;
+
+            Ok(meta_to_properties(&meta, None))
         }
-        let _lock = self.mutation_lock_for_name(vault, name)?;
-
-        // Restore the most recent trash entry for this name (legacy un-suffixed
-        // entries sort as oldest). Ties on timestamp break by path so the
-        // choice is deterministic regardless of read_dir order. Covers both
-        // opaque and legacy trash stems.
-        let mut entries = self.trash_entries_for(vault, name)?;
-        entries.sort();
-        let Some((_, tdir)) = entries.pop() else {
-            return Err(BackendError::NotFound {
-                name: format!("{name} (deleted)"),
-                suggestion: Some("Secret is not in the trash".into()),
-            });
-        };
-
-        // Inner files may be named with an opaque or legacy stem; locate by
-        // extension rather than recomputing a stem.
-        let (trash_age, trash_meta) = trash_inner_files(&tdir);
-        let Some(trash_meta) = trash_meta.filter(|p| p.exists()) else {
-            return Err(BackendError::NotFound {
-                name: format!("{name} (deleted)"),
-                suggestion: Some("Trash metadata not found".into()),
-            });
-        };
-
-        // Move files back to secrets/ at the active (opaque when enabled) stem.
-        let sdir = secrets_dir(&self.store_path, vault)?;
-        fs::create_dir_all(&sdir)
-            .map_err(|e| BackendError::Internal(format!("mkdir secrets: {e}")))?;
-
-        let target_stem = self.active_stem(name);
-        let ap = age_path(&self.store_path, vault, &target_stem)?;
-        let mp = meta_path(&self.store_path, vault, &target_stem)?;
-
-        // A restore must never displace an active value. Leave both the live
-        // secret and trash entry untouched so the caller can resolve the
-        // collision explicitly.
-        let existing_stem = self.resolve_active_stem(vault, name)?;
-        let existing_ap = age_path(&self.store_path, vault, &existing_stem)?;
-        let existing_mp = meta_path(&self.store_path, vault, &existing_stem)?;
-        if existing_ap.exists() || existing_mp.exists() {
-            return Err(BackendError::Conflict(format!(
-                "secret '{name}' already exists in vault '{vault}'"
-            )));
+        .await;
+        if __result.is_ok() {
+            self.audit_record(vault, AuditOp::RestoreSecret, name)?;
+            self.git_commit(&format!("restore {name}"))?;
         }
-
-        if let Some(trash_age) = trash_age.filter(|p| p.exists()) {
-            fs::rename(&trash_age, &ap)
-                .map_err(|e| BackendError::Internal(format!("restore age from trash: {e}")))?;
-        }
-        fs::rename(&trash_meta, &mp)
-            .map_err(|e| BackendError::Internal(format!("restore meta from trash: {e}")))?;
-
-        // Remove the trash entry
-        fs::remove_dir_all(&tdir)
-            .map_err(|e| BackendError::Internal(format!("remove trash dir: {e}")))?;
-
-        let mut meta = read_meta(&mp, &self.identity)?;
-        meta.revision = new_revision();
-        meta.updated_at = Utc::now();
-        write_meta(
-            &mp,
-            &meta,
-            MetaCrypto {
-                recipients: &self.recipients,
-                encrypt: self.encrypt_metadata,
-            },
-        )?;
-        sync_file(&mp)?;
-        sync_directory(mp.parent().expect("restored metadata has parent"))?;
-
-        // Re-add the active index entry and upgrade any remaining legacy layout.
-        self.ensure_opaque_layout(vault, name)?;
-
-        Ok(meta_to_properties(&meta, None))
+        self.audit_failure(vault, AuditOp::RestoreSecret, name, __result)
     }
 
     async fn purge_secret(&self, vault: &str, name: &str) -> Result<(), BackendError> {
-        let vault_dir = paths::vault_dir(&self.store_path, vault)?;
-        if !vault_dir.join(".vault.json").exists() {
-            return Err(BackendError::VaultNotFound {
-                name: vault.to_string(),
-                suggestion: None,
-            });
-        }
-        let _lock = self.mutation_lock_for_name(vault, name)?;
-
-        let trash_entries = self.trash_entries_for(vault, name)?;
-        if trash_entries.is_empty() {
-            return Err(BackendError::NotFound {
-                name: format!("{name} (deleted)"),
-                suggestion: Some("Secret is not in the trash".into()),
-            });
-        }
-
-        // A same-name active secret may have been recreated after deletion.
-        // Purging the old trash must not erase that live secret's versions.
-        let mut active_stems = vec![self.active_stem(name)];
-        if self.opaque_filenames {
-            active_stems.push(encode_name(name));
-        }
-        let has_active = active_stems.iter().try_fold(false, |found, stem| {
-            Ok::<_, BackendError>(
-                found
-                    || age_path(&self.store_path, vault, stem)?.exists()
-                    || meta_path(&self.store_path, vault, stem)?.exists(),
-            )
-        })?;
-
-        // Permanently remove every trash entry for this name (opaque + legacy
-        // stems, suffixed and unsuffixed).
-        for (_, tdir) in trash_entries {
-            fs::remove_dir_all(&tdir)
-                .map_err(|e| BackendError::Internal(format!("purge trash: {e}")))?;
-        }
-
-        // With no active same-name secret, versions belong only to the
-        // deleted secret and are purged with it. Otherwise preserve the
-        // shared version namespace for the active value.
-        if !has_active {
-            let mut version_stems = vec![self.active_stem(name)];
-            if self.opaque_filenames {
-                version_stems.push(encode_name(name));
+        let __result = async {
+            let vault_dir = paths::vault_dir(&self.store_path, vault)?;
+            if !vault_dir.join(".vault.json").exists() {
+                return Err(BackendError::VaultNotFound {
+                    name: vault.to_string(),
+                    suggestion: None,
+                });
             }
-            for stem in version_stems {
-                let vdir = versions_dir(&self.store_path, vault, &stem)?;
-                if vdir.exists() {
-                    fs::remove_dir_all(&vdir)
-                        .map_err(|e| BackendError::Internal(format!("purge versions: {e}")))?;
+            let _lock = self.mutation_lock_for_name(vault, name)?;
+
+            let trash_entries = self.trash_entries_for(vault, name)?;
+            if trash_entries.is_empty() {
+                return Err(BackendError::NotFound {
+                    name: format!("{name} (deleted)"),
+                    suggestion: Some("Secret is not in the trash".into()),
+                });
+            }
+
+            // A same-name active secret may have been recreated after deletion.
+            // Purging the old trash must not erase that live secret's versions.
+            let mut active_stems = vec![self.active_stem(name)];
+            if self.opaque_filenames {
+                active_stems.push(encode_name(name));
+            }
+            let has_active = active_stems.iter().try_fold(false, |found, stem| {
+                Ok::<_, BackendError>(
+                    found
+                        || age_path(&self.store_path, vault, stem)?.exists()
+                        || meta_path(&self.store_path, vault, stem)?.exists(),
+                )
+            })?;
+
+            // Permanently remove every trash entry for this name (opaque + legacy
+            // stems, suffixed and unsuffixed).
+            for (_, tdir) in trash_entries {
+                fs::remove_dir_all(&tdir)
+                    .map_err(|e| BackendError::Internal(format!("purge trash: {e}")))?;
+            }
+
+            // With no active same-name secret, versions belong only to the
+            // deleted secret and are purged with it. Otherwise preserve the
+            // shared version namespace for the active value.
+            if !has_active {
+                let mut version_stems = vec![self.active_stem(name)];
+                if self.opaque_filenames {
+                    version_stems.push(encode_name(name));
+                }
+                for stem in version_stems {
+                    let vdir = versions_dir(&self.store_path, vault, &stem)?;
+                    if vdir.exists() {
+                        fs::remove_dir_all(&vdir)
+                            .map_err(|e| BackendError::Internal(format!("purge versions: {e}")))?;
+                    }
                 }
             }
-        }
 
-        Ok(())
+            Ok(())
+        }
+        .await;
+        if __result.is_ok() {
+            self.audit_record(vault, AuditOp::PurgeSecret, name)?;
+            self.git_commit(&format!("purge {name}"))?;
+        }
+        self.audit_failure(vault, AuditOp::PurgeSecret, name, __result)
     }
 
     async fn list_deleted_secrets(

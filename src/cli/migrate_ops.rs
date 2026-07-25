@@ -670,6 +670,8 @@ mod tests {
             default_vault: Some("default".into()),
             encrypt_metadata: None,
             opaque_filenames: None,
+            audit: None,
+            git: None,
         };
         let target_config = LocalConfig {
             store_path: Some(
@@ -689,6 +691,8 @@ mod tests {
             default_vault: Some("default".into()),
             encrypt_metadata: None,
             opaque_filenames: None,
+            audit: None,
+            git: None,
         };
 
         // Create source backend and seed it with secrets
@@ -801,6 +805,8 @@ mod tests {
             default_vault: Some("default".into()),
             encrypt_metadata: None,
             opaque_filenames: None,
+            audit: None,
+            git: None,
         };
         let target_config = LocalConfig {
             store_path: Some(
@@ -820,6 +826,8 @@ mod tests {
             default_vault: Some("default".into()),
             encrypt_metadata: None,
             opaque_filenames: None,
+            audit: None,
+            git: None,
         };
         let source = crate::backend::local::LocalBackend::new(Some(&source_config)).unwrap();
         let target = crate::backend::local::LocalBackend::new(Some(&target_config)).unwrap();

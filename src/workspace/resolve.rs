@@ -229,6 +229,8 @@ mod tests {
                 default_vault: Some("default".into()),
                 encrypt_metadata: None,
                 opaque_filenames: None,
+                audit: None,
+                git: None,
             }),
         );
         named_backends.insert(
@@ -239,6 +241,8 @@ mod tests {
                 default_vault: Some("default".into()),
                 encrypt_metadata: None,
                 opaque_filenames: None,
+                audit: None,
+                git: None,
             }),
         );
         let config = Config {
@@ -559,6 +563,8 @@ mod tests {
                 default_vault: Some("default".into()),
                 encrypt_metadata: None,
                 opaque_filenames: None,
+                audit: None,
+                git: None,
             }),
         );
         // No top-level `backend`/`local`/`azure` config at all — this
@@ -633,6 +639,8 @@ mod tests {
                 default_vault: Some("default".into()),
                 encrypt_metadata: None,
                 opaque_filenames: None,
+                audit: None,
+                git: None,
             }),
         );
         // No top-level `backend`/`local`/`azure` config at all — same
