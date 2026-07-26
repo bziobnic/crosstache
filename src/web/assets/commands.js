@@ -321,12 +321,6 @@ export function mountCommandPalette({
       if (!activationStillCurrent(result)) return false;
       clearFilters.click();
     }
-    const allItems = [...document.querySelectorAll?.(`#${surface}-folder-tree .folder-tree-item`) || []]
-      .find((item) => item.querySelector('.folder-tree-label')?.textContent === 'All items');
-    if (allItems) {
-      if (!activationStillCurrent(result)) return false;
-      allItems.click();
-    }
     return true;
   }
 
@@ -376,12 +370,15 @@ export function mountCommandPalette({
     if (!clearSurfaceDiscovery(result.surface, result)) return false;
     if (result.kind === 'folder') {
       if (!activationStillCurrent(result)) return false;
-      byId(`${result.surface}-folders-expand-all`)?.click();
-      const folder = [...document.querySelectorAll?.(`#${result.surface}-folder-tree .folder-tree-item`) || []]
-        .find((item) => item.querySelector('.folder-tree-label')?.textContent === result.name);
+      // The tree grid holds folders and items in one table, so revealing a
+      // folder means expanding to it and focusing its row rather than filtering.
+      byId(`${result.surface}-expand-all`)?.click();
+      const folder = [...document.querySelectorAll?.(
+        `#${result.surface}-table tbody tr[data-tree-path]`,
+      ) || []].find((row) => row.dataset.treePath === result.name);
       if (!activationStillCurrent(result)) return false;
-      folder?.click();
       folder?.focus();
+      folder?.scrollIntoView?.({ block: 'nearest' });
       return Boolean(folder);
     }
     const search = byId(result.surface === 'files' ? 'file-search' : 'search');

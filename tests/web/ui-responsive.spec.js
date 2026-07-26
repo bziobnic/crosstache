@@ -217,17 +217,15 @@ test('desktop table keeps sorting and resizing controls above the breakpoint', a
   await expect(page.locator('#secrets-table .sort-button')).toHaveCount(5);
 });
 
-test('constrained desktop keeps table mode but replaces the folder rail with its filter sheet', async ({ page, baseURL }) => {
+test('constrained desktop keeps the single tree grid in table mode without a folder rail', async ({ page, baseURL }) => {
   await page.setViewportSize({ width: 820, height: 560 });
   await page.goto(baseURL);
 
   await expect(page.locator('#secrets-table')).toBeVisible();
   await expect(page.locator('#secrets-stacked')).toBeHidden();
-  await expect(page.locator('#secrets-workspace .folder-sidebar')).toBeHidden();
-  const filterFolders = page.getByRole('button', { name: 'Filter folders' });
-  await expect(filterFolders).toBeVisible();
-  await filterFolders.click();
-  await expect(page.getByRole('dialog', { name: 'Filter secret folders' })).toBeVisible();
+  await expect(page.locator('#secrets-table')).toHaveAttribute('role', 'treegrid');
+  await expect(page.locator('#secrets-expand-all')).toBeVisible();
+  await expect(page.locator('#secrets-collapse-all')).toBeVisible();
   await expectNoHorizontalOverflow(page);
   await expectNoSeriousOrCriticalAxeViolations(page);
 });
@@ -305,9 +303,9 @@ test('sheets fill the viewport below 544px', async ({ page, baseURL }) => {
   const box = await page.getByRole('dialog', { name: 'New secret' }).boundingBox();
   expect(box).toEqual(expect.objectContaining({ x: 0, y: 0, width: 390, height: 844 }));
   await page.getByRole('button', { name: 'Cancel' }).click();
-  await page.locator('#secrets-folder-filter-open').click();
-  const folderBox = await page.getByRole('dialog', { name: 'Filter secret folders' }).boundingBox();
-  expect(folderBox).toEqual(expect.objectContaining({ x: 0, y: 0, width: 390, height: 844 }));
+  await page.locator('#settings-open').click();
+  const settingsBox = await page.getByRole('dialog', { name: 'Settings' }).boundingBox();
+  expect(settingsBox?.width).toBe(390);
 });
 
 test('desktop permits exercising the approved responsive breakpoints', async () => {

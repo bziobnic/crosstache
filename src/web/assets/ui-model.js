@@ -294,7 +294,6 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
     });
   }
 
-  const FOLDER_ALL = Object.freeze({ kind: 'all' });
   const FOLDER_UNFILED = Object.freeze({ kind: 'unfiled' });
 
   function folderIdentity(path) {
@@ -307,7 +306,6 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
   }
 
   function folderIdentityKey(identity) {
-    if (identity?.kind === 'all') return '["all"]';
     if (identity?.kind === 'unfiled') return '["unfiled"]';
     if (identity?.kind === 'folder' && typeof identity.path === 'string') {
       return JSON.stringify(['folder', identity.path]);
@@ -315,66 +313,158 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
     return '';
   }
 
-  function sameFolderIdentity(left, right) {
-    if (left?.kind !== right?.kind) return false;
-    if (left?.kind === 'folder') return left.path === right.path;
-    return left?.kind === 'all' || left?.kind === 'unfiled';
+  function treeItemKey(identifier) {
+    return JSON.stringify(['item', String(identifier ?? '')]);
   }
 
-  function buildFolderTree(items) {
-    const roots = new Map();
-    const unfiledItems = [];
-
-    for (const item of items || []) {
-      const path = normalizeFolderPath(item?.folder);
+  // One table holds folders and their contents: every folder is a branch row and
+  // every secret/file is a leaf row underneath it. Rows arrive pre-sorted, so the
+  // per-folder item order is whatever the active column sort produced.
+  function buildContentTree(rows = []) {
+    const root = { children: new Map(), items: [] };
+    for (const row of rows) {
+      const path = normalizeFolderPath(row?.folder);
       if (!path) {
-        unfiledItems.push(item);
+        root.items.push(row);
         continue;
       }
-      let siblings = roots;
+      let node = root;
       let parentPath = '';
       for (const segment of path.split('/')) {
         const folderPath = parentPath ? `${parentPath}/${segment}` : segment;
-        if (!siblings.has(segment)) {
-          siblings.set(segment, {
-            id: folderIdentity(folderPath),
+        if (!node.children.has(segment)) {
+          node.children.set(segment, {
+            identity: folderIdentity(folderPath),
+            path: folderPath,
             label: segment,
-            directCount: 0,
-            totalCount: 0,
-            items: [],
             children: new Map(),
+            items: [],
           });
         }
-        const node = siblings.get(segment);
-        node.totalCount++;
-        if (folderPath === path) {
-          node.directCount++;
-          node.items.push(item);
-        }
-        siblings = node.children;
+        node = node.children.get(segment);
         parentPath = folderPath;
       }
+      node.items.push(row);
     }
 
-    const finalize = (nodes) => [...nodes.values()]
+    const finalizeChildren = (source) => [...source.children.values()]
       .sort((left, right) => collator.compare(left.label, right.label))
-      .map((node) => ({
-        ...node,
-        children: finalize(node.children),
-      }));
-
-    const tree = finalize(roots);
-    if (unfiledItems.length) {
-      tree.unshift({
-        id: FOLDER_UNFILED,
-        label: 'Unfiled',
-        directCount: unfiledItems.length,
-        totalCount: unfiledItems.length,
-        items: [...unfiledItems],
-        children: [],
+      .map(finalize);
+    const finalize = (source) => {
+      const children = finalizeChildren(source);
+      const items = [...source.items];
+      const itemIds = Object.freeze([
+        ...children.flatMap((child) => child.itemIds),
+        ...items.map((item) => item.identifier),
+      ]);
+      return Object.freeze({
+        kind: 'folder',
+        key: folderIdentityKey(source.identity),
+        identity: source.identity,
+        path: source.path,
+        label: source.label,
+        children: Object.freeze(children),
+        items: Object.freeze(items),
+        itemIds,
+        totalCount: itemIds.length,
       });
+    };
+
+    const children = finalizeChildren(root);
+    const items = [...root.items];
+    return Object.freeze({
+      kind: 'root',
+      key: '',
+      children: Object.freeze(children),
+      items: Object.freeze(items),
+      itemIds: Object.freeze([
+        ...children.flatMap((child) => child.itemIds),
+        ...items.map((item) => item.identifier),
+      ]),
+    });
+  }
+
+  function treeFolderIdentities(node, collected = []) {
+    for (const child of node?.children || []) {
+      collected.push(child.identity);
+      treeFolderIdentities(child, collected);
     }
-    return tree;
+    return collected;
+  }
+
+  function treeFolderCount(node) {
+    return treeFolderIdentities(node).length;
+  }
+
+  // A filtered/searched list must stay reachable, so every folder that survived the
+  // filter is force-expanded for that render without touching the persisted state.
+  function treeForcedKeys(node, forced = new Set()) {
+    for (const child of node?.children || []) {
+      forced.add(child.key);
+      treeForcedKeys(child, forced);
+    }
+    return forced;
+  }
+
+  function flattenContentTree(tree, expanded, { forcedKeys = null } = {}) {
+    const rows = [];
+    const isOpen = (key) => (forcedKeys ? forcedKeys.has(key) : false)
+      || (expanded instanceof Map ? expanded.has(key) : Boolean(expanded?.has?.(key)));
+    const visit = (node, level, parentKey) => {
+      for (const child of node.children) {
+        const open = isOpen(child.key);
+        rows.push(Object.freeze({
+          type: 'folder',
+          key: child.key,
+          node: child,
+          identity: child.identity,
+          label: child.label,
+          path: child.path,
+          level,
+          parentKey,
+          expanded: open,
+          hasChildren: child.children.length > 0 || child.items.length > 0,
+          itemIds: child.itemIds,
+        }));
+        if (open) visit(child, level + 1, child.key);
+      }
+      for (const item of node.items) {
+        rows.push(Object.freeze({
+          type: 'item',
+          key: treeItemKey(item.identifier),
+          row: item,
+          identifier: item.identifier,
+          level,
+          parentKey,
+          expanded: false,
+          hasChildren: false,
+          itemIds: Object.freeze([item.identifier]),
+        }));
+      }
+    };
+    visit(tree, 1, null);
+    return rows;
+  }
+
+  // Tri-state: a branch is checked when every descendant item is selected, mixed
+  // when only some are, unchecked otherwise. Branches are never selection targets
+  // themselves — they are a proxy for the items below them.
+  function branchSelection(itemIds, selectedIds) {
+    const ids = [...(itemIds || [])];
+    if (!ids.length) return 'unchecked';
+    const selected = selectedIds instanceof Set ? selectedIds : new Set(selectedIds || []);
+    let hits = 0;
+    for (const id of ids) if (selected.has(id)) hits++;
+    if (hits === 0) return 'unchecked';
+    return hits === ids.length ? 'checked' : 'mixed';
+  }
+
+  function applyBranchSelection(selectedIds, itemIds, checked) {
+    for (const id of itemIds || []) {
+      if (checked) selectedIds.add(id);
+      else selectedIds.delete(id);
+    }
+    return selectedIds;
   }
 
   function initialExpansion({ total, saved }) {
@@ -406,9 +496,14 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
     });
   }
 
+  // v5: the tree grid makes every folder expandable (v1-v4 could only persist
+  // folders that had sub-folders), so a v4 payload would restore a set that no
+  // longer describes what the user actually opened.
+  const FOLDER_EXPANSION_VERSION = 5;
+
   function folderPreferenceKey(tokenIndex) {
     return OPAQUE_TOKEN.test(tokenIndex?.scopeToken)
-      ? `xv.ui.folder-expansion.v4:${tokenIndex.scopeToken}`
+      ? `xv.ui.folder-expansion.v${FOLDER_EXPANSION_VERSION}:${tokenIndex.scopeToken}`
       : '';
   }
 
@@ -422,7 +517,8 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
       for (let index = 0; index < storage.length; index++) {
         const key = storage.key(index);
         if (key?.startsWith('xv.ui.folder-expansion.v2:')
-          || key?.startsWith('xv.ui.folder-expansion.v3:')) legacyKeys.add(key);
+          || key?.startsWith('xv.ui.folder-expansion.v3:')
+          || key?.startsWith('xv.ui.folder-expansion.v4:')) legacyKeys.add(key);
       }
     }
     for (const key of legacyKeys) {
@@ -439,7 +535,7 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
       const serialized = storage.getItem(key);
       if (serialized === null) return null;
       const parsed = JSON.parse(serialized);
-      if (parsed?.version !== 4 || !Array.isArray(parsed.expanded)
+      if (parsed?.version !== FOLDER_EXPANSION_VERSION || !Array.isArray(parsed.expanded)
         || parsed.expanded.some((token) => !OPAQUE_TOKEN.test(token))) {
         return null;
       }
@@ -461,7 +557,7 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
         .filter((token) => OPAQUE_TOKEN.test(token))
         .sort((left, right) => collator.compare(left, right));
       storage.setItem(key, JSON.stringify({
-        version: 4,
+        version: FOLDER_EXPANSION_VERSION,
         expanded: tokens,
       }));
       return true;
@@ -470,22 +566,51 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
     }
   }
 
-  function createFolderNavigationState(storage) {
+  function createTreeExpansionState(storage) {
     let scope = null;
     let scopeKey = null;
     let tokenIndex = null;
-    let hydratedTokenIndex = null;
-    let selected = FOLDER_ALL;
-    let folderIds = [];
+    // Hydrate the saved set once per scope. Every list reload mints a fresh token
+    // index object, so keying on object identity re-ran hydration on each refresh
+    // and clobbered whatever the user had opened since.
+    let hydrated = false;
     let expandableIds = [];
+    // A surface's rows arrive after the scope switch, so the very first sync for
+    // a scope usually has no folders yet. The first-visit default therefore stays
+    // pending until a sync actually reports folders (or the user acts).
+    let initialPending = true;
+    // Folders this scope has already shown. A folder that appears later (a new
+    // secret filed somewhere new) is not "collapsed by the user" — it inherits
+    // the scope's first-visit rule so the row that just appeared stays visible.
+    let knownKeys = new Set();
     const expanded = new Map();
 
-    const persist = () => scope && tokenIndex
-      && saveFolderExpansion(storage, tokenIndex, expanded);
+    // A reconcile can land before the scope's token index arrives; the write is
+    // owed until one does, otherwise a pruned folder stays in storage forever.
+    let persistPending = false;
+    const persist = () => {
+      const wrote = Boolean(scope && tokenIndex
+        && saveFolderExpansion(storage, tokenIndex, expanded));
+      persistPending = !wrote;
+      return wrote;
+    };
+    const applyInitial = (total, available) => {
+      expanded.clear();
+      const saved = tokenIndex ? loadFolderExpansion(storage, tokenIndex) : null;
+      const initial = initialExpansion({ total, saved });
+      const keys = initial === 'all'
+        ? [...available.keys()]
+        : (Array.isArray(initial)
+          ? initial.map((token) => folderIdentityKey(tokenIndex?.byToken.get(token)))
+          : []);
+      for (const key of keys) {
+        if (available.has(key)) expanded.set(key, available.get(key));
+      }
+      knownKeys = new Set(available.keys());
+    };
     return Object.freeze({
       sync(nextScope, {
         total,
-        folderIds: nextFolderIds = null,
         expandableIds: nextExpandableIds,
         tokenIndex: nextTokenIndex = null,
       }) {
@@ -495,95 +620,87 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
           String(nextScope?.surface || ''),
         ]);
         expandableIds = [...nextExpandableIds];
-        folderIds = [...(nextFolderIds || nextExpandableIds)];
-        const availableFolders = new Map(
-          folderIds.map((id) => [folderIdentityKey(id), id]),
-        );
-        const availableExpandable = new Map(
+        const available = new Map(
           expandableIds.map((id) => [folderIdentityKey(id), id]),
         );
         const sameScope = nextKey === scopeKey;
         tokenIndex = nextTokenIndex;
         if (sameScope) {
-          let reconciledExpansion = false;
-          if (tokenIndex && hydratedTokenIndex !== tokenIndex) {
+          let reconciled = false;
+          if (initialPending && available.size) {
+            applyInitial(total, available);
+            initialPending = false;
+            hydrated = hydrated || Boolean(tokenIndex);
+            return expanded;
+          }
+          if (tokenIndex && !hydrated) {
             const saved = loadFolderExpansion(storage, tokenIndex);
             if (saved !== null) {
               expanded.clear();
               for (const token of saved) {
                 const identity = tokenIndex.byToken.get(token);
                 const key = folderIdentityKey(identity);
-                if (availableExpandable.has(key)) {
-                  expanded.set(key, availableExpandable.get(key));
-                } else {
-                  reconciledExpansion = true;
-                }
+                if (available.has(key)) expanded.set(key, available.get(key));
+                else reconciled = true;
               }
             }
-            hydratedTokenIndex = tokenIndex;
+            hydrated = true;
+            knownKeys = new Set(available.keys());
           }
-          for (const key of [...expanded.keys()]) {
-            if (!availableExpandable.has(key)) {
-              expanded.delete(key);
-              reconciledExpansion = true;
+          const expandsByDefault = initialExpansion({ total, saved: null }) === 'all';
+          for (const [key, id] of available) {
+            if (knownKeys.has(key)) continue;
+            knownKeys.add(key);
+            if (expandsByDefault) {
+              expanded.set(key, id);
+              reconciled = true;
             }
           }
-          if (reconciledExpansion) persist();
-          if (!sameFolderIdentity(selected, FOLDER_ALL)
-            && !availableFolders.has(folderIdentityKey(selected))) {
-            selected = FOLDER_ALL;
+          for (const key of [...expanded.keys()]) {
+            if (!available.has(key)) {
+              expanded.delete(key);
+              reconciled = true;
+            }
           }
-          return selected;
+          for (const key of [...knownKeys]) {
+            if (!available.has(key)) knownKeys.delete(key);
+          }
+          if (reconciled || persistPending) persist();
+          return expanded;
         }
         scope = { ...nextScope };
         scopeKey = nextKey;
-        hydratedTokenIndex = tokenIndex;
-        selected = FOLDER_ALL;
-        expanded.clear();
-        const saved = tokenIndex ? loadFolderExpansion(storage, tokenIndex) : null;
-        const initial = initialExpansion({ total, saved });
-        const initialKeys = initial === 'all'
-          ? [...availableExpandable.keys()]
-          : (Array.isArray(initial)
-            ? initial.map((token) => folderIdentityKey(tokenIndex?.byToken.get(token)))
-            : []);
-        for (const key of initialKeys) {
-          if (availableExpandable.has(key)) expanded.set(key, availableExpandable.get(key));
-        }
-        return selected;
-      },
-      select(id) {
-        selected = id?.kind ? id : FOLDER_ALL;
-        return selected;
+        hydrated = Boolean(tokenIndex);
+        applyInitial(total, available);
+        initialPending = available.size === 0;
+        return expanded;
       },
       toggle(id, value = !expanded.has(folderIdentityKey(id))) {
+        initialPending = false;
         const key = folderIdentityKey(id);
         if (value) expanded.set(key, id);
-        else {
-          expanded.delete(key);
-          if (selected?.kind === 'folder' && id?.kind === 'folder'
-            && selected.path.startsWith(`${id.path}/`)) {
-            selected = id;
-          }
-        }
+        else expanded.delete(key);
         persist();
-        return selected;
+        return value;
       },
       expandAll() {
+        initialPending = false;
         expanded.clear();
         for (const id of expandableIds) expanded.set(folderIdentityKey(id), id);
         persist();
-        return selected;
+        return expanded;
       },
       collapseAll() {
+        initialPending = false;
         expanded.clear();
-        selected = FOLDER_ALL;
         persist();
-        return selected;
+        return expanded;
+      },
+      has(key) {
+        return expanded.has(key);
       },
       snapshot() {
         return {
-          selected,
           expanded: [...expanded.values()].sort((left, right) => (
             collator.compare(left.path || '', right.path || '')
           )),
@@ -593,227 +710,15 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
     });
   }
 
-  function itemMatchesFolder(item, selected) {
-    if (!selected || selected.kind === 'all') return true;
-    const folder = normalizeFolderPath(item?.folder);
-    if (selected.kind === 'unfiled') return folder === '';
-    if (selected.kind !== 'folder') return false;
-    const target = selected.path;
-    return folder === target || folder.startsWith(`${target}/`);
-  }
-
-  function treeCountMap(nodes, counts = new Map()) {
-    for (const node of nodes) {
-      counts.set(folderIdentityKey(node.id), node.totalCount);
-      treeCountMap(node.children, counts);
-    }
-    return counts;
-  }
-
-  function buildFolderViewModel(items, visibleItems = items, {
-    buildTree = buildFolderTree,
-  } = {}) {
-    const tree = buildTree(items);
-    const visibleTree = buildTree(visibleItems);
-    const folderIds = [];
-    const expandableIds = [];
-    let folderCount = 0;
-    const visit = (nodes) => {
-      for (const node of nodes) {
-        folderIds.push(node.id);
-        if (node.id.kind === 'folder') folderCount++;
-        if (node.children.length) expandableIds.push(node.id);
-        visit(node.children);
-      }
-    };
-    visit(tree);
-    return Object.freeze({
-      tree,
-      visibleCounts: treeCountMap(visibleTree),
-      folderIds: Object.freeze(folderIds),
-      expandableIds: Object.freeze(expandableIds),
-      folderCount,
-      totalCount: items.length,
-      visibleCount: visibleItems.length,
-    });
-  }
-
-  function flattenFolderTree(nodes, expanded, level = 1, parentId = null, rows = []) {
-    for (const node of nodes) {
-      rows.push({ ...node, level, parentId });
-      if (node.children.length && expanded.has(folderIdentityKey(node.id))) {
-        flattenFolderTree(node.children, expanded, level + 1, node.id, rows);
-      }
-    }
-    return rows;
-  }
-
-  function renderFolderTree({
-    document,
-    container,
-    items,
-    visibleItems = items,
-    viewModel = null,
-    expanded,
-    selected,
-    focusedId,
-    onSelect,
-    onToggle,
-    onFocus,
-  }) {
-    const folderView = viewModel || buildFolderViewModel(items, visibleItems);
-    const tree = folderView.tree;
-    const visibleCounts = folderView.visibleCounts;
-    const rows = [{
-      id: FOLDER_ALL,
-      label: 'All items',
-      level: 1,
-      parentId: null,
-      totalCount: folderView.totalCount,
-      children: [],
-    }, ...flattenFolderTree(tree, expanded)];
-    const visibleIds = rows.map((row) => row.id);
-    const visibleKeys = new Set(visibleIds.map(folderIdentityKey));
-    const effectiveSelected = visibleKeys.has(folderIdentityKey(selected))
-      ? selected
-      : FOLDER_ALL;
-    let rovingId = visibleKeys.has(folderIdentityKey(focusedId))
-      ? focusedId
-      : effectiveSelected;
-    const buttons = [];
-    const buttonsByIdentity = new Map();
-    const hadTreeFocus = Boolean(container.contains?.(document.activeElement));
-    const previousFocusKey = hadTreeFocus
-      ? document.activeElement?.__xvFolderIdentityKey
-      : '';
-
-    container.setAttribute('role', 'tree');
-    const focusItem = (id) => {
-      const key = folderIdentityKey(id);
-      const button = buttonsByIdentity.get(key);
-      if (!button) return;
-      rovingId = id;
-      for (const candidate of buttons) {
-        candidate.tabIndex = candidate === button ? 0 : -1;
-      }
-      button.focus();
-      onFocus?.(id);
-    };
-
-    for (const [rowIndex, row] of rows.entries()) {
-      const button = document.createElement('button');
-      const rowKey = folderIdentityKey(row.id);
-      const visibleCount = row.id.kind === 'all'
-        ? folderView.visibleCount
-        : (visibleCounts.get(rowKey) || 0);
-      const countLabel = visibleCount === row.totalCount
-        ? `${row.totalCount} ${row.totalCount === 1 ? 'item' : 'items'}`
-        : `${visibleCount} visible of ${row.totalCount} total`;
-      button.type = 'button';
-      button.className = 'folder-tree-item';
-      button.dataset.folderId = `folder-node-${rowIndex}`;
-      button.__xvFolderIdentityKey = rowKey;
-      button.dataset.level = String(row.level);
-      button.style.setProperty('--folder-depth', String(row.level - 1));
-      button.setAttribute('role', 'treeitem');
-      button.setAttribute('aria-level', String(row.level));
-      button.setAttribute('aria-selected', String(
-        sameFolderIdentity(row.id, effectiveSelected),
-      ));
-      button.setAttribute('aria-label', `${row.label}, ${countLabel}`);
-      button.tabIndex = sameFolderIdentity(row.id, rovingId) ? 0 : -1;
-      if (row.children.length) {
-        button.setAttribute('aria-expanded', String(expanded.has(rowKey)));
-      }
-
-      const disclosure = document.createElement('span');
-      disclosure.className = 'folder-tree-disclosure';
-      disclosure.textContent = row.children.length
-        ? (expanded.has(rowKey) ? '▾' : '▸')
-        : '';
-      disclosure.setAttribute('aria-hidden', 'true');
-      if (row.children.length) {
-        disclosure.onclick = (event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          onToggle?.(row.id, !expanded.has(rowKey));
-          const replacement = container.__xvFolderButtons?.get(rowKey);
-          replacement?.focus();
-        };
-      }
-      const label = document.createElement('span');
-      label.className = 'folder-tree-label';
-      label.textContent = row.label;
-      const count = document.createElement('span');
-      count.className = 'folder-tree-count';
-      count.textContent = countLabel;
-      button.append(disclosure, label, count);
-      button.onfocus = () => {
-        rovingId = row.id;
-        for (const candidate of buttons) {
-          candidate.tabIndex = candidate === button ? 0 : -1;
-        }
-        onFocus?.(row.id);
-      };
-      button.onclick = () => {
-        if (onSelect?.(row.id) === false) return;
-        const replacement = container.__xvFolderButtons?.get(rowKey);
-        replacement?.focus();
-      };
-      button.onkeydown = (event) => {
-        const index = buttons.indexOf(button);
-        let destination = null;
-        if (event.key === 'ArrowDown') destination = buttons[Math.min(buttons.length - 1, index + 1)];
-        if (event.key === 'ArrowUp') destination = buttons[Math.max(0, index - 1)];
-        if (event.key === 'Home') destination = buttons[0];
-        if (event.key === 'End') destination = buttons.at(-1);
-        if (event.key === 'ArrowRight' && row.children.length) {
-          if (!expanded.has(rowKey)) onToggle?.(row.id, true);
-          else destination = buttons[index + 1];
-        }
-        if (event.key === 'ArrowLeft') {
-          if (row.children.length && expanded.has(rowKey)) onToggle?.(row.id, false);
-          else if (row.parentId) destination = buttonsByIdentity.get(
-            folderIdentityKey(row.parentId),
-          );
-        }
-        if (event.key === 'Enter' || event.key === ' ') {
-          onSelect?.(row.id);
-        } else if (!destination
-          && !['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) {
-          return;
-        }
-        event.preventDefault();
-        if (destination) {
-          const destinationRow = rows.find(
-            (candidate) => folderIdentityKey(candidate.id)
-              === destination.__xvFolderIdentityKey,
-          );
-          if (destinationRow) focusItem(destinationRow.id);
-        } else if (event.key === 'Enter' || event.key === ' ') {
-          const replacement = container.__xvFolderButtons?.get(rowKey);
-          replacement?.focus();
-        }
-      };
-      buttons.push(button);
-      buttonsByIdentity.set(rowKey, button);
-    }
-    container.__xvFolderButtons = buttonsByIdentity;
-    container.replaceChildren(...buttons);
-    if (hadTreeFocus) {
-      const replacement = rows.find((row) => folderIdentityKey(row.id) === previousFocusKey);
-      focusItem(replacement?.id || rovingId);
-    }
-    return Object.freeze({ visibleIds, focusedId: () => rovingId });
-  }
 export { PROTECTED_MASK, formatDate, expirationDate, createProtectedState,
   typeCards, buildTypedDraft, groupSuggestions, conversionSummary,
   protectedDisplay, revealProtected, editProtected, hideProtected, loadProtected,
   sortedCopy, normalizeWidths, resizeAdjacentWidths, contentMode, contentRows,
   groupContentRows, normalizeFolderPath,
-  FOLDER_ALL, FOLDER_UNFILED, folderIdentity, folderIdentityKey, sameFolderIdentity,
-  buildFolderTree, buildFolderViewModel, initialExpansion, createFolderTokenIndex,
+  FOLDER_UNFILED, folderIdentity, folderIdentityKey, treeItemKey,
+  buildContentTree, treeFolderIdentities, treeFolderCount, treeForcedKeys,
+  flattenContentTree, branchSelection, applyBranchSelection,
+  initialExpansion, createFolderTokenIndex,
   folderPreferenceKey, loadFolderExpansion,
-  saveFolderExpansion, createFolderNavigationState, itemMatchesFolder,
-  flattenFolderTree, renderFolderTree, filterSecrets, filterFiles,
+  saveFolderExpansion, createTreeExpansionState, filterSecrets, filterFiles,
   activeFilterChips };

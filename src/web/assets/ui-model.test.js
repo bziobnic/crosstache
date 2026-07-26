@@ -183,68 +183,156 @@ test('stacked groups use one deterministic heading per folder and retain current
   ]);
 });
 
-test('slash paths become nested folder nodes with stable unfiled node', () => {
-  const tree = model.buildFolderTree([
+function secretRows(items) {
+  return model.contentRows('secrets', items);
+}
+
+function labelsOf(rows) {
+  return rows.map((row) => (row.type === 'folder' ? `${row.label}/` : row.identifier));
+}
+
+test('slash paths become nested folder branches with loose items at the root', () => {
+  const tree = model.buildContentTree(secretRows([
     { name: 'a', folder: 'apps/prod' },
     { name: 'b', folder: null },
-  ]);
+  ]));
 
-  assert.deepEqual(tree.map((node) => node.id.kind), ['unfiled', 'folder']);
-  assert.equal(tree[0].label, 'Unfiled');
-  assert.equal(tree[1].id.path, 'apps');
-  assert.equal(tree[1].children[0].id.path, 'apps/prod');
+  assert.deepEqual(tree.children.map((node) => node.path), ['apps']);
+  assert.deepEqual(tree.children[0].children.map((node) => node.path), ['apps/prod']);
+  assert.deepEqual(tree.items.map((row) => row.identifier), ['b']);
+  assert.deepEqual(tree.children[0].itemIds, ['a']);
 });
 
 test('folder paths normalize slashes and empty segments without duplicating parents', () => {
-  const tree = model.buildFolderTree([
+  const tree = model.buildContentTree(secretRows([
     { name: 'one', folder: '/apps//prod/' },
     { name: 'two', folder: 'apps/prod' },
     { name: 'three', folder: 'apps///stage/' },
     { name: 'four', folder: '///' },
-  ]);
+  ]));
 
-  assert.deepEqual(tree.map((node) => node.id.kind), ['unfiled', 'folder']);
-  assert.deepEqual(tree[1].children.map((node) => node.id.path), ['apps/prod', 'apps/stage']);
-  assert.equal(tree[1].directCount, 0);
-  assert.equal(tree[1].totalCount, 3);
-  assert.equal(tree[1].children[0].directCount, 2);
-  assert.equal(tree[0].totalCount, 1);
+  assert.deepEqual(tree.children.map((node) => node.path), ['apps']);
+  assert.deepEqual(tree.children[0].children.map((node) => node.path), ['apps/prod', 'apps/stage']);
+  assert.equal(tree.children[0].items.length, 0);
+  assert.equal(tree.children[0].totalCount, 3);
+  assert.deepEqual(tree.children[0].children[0].itemIds, ['one', 'two']);
+  assert.deepEqual(tree.items.map((row) => row.identifier), ['four']);
 });
 
 test('folder identities preserve valid whitespace and cannot collide with reserved labels', () => {
-  const tree = model.buildFolderTree([
+  const tree = model.buildContentTree(secretRows([
     { name: 'spaced', folder: ' apps / prod ' },
     { name: 'plain', folder: 'apps/prod' },
     { name: 'reserved-all', folder: '__all__' },
     { name: 'reserved-unfiled', folder: '__unfiled__' },
     { name: 'unfiled', folder: null },
-  ]);
-  const rows = model.flattenFolderTree(tree, new Map(
-    tree.map((node) => [model.folderIdentityKey(node.id), node.id]),
-  ));
-  const labels = rows.map((row) => row.label);
+  ]));
+  const expanded = new Map(
+    model.treeFolderIdentities(tree).map((id) => [model.folderIdentityKey(id), id]),
+  );
+  const labels = model.flattenContentTree(tree, expanded)
+    .filter((row) => row.type === 'folder')
+    .map((row) => row.label);
 
   assert.ok(labels.includes(' apps '));
   assert.ok(labels.includes('apps'));
   assert.ok(labels.includes('__all__'));
   assert.ok(labels.includes('__unfiled__'));
-  assert.equal(tree.find((node) => node.label === 'Unfiled').id.kind, 'unfiled');
-  assert.equal(tree.find((node) => node.label === '__unfiled__').id.kind, 'folder');
   assert.notEqual(
-    model.folderIdentityKey(tree.find((node) => node.label === 'Unfiled').id),
-    model.folderIdentityKey(tree.find((node) => node.label === '__unfiled__').id),
+    model.folderIdentityKey(model.folderIdentity('__unfiled__')),
+    model.folderIdentityKey(model.FOLDER_UNFILED),
   );
   assert.equal(model.normalizeFolderPath('/ apps // prod /'), ' apps / prod ');
 });
 
-test('folder nodes use the existing numeric case-insensitive collation', () => {
-  const tree = model.buildFolderTree([
+test('folder branches use the existing numeric case-insensitive collation', () => {
+  const tree = model.buildContentTree(secretRows([
     { name: 'a', folder: 'Folder 10' },
     { name: 'b', folder: 'folder 2' },
     { name: 'c', folder: 'Alpha' },
-  ]);
+  ]));
 
-  assert.deepEqual(tree.map((node) => node.id.path), ['Alpha', 'folder 2', 'Folder 10']);
+  assert.deepEqual(tree.children.map((node) => node.path), ['Alpha', 'folder 2', 'Folder 10']);
+});
+
+test('every folder is expandable so expand and collapse always have something to act on', () => {
+  const flat = model.buildContentTree(secretRows([
+    { name: 'a', folder: 'prod' },
+    { name: 'b', folder: 'prod' },
+    { name: 'c', folder: 'dev' },
+    { name: 'd', folder: null },
+  ]));
+
+  // The pre-tree-grid model only treated a folder as expandable when it held
+  // sub-folders, so a vault of flat folders had zero expandable nodes and the
+  // expand/collapse controls were inert.
+  assert.deepEqual(
+    model.treeFolderIdentities(flat).map((id) => id.path),
+    ['dev', 'prod'],
+  );
+  const collapsed = model.flattenContentTree(flat, new Map());
+  assert.deepEqual(labelsOf(collapsed), ['dev/', 'prod/', 'd']);
+  assert.deepEqual(collapsed.filter((row) => row.type === 'folder').map((row) => row.hasChildren), [true, true]);
+
+  const expanded = new Map(
+    model.treeFolderIdentities(flat).map((id) => [model.folderIdentityKey(id), id]),
+  );
+  assert.deepEqual(labelsOf(model.flattenContentTree(flat, expanded)), ['dev/', 'c', 'prod/', 'a', 'b', 'd']);
+});
+
+test('flattened rows carry depth, parent links, and stable keys for both surfaces', () => {
+  const fileTree = model.buildContentTree(model.contentRows('files', [
+    { name: 'docs/prod/report.txt', size: 10, content_type: 'text/plain' },
+    { name: 'loose.txt', size: 4, content_type: 'text/plain' },
+  ], { formatSize: (value) => `${value} B` }));
+  const expanded = new Map(
+    model.treeFolderIdentities(fileTree).map((id) => [model.folderIdentityKey(id), id]),
+  );
+  const rows = model.flattenContentTree(fileTree, expanded);
+
+  assert.deepEqual(rows.map((row) => row.level), [1, 2, 3, 1]);
+  assert.deepEqual(labelsOf(rows), ['docs/', 'prod/', 'docs/prod/report.txt', 'loose.txt']);
+  assert.equal(rows[2].parentKey, model.folderIdentityKey(model.folderIdentity('docs/prod')));
+  assert.equal(rows[2].key, model.treeItemKey('docs/prod/report.txt'));
+  assert.equal(rows[3].parentKey, null);
+});
+
+test('a filtered render force-expands surviving branches without persisting them', () => {
+  const tree = model.buildContentTree(secretRows([{ name: 'match', folder: 'apps/prod' }]));
+  const expanded = new Map();
+
+  assert.deepEqual(labelsOf(model.flattenContentTree(tree, expanded)), ['apps/']);
+  assert.deepEqual(
+    labelsOf(model.flattenContentTree(tree, expanded, { forcedKeys: model.treeForcedKeys(tree) })),
+    ['apps/', 'prod/', 'match'],
+  );
+  assert.equal(expanded.size, 0, 'forced expansion never mutates the persisted set');
+});
+
+test('branch selection is tri-state and propagates down and rolls up', () => {
+  const tree = model.buildContentTree(secretRows([
+    { name: 'a', folder: 'apps/prod' },
+    { name: 'b', folder: 'apps/prod' },
+    { name: 'c', folder: 'apps/stage' },
+  ]));
+  const apps = tree.children[0];
+  const prod = apps.children[0];
+  const selected = new Set();
+
+  assert.equal(model.branchSelection(apps.itemIds, selected), 'unchecked');
+
+  model.applyBranchSelection(selected, prod.itemIds, true);
+  assert.deepEqual([...selected].sort(), ['a', 'b']);
+  assert.equal(model.branchSelection(prod.itemIds, selected), 'checked');
+  assert.equal(model.branchSelection(apps.itemIds, selected), 'mixed');
+
+  selected.add('c');
+  assert.equal(model.branchSelection(apps.itemIds, selected), 'checked');
+
+  model.applyBranchSelection(selected, apps.itemIds, false);
+  assert.equal(selected.size, 0);
+  assert.equal(model.branchSelection(apps.itemIds, selected), 'unchecked');
+  assert.equal(model.branchSelection([], selected), 'unchecked');
 });
 
 test('small vaults expand on first visit and saved expansion always wins', () => {
@@ -259,7 +347,7 @@ test('folder preference keys use only server-issued opaque scope tokens', () => 
   const files = model.folderPreferenceKey(folderTokenIndex('F', []));
   const otherVault = model.folderPreferenceKey(folderTokenIndex('V', []));
 
-  assert.match(secrets, /^xv\.ui\.folder-expansion\.v4:[A-Za-z0-9_-]{43}$/);
+  assert.match(secrets, /^xv\.ui\.folder-expansion\.v5:[A-Za-z0-9_-]{43}$/);
   assert.notEqual(secrets, files);
   assert.notEqual(secrets, otherVault);
   assert.equal(secrets.includes('azure'), false);
@@ -305,7 +393,7 @@ test('folder persistence stores only versioned opaque scope and folder identifie
   ]) {
     assert.equal(serialized.includes(source), false, `storage leaked ${source}`);
   }
-  assert.match([...values.keys()][0], /^xv\.ui\.folder-expansion\.v4:[A-Za-z0-9_-]{43}$/);
+  assert.match([...values.keys()][0], /^xv\.ui\.folder-expansion\.v5:[A-Za-z0-9_-]{43}$/);
   assert.deepEqual(model.loadFolderExpansion(storage, tokenIndex), ['A'.repeat(43)]);
   assert.ok(removed.some((key) => key.startsWith('xv.ui.folder-expansion.v2:')));
   assert.equal(
@@ -314,57 +402,28 @@ test('folder persistence stores only versioned opaque scope and folder identifie
   );
 });
 
-test('typed folder matching keeps reserved-name folders distinct from all and unfiled', () => {
-  assert.equal(model.itemMatchesFolder({ folder: '__all__' }, model.FOLDER_ALL), true);
-  assert.equal(model.itemMatchesFolder({ folder: 'other' }, model.FOLDER_ALL), true);
-  assert.equal(model.itemMatchesFolder({ folder: null }, model.FOLDER_UNFILED), true);
-  assert.equal(model.itemMatchesFolder({ folder: '__unfiled__' }, model.FOLDER_UNFILED), false);
+test('a v4 payload is discarded because the tree grid changed what expansion means', () => {
+  const tokenIndex = folderTokenIndex('S', ['apps']);
+  const values = new Map([
+    [`xv.ui.folder-expansion.v4:${'S'.repeat(43)}`, JSON.stringify({
+      version: 4,
+      expanded: ['A'.repeat(43)],
+    })],
+  ]);
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => values.delete(key),
+    get length() { return values.size; },
+    key: (index) => [...values.keys()][index] ?? null,
+  };
+
+  assert.equal(model.loadFolderExpansion(storage, tokenIndex), null);
   assert.equal(
-    model.itemMatchesFolder({ folder: '__unfiled__' }, model.folderIdentity('__unfiled__')),
-    true,
+    [...values.keys()].some((key) => key.startsWith('xv.ui.folder-expansion.v4:')),
+    false,
+    'the superseded payload is removed rather than left to rot',
   );
-  assert.equal(
-    model.itemMatchesFolder({ folder: ' apps /prod' }, model.folderIdentity(' apps ')),
-    true,
-  );
-});
-
-test('collapsing or removing a selected descendant reconciles selection to a visible item', () => {
-  const navigation = model.createFolderNavigationState(null);
-  const apps = model.folderIdentity('apps');
-  const prod = model.folderIdentity('apps/prod');
-  const stage = model.folderIdentity('apps/stage');
-  const scope = { backend: 'local', vault: 'one', surface: 'secrets' };
-
-  navigation.sync(scope, {
-    total: 2,
-    folderIds: [apps, prod, stage],
-    expandableIds: [apps],
-  });
-  navigation.select(prod);
-  navigation.toggle(apps, false);
-  assert.deepEqual(navigation.snapshot().selected, apps);
-
-  navigation.select(stage);
-  navigation.collapseAll();
-  assert.deepEqual(navigation.snapshot().selected, model.FOLDER_ALL);
-
-  navigation.select(prod);
-  navigation.sync(scope, {
-    total: 1,
-    folderIds: [apps, stage],
-    expandableIds: [apps],
-  });
-  assert.deepEqual(navigation.snapshot().selected, model.FOLDER_ALL);
-});
-
-test('folder membership includes descendants but keeps unfiled stable', () => {
-  assert.equal(model.itemMatchesFolder({ folder: 'apps/prod' }, model.folderIdentity('apps')), true);
-  assert.equal(model.itemMatchesFolder({ folder: 'apps/prod' }, model.folderIdentity('apps/prod')), true);
-  assert.equal(model.itemMatchesFolder({ folder: 'apps/production' }, model.folderIdentity('apps/prod')), false);
-  assert.equal(model.itemMatchesFolder({ folder: '' }, model.FOLDER_UNFILED), true);
-  assert.equal(model.itemMatchesFolder({ folder: 'apps' }, model.FOLDER_UNFILED), false);
-  assert.equal(model.itemMatchesFolder({ folder: 'apps' }, model.FOLDER_ALL), true);
 });
 
 test('folder expansion persistence is explicit and isolated by context and surface', () => {
@@ -373,7 +432,6 @@ test('folder expansion persistence is explicit and isolated by context and surfa
     getItem: (key) => values.get(key) ?? null,
     setItem: (key, value) => values.set(key, value),
   };
-  const scope = { backend: 'local-a', vault: 'one', surface: 'secrets' };
   const apps = model.folderIdentity('apps');
   const prod = model.folderIdentity('apps/prod');
   const one = folderTokenIndex('S', [apps.path, prod.path]);
@@ -425,13 +483,13 @@ test('invalid or unavailable folder expansion storage safely uses first-visit de
   assert.equal(model.saveFolderExpansion(null, scope, new Map()), false);
 });
 
-test('folder navigation resets selection and restores expansion when workspace scope changes', () => {
+test('tree expansion restores per-scope state when the workspace changes', () => {
   const values = new Map();
   const storage = {
     getItem: (key) => values.get(key) ?? null,
     setItem: (key, value) => values.set(key, value),
   };
-  const navigation = model.createFolderNavigationState(storage);
+  const expansion = model.createTreeExpansionState(storage);
   const one = { backend: 'local', vault: 'one', surface: 'secrets' };
   const two = { backend: 'local', vault: 'two', surface: 'secrets' };
   const apps = model.folderIdentity('apps');
@@ -439,33 +497,25 @@ test('folder navigation resets selection and restores expansion when workspace s
   const oneTokens = folderTokenIndex('S', [apps.path]);
   const twoTokens = folderTokenIndex('T', [other.path]);
 
-  navigation.sync(one, {
-    total: 51, folderIds: [apps], expandableIds: [apps], tokenIndex: oneTokens,
-  });
-  assert.deepEqual(navigation.snapshot(), { selected: model.FOLDER_ALL, expanded: [] });
-  navigation.select(apps);
-  navigation.toggle(apps, true);
-  assert.deepEqual(navigation.snapshot(), { selected: apps, expanded: [apps] });
+  expansion.sync(one, { total: 51, expandableIds: [apps], tokenIndex: oneTokens });
+  assert.deepEqual(expansion.snapshot(), { expanded: [] });
+  expansion.toggle(apps, true);
+  assert.deepEqual(expansion.snapshot(), { expanded: [apps] });
 
-  navigation.sync(two, {
-    total: 2, folderIds: [other], expandableIds: [other], tokenIndex: twoTokens,
-  });
-  assert.deepEqual(navigation.snapshot(), { selected: model.FOLDER_ALL, expanded: [other] });
-  navigation.select(other);
+  expansion.sync(two, { total: 2, expandableIds: [other], tokenIndex: twoTokens });
+  assert.deepEqual(expansion.snapshot(), { expanded: [other] });
 
-  navigation.sync(one, {
-    total: 51, folderIds: [apps], expandableIds: [apps], tokenIndex: oneTokens,
-  });
-  assert.deepEqual(navigation.snapshot(), { selected: model.FOLDER_ALL, expanded: [apps] });
+  expansion.sync(one, { total: 51, expandableIds: [apps], tokenIndex: oneTokens });
+  assert.deepEqual(expansion.snapshot(), { expanded: [apps] });
 });
 
-test('folder navigation keeps files expansion independent from secrets in one vault', () => {
+test('tree expansion keeps files independent from secrets in one vault', () => {
   const values = new Map();
   const storage = {
     getItem: (key) => values.get(key) ?? null,
     setItem: (key, value) => values.set(key, value),
   };
-  const navigation = model.createFolderNavigationState(storage);
+  const expansion = model.createTreeExpansionState(storage);
   const secrets = { backend: 'azure', vault: 'payments', surface: 'secrets' };
   const files = { backend: 'azure', vault: 'payments', surface: 'files' };
   const apps = model.folderIdentity('apps');
@@ -474,56 +524,30 @@ test('folder navigation keeps files expansion independent from secrets in one va
   const secretTokens = folderTokenIndex('S', [apps.path, prod.path]);
   const fileTokens = folderTokenIndex('F', [documents.path]);
 
-  navigation.sync(secrets, {
-    total: 60,
-    folderIds: [apps, prod],
-    expandableIds: [apps, prod],
-    tokenIndex: secretTokens,
+  expansion.sync(secrets, {
+    total: 60, expandableIds: [apps, prod], tokenIndex: secretTokens,
   });
-  navigation.expandAll();
-  navigation.sync(files, {
-    total: 60,
-    folderIds: [documents],
-    expandableIds: [documents],
-    tokenIndex: fileTokens,
+  expansion.expandAll();
+  expansion.sync(files, { total: 60, expandableIds: [documents], tokenIndex: fileTokens });
+  assert.deepEqual(expansion.snapshot(), { expanded: [] });
+  expansion.toggle(documents, true);
+  expansion.sync(secrets, {
+    total: 60, expandableIds: [apps, prod], tokenIndex: secretTokens,
   });
-  assert.deepEqual(navigation.snapshot(), { selected: model.FOLDER_ALL, expanded: [] });
-  navigation.toggle(documents, true);
-  navigation.sync(secrets, {
-    total: 60,
-    folderIds: [apps, prod],
-    expandableIds: [apps, prod],
-    tokenIndex: secretTokens,
-  });
-  assert.deepEqual(navigation.snapshot(), {
-    selected: model.FOLDER_ALL,
-    expanded: [apps, prod],
-  });
+  assert.deepEqual(expansion.snapshot(), { expanded: [apps, prod] });
 });
 
-test('large folder view models build total and visible trees exactly once each', () => {
+test('large vaults build one tree with every folder expandable', () => {
   const items = Array.from({ length: 10_000 }, (_, index) => ({
     name: `secret-${index}`,
     folder: `team-${index % 100}/service-${index % 500}/env-${index % 3}`,
   }));
-  let builds = 0;
-  const buildTree = (source) => {
-    builds++;
-    return model.buildFolderTree(source);
-  };
 
-  const view = model.buildFolderViewModel(
-    items,
-    items.filter((_, index) => index % 2 === 0),
-    { buildTree },
-  );
+  const tree = model.buildContentTree(secretRows(items));
 
-  assert.equal(builds, 2);
-  assert.equal(view.totalCount, 10_000);
-  assert.equal(view.visibleCount, 5_000);
-  assert.equal(view.folderCount, 2_100);
-  assert.equal(view.folderIds.length, 2_100);
-  assert.ok(view.expandableIds.length > 0);
+  assert.equal(tree.itemIds.length, 10_000);
+  assert.equal(model.treeFolderCount(tree), 2_100);
+  assert.equal(model.treeFolderIdentities(tree).length, 2_100);
 });
 
 test('server token indexes reject duplicate tokens and preserve collision-free raw identities', () => {
@@ -578,34 +602,19 @@ test('pruned expansion persists across fresh state and does not return when a fo
       { path: prod.path, token: 'P'.repeat(43) },
     ],
   });
-  const navigation = model.createFolderNavigationState(storage);
+  const expansion = model.createTreeExpansionState(storage);
 
-  navigation.sync(scope, {
-    total: 51,
-    folderIds: [apps, prod],
-    expandableIds: [apps],
-    tokenIndex,
-  });
-  navigation.toggle(apps, true);
-  navigation.sync(scope, {
-    total: 1,
-    folderIds: [],
-    expandableIds: [],
-    tokenIndex,
-  });
-  assert.deepEqual(navigation.snapshot().expanded, []);
+  expansion.sync(scope, { total: 51, expandableIds: [apps, prod], tokenIndex });
+  expansion.toggle(apps, true);
+  expansion.sync(scope, { total: 1, expandableIds: [], tokenIndex });
+  assert.deepEqual(expansion.snapshot().expanded, []);
   assert.equal(
     [...values.values()].some((serialized) => serialized.includes('A'.repeat(43))),
     false,
   );
 
-  const fresh = model.createFolderNavigationState(storage);
-  fresh.sync(scope, {
-    total: 51,
-    folderIds: [apps, prod],
-    expandableIds: [apps],
-    tokenIndex,
-  });
+  const fresh = model.createTreeExpansionState(storage);
+  fresh.sync(scope, { total: 51, expandableIds: [apps, prod], tokenIndex });
   assert.deepEqual(fresh.snapshot().expanded, []);
   assert.equal(
     JSON.stringify([...values.entries()]).includes('private-backend'),

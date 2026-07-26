@@ -616,7 +616,7 @@ test('successful workspace commit clears both refresh owners before new-scope fi
   }
 });
 
-test('mounted folder navigation filters rows and restores expansion without leaking selection across workspaces', async () => {
+test('the mounted tree grid nests folders with their items and restores scoped expansion', async () => {
   const primary = routedContext('primary', 'one');
   const stage = routedContext('stage', 'two');
   const primarySecrets = [
@@ -632,6 +632,7 @@ test('mounted folder navigation filters rows and restores expansion without leak
         : { context: primary, secrets: primarySecrets };
     }
     if (requestPath === '/api/types') return { types: [] };
+    if (requestPath === '/api/vaults') return { vaults: [{ name: 'one' }, { name: 'two' }] };
     if (method === 'POST' && requestPath.startsWith('/api/folder-tokens')) {
       const scopeCharacter = requestPath.includes('vault=two') ? 'T' : 'S';
       return {
@@ -648,56 +649,146 @@ test('mounted folder navigation filters rows and restores expansion without leak
   };
   const ui = await mountRouteUi({ apiImpl: api, withContextRail: true });
   try {
-    const treeitems = () => ui.findAll('#secrets-folder-tree', (element) => (
-      element.getAttribute?.('role') === 'treeitem'
+    const gridRows = () => ui.findAll('#secrets-table tbody', (element) => (
+      element.getAttribute?.('role') === 'row'
     ));
-    const item = (label) => treeitems().find((element) => (
-      element.getAttribute('aria-label')?.startsWith(`${label},`)
-    ));
-
-    assert.equal(item('apps').getAttribute('aria-expanded'), 'false', '51 items start collapsed');
-    item('apps').focus();
-    item('apps').onkeydown({ key: 'ArrowRight', preventDefault() {} });
-    assert.equal(item('apps').getAttribute('aria-expanded'), 'true');
-    assert.ok(item('prod'), 'nested child becomes visible');
-
-    item('apps').onclick();
-    const visiblePrimaryRows = ui.findAll('#secrets-table tbody', (element) => (
-      element.getAttribute?.('aria-label')?.startsWith('Edit secret ')
-    ));
-    assert.deepEqual(
-      visiblePrimaryRows.map((element) => element.getAttribute('aria-label')),
-      ['Edit secret prod-secret'],
-    );
-    assert.equal(item('apps').getAttribute('aria-selected'), 'true');
-    assert.match(ui.elements.get('#secret-list-summary').textContent, /^1 of 51 secrets/);
-
-    ui.store.dispatch({
-      type: 'context/switch-succeeded',
-      context: {
-        ...primary,
-        workspace: { ...primary.workspace, alias: 'same-vault-alias' },
-      },
-      secrets: primarySecrets,
+    const row = (label) => gridRows().find((element) => {
+      const actual = element.getAttribute('aria-label');
+      return actual === label || actual?.startsWith(`${label},`);
     });
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    assert.equal(
-      item('All items').getAttribute('aria-selected'),
-      'true',
-      'selection resets even when a different workspace alias targets the same backend and vault',
-    );
+
+    assert.equal(row('Folder apps').getAttribute('aria-expanded'), 'false', '51 items start collapsed');
+    assert.equal(row('Folder apps/prod'), undefined);
+
+    row('Folder apps').focus();
+    row('Folder apps').onkeydown({ key: 'ArrowRight', preventDefault() {} });
+    assert.equal(row('Folder apps').getAttribute('aria-expanded'), 'true');
+    assert.ok(row('Folder apps/prod'), 'the nested folder becomes visible');
+
+    row('Folder apps/prod').onkeydown({ key: 'ArrowRight', preventDefault() {} });
+    assert.equal(row('Secret prod-secret').getAttribute('aria-level'), '3');
+    assert.match(ui.elements.get('#secret-list-summary').textContent, /^51 secrets across 2 folders/);
 
     assert.equal(await ui.contextRail.switchTo('stage'), true);
     await new Promise((resolve) => setTimeout(resolve, 0));
-    assert.equal(item('All items').getAttribute('aria-selected'), 'true');
-    assert.equal(item('other').getAttribute('aria-expanded'), 'true', 'small workspace expands');
-    assert.equal(item('apps'), undefined, 'prior workspace folders are absent');
+    assert.equal(row('Folder apps'), undefined, 'prior workspace folders are absent');
+    assert.equal(row('Folder other').getAttribute('aria-expanded'), 'true', 'small workspace expands');
+    assert.ok(row('Secret stage-secret'));
 
     assert.equal(await ui.contextRail.switchTo('primary'), true);
     await new Promise((resolve) => setTimeout(resolve, 0));
-    assert.equal(item('All items').getAttribute('aria-selected'), 'true', 'folder selection resets');
-    assert.equal(item('apps').getAttribute('aria-expanded'), 'true', 'scoped expansion restores');
-    assert.ok(item('prod'));
+    assert.equal(row('Folder apps').getAttribute('aria-expanded'), 'true', 'scoped expansion restores');
+    assert.ok(row('Secret prod-secret'));
+  } finally {
+    ui.restore();
+  }
+});
+
+test('the toolbar expand and collapse controls act on a flat vault of folders', async () => {
+  const context = routedContext('primary', 'one');
+  const listed = [
+    { name: 'a', folder: 'prod' },
+    { name: 'b', folder: 'dev' },
+    { name: 'c', folder: null },
+  ];
+  const api = async (method, requestPath, body) => {
+    if (method === 'GET' && requestPath === '/api/context') return context;
+    if (requestPath === '/api/types') return { types: [] };
+    if (requestPath === '/api/vaults') return { vaults: [{ name: 'one' }] };
+    if (method === 'POST' && requestPath.startsWith('/api/folder-tokens')) {
+      return {
+        version: 1,
+        scope_token: 'S'.repeat(43),
+        folders: body.folders.map((folder, index) => ({
+          path: folder,
+          token: String.fromCharCode(65 + index).repeat(43),
+        })),
+      };
+    }
+    if (method === 'GET' && requestPath.startsWith('/api/secrets')) return listed;
+    return [];
+  };
+  const ui = await mountRouteUi({ apiImpl: api });
+  try {
+    const labels = () => ui.findAll('#secrets-table tbody', (element) => (
+      element.getAttribute?.('role') === 'row'
+    )).map((element) => element.getAttribute('aria-label').split(',')[0]);
+
+    // Regression: with only single-segment folders the old sidebar tree had no
+    // expandable node at all, so both controls were silent no-ops.
+    assert.deepEqual(labels(), ['Folder dev', 'Secret b', 'Folder prod', 'Secret a', 'Secret c']);
+    ui.elements.get('#secrets-collapse-all').onclick();
+    assert.deepEqual(labels(), ['Folder dev', 'Folder prod', 'Secret c']);
+    ui.elements.get('#secrets-expand-all').onclick();
+    assert.deepEqual(labels(), ['Folder dev', 'Secret b', 'Folder prod', 'Secret a', 'Secret c']);
+  } finally {
+    ui.restore();
+  }
+});
+
+test('tree selection propagates through folders and keeps bulk actions scoped to items', async () => {
+  const context = routedContext('primary', 'one');
+  const listed = [
+    { name: 'a', folder: 'apps/prod' },
+    { name: 'b', folder: 'apps/prod' },
+    { name: 'c', folder: 'apps/stage' },
+  ];
+  const api = async (method, requestPath, body) => {
+    if (method === 'GET' && requestPath === '/api/context') return context;
+    if (requestPath === '/api/types') return { types: [] };
+    if (requestPath === '/api/vaults') return { vaults: [{ name: 'one' }] };
+    if (method === 'POST' && requestPath.startsWith('/api/folder-tokens')) {
+      return {
+        version: 1,
+        scope_token: 'S'.repeat(43),
+        folders: body.folders.map((folder, index) => ({
+          path: folder,
+          token: String.fromCharCode(65 + index).repeat(43),
+        })),
+      };
+    }
+    if (method === 'GET' && requestPath.startsWith('/api/secrets')) return listed;
+    return [];
+  };
+  const ui = await mountRouteUi({ apiImpl: api });
+  try {
+    const row = (label) => ui.findAll('#secrets-table tbody', (element) => (
+      element.getAttribute?.('role') === 'row'
+    )).find((element) => {
+      const actual = element.getAttribute('aria-label');
+      return actual === label || actual?.startsWith(`${label},`);
+    });
+    const checkbox = (label) => findElement(
+      row(label),
+      (element) => element.className === 'tree-checkbox',
+    );
+
+    ui.elements.get('#select-secrets').onclick();
+    assert.equal(ui.elements.get('#select-all-secrets').hidden, false);
+
+    checkbox('Secret a').onchange();
+    assert.equal(checkbox('Folder apps/prod').getAttribute('aria-checked'), 'mixed');
+    assert.equal(checkbox('Folder apps').getAttribute('aria-checked'), 'mixed');
+    assert.equal(ui.elements.get('#secret-selection-count').textContent, '1 selected');
+
+    checkbox('Folder apps').onchange();
+    assert.equal(ui.elements.get('#secret-selection-count').textContent, '3 selected');
+    assert.equal(checkbox('Folder apps/stage').getAttribute('aria-checked'), 'true');
+
+    // Bulk actions read the same identifier set they always did, so a checked
+    // folder puts its descendants in scope for them.
+    assert.equal(ui.elements.get('#bulk-delete-secrets').disabled, false);
+    assert.equal(ui.elements.get('#bulk-move-secrets').disabled, false);
+    assert.equal(ui.elements.get('#select-all-secrets').checked, true);
+    assert.equal(ui.elements.get('#select-all-secrets').indeterminate, false);
+
+    checkbox('Folder apps/stage').onchange();
+    assert.equal(ui.elements.get('#secret-selection-count').textContent, '2 selected');
+    assert.equal(ui.elements.get('#select-all-secrets').getAttribute('aria-checked'), 'mixed');
+
+    ui.elements.get('#cancel-secret-selection').onclick();
+    assert.equal(ui.elements.get('#secret-selection-count').textContent, '0 selected');
+    assert.equal(ui.elements.get('#select-all-secrets').hidden, true);
   } finally {
     ui.restore();
   }
@@ -799,8 +890,8 @@ test('mounted local search and composable filters stay metadata-only and expose 
     fileSearch.value = 'APPLICATION/PDF';
     fileSearch.oninput();
     assert.deepEqual(ui.findAll('#files-table tbody', (element) => (
-      element.key === 'strong' && element.textContent
-    )).map((element) => element.textContent), ['prod/report.pdf']);
+      element.getAttribute?.('aria-label')?.startsWith('File ')
+    )).map((element) => element.getAttribute('aria-label')), ['File prod/report.pdf']);
     assert.equal(ui.elements.get('#file-search-clear').hidden, false);
   } finally {
     ui.restore();
@@ -962,16 +1053,16 @@ test('empty list refresh persists pruning and cleans legacy folder state before 
   };
   const ui = await mountRouteUi({ apiImpl: api, storageValues });
   try {
-    const item = (label) => ui.findAll('#secrets-folder-tree', (element) => (
-      element.getAttribute?.('role') === 'treeitem'
-      && element.getAttribute('aria-label')?.startsWith(`${label},`)
+    const item = (label) => ui.findAll('#secrets-table tbody', (element) => (
+      element.getAttribute?.('role') === 'row'
+      && element.getAttribute('aria-label')?.startsWith(`Folder ${label},`)
     ))[0];
     item('apps').onkeydown({ key: 'ArrowRight', preventDefault() {} });
-    const v4Key = [...storageValues.keys()].find((key) => (
-      key.startsWith('xv.ui.folder-expansion.v4:')
+    const v5Key = [...storageValues.keys()].find((key) => (
+      key.startsWith('xv.ui.folder-expansion.v5:')
     ));
-    assert.ok(v4Key);
-    assert.match(storageValues.get(v4Key), /A{43}/);
+    assert.ok(v5Key);
+    assert.match(storageValues.get(v5Key), /A{43}/);
     storageValues.set('xv.ui.folder-expansion.v1', 'true');
     storageValues.set('xv.ui.folder-expansion.v2:raw:scope:secrets', '["apps"]');
     storageValues.set('xv.ui.folder-expansion.v3:oldhash', '{"version":3}');
@@ -982,9 +1073,9 @@ test('empty list refresh persists pruning and cleans legacy folder state before 
     await settleUntil(() => tokenBodies.length === 2 && !item('apps'));
 
     assert.deepEqual(tokenBodies[1], { surface: 'secrets', folders: [] });
-    assert.deepEqual(JSON.parse(storageValues.get(v4Key)), { version: 4, expanded: [] });
+    assert.deepEqual(JSON.parse(storageValues.get(v5Key)), { version: 5, expanded: [] });
     assert.equal(
-      [...storageValues.keys()].some((key) => /^xv\.ui\.folder-expansion\.v[1-3]/.test(key)),
+      [...storageValues.keys()].some((key) => /^xv\.ui\.folder-expansion\.v[1-4]/.test(key)),
       false,
     );
 
@@ -996,11 +1087,10 @@ test('empty list refresh persists pruning and cleans legacy folder state before 
         { path: prod.path, token: 'B'.repeat(43) },
       ],
     });
-    const fresh = XvUiModel.createFolderNavigationState(globalThis.localStorage);
+    const fresh = XvUiModel.createTreeExpansionState(globalThis.localStorage);
     fresh.sync({ backend: 'local', vault: 'one', surface: 'secrets' }, {
       total: 51,
-      folderIds: [apps, prod],
-      expandableIds: [apps],
+      expandableIds: [apps, prod],
       tokenIndex,
     });
     assert.deepEqual(fresh.snapshot().expanded, []);
@@ -1060,11 +1150,11 @@ test('stale empty-folder token response cannot hydrate a switched workspace', as
     });
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    const labels = ui.findAll('#secrets-folder-tree', (element) => (
-      element.getAttribute?.('role') === 'treeitem'
+    const labels = ui.findAll('#secrets-table tbody', (element) => (
+      element.getAttribute?.('role') === 'row'
     )).map((element) => element.getAttribute('aria-label'));
-    assert.ok(labels.some((label) => label.startsWith('other,')));
-    assert.equal(labels.some((label) => label.startsWith('apps,')), false);
+    assert.ok(labels.some((label) => label.startsWith('Folder other,')));
+    assert.equal(labels.some((label) => label.startsWith('Folder apps,')), false);
     assert.equal(ui.elements.get('#secret-list-summary').textContent.includes('1 secret'), true);
   } finally {
     ui.restore();

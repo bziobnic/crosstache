@@ -35,6 +35,8 @@ const UI_MODEL_JS: &str = include_str!("assets/ui-model.js");
 #[cfg(test)]
 const ACCESSIBILITY_JS: &str = include_str!("assets/accessibility.js");
 #[cfg(test)]
+const TREE_GRID_JS: &str = include_str!("assets/tree-grid.js");
+#[cfg(test)]
 const APP_JS: &str = concat!(
     include_str!("assets/app.js"),
     include_str!("assets/context.js"),
@@ -67,6 +69,10 @@ fn asset(path: &str) -> Option<(&'static str, &'static str)> {
         )),
         "/settings.js" => Some(("application/javascript", include_str!("assets/settings.js"))),
         "/ui-model.js" => Some(("application/javascript", include_str!("assets/ui-model.js"))),
+        "/tree-grid.js" => Some((
+            "application/javascript",
+            include_str!("assets/tree-grid.js"),
+        )),
         "/style.css" => Some(("text/css", include_str!("assets/style.css"))),
         _ => None,
     }
@@ -524,6 +530,7 @@ mod tests {
             "/settings.js",
             "/commands.js",
             "/files.js",
+            "/tree-grid.js",
         ] {
             assert!(asset(path).is_some(), "missing {path}");
         }
@@ -719,7 +726,7 @@ mod tests {
     fn ui_expiration_is_blank_when_absent_and_updated_is_date_only() {
         assert!(APP_JS.contains("f.elements.expires_on.value = '';"));
         assert!(APP_JS.contains("XvUiModel.expirationDate(meta.expires_on)"));
-        assert!(APP_JS.contains("XvUiModel.formatDate(s.updated_on)"));
+        assert!(APP_JS.contains("XvUiModel.formatDate(secret.updated_on)"));
         assert!(INDEX_HTML.contains("name=\"expires_on\" type=\"date\""));
         assert!(INDEX_HTML.contains("id=\"no-expiry\""));
         assert!(INDEX_HTML.contains("id=\"clear-expiry\""));
@@ -734,8 +741,8 @@ mod tests {
 
     #[test]
     fn ui_files_are_links_without_row_actions() {
-        assert!(APP_JS.contains("function fileNameCell(name)"));
-        assert!(APP_JS.contains("document.createElement('a')"));
+        assert!(APP_JS.contains("const link = document.createElement('a');"));
+        assert!(APP_JS.contains("link.className = 'item-name-content file-link'"));
         assert!(APP_JS.contains("downloadFile(name)"));
         assert!(!INDEX_HTML.contains("class=\"file-actions\""));
         assert!(!APP_JS.contains("dl.textContent = 'Download'"));
@@ -854,35 +861,35 @@ mod tests {
     #[test]
     fn ui_replaces_flat_group_indentation_with_folder_navigation() {
         assert!(!APP_JS.contains("tr.classList.add('folder-child')"));
-        assert!(APP_JS.contains("td.classList.add('item-name')"));
-        assert!(INDEX_HTML.contains("class=\"folder-tree\" role=\"tree\""));
+        assert!(TREE_GRID_JS.contains("`tree-cell item-name ${treeCellClass}`"));
+        assert!(INDEX_HTML.contains("id=\"secrets-table\" role=\"treegrid\""));
     }
 
     #[test]
     fn ui_exposes_semantic_scoped_folder_navigation() {
         for marker in [
-            "id=\"secrets-folder-tree\" class=\"folder-tree\" role=\"tree\"",
-            "id=\"files-folder-tree\" class=\"folder-tree\" role=\"tree\"",
-            "id=\"secrets-folder-sheet\" class=\"folder-sheet\" role=\"dialog\"",
-            "id=\"files-folder-sheet\" class=\"folder-sheet\" role=\"dialog\"",
-            "id=\"secrets-folders-expand-all\"",
-            "id=\"secrets-folders-collapse-all\"",
-            "id=\"files-folders-expand-all\"",
-            "id=\"files-folders-collapse-all\"",
+            "id=\"secrets-table\" role=\"treegrid\"",
+            "id=\"files-table\" role=\"treegrid\"",
+            "id=\"secrets-expand-all\"",
+            "id=\"secrets-collapse-all\"",
+            "id=\"files-expand-all\"",
+            "id=\"files-collapse-all\"",
         ] {
             assert!(INDEX_HTML.contains(marker), "missing {marker}");
         }
-        assert!(UI_MODEL_JS.contains("function renderFolderTree({"));
-        assert!(UI_MODEL_JS.contains("button.setAttribute('role', 'treeitem')"));
-        assert!(UI_MODEL_JS.contains("button.setAttribute('aria-expanded'"));
-        assert!(UI_MODEL_JS.contains("button.setAttribute('aria-selected'"));
+        assert!(!INDEX_HTML.contains("folder-sidebar"));
+        assert!(!INDEX_HTML.contains("folder-sheet"));
+        assert!(TREE_GRID_JS.contains("tr.setAttribute('role', 'row')"));
+        assert!(TREE_GRID_JS.contains("tr.setAttribute('aria-expanded', String(row.expanded))"));
+        assert!(TREE_GRID_JS.contains("tr.setAttribute('aria-level', String(row.level))"));
+        assert!(TREE_GRID_JS.contains("tr.setAttribute('aria-selected'"));
         assert!(UI_MODEL_JS.contains("function createFolderTokenIndex(response)"));
         assert!(UI_MODEL_JS.contains("function folderPreferenceKey(tokenIndex)"));
-        assert!(UI_MODEL_JS.contains("xv.ui.folder-expansion.v4:"));
+        assert!(UI_MODEL_JS.contains("const FOLDER_EXPANSION_VERSION = 5;"));
         assert!(APP_JS.contains("`/api/folder-tokens${vaultQS(scope.vault, scope)}`"));
-        assert!(APP_JS.contains("function renderFolderNavigation(kind, allItems, visibleItems)"));
+        assert!(APP_JS.contains("function syncTreeExpansion(kind, allItems)"));
         assert!(APP_JS.contains("surface: kind"));
-        assert!(STYLE_CSS.contains(".folder-tree-item[aria-selected=\"true\"]"));
+        assert!(STYLE_CSS.contains("tbody tr.selected-row {"));
     }
 
     #[test]
@@ -952,10 +959,18 @@ mod tests {
         assert!(reconcile.contains("state.ids.delete(id);"));
         assert!(reconcile.contains("if (selectionChanged) resetBulkConfirmation(kind);"));
 
-        let row_checkbox = between("function selectionCell(kind, id) {", "// ---- state ----");
-        assert!(row_checkbox.contains("if (checkbox.checked) state.ids.add(id);"));
-        assert!(row_checkbox.contains("else state.ids.delete(id);"));
-        assert!(row_checkbox.contains("resetBulkConfirmation(kind);"));
+        let stacked_checkbox = between(
+            "function selectionCheckbox(kind, id) {",
+            "// ---- state ----",
+        );
+        assert!(stacked_checkbox.contains("if (checkbox.checked) state.ids.add(id);"));
+        assert!(stacked_checkbox.contains("else state.ids.delete(id);"));
+        assert!(stacked_checkbox.contains("resetBulkConfirmation(kind);"));
+        // The tree grid mutates the shared id set through the model helper so a
+        // checked branch puts every descendant in bulk-action scope.
+        assert!(TREE_GRID_JS.contains("applyBranchSelection(selectedIds, row.itemIds,"));
+        assert!(TREE_GRID_JS.contains("onSelectionChange?.(row);"));
+        assert!(APP_JS.contains("resetBulkConfirmation(kind);\n      renderSelectionKind(kind);"));
 
         let visible = between(
             "function setVisibleSelection(kind, checked) {",
@@ -1069,9 +1084,9 @@ mod tests {
         );
         assert!(APP_JS.contains("icon('secret')"));
         assert!(APP_JS.contains("icon('file')"));
-        assert!(UI_MODEL_JS.contains("disclosure.className = 'folder-tree-disclosure'"));
-        assert!(STYLE_CSS.contains(".folder-tree { display:grid;"));
-        assert!(STYLE_CSS.contains(".folder-tree-disclosure {"));
+        assert!(TREE_GRID_JS.contains("disclosure.className = 'tree-disclosure'"));
+        assert!(STYLE_CSS.contains(".tree-cell-inner { display:flex;"));
+        assert!(STYLE_CSS.contains(".tree-disclosure {"));
     }
 
     #[test]
@@ -1169,7 +1184,6 @@ mod tests {
         assert!(APP_JS.contains("table.hidden = !tableMode"));
         assert!(APP_JS.contains("stacked.hidden = tableMode"));
         assert!(!STYLE_CSS.contains("#secrets-table, #files-table { table-layout:auto; }"));
-        assert!(STYLE_CSS.contains(".selection-column { width:2.75rem;"));
         for rule in [
             "#secrets-table:not(.selection-mode) .column-secret-name { width:50%; }",
             "#secrets-table:not(.selection-mode) .column-secret-folder { width:22%; }",
@@ -1199,11 +1213,11 @@ mod tests {
         assert!(!INDEX_HTML.contains("<label class=\"linkish\""));
         assert!(APP_JS.contains("$('#browse-files').onclick = () => {"));
         assert!(APP_JS.contains("if (!canStartScopedAction()) return;"));
-        assert!(APP_JS.contains("function itemNameCell(kind, name, activate, accessibleLabel)"));
+        assert!(APP_JS.contains("function treeNameContent(kind, row)"));
         assert!(APP_JS.contains("button.className = 'item-name-content row-action'"));
         assert!(APP_JS.contains("`Edit secret ${name}`"));
-        assert!(APP_JS.contains("itemNameCell('file', name, null, '')"));
-        assert!(APP_JS.contains("`Select ${kind === 'secrets' ? 'secret' : 'file'} ${id}`"));
+        assert!(APP_JS.contains("`Select ${singular} ${row.identifier}`"));
+        assert!(APP_JS.contains("`Select all ${kind} in folder ${row.path}`"));
         assert!(STYLE_CSS.contains(".row-action:focus-visible"));
     }
 
@@ -1237,8 +1251,9 @@ mod tests {
             "const sorted = query.trim() ? visible : sortedTableItems('files', visible);"
         ));
         assert!(APP_JS.contains("const rows = XvUiModel.contentRows('secrets', sorted);"));
-        assert!(APP_JS.contains("for (const row of rows) tbody.appendChild(secretRow(row));"));
         assert!(APP_JS.contains("const rows = XvUiModel.contentRows('files', sorted"));
-        assert!(APP_JS.contains("for (const row of rows) tbody.appendChild(fileRow(row));"));
+        assert!(APP_JS.contains("const tree = XvUiModel.buildContentTree(rows);"));
+        assert!(APP_JS.contains("renderSecretTreeGrid(gridRows);"));
+        assert!(APP_JS.contains("mountTreeGrid('files', gridRows);"));
     }
 }

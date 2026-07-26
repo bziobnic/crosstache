@@ -29,8 +29,16 @@ async function routeFolderFixtures(page, {
   }
 }
 
-function treeitem(tree, name) {
-  return tree.getByRole('treeitem', { name });
+function grid(page, surface = 'secrets') {
+  return page.locator(`#${surface}-table tbody`);
+}
+
+function folderRow(page, path, surface = 'secrets') {
+  return grid(page, surface).locator(`tr[data-tree-path="${path}"]`);
+}
+
+function itemRow(page, label, surface = 'secrets') {
+  return grid(page, surface).locator(`tr[aria-label="${label}"]`);
 }
 
 test('no-results guidance names only searchable fields on secrets and files', async ({ page, baseURL }) => {
@@ -58,7 +66,7 @@ test('no-results guidance names only searchable fields on secrets and files', as
   await expect(page.locator('#files-table tbody')).not.toContainText('status');
 });
 
-test('desktop folder tree filters descendants, supports keyboard navigation, and restores scoped expansion', async ({ page, baseURL }) => {
+test('the tree grid nests items under folders, drives them by keyboard, and restores scoped expansion', async ({ page, baseURL }) => {
   await routeFolderFixtures(page, {
     secretsByVault: {
       playwright: primarySecrets,
@@ -67,44 +75,121 @@ test('desktop folder tree filters descendants, supports keyboard navigation, and
   });
   await page.goto(baseURL);
 
-  const tree = page.getByRole('tree', { name: 'Secret folders' });
-  const apps = treeitem(tree, /^apps,/);
+  const apps = folderRow(page, 'apps');
   await expect(apps).toHaveAttribute('aria-expanded', 'false');
-  await expect(treeitem(tree, /^Unfiled,/)).toHaveAttribute('aria-selected', 'false');
+  await expect(apps).toHaveAttribute('aria-level', '1');
+  await expect(itemRow(page, 'Secret prod-secret')).toHaveCount(0);
 
   await apps.focus();
   await page.keyboard.press('ArrowRight');
   await expect(apps).toHaveAttribute('aria-expanded', 'true');
   await page.keyboard.press('ArrowRight');
-  await expect(treeitem(tree, /^prod,/)).toBeFocused();
+  await expect(folderRow(page, 'apps/prod')).toBeFocused();
+  await page.keyboard.press('ArrowRight');
+  await expect(folderRow(page, 'apps/prod')).toHaveAttribute('aria-expanded', 'true');
+  await page.keyboard.press('ArrowDown');
+  await expect(itemRow(page, 'Secret prod-secret')).toBeFocused();
+  await expect(itemRow(page, 'Secret prod-secret')).toHaveAttribute('aria-level', '3');
   await page.keyboard.press('ArrowLeft');
-  await expect(apps).toBeFocused();
-  await page.keyboard.press('Enter');
+  await expect(folderRow(page, 'apps/prod')).toBeFocused();
 
-  await expect(apps).toHaveAttribute('aria-selected', 'true');
-  await expect(apps).toBeFocused();
   await expect(page.getByRole('button', { name: 'Edit secret prod-secret' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Edit secret stage-secret' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Edit secret loose-0' })).toHaveCount(0);
-  await expect(page.locator('#secret-list-summary')).toContainText('2 of 51 secrets');
-  await expect(page.locator('#secrets-folders-expand-all')).toBeVisible();
-  await expect(page.locator('#secrets-folders-collapse-all')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Edit secret loose-0' })).toBeVisible();
+  await expect(page.locator('#secret-list-summary')).toContainText('51 secrets across 3 folders');
+  await expect(page.locator('#secrets-expand-all')).toBeVisible();
+  await expect(page.locator('#secrets-collapse-all')).toBeVisible();
 
   await page.locator('#workspace-select').selectOption('sandbox');
   await expect(page.locator('#context-line')).toContainText('local / sandbox');
-  await expect(treeitem(tree, /^All items,/)).toHaveAttribute('aria-selected', 'true');
-  await expect(treeitem(tree, /^other,/)).toHaveAttribute('aria-expanded', 'true');
-  await expect(treeitem(tree, /^apps,/)).toHaveCount(0);
+  await expect(folderRow(page, 'other')).toHaveAttribute('aria-expanded', 'true');
+  await expect(folderRow(page, 'apps')).toHaveCount(0);
 
   await page.locator('#workspace-select').selectOption('playwright');
   await expect(page.locator('#context-line')).toContainText('local / playwright');
-  await expect(treeitem(tree, /^All items,/)).toHaveAttribute('aria-selected', 'true');
-  await expect(treeitem(tree, /^apps,/)).toHaveAttribute('aria-expanded', 'true');
-  await expect(treeitem(tree, /^prod,/)).toBeVisible();
+  await expect(folderRow(page, 'apps')).toHaveAttribute('aria-expanded', 'true');
+  await expect(folderRow(page, 'apps/prod')).toBeVisible();
   await expectNoSeriousOrCriticalAxeViolations(page);
 });
 
-test('typed folder identities stay unique and opaque while rerenders keep one focused selection', async ({ page, baseURL }) => {
+test('a flat vault of folders still expands and collapses from the row and the toolbar', async ({ page, baseURL }) => {
+  await routeFolderFixtures(page, {
+    secretsByVault: {
+      playwright: [
+        { name: 'a', folder: 'prod' },
+        { name: 'b', folder: 'dev' },
+        { name: 'c', folder: null },
+      ],
+    },
+  });
+  await page.goto(baseURL);
+
+  // Regression: with only single-segment folders the previous sidebar tree had
+  // no expandable node, so every expand/collapse control was a silent no-op.
+  const prod = folderRow(page, 'prod');
+  await expect(prod).toHaveAttribute('aria-expanded', 'true');
+  await expect(itemRow(page, 'Secret a')).toBeVisible();
+
+  await prod.locator('.tree-disclosure').click();
+  await expect(prod).toHaveAttribute('aria-expanded', 'false');
+  await expect(itemRow(page, 'Secret a')).toHaveCount(0);
+
+  await page.locator('#secrets-expand-all').click();
+  await expect(prod).toHaveAttribute('aria-expanded', 'true');
+  await expect(itemRow(page, 'Secret a')).toBeVisible();
+
+  await page.locator('#secrets-collapse-all').click();
+  await expect(folderRow(page, 'dev')).toHaveAttribute('aria-expanded', 'false');
+  await expect(prod).toHaveAttribute('aria-expanded', 'false');
+  await expect(itemRow(page, 'Secret c')).toBeVisible();
+  await expectNoSeriousOrCriticalAxeViolations(page);
+});
+
+test('tri-state selection propagates down the tree and rolls up to ancestors', async ({ page, baseURL }) => {
+  await routeFolderFixtures(page, {
+    secretsByVault: {
+      playwright: [
+        { name: 'alpha', folder: 'apps/prod' },
+        { name: 'beta', folder: 'apps/prod' },
+        { name: 'gamma', folder: 'apps/stage' },
+      ],
+    },
+  });
+  await page.goto(baseURL);
+  await page.locator('#select-secrets').click();
+
+  const checkbox = (row) => row.locator('.tree-checkbox');
+  const mixed = (locator) => expect(locator).toHaveJSProperty('indeterminate', true);
+
+  await checkbox(itemRow(page, 'Secret alpha')).check();
+  await expect(page.locator('#secret-selection-count')).toHaveText('1 selected');
+  await mixed(checkbox(folderRow(page, 'apps/prod')));
+  await mixed(checkbox(folderRow(page, 'apps')));
+  await expect(checkbox(folderRow(page, 'apps'))).toHaveAttribute('aria-checked', 'mixed');
+
+  await checkbox(folderRow(page, 'apps/prod')).check();
+  await expect(page.locator('#secret-selection-count')).toHaveText('2 selected');
+  await expect(checkbox(folderRow(page, 'apps/prod'))).toBeChecked();
+  await expect(itemRow(page, 'Secret beta')).toHaveAttribute('aria-selected', 'true');
+  await mixed(checkbox(folderRow(page, 'apps')));
+
+  await checkbox(folderRow(page, 'apps')).check();
+  await expect(page.locator('#secret-selection-count')).toHaveText('3 selected');
+  await expect(checkbox(folderRow(page, 'apps/stage'))).toBeChecked();
+  await expect(page.locator('#bulk-delete-secrets')).toBeEnabled();
+  await expect(page.locator('#bulk-move-secrets')).toBeEnabled();
+  await expect(page.locator('#select-all-secrets')).toBeChecked();
+
+  await checkbox(folderRow(page, 'apps')).uncheck();
+  await expect(page.locator('#secret-selection-count')).toHaveText('0 selected');
+  await expect(page.locator('#bulk-delete-secrets')).toBeDisabled();
+
+  await itemRow(page, 'Secret gamma').focus();
+  await page.keyboard.press('Space');
+  await expect(page.locator('#secret-selection-count')).toHaveText('1 selected');
+  await expectNoSeriousOrCriticalAxeViolations(page);
+});
+
+test('typed folder identities stay unique and opaque while rerenders keep one focused row', async ({ page, baseURL }) => {
   await routeFolderFixtures(page, {
     secretsByVault: {
       playwright: [
@@ -118,59 +203,30 @@ test('typed folder identities stay unique and opaque while rerenders keep one fo
   });
   await page.goto(baseURL);
 
-  const tree = page.getByRole('tree', { name: 'Secret folders' });
-  const items = tree.getByRole('treeitem');
-  const ids = await items.evaluateAll((nodes) => nodes.map((node) => node.dataset.folderId));
-  expect(new Set(ids).size).toBe(ids.length);
-  expect(ids.every((id) => /^folder-node-\d+$/.test(id))).toBe(true);
-  await expect(treeitem(tree, /^__all__,/)).toBeVisible();
-  await expect(treeitem(tree, /^__unfiled__,/)).toBeVisible();
-  await expect(treeitem(tree, /^Unfiled,/)).toBeVisible();
+  const rows = grid(page).locator('tr[data-tree-path]');
+  const paths = await rows.evaluateAll((nodes) => nodes.map((node) => node.dataset.treePath));
+  expect(new Set(paths).size).toBe(paths.length);
+  await expect(folderRow(page, '__all__')).toBeVisible();
+  await expect(folderRow(page, '__unfiled__')).toBeVisible();
+  await expect(itemRow(page, 'Secret unfiled')).toHaveAttribute('aria-level', '1');
 
-  const apps = treeitem(tree, /^apps,/);
-  await treeitem(tree, /^prod,/).focus();
-  await page.keyboard.press('Enter');
-  await expect(treeitem(tree, /^prod,/)).toBeFocused();
-  await expect(tree.locator('[aria-selected="true"]')).toHaveCount(1);
-  await expect(tree.locator('[tabindex="0"]')).toHaveCount(1);
+  await folderRow(page, 'apps/prod').focus();
   await page.keyboard.press('ArrowLeft');
+  await expect(folderRow(page, 'apps/prod')).toHaveAttribute('aria-expanded', 'false');
   await page.keyboard.press('ArrowLeft');
-  await expect(apps).toBeFocused();
-  await expect(apps).toHaveAttribute('aria-selected', 'true');
-  await expect(tree.locator('[aria-selected="true"]')).toHaveCount(1);
-  await expect(page.getByRole('button', { name: 'Edit secret nested' })).toBeVisible();
+  await expect(folderRow(page, 'apps')).toBeFocused();
+  await expect(grid(page).locator('[tabindex="0"]')).toHaveCount(1);
 
-  const disclosure = apps.locator('.folder-tree-disclosure');
-  await disclosure.click();
-  await expect(apps).toHaveAttribute('aria-expanded', 'true');
-  await expect(apps).toHaveAttribute('aria-selected', 'true');
+  await folderRow(page, 'apps').locator('.tree-disclosure').click();
+  await expect(folderRow(page, 'apps')).toHaveAttribute('aria-expanded', 'false');
   const persisted = await page.evaluate(() => JSON.stringify(
     Object.entries(localStorage).filter(([key]) => key.startsWith('xv.ui.folder-expansion')),
   ));
+  expect(persisted).toContain('.v5:');
   for (const source of ['local', 'playwright', 'apps', 'prod', '__all__', '__unfiled__']) {
     expect(persisted).not.toContain(source);
   }
   await expectNoSeriousOrCriticalAxeViolations(page);
-});
-
-test('pointer disclosure toggles only its branch', async ({ page, baseURL }) => {
-  await routeFolderFixtures(page, {
-    secretsByVault: {
-      playwright: [{ name: 'prod-secret', folder: 'apps/prod' }],
-    },
-  });
-  await page.goto(baseURL);
-  const tree = page.getByRole('tree', { name: 'Secret folders' });
-  const apps = treeitem(tree, /^apps,/);
-  const all = treeitem(tree, /^All items,/);
-
-  await expect(apps).toHaveAttribute('aria-expanded', 'true');
-  await apps.locator('.folder-tree-disclosure').click();
-  await expect(apps).toHaveAttribute('aria-expanded', 'false');
-  await expect(all).toHaveAttribute('aria-selected', 'true');
-  await apps.locator('.folder-tree-disclosure').dispatchEvent('click', { pointerType: 'touch' });
-  await expect(apps).toHaveAttribute('aria-expanded', 'true');
-  await expect(all).toHaveAttribute('aria-selected', 'true');
 });
 
 test('48rem layouts show full identifiers and ten-level trees keep increasing indentation', async ({ page, baseURL }) => {
@@ -185,41 +241,27 @@ test('48rem layouts show full identifiers and ten-level trees keep increasing in
   });
   await page.setViewportSize({ width: 768, height: 900 });
   await page.goto(baseURL);
-  const primary = page.locator('#secrets-table .item-name-content strong');
-  await expect(primary).toHaveCSS('white-space', 'normal');
-  await expect(primary).toHaveCSS('overflow', 'visible');
-  await page.setViewportSize({ width: 600, height: 900 });
+  const primary = page.locator('#secrets-table .item-name-content strong').first();
   await expect(primary).toHaveCSS('white-space', 'normal');
   await expect(primary).toHaveCSS('overflow', 'visible');
 
-  await page.setViewportSize({ width: 1024, height: 900 });
-  await expect(page.locator('#secrets-workspace .folder-sidebar')).toBeHidden();
-  await expect(page.locator('#secrets-folder-filter-open')).toBeVisible();
-  await page.setViewportSize({ width: 1025, height: 900 });
-  await expect(page.locator('#secrets-workspace .folder-sidebar')).toBeVisible();
-  await page.locator('#secrets-folders-expand-all').click();
-  const tree = page.getByRole('tree', { name: 'Secret folders' });
-  const deepest = treeitem(tree, /^j,/);
+  await page.setViewportSize({ width: 1180, height: 900 });
+  await page.locator('#secrets-expand-all').click();
+  const deepest = folderRow(page, deepFolder);
   await expect(deepest).toHaveAttribute('aria-level', '10');
-  await expect(deepest).toHaveCSS('--folder-depth', '9');
-  const eighthPadding = parseFloat(await treeitem(tree, /^h,/).evaluate(
+  await expect(deepest.locator('td.tree-cell')).toHaveCSS('--tree-depth', '9');
+  const eighthPadding = parseFloat(await folderRow(page, 'a/b/c/d/e/f/g/h').locator('td.tree-cell').evaluate(
     (element) => getComputedStyle(element).paddingInlineStart,
   ));
-  const tenthPadding = parseFloat(await deepest.evaluate(
+  const tenthPadding = parseFloat(await deepest.locator('td.tree-cell').evaluate(
     (element) => getComputedStyle(element).paddingInlineStart,
   ));
   expect(tenthPadding).toBeGreaterThan(eighthPadding);
 });
 
-test('mobile filter sheets reuse folder models for secrets and files with visible controls', async ({ page, baseURL }) => {
-  await page.setViewportSize({ width: 390, height: 844 });
+test('the files surface uses the same tree grid with its own columns', async ({ page, baseURL }) => {
   await routeFolderFixtures(page, {
-    secretsByVault: {
-      playwright: [
-        { name: 'prod-secret', folder: 'apps/prod' },
-        { name: 'loose-secret', folder: null },
-      ],
-    },
+    secretsByVault: { playwright: [] },
     filesByVault: {
       playwright: [
         { name: 'docs/prod/report.txt', size: 12, content_type: 'text/plain', last_modified: '2026-07-22T00:00:00Z' },
@@ -228,35 +270,38 @@ test('mobile filter sheets reuse folder models for secrets and files with visibl
     },
   });
   await page.goto(baseURL);
-
-  await expect(page.locator('#secrets-workspace .folder-sidebar')).toBeHidden();
-  await expect(page.locator('#secrets-folder-filter-open')).toBeVisible();
-  await expect(page.locator('#secrets-mobile-folders-expand-all')).toBeVisible();
-  await expect(page.locator('#secrets-mobile-folders-collapse-all')).toBeVisible();
-  await page.locator('#secrets-folder-filter-open').click();
-  const secretSheet = page.getByRole('dialog', { name: 'Filter secret folders' });
-  await expect(secretSheet).toBeVisible();
-  await expect(page.locator('main')).toHaveAttribute('inert', '');
-  await expectNoSeriousOrCriticalAxeViolations(page);
-  await treeitem(secretSheet.getByRole('tree', { name: 'Secret folder filter' }), /^prod,/).click();
-  await expect(secretSheet).toBeHidden();
-  await expect(page.getByRole('button', { name: 'Edit secret prod-secret' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Edit secret loose-secret' })).toHaveCount(0);
-
   await page.getByRole('tab', { name: 'Files' }).click();
-  await expect(page.locator('#files-folder-filter-open')).toBeVisible();
-  await expect(page.locator('#files-mobile-folders-expand-all')).toBeVisible();
-  await expect(page.locator('#files-mobile-folders-collapse-all')).toBeVisible();
-  await page.locator('#files-folder-filter-open').click();
-  const fileSheet = page.getByRole('dialog', { name: 'Filter file folders' });
-  const fileTree = fileSheet.getByRole('tree', { name: 'File folder filter' });
-  await expect(treeitem(fileTree, /^docs,/)).toHaveAttribute('aria-expanded', 'true');
-  await treeitem(fileTree, /^prod,/).click();
-  await expect(fileSheet).toBeHidden();
+
+  await expect(folderRow(page, 'docs', 'files')).toHaveAttribute('aria-expanded', 'true');
+  await expect(folderRow(page, 'docs/prod', 'files')).toHaveAttribute('aria-level', '2');
   await expect(page.getByRole('link', { name: 'docs/prod/report.txt' })).toBeVisible();
-  await expect(page.getByRole('link', { name: 'loose.txt' })).toHaveCount(0);
-  await expect(page.locator('#file-list-summary')).toContainText('1 of 2 files');
+  await expect(itemRow(page, 'File loose.txt', 'files')).toHaveAttribute('aria-level', '1');
+  await expect(page.locator('#file-list-summary')).toContainText('2 files across 2 folders');
+
+  await folderRow(page, 'docs', 'files').locator('.tree-disclosure').click();
+  await expect(page.getByRole('link', { name: 'docs/prod/report.txt' })).toHaveCount(0);
+  await expect(itemRow(page, 'File loose.txt', 'files')).toBeVisible();
   await expectNoSeriousOrCriticalAxeViolations(page);
+});
+
+test('a search reveals matches inside collapsed folders without persisting that expansion', async ({ page, baseURL }) => {
+  await routeFolderFixtures(page, {
+    secretsByVault: {
+      playwright: [
+        { name: 'needle-secret', folder: 'apps/prod' },
+        ...Array.from({ length: 55 }, (_, index) => ({ name: `loose-${index}`, folder: null })),
+      ],
+    },
+  });
+  await page.goto(baseURL);
+
+  await expect(folderRow(page, 'apps')).toHaveAttribute('aria-expanded', 'false');
+  await page.locator('#search').fill('needle');
+  await expect(itemRow(page, 'Secret needle-secret')).toBeVisible();
+  await expect(folderRow(page, 'apps')).toHaveAttribute('aria-expanded', 'true');
+
+  await page.locator('#secret-search-clear').click();
+  await expect(folderRow(page, 'apps')).toHaveAttribute('aria-expanded', 'false');
 });
 
 test('an obsolete file response cannot publish its folders after a workspace switch', async ({ page, baseURL }) => {
@@ -281,10 +326,9 @@ test('an obsolete file response cannot publish its folders after a workspace swi
   releasePrimary();
   await expect(page.locator('#progress')).toBeHidden();
   await page.getByRole('tab', { name: 'Files' }).click();
-  const tree = page.getByRole('tree', { name: 'File folders' });
-  await expect(treeitem(tree, /^current,/)).toBeVisible();
+  await expect(folderRow(page, 'current', 'files')).toBeVisible();
 
-  await expect(treeitem(tree, /^stale,/)).toHaveCount(0);
+  await expect(folderRow(page, 'stale', 'files')).toHaveCount(0);
   await expect(page.getByRole('link', { name: 'current/path/new.txt' })).toBeVisible();
   await expect(page.getByRole('link', { name: 'stale/path/old.txt' })).toHaveCount(0);
 });
