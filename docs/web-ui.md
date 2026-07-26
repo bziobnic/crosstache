@@ -11,15 +11,30 @@ Typed records are supported: create one via the type picker on the "New
 secret" drawer or open an existing one to edit it field-by-field, with
 secret-kind fields masked and individually revealable/copyable.
 
-Entries in both tables are grouped by folder into collapsible sections
-(collapsed by default). Expanded contents are indented beneath their folder
-header, and file sizes use human-readable units.
+Both surfaces render a single hierarchical tree grid: folders and their
+contents live in one table, each row indented by depth, with a disclosure
+chevron on folder rows. Vaults with 50 or fewer items open fully expanded;
+larger ones start collapsed. **Expand all** / **Collapse all** sit in the
+toolbar, expansion is remembered per backend/vault/surface, and searching or
+filtering temporarily reveals matches inside collapsed folders without
+changing what you had open. Each surface keeps its own columns (secrets show
+folder, groups, note and updated; files show size, type and modified), and
+file sizes use human-readable units.
 
-Use **Select** to reveal per-item checkboxes. The header checkbox selects only
-items currently visible (including the active secret filter and expanded
-folders). Both tables support bulk deletion; selected secrets can also be moved
-to another folder. Bulk file moves are not available because file backends do
-not expose a portable move operation.
+Use **Select** to reveal per-row checkboxes. Folder rows are containers rather
+than selectable entities: checking a folder selects every item beneath it,
+partial selection shows the indeterminate state, and unchecking clears the
+branch. Bulk actions therefore always operate on items — a checked folder puts
+its descendants in scope. The header checkbox selects every item currently
+listed (honouring the active search and filters). Both tables support bulk
+deletion; selected secrets can also be moved to another folder. Bulk file moves
+are not available because file backends do not expose a portable move
+operation.
+
+Keyboard: arrow up/down move between rows, arrow right expands a folder then
+steps into it, arrow left collapses or moves to the parent, Home/End jump to
+the ends, Space toggles selection, and Enter opens a secret, downloads a file,
+or toggles a folder.
 
 The URL token is copied into per-tab `sessionStorage`, so reloads in that tab
 remain authenticated while the server is running. Closing the tab discards the

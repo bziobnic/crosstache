@@ -14,8 +14,9 @@ test('palette searches loaded metadata without retaining or exposing secret valu
   await expect(page.locator('#context-line')).toContainText('local / playwright');
   await createSecret(page, 'production-login', 'prod');
   await createSecret(page, 'other-login', 'other');
-  await page.getByRole('treeitem', { name: /other,/i }).click();
-  await expect(page.getByRole('button', { name: 'Edit secret production-login' })).toBeHidden();
+  await page.locator('#secrets-table tbody tr[data-tree-path="other"] .tree-disclosure').click();
+  await expect(page.locator('#secrets-table tbody tr[data-tree-path="other"]'))
+    .toHaveAttribute('aria-expanded', 'false');
 
   await page.keyboard.press(process.platform === 'darwin' ? 'Meta+K' : 'Control+K');
   const palette = page.getByRole('dialog', { name: 'Commands' });
@@ -139,7 +140,7 @@ test('workspace, file, folder, and trash results use truthful exact targets', as
   palette = page.getByRole('dialog', { name: 'Commands' });
   await palette.getByRole('combobox').fill('prod');
   await palette.getByRole('option', { name: /^prod.*Secrets.*local \/ playwright/i }).click();
-  await expect(page.getByRole('treeitem', { name: /prod,/i })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.locator('#secrets-table tbody tr[data-tree-path="prod"]')).toBeFocused();
 
   const activation = page.waitForRequest((request) => (
     request.method() === 'POST' && request.url().includes('/api/workspaces/activate')

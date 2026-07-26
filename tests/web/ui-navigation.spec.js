@@ -46,7 +46,9 @@ test('desktop selection has one checkbox per row and a visible-scope mixed heade
   await expect(rows).toHaveCount(2);
   for (const row of await rows.all()) {
     await expect(row.getByRole('checkbox')).toHaveCount(1);
-    await expect(row.locator('button, a')).toHaveCount(0);
+    // The disclosure is an aria-hidden pointer affordance, not a second
+    // activation target competing with the checkbox.
+    await expect(row.locator('button:not(.tree-disclosure), a')).toHaveCount(0);
   }
 
   const header = table.getByRole('checkbox', { name: 'Select all 2 visible secrets' });
@@ -75,7 +77,9 @@ test('desktop file selection removes duplicate row activation and scopes its hea
   const table = page.locator('#files-table');
   for (const row of await table.locator('tbody tr').all()) {
     await expect(row.getByRole('checkbox')).toHaveCount(1);
-    await expect(row.locator('button, a')).toHaveCount(0);
+    // The disclosure is an aria-hidden pointer affordance, not a second
+    // activation target competing with the checkbox.
+    await expect(row.locator('button:not(.tree-disclosure), a')).toHaveCount(0);
   }
   const header = table.getByRole('checkbox', { name: 'Select all 2 visible files' });
   await table.getByRole('checkbox', { name: 'Select file alpha.txt' }).check();

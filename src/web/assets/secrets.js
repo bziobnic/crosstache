@@ -1,6 +1,7 @@
 import * as XvUiModel from './ui-model.js';
 import { buildMetadataIndex, searchIndex } from './commands.js';
 import { mountFilterControls, mountUploadQueue } from './files.js';
+import { renderTreeGrid } from './tree-grid.js';
 import { guardNavigation } from './dialogs.js';
 import {
   setProtectedValueStatus,
@@ -588,20 +589,17 @@ function showListState(tbody, kind, state, cols) {
   tbody.appendChild(tr);
 }
 
-const secretFolderNavigation = XvUiModel.createFolderNavigationState(globalThis.localStorage);
-const fileFolderNavigation = XvUiModel.createFolderNavigationState(globalThis.localStorage);
-const folderNavigationFocus = {
-  secrets: { desktop: XvUiModel.FOLDER_ALL, mobile: XvUiModel.FOLDER_ALL },
-  files: { desktop: XvUiModel.FOLDER_ALL, mobile: XvUiModel.FOLDER_ALL },
-};
+const secretExpansion = XvUiModel.createTreeExpansionState(globalThis.localStorage);
+const fileExpansion = XvUiModel.createTreeExpansionState(globalThis.localStorage);
+const treeFocus = { secrets: '', files: '' };
 const folderTokenIndexes = { secrets: null, files: null };
 const listFilters = {
   secrets: { group: '', type: '', expiry: '', enabled: null },
   files: { type: '' },
 };
 
-function navigationFor(kind) {
-  return kind === 'secrets' ? secretFolderNavigation : fileFolderNavigation;
+function expansionFor(kind) {
+  return kind === 'secrets' ? secretExpansion : fileExpansion;
 }
 
 function folderOf(kind, item) {
@@ -610,10 +608,6 @@ function folderOf(kind, item) {
   return XvUiModel.normalizeFolderPath(
     name.includes('/') ? name.slice(0, name.lastIndexOf('/')) : '',
   );
-}
-
-function folderModelItems(kind, items) {
-  return items.map((item) => ({ ...item, folder: folderOf(kind, item) }));
 }
 
 function folderPaths(kind, items) {
@@ -643,108 +637,41 @@ function folderScope(kind) {
   return { backend: backend || '', vault: currentVault || '', surface: kind };
 }
 
-function renderFolderNavigation(kind, allItems, visibleItems) {
-  const navigation = navigationFor(kind);
-  const modelItems = folderModelItems(kind, allItems);
-  const modelVisibleItems = folderModelItems(kind, visibleItems);
-  const viewModel = XvUiModel.buildFolderViewModel(modelItems, modelVisibleItems);
-  navigation.sync(folderScope(kind), {
+// Expansion has to be reconciled against every folder in the vault, not just the
+// folders that survived the current search, or filtering would silently forget
+// which branches the user had opened.
+function syncTreeExpansion(kind, allItems) {
+  const allRows = XvUiModel.contentRows(kind, allItems, { formatSize: fmtSize });
+  const expandableIds = XvUiModel.treeFolderIdentities(XvUiModel.buildContentTree(allRows));
+  expansionFor(kind).sync(folderScope(kind), {
     total: allItems.length,
-    folderIds: viewModel.folderIds,
-    expandableIds: viewModel.expandableIds,
+    expandableIds,
     tokenIndex: folderTokenIndexes[kind],
   });
-  const renderOne = (mobile) => {
-    const mode = mobile ? 'mobile' : 'desktop';
-    const container = $(`#${kind}${mobile ? '-mobile' : ''}-folder-tree`);
-    const snapshot = navigation.snapshot();
-    XvUiModel.renderFolderTree({
-      document,
-      container,
-      items: modelItems,
-      visibleItems: modelVisibleItems,
-      viewModel,
-      expanded: navigation.expanded,
-      selected: snapshot.selected,
-      focusedId: folderNavigationFocus[kind][mode],
-      onFocus: (id) => { folderNavigationFocus[kind][mode] = id; },
-      onSelect: (id) => {
-        folderNavigationFocus[kind][mode] = id;
-        navigation.select(id);
-        renderSelectionKind(kind);
-        if (mobile) {
-          dialogs.closeModal($(`#${kind}-folder-sheet`));
-          return false;
-        }
-        return true;
-      },
-      onToggle: (id, expanded) => {
-        folderNavigationFocus[kind][mode] = id;
-        navigation.toggle(id, expanded);
-        renderSelectionKind(kind);
-      },
-    });
-  };
-  renderOne(false);
-  renderOne(true);
-  return viewModel.folderCount;
+  return expandableIds;
 }
 
-function setAllFolderExpansion(kind, expanded) {
-  const navigation = navigationFor(kind);
-  if (expanded) navigation.expandAll();
+function setAllTreeExpansion(kind, expanded) {
+  const expansion = expansionFor(kind);
+  if (expanded) expansion.expandAll();
   else {
-    navigation.collapseAll();
-    folderNavigationFocus[kind] = {
-      desktop: XvUiModel.FOLDER_ALL,
-      mobile: XvUiModel.FOLDER_ALL,
-    };
+    expansion.collapseAll();
+    treeFocus[kind] = '';
   }
   renderSelectionKind(kind);
 }
 
-function initFolderNavigationControls() {
+function initTreeExpansionControls() {
   for (const kind of ['secrets', 'files']) {
-    for (const id of [
-      `${kind}-folders-expand-all`,
-      `${kind}-mobile-folders-expand-all`,
-      `${kind}-mobile-sheet-expand-all`,
-    ]) {
-      $(`#${id}`).onclick = () => setAllFolderExpansion(kind, true);
-    }
-    for (const id of [
-      `${kind}-folders-collapse-all`,
-      `${kind}-mobile-folders-collapse-all`,
-      `${kind}-mobile-sheet-collapse-all`,
-    ]) {
-      $(`#${id}`).onclick = () => setAllFolderExpansion(kind, false);
-    }
-    const opener = $(`#${kind}-folder-filter-open`);
-    const sheet = $(`#${kind}-folder-sheet`);
-    const close = $(`#${kind}-folder-sheet-close`);
-    const dismiss = () => dialogs.closeModal(sheet);
-    opener.onclick = () => dialogs.openModal(sheet, {
-      initialFocus: sheet.querySelector('[role="treeitem"]') || close,
-      invoker: opener,
-      onEscape: dismiss,
-    });
-    close.onclick = dismiss;
+    $(`#${kind}-expand-all`).onclick = () => setAllTreeExpansion(kind, true);
+    $(`#${kind}-collapse-all`).onclick = () => setAllTreeExpansion(kind, false);
   }
 }
 
-function selectedFolderLabel(kind) {
-  const selected = navigationFor(kind).snapshot().selected;
-  if (selected.kind === 'folder') return selected.path;
-  if (selected.kind === 'unfiled') return 'Unfiled';
-  return '';
-}
-
-function clearSelectedFolder(kind) {
-  navigationFor(kind).select(XvUiModel.FOLDER_ALL);
-  folderNavigationFocus[kind] = {
-    desktop: XvUiModel.FOLDER_ALL,
-    mobile: XvUiModel.FOLDER_ALL,
-  };
+function hasNarrowingFilters(kind) {
+  return Object.values(listFilters[kind]).some((value) => (
+    value !== '' && value !== null && value !== undefined
+  ));
 }
 
 const filterControls = {
@@ -762,8 +689,6 @@ const filterControls = {
       enabled: 'Status',
     },
     onChange: () => renderSecrets(),
-    folderValue: () => selectedFolderLabel('secrets'),
-    clearFolder: () => clearSelectedFolder('secrets'),
   }),
   files: mountFilterControls({
     document,
@@ -776,8 +701,6 @@ const filterControls = {
       type: 'Type',
     },
     onChange: () => renderFiles(),
-    folderValue: () => selectedFolderLabel('files'),
-    clearFolder: () => clearSelectedFolder('files'),
   }),
 };
 
@@ -927,11 +850,12 @@ function initSorting() {
 }
 
 const TABLE_WIDTHS = {
-  secrets: { defaults:[28,15,14,25,18], minimums:[14,10,10,14,12], storageKey:'xv.ui.columns.secrets.v1' },
-  files: { defaults:[42,12,24,22], minimums:[20,10,14,14], storageKey:'xv.ui.columns.files.v1' },
+  // The name column carries the tree indentation, so it needs the widest share.
+  secrets: { defaults:[38,14,12,20,16], minimums:[20,10,10,14,12], storageKey:'xv.ui.columns.secrets.v1' },
+  files: { defaults:[52,12,18,18], minimums:[26,10,14,14], storageKey:'xv.ui.columns.files.v1' },
 };
 function dataColumns(kind) {
-  return [...document.querySelectorAll(`#${kind}-table colgroup col:not(.selection-col)`)];
+  return [...document.querySelectorAll(`#${kind}-table colgroup col`)];
 }
 function applyColumnWidths(kind, widths) {
   const config = TABLE_WIDTHS[kind];
@@ -1048,8 +972,7 @@ function setSelectionMode(kind, enabled) {
   }
   elements.toggle.hidden = enabled;
   elements.bulkBar.hidden = !enabled;
-  elements.table.querySelector('thead .selection-column').hidden = !enabled;
-  elements.table.querySelector('col.selection-col').hidden = !enabled;
+  elements.selectAll.hidden = !enabled;
   elements.table.classList.toggle('selection-mode', enabled);
   renderSelectionKind(kind);
 }
@@ -1102,10 +1025,8 @@ function updateSelectionControls(kind) {
   if (kind === 'secrets') $('#bulk-move-secrets').disabled = state.pending || state.ids.size === 0;
 }
 
-function selectionCell(kind, id) {
+function selectionCheckbox(kind, id) {
   const state = selectionState(kind);
-  const td = document.createElement('td');
-  td.className = 'selection-column';
   const checkbox = document.createElement('input');
   checkbox.type = 'checkbox';
   checkbox.checked = state.ids.has(id);
@@ -1123,9 +1044,7 @@ function selectionCell(kind, id) {
       findContentControl(kind, id, 'selection')?.focus({ preventScroll: true });
     }
   };
-  td.onclick = (e) => e.stopPropagation();
-  td.appendChild(checkbox);
-  return td;
+  return checkbox;
 }
 
 // ---- state ----
@@ -1680,16 +1599,8 @@ store.subscribe((snapshot, event) => {
   folderTokenIndexes.files = null;
   clearSelection('secrets');
   clearSelection('files');
-  secretFolderNavigation.select(XvUiModel.FOLDER_ALL);
-  fileFolderNavigation.select(XvUiModel.FOLDER_ALL);
-  folderNavigationFocus.secrets = {
-    desktop: XvUiModel.FOLDER_ALL,
-    mobile: XvUiModel.FOLDER_ALL,
-  };
-  folderNavigationFocus.files = {
-    desktop: XvUiModel.FOLDER_ALL,
-    mobile: XvUiModel.FOLDER_ALL,
-  };
+  treeFocus.secrets = '';
+  treeFocus.files = '';
   applyContextCapabilities();
   clearListLoadError('secrets');
   renderSecrets();
@@ -1905,8 +1816,7 @@ function clearUnavailableFilesState() {
   clearError('#file-refresh-error');
   $('#files-table tbody').replaceChildren();
   $('#files-stacked').replaceChildren();
-  $('#files-folder-tree').replaceChildren();
-  $('#files-mobile-folder-tree').replaceChildren();
+  treeFocus.files = '';
   $('#file-item-count').textContent = 'Files unavailable';
   $('#file-list-summary').textContent = 'File storage is unavailable in this context.';
   uploadManager?.updateDestinations();
@@ -2009,16 +1919,8 @@ async function init() {
       folderTokenIndexes.files = null;
       clearSelection('secrets');
       clearSelection('files');
-      secretFolderNavigation.select(XvUiModel.FOLDER_ALL);
-      fileFolderNavigation.select(XvUiModel.FOLDER_ALL);
-      folderNavigationFocus.secrets = {
-        desktop: XvUiModel.FOLDER_ALL,
-        mobile: XvUiModel.FOLDER_ALL,
-      };
-      folderNavigationFocus.files = {
-        desktop: XvUiModel.FOLDER_ALL,
-        mobile: XvUiModel.FOLDER_ALL,
-      };
+      treeFocus.secrets = '';
+      treeFocus.files = '';
       const loads = [loadSecrets(selectedVault).catch(fail)];
       if (ctx.capabilities.files) loads.push(loadFiles(selectedVault).catch(fail));
       if (activeTab === 'trash') loads.push(loadDeleted(selectedVault).catch(fail));
@@ -2100,18 +2002,13 @@ function renderSecrets() {
   publishCommandMetadata();
   const query = $('#search').value;
   const tbody = $('#secrets-table tbody');
-  tbody.innerHTML = '';
   const searchVisible = query.trim()
     ? searchIndex(secretSearchIndex, query)
       .filter((entry) => entry.surface === 'secrets')
       .map((entry) => secrets[entry.sourceIndex])
     : secrets;
-  const filtered = XvUiModel.filterSecrets(searchVisible, listFilters.secrets);
-  const folderCount = renderFolderNavigation('secrets', secrets, filtered);
-  const selectedFolder = secretFolderNavigation.snapshot().selected;
-  const visible = filtered.filter((secret) => (
-    XvUiModel.itemMatchesFolder(secret, selectedFolder)
-  ));
+  const visible = XvUiModel.filterSecrets(searchVisible, listFilters.secrets);
+  const expandableIds = syncTreeExpansion('secrets', secrets);
   const sorted = query.trim() ? visible : sortedTableItems('secrets', visible);
   filterControls.secrets.setOptions('group', [
     ...groupFilterOptions(secrets),
@@ -2123,81 +2020,178 @@ function renderSecrets() {
   ]);
   filterControls.secrets.render();
   $('#secret-search-clear').hidden = !query;
-  setListSummary(
-    'secrets',
-    visible.length,
-    secrets.length,
-    folderCount,
-  );
-  const cols = secretSelection.enabled ? 6 : 5;
+  setListSummary('secrets', visible.length, secrets.length, expandableIds.length);
   const rows = XvUiModel.contentRows('secrets', sorted);
-  for (const row of rows) tbody.appendChild(secretRow(row));
+  const tree = XvUiModel.buildContentTree(rows);
+  const narrowed = Boolean(query.trim()) || hasNarrowingFilters('secrets');
+  const gridRows = XvUiModel.flattenContentTree(tree, secretExpansion.expanded, {
+    forcedKeys: narrowed ? XvUiModel.treeForcedKeys(tree) : null,
+  });
+  renderSecretTreeGrid(gridRows);
   renderStackedRows('secrets', rows);
   syncSelectionUi('secrets', sorted.map((secret) => secret.original_name || secret.name));
-  if (!tbody.children.length) {
-    showListState(tbody, 'secrets', secrets.length ? 'filtered' : 'empty', cols);
+  if (!gridRows.length) {
+    tbody.innerHTML = '';
+    showListState(tbody, 'secrets', secrets.length ? 'filtered' : 'empty', SECRET_COLUMN_COUNT);
   }
 }
 
-function itemNameCell(kind, name, activate, accessibleLabel) {
-  const td = document.createElement('td');
-  td.classList.add('item-name');
-  const content = document.createElement('div');
-  content.className = 'item-name-content';
-  content.appendChild(kind === 'secret' ? icon('secret') : icon('file'));
-  const label = document.createElement('strong');
-  label.textContent = name || '';
-  content.appendChild(label);
-  if (!activate) {
-    td.appendChild(content);
-    return td;
+const SECRET_COLUMN_COUNT = 5;
+
+function treeNameContent(kind, row) {
+  const name = row.identifier;
+  if (kind === 'secrets') {
+    if (secretSelection.enabled) {
+      const content = document.createElement('span');
+      content.className = 'item-name-content';
+      content.append(icon('secret'));
+      const label = document.createElement('strong');
+      label.textContent = name;
+      content.appendChild(label);
+      return content;
+    }
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'item-name-content row-action';
+    button.setAttribute('aria-label', `Edit secret ${name}`);
+    button.append(icon('secret'));
+    const label = document.createElement('strong');
+    label.textContent = name;
+    button.appendChild(label);
+    button.onclick = (event) => { event.stopPropagation(); openDrawer(name); };
+    markContentControl(button, 'secrets', name, 'activation');
+    return button;
   }
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.className = 'item-name-content row-action';
-  button.setAttribute('aria-label', accessibleLabel);
-  button.replaceChildren(...content.childNodes);
-  button.onclick = (event) => {
-    event.stopPropagation();
-    activate();
-  };
-  td.appendChild(button);
+  if (fileSelection.enabled) {
+    const content = document.createElement('span');
+    content.className = 'item-name-content';
+    content.append(icon('file'));
+    const label = document.createElement('strong');
+    label.textContent = name;
+    content.appendChild(label);
+    return content;
+  }
+  const link = document.createElement('a');
+  link.className = 'item-name-content file-link';
+  link.href = `/api/files/${encodeURIComponent(name)}${vaultQS(currentVault)}`;
+  link.download = name;
+  link.append(icon('file'));
+  const label = document.createElement('strong');
+  label.textContent = name;
+  link.appendChild(label);
+  link.onclick = (event) => { event.preventDefault(); event.stopPropagation(); downloadFile(name); };
+  markContentControl(link, 'files', name, 'activation');
+  return link;
+}
+
+function treeFolderContent(row) {
+  const content = document.createElement('span');
+  content.className = 'item-name-content tree-folder-name';
+  content.append(icon('folder'));
+  const label = document.createElement('strong');
+  label.textContent = row.label;
+  const count = document.createElement('span');
+  count.className = 'tree-folder-count';
+  count.textContent = String(row.itemIds.length);
+  content.append(label, count);
+  return content;
+}
+
+function textCell(value, className) {
+  const td = document.createElement('td');
+  if (className) td.classList.add(className);
+  td.textContent = value || '';
   return td;
 }
 
-function secretRow(row) {
-  const s = row.source;
-  const name = row.identifier;
-  const activate = secretSelection.enabled ? null : () => openDrawer(name);
-  const tr = document.createElement('tr');
-  if (secretSelection.ids.has(name)) tr.classList.add('selected-row');
-  if (secretSelection.enabled) tr.appendChild(selectionCell('secrets', name));
-  for (const [index, cell] of [name, s.folder, s.groups, s.note, XvUiModel.formatDate(s.updated_on)].entries()) {
-    if (index === 0) {
-      const nameCell = itemNameCell('secret', name, activate, `Edit secret ${name}`);
-      nameCell.classList.add('column-secret-name');
-      const action = nameCell.querySelector('button');
-      if (action) markContentControl(action, 'secrets', name, 'activation');
-      tr.appendChild(nameCell);
-      continue;
-    }
-    const td = document.createElement('td');
-    if (index === 1) td.classList.add('column-secret-folder');
-    if (index === 2) td.classList.add('column-groups');
-    if (index === 3) td.classList.add('column-note');
-    if (index === 4) td.classList.add('column-secret-updated');
-    if (index === 2 && cell) {
-      const tag = document.createElement('span');
-      tag.className = 'tag';
-      tag.textContent = cell;
-      td.appendChild(tag);
-    } else {
-      td.textContent = cell || '';
-    }
-    tr.appendChild(td);
+function secretCells(row) {
+  if (row.type === 'folder') {
+    return [
+      textCell(row.path, 'column-secret-folder'),
+      textCell('', 'column-groups'),
+      textCell('', 'column-note'),
+      textCell('', 'column-secret-updated'),
+    ];
   }
-  if (activate) tr.onclick = activate;
-  return tr;
+  const secret = row.row.source;
+  const groups = document.createElement('td');
+  groups.classList.add('column-groups');
+  if (secret.groups) {
+    const tag = document.createElement('span');
+    tag.className = 'tag';
+    tag.textContent = secret.groups;
+    groups.appendChild(tag);
+  }
+  return [
+    textCell(secret.folder, 'column-secret-folder'),
+    groups,
+    textCell(secret.note, 'column-note'),
+    textCell(XvUiModel.formatDate(secret.updated_on), 'column-secret-updated'),
+  ];
+}
+
+function fileCells(row) {
+  if (row.type === 'folder') {
+    return [
+      textCell('', 'column-file-size'),
+      textCell('', 'column-file-type'),
+      textCell('', 'column-file-modified'),
+    ];
+  }
+  const file = row.row.source;
+  return [
+    textCell(fmtSize(file.size), 'column-file-size'),
+    textCell(file.content_type, 'column-file-type'),
+    textCell(XvUiModel.formatDate(file.last_modified), 'column-file-modified'),
+  ];
+}
+
+function folderRowLabel(kind, row) {
+  const singular = kind === 'secrets' ? 'secret' : 'file';
+  const count = row.itemIds.length;
+  return `Folder ${row.path}, ${count} ${count === 1 ? singular : kind}`;
+}
+
+function mountTreeGrid(kind, gridRows) {
+  const singular = kind === 'secrets' ? 'secret' : 'file';
+  const expansion = expansionFor(kind);
+  return renderTreeGrid({
+    document,
+    tbody: $(`#${kind}-table tbody`),
+    rows: gridRows,
+    treeCellClass: kind === 'secrets' ? 'column-secret-name' : 'column-file-name',
+    selection: selectionState(kind),
+    treeContent: (row) => (row.type === 'folder'
+      ? treeFolderContent(row)
+      : treeNameContent(kind, row)),
+    cells: (row) => (kind === 'secrets' ? secretCells(row) : fileCells(row)),
+    rowLabel: (row) => (row.type === 'folder'
+      ? folderRowLabel(kind, row)
+      : `${singular === 'secret' ? 'Secret' : 'File'} ${row.identifier}`),
+    selectionLabel: (row) => (row.type === 'folder'
+      ? `Select all ${kind} in folder ${row.path}`
+      : `Select ${singular} ${row.identifier}`),
+    onToggle: (row, value) => {
+      treeFocus[kind] = row.key;
+      expansion.toggle(row.identity, value);
+      renderSelectionKind(kind);
+    },
+    onSelectionChange: () => {
+      resetBulkConfirmation(kind);
+      renderSelectionKind(kind);
+    },
+    onActivate: (row) => {
+      if (kind === 'secrets') openDrawer(row.identifier);
+      else downloadFile(row.identifier);
+    },
+    focusKey: treeFocus[kind],
+    onFocus: (key) => { treeFocus[kind] = key; },
+    markControl: (element, id, type) => markContentControl(element, kind, id, type),
+  });
+}
+
+function renderSecretTreeGrid(gridRows) {
+  return mountTreeGrid('secrets', gridRows);
 }
 
 function stackedMetadata(metadata, id) {
@@ -2285,7 +2279,7 @@ function renderStackedRows(kind, rows) {
       if (state.ids.has(row.identifier)) item.classList.add('selected-row');
       const metadata = stackedMetadata(row.metadata, ids.metadata);
       if (state.enabled) {
-        const selection = selectionCell(kind, row.identifier).firstElementChild;
+        const selection = selectionCheckbox(kind, row.identifier);
         selection.classList.add('stacked-selection');
         selection.removeAttribute('aria-label');
         selection.setAttribute('aria-labelledby', `${ids.action} ${ids.identifier}`);
@@ -3476,27 +3470,15 @@ function renderFiles() {
   if (filesState !== 'ready') return;
   publishCommandMetadata();
   const tbody = $('#files-table tbody');
-  tbody.innerHTML = '';
   const query = $('#file-search').value;
   const searchVisible = query.trim()
     ? searchIndex(fileSearchIndex, query)
       .filter((entry) => entry.surface === 'files')
       .map((entry) => files[entry.sourceIndex])
     : files;
-  const filtered = XvUiModel.filterFiles(searchVisible, listFilters.files);
-  const folderCount = renderFolderNavigation('files', files, filtered);
-  const selectedFolder = fileFolderNavigation.snapshot().selected;
-  const visible = filtered.filter((file) => XvUiModel.itemMatchesFolder(
-    { folder: folderOf('files', file) },
-    selectedFolder,
-  ));
-  setListSummary(
-    'files',
-    visible.length,
-    files.length,
-    folderCount,
-  );
-  const cols = fileSelection.enabled ? 5 : 4;
+  const visible = XvUiModel.filterFiles(searchVisible, listFilters.files);
+  const expandableIds = syncTreeExpansion('files', files);
+  setListSummary('files', visible.length, files.length, expandableIds.length);
   const sorted = query.trim() ? visible : sortedTableItems('files', visible);
   filterControls.files.setOptions('type', [
     ...files.map((file) => file.content_type).filter(Boolean),
@@ -3505,13 +3487,21 @@ function renderFiles() {
   filterControls.files.render();
   $('#file-search-clear').hidden = !query;
   const rows = XvUiModel.contentRows('files', sorted, { formatSize: fmtSize });
-  for (const row of rows) tbody.appendChild(fileRow(row));
+  const tree = XvUiModel.buildContentTree(rows);
+  const narrowed = Boolean(query.trim()) || hasNarrowingFilters('files');
+  const gridRows = XvUiModel.flattenContentTree(tree, fileExpansion.expanded, {
+    forcedKeys: narrowed ? XvUiModel.treeForcedKeys(tree) : null,
+  });
+  mountTreeGrid('files', gridRows);
   renderStackedRows('files', rows);
   syncSelectionUi('files', sorted.map((file) => file.name));
-  if (!tbody.children.length) {
-    showListState(tbody, 'files', files.length ? 'filtered' : 'empty', cols);
+  if (!gridRows.length) {
+    tbody.innerHTML = '';
+    showListState(tbody, 'files', files.length ? 'filtered' : 'empty', FILE_COLUMN_COUNT);
   }
 }
+
+const FILE_COLUMN_COUNT = 4;
 
 $('#file-search').oninput = renderFiles;
 $('#file-search-clear').onclick = () => {
@@ -3519,51 +3509,6 @@ $('#file-search-clear').onclick = () => {
   renderFiles();
   $('#file-search').focus();
 };
-
-function fileNameCell(name) {
-  if (fileSelection.enabled) {
-    const cell = itemNameCell('file', name, null, '');
-    cell.classList.add('column-file-name');
-    return cell;
-  }
-  const td = document.createElement('td');
-  td.className = 'item-name column-file-name';
-  const link = document.createElement('a');
-  link.className = 'item-name-content file-link';
-  link.href = `/api/files/${encodeURIComponent(name)}${vaultQS(currentVault)}`;
-  link.download = name;
-  link.appendChild(icon('file'));
-  const label = document.createElement('strong');
-  label.textContent = name;
-  link.appendChild(label);
-  link.onclick = (event) => { event.preventDefault(); downloadFile(name); };
-  td.appendChild(link);
-  return td;
-}
-
-function fileRow(row) {
-  const f = row.source;
-  const name = row.identifier;
-  const tr = document.createElement('tr');
-  if (fileSelection.ids.has(name)) tr.classList.add('selected-row');
-  if (fileSelection.enabled) tr.appendChild(selectionCell('files', name));
-  for (const [index, cell] of [f.name, fmtSize(f.size), f.content_type, XvUiModel.formatDate(f.last_modified)].entries()) {
-    if (index === 0) {
-      const nameCell = fileNameCell(name);
-      const action = nameCell.querySelector('a, button');
-      if (action) markContentControl(action, 'files', name, 'activation');
-      tr.appendChild(nameCell);
-      continue;
-    }
-    const td = document.createElement('td');
-    if (index === 1) td.classList.add('column-file-size');
-    if (index === 2) td.classList.add('column-file-type');
-    if (index === 3) td.classList.add('column-file-modified');
-    td.textContent = cell || '';
-    tr.appendChild(td);
-  }
-  return tr;
-}
 
 function setVisibleSelection(kind, checked) {
   const state = selectionState(kind);
@@ -3912,6 +3857,6 @@ $('#file-input').onchange = (e) => {
 initColumnResizing();
 initSorting();
 initResponsiveContent();
-initFolderNavigationControls();
+initTreeExpansionControls();
 init().catch(fail);
 }

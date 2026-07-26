@@ -76,6 +76,8 @@
     <div class="toolbar">
       <label class="search-field"><span class="sr-only">Search secrets</span><svg class="icon" aria-hidden="true"><use href="#icon-search"></use></svg><input id="search" type="search" placeholder="Search names, folders, groups, and record types"></label>
       <button id="secret-search-clear" class="button ghost compact search-clear" type="button" hidden>Clear search</button>
+      <button id="secrets-expand-all" class="button ghost compact" type="button">Expand all</button>
+      <button id="secrets-collapse-all" class="button ghost compact" type="button">Collapse all</button>
       <button id="refresh-secrets" class="button secondary" type="button" aria-label="Refresh secrets">Refresh</button>
       <button id="select-secrets" class="button secondary" type="button">Select</button>
       <button id="new-secret" class="button primary" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-plus"></use></svg>New secret</button>
@@ -88,11 +90,6 @@
       <button id="secret-filters-clear" class="button ghost compact" type="button" hidden>Clear filters</button>
     </div>
     <div id="secret-filter-chips" class="filter-chips" role="group" aria-label="Active secret filters" aria-live="polite" hidden></div>
-    <div class="folder-mobile-controls" aria-label="Secret folder controls">
-      <button id="secrets-folder-filter-open" class="button secondary" type="button" aria-haspopup="dialog" aria-controls="secrets-folder-sheet">Filter folders</button>
-      <button id="secrets-mobile-folders-expand-all" class="button ghost compact" type="button">Expand all</button>
-      <button id="secrets-mobile-folders-collapse-all" class="button ghost compact" type="button">Collapse all</button>
-    </div>
     <div id="secret-bulk-bar" class="bulk-toolbar" hidden>
       <span id="secret-selection-count" aria-live="polite">0 selected</span>
       <small data-context-copy></small>
@@ -113,21 +110,11 @@
       <button class="button ghost error-dismiss" type="button" aria-label="Dismiss error">Dismiss</button>
     </div>
     <div id="secrets-workspace" class="vault-workspace">
-      <aside class="folder-sidebar" aria-labelledby="secrets-folder-heading">
-        <div class="folder-sidebar-heading">
-          <h2 id="secrets-folder-heading">Folders</h2>
-          <div class="folder-actions">
-            <button id="secrets-folders-expand-all" class="button ghost compact" type="button">Expand all</button>
-            <button id="secrets-folders-collapse-all" class="button ghost compact" type="button">Collapse all</button>
-          </div>
-        </div>
-        <div id="secrets-folder-tree" class="folder-tree" role="tree" aria-label="Secret folders"></div>
-      </aside>
       <div class="vault-content">
         <div class="data-surface">
-          <table id="secrets-table" tabindex="-1">
-            <colgroup><col class="selection-col" hidden><col class="column-secret-name"><col class="column-secret-folder"><col class="column-groups"><col class="column-note"><col class="column-secret-updated"></colgroup>
-            <thead><tr><th class="selection-column" hidden><input id="select-all-secrets" type="checkbox" aria-label="Select all 0 visible secrets" aria-checked="false"></th><th class="column-secret-name sortable" data-sort-key="name" aria-sort="ascending"><button class="sort-button" type="button">Name<span class="sort-indicator" aria-hidden="true"></span></button><span class="column-resizer" role="separator" aria-orientation="vertical" aria-label="Resize Name and Folder columns" tabindex="0"></span></th><th class="column-secret-folder sortable" data-sort-key="folder" aria-sort="none"><button class="sort-button" type="button">Folder<span class="sort-indicator" aria-hidden="true"></span></button><span class="column-resizer" role="separator" aria-orientation="vertical" aria-label="Resize Folder and Groups columns" tabindex="0"></span></th><th class="column-groups sortable" data-sort-key="groups" aria-sort="none"><button class="sort-button" type="button">Groups<span class="sort-indicator" aria-hidden="true"></span></button><span class="column-resizer" role="separator" aria-orientation="vertical" aria-label="Resize Groups and Note columns" tabindex="0"></span></th><th class="column-note sortable" data-sort-key="note" aria-sort="none"><button class="sort-button" type="button">Note<span class="sort-indicator" aria-hidden="true"></span></button><span class="column-resizer" role="separator" aria-orientation="vertical" aria-label="Resize Note and Updated columns" tabindex="0"></span></th><th class="column-secret-updated sortable" data-sort-key="updated" aria-sort="none"><button class="sort-button" type="button">Updated<span class="sort-indicator" aria-hidden="true"></span></button></th></tr></thead>
+          <table id="secrets-table" role="treegrid" aria-label="Secret folders and secrets" tabindex="-1">
+            <colgroup><col class="column-secret-name"><col class="column-secret-folder"><col class="column-groups"><col class="column-note"><col class="column-secret-updated"></colgroup>
+            <thead><tr><th class="column-secret-name sortable" data-sort-key="name" aria-sort="ascending"><input id="select-all-secrets" class="tree-select-all" type="checkbox" aria-label="Select all 0 visible secrets" aria-checked="false" hidden><button class="sort-button" type="button">Name<span class="sort-indicator" aria-hidden="true"></span></button><span class="column-resizer" role="separator" aria-orientation="vertical" aria-label="Resize Name and Folder columns" tabindex="0"></span></th><th class="column-secret-folder sortable" data-sort-key="folder" aria-sort="none"><button class="sort-button" type="button">Folder<span class="sort-indicator" aria-hidden="true"></span></button><span class="column-resizer" role="separator" aria-orientation="vertical" aria-label="Resize Folder and Groups columns" tabindex="0"></span></th><th class="column-groups sortable" data-sort-key="groups" aria-sort="none"><button class="sort-button" type="button">Groups<span class="sort-indicator" aria-hidden="true"></span></button><span class="column-resizer" role="separator" aria-orientation="vertical" aria-label="Resize Groups and Note columns" tabindex="0"></span></th><th class="column-note sortable" data-sort-key="note" aria-sort="none"><button class="sort-button" type="button">Note<span class="sort-indicator" aria-hidden="true"></span></button><span class="column-resizer" role="separator" aria-orientation="vertical" aria-label="Resize Note and Updated columns" tabindex="0"></span></th><th class="column-secret-updated sortable" data-sort-key="updated" aria-sort="none"><button class="sort-button" type="button">Updated<span class="sort-indicator" aria-hidden="true"></span></button></th></tr></thead>
             <tbody></tbody>
           </table>
           <div id="secrets-stacked" class="stacked-list" role="region" aria-label="Secrets" tabindex="-1" hidden></div>
@@ -148,6 +135,8 @@
     <div class="toolbar file-toolbar">
       <label class="search-field"><span class="sr-only">Search files</span><svg class="icon" aria-hidden="true"><use href="#icon-search"></use></svg><input id="file-search" type="search" placeholder="Search file names, folders, and types"></label>
       <button id="file-search-clear" class="button ghost compact search-clear" type="button" hidden>Clear search</button>
+      <button id="files-expand-all" class="button ghost compact" type="button">Expand all</button>
+      <button id="files-collapse-all" class="button ghost compact" type="button">Collapse all</button>
       <button id="refresh-files" class="button secondary" type="button" aria-label="Refresh files">Refresh</button>
       <button id="select-files" class="button secondary" type="button">Select</button>
     </div>
@@ -156,11 +145,6 @@
       <button id="file-filters-clear" class="button ghost compact" type="button" hidden>Clear filters</button>
     </div>
     <div id="file-filter-chips" class="filter-chips" role="group" aria-label="Active file filters" aria-live="polite" hidden></div>
-    <div class="folder-mobile-controls" aria-label="File folder controls">
-      <button id="files-folder-filter-open" class="button secondary" type="button" aria-haspopup="dialog" aria-controls="files-folder-sheet">Filter folders</button>
-      <button id="files-mobile-folders-expand-all" class="button ghost compact" type="button">Expand all</button>
-      <button id="files-mobile-folders-collapse-all" class="button ghost compact" type="button">Collapse all</button>
-    </div>
     <div id="file-bulk-bar" class="bulk-toolbar" hidden>
       <span id="file-selection-count" aria-live="polite">0 selected</span>
       <small data-context-copy></small>
@@ -210,21 +194,11 @@
       Dismiss the current upload summary before choosing another batch.
     </p>
     <div id="files-workspace" class="vault-workspace">
-      <aside class="folder-sidebar" aria-labelledby="files-folder-heading">
-        <div class="folder-sidebar-heading">
-          <h2 id="files-folder-heading">Folders</h2>
-          <div class="folder-actions">
-            <button id="files-folders-expand-all" class="button ghost compact" type="button">Expand all</button>
-            <button id="files-folders-collapse-all" class="button ghost compact" type="button">Collapse all</button>
-          </div>
-        </div>
-        <div id="files-folder-tree" class="folder-tree" role="tree" aria-label="File folders"></div>
-      </aside>
       <div class="vault-content">
         <div class="data-surface">
-          <table id="files-table" tabindex="-1">
-            <colgroup><col class="selection-col" hidden><col class="column-file-name"><col class="column-file-size"><col class="column-file-type"><col class="column-file-modified"></colgroup>
-            <thead><tr><th class="selection-column" hidden><input id="select-all-files" type="checkbox" aria-label="Select all 0 visible files" aria-checked="false"></th><th class="column-file-name sortable" data-sort-key="name" aria-sort="ascending"><button class="sort-button" type="button">Name<span class="sort-indicator" aria-hidden="true"></span></button><span class="column-resizer" role="separator" aria-orientation="vertical" aria-label="Resize Name and Size columns" tabindex="0"></span></th><th class="column-file-size sortable" data-sort-key="size" aria-sort="none"><button class="sort-button" type="button">Size<span class="sort-indicator" aria-hidden="true"></span></button><span class="column-resizer" role="separator" aria-orientation="vertical" aria-label="Resize Size and Type columns" tabindex="0"></span></th><th class="column-file-type sortable" data-sort-key="type" aria-sort="none"><button class="sort-button" type="button">Type<span class="sort-indicator" aria-hidden="true"></span></button><span class="column-resizer" role="separator" aria-orientation="vertical" aria-label="Resize Type and Modified columns" tabindex="0"></span></th><th class="column-file-modified sortable" data-sort-key="modified" aria-sort="none"><button class="sort-button" type="button">Modified<span class="sort-indicator" aria-hidden="true"></span></button></th></tr></thead>
+          <table id="files-table" role="treegrid" aria-label="File folders and files" tabindex="-1">
+            <colgroup><col class="column-file-name"><col class="column-file-size"><col class="column-file-type"><col class="column-file-modified"></colgroup>
+            <thead><tr><th class="column-file-name sortable" data-sort-key="name" aria-sort="ascending"><input id="select-all-files" class="tree-select-all" type="checkbox" aria-label="Select all 0 visible files" aria-checked="false" hidden><button class="sort-button" type="button">Name<span class="sort-indicator" aria-hidden="true"></span></button><span class="column-resizer" role="separator" aria-orientation="vertical" aria-label="Resize Name and Size columns" tabindex="0"></span></th><th class="column-file-size sortable" data-sort-key="size" aria-sort="none"><button class="sort-button" type="button">Size<span class="sort-indicator" aria-hidden="true"></span></button><span class="column-resizer" role="separator" aria-orientation="vertical" aria-label="Resize Size and Type columns" tabindex="0"></span></th><th class="column-file-type sortable" data-sort-key="type" aria-sort="none"><button class="sort-button" type="button">Type<span class="sort-indicator" aria-hidden="true"></span></button><span class="column-resizer" role="separator" aria-orientation="vertical" aria-label="Resize Type and Modified columns" tabindex="0"></span></th><th class="column-file-modified sortable" data-sort-key="modified" aria-sort="none"><button class="sort-button" type="button">Modified<span class="sort-indicator" aria-hidden="true"></span></button></th></tr></thead>
             <tbody></tbody>
           </table>
           <div id="files-stacked" class="stacked-list" role="region" aria-label="Files" tabindex="-1" hidden></div>
@@ -264,29 +238,7 @@
   </section>
 </main>
 
-<section id="secrets-folder-sheet" class="folder-sheet" role="dialog" aria-modal="true" aria-labelledby="secrets-folder-sheet-title" tabindex="-1" hidden>
-  <div class="folder-sheet-heading">
-    <h2 id="secrets-folder-sheet-title">Filter secret folders</h2>
-    <button id="secrets-folder-sheet-close" class="button ghost" type="button">Done</button>
-  </div>
-  <div class="folder-actions">
-    <button id="secrets-mobile-sheet-expand-all" class="button secondary compact" type="button">Expand all</button>
-    <button id="secrets-mobile-sheet-collapse-all" class="button secondary compact" type="button">Collapse all</button>
-  </div>
-  <div id="secrets-mobile-folder-tree" class="folder-tree" role="tree" aria-label="Secret folder filter"></div>
-</section>
 
-<section id="files-folder-sheet" class="folder-sheet" role="dialog" aria-modal="true" aria-labelledby="files-folder-sheet-title" tabindex="-1" hidden>
-  <div class="folder-sheet-heading">
-    <h2 id="files-folder-sheet-title">Filter file folders</h2>
-    <button id="files-folder-sheet-close" class="button ghost" type="button">Done</button>
-  </div>
-  <div class="folder-actions">
-    <button id="files-mobile-sheet-expand-all" class="button secondary compact" type="button">Expand all</button>
-    <button id="files-mobile-sheet-collapse-all" class="button secondary compact" type="button">Collapse all</button>
-  </div>
-  <div id="files-mobile-folder-tree" class="folder-tree" role="tree" aria-label="File folder filter"></div>
-</section>
 
 <div id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" tabindex="-1" hidden>
   <div class="drawer-header">
