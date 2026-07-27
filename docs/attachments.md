@@ -42,7 +42,7 @@ missing name fails early rather than creating an orphan blob.
 | Ciphertext location | Ordinary file storage under `attachments/<secret-name>/<filename>`. Association is the naming convention — no secret tags are consumed. |
 | Metadata flag | Uploaded blobs carry `xv_encrypted=age`. Underscore is required: Azure Blob rejects hyphenated metadata keys (`xv-encrypted` fails with 400). |
 | Listings | `xv list` / `xv ls` hide `xv-attachment-key`. Treat it as infrastructure, not a user secret. |
-| Download | `xv attachments --get` and `xv file download` decrypt when the blob is under `attachments/` or carries the metadata flag. |
+| Download | `xv attachments --get` and `xv file download` decrypt when content is age-shaped **and** carries `xv_encrypted=age`. Unflagged / foreign `.age` files pass through untouched. |
 
 On the local backend, files are already age-encrypted at rest; attachments
 still use the vault key so the same CLI and web paths work on every backend.
