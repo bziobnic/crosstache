@@ -11,6 +11,13 @@ Typed records are supported: create one via the type picker on the "New
 secret" drawer or open an existing one to edit it field-by-field, with
 secret-kind fields masked and individually revealable/copyable.
 
+Opening a secret lists its file attachments (if any) as download links in the
+detail drawer (`GET /api/secrets/{name}/attachments`). Downloads decrypt
+age-encrypted blobs the same way `xv file download` does. Renaming a secret
+that still has attachments is refused (`xv-attachments-block-rename`) —
+detach first, or keep the current name. See
+[`docs/attachments.md`](attachments.md).
+
 Both surfaces render a single hierarchical tree grid: folders and their
 contents live in one table, each row indented by depth, with a disclosure
 chevron on folder rows. Vaults with 50 or fewer items open fully expanded;

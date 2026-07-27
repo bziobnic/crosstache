@@ -1,14 +1,30 @@
-# Web UI selection and indentation
+# Documentation automation — secret file attachments
 
-Detailed plan:
-`docs/superpowers/plans/2026-07-14-web-ui-selection.md`
+## Goal
 
-## Steps
+Ship operator-facing docs for secret file attachments (v0.27.0+) — the feature
+had design/plan specs but no public workflow guide in `docs/`, `README.md`, or
+`docs/FEATURES.md`.
 
-- [x] Add failing embedded-asset contract tests.
-- [x] Indent expanded folder children in both tables.
-- [x] Add explicit selection mode and visible-only select-all.
-- [x] Add bounded bulk delete for secrets and files.
-- [x] Add bounded bulk move for secrets.
-- [x] Update web UI documentation.
-- [x] Run formatting, clippy, and UI-feature tests.
+## Plan
+
+- [x] Inventory recent feature work vs public docs; confirm attachments as the
+      largest post-ship gap (schedule/rotation/git/CI already documented).
+- [x] Add `docs/attachments.md` verified against
+      `src/secret/attachments.rs`, `src/cli/attach_ops.rs`, `src/cli/file_ops.rs`,
+      `src/cli/secret_ops.rs`, `src/cli/migrate_ops.rs`, and `src/web/api.rs`.
+- [x] Update `docs/FEATURES.md` command tables for `attach` / `attachments` /
+      `detach` and `xv file upload --encrypt`.
+- [x] Update `README.md` TOC, Files section, Web UI note, and troubleshooting.
+- [x] Update `docs/web-ui.md` for secret-drawer attachment download links.
+- [x] Mark the attachments design spec as shipped; correct the metadata key to
+      `xv_encrypted` (Azure-valid underscore form).
+- [x] Note migrate limitations for attachment blobs in `docs/migration.md`.
+- [ ] Commit, push, open PR.
+
+## Validation
+
+- Cross-check constants and commands against source (no fabricated behavior).
+- Prefer updating existing public docs over inventing parallel guides.
+- Spot-check: `rg` for `xv_encrypted`, `xv attach`, `xv-attachment-key` in the
+  updated files; confirm design banner no longer says "not yet implemented".

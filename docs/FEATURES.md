@@ -19,6 +19,7 @@
 | Git-native versioning | Unsupported by design (would mirror cloud secrets into permanent git history) | Unsupported by design | `[local].git` + `xv git log/diff/push/pull` |
 | Sharing / RBAC commands | Azure RBAC | Unsupported; commands return IAM resource-policy hints | Unsupported |
 | File storage | Azure Blob Storage; includes `xv file sync` | S3 when `[aws].s3_bucket` or `XV_AWS_S3_BUCKET` is set; sync unsupported | age-encrypted per-vault files; includes `xv file sync` |
+| Secret file attachments | Client-side age (`xv attach`); key in Key Vault as `xv-attachment-key` | Same over S3 when file storage is configured | Same; double-encrypts harmlessly with the store key |
 
 ---
 
@@ -46,6 +47,9 @@
 | `xv schedule uninstall` | Remove the schedule; succeeds when none is installed |
 | `xv copy <name>` | Copy a secret between vaults (`--from`, `--to`) |
 | `xv move <name>` | Move a secret between vaults (`--from`, `--to`) |
+| `xv attach <secret> <file>` | Age-encrypt and attach a file to a secret (`--name` overrides the stored basename). Requires file storage. See [attachments.md](attachments.md) |
+| `xv attachments <secret>` | List a secret's attachments, or `--get <name>` to download decrypted (`-o/--output` path; refuses overwrite) |
+| `xv detach <secret> <name>` | Remove one attachment (`--force` skips confirmation) |
 | `xv group list` | List secret groups with member counts, derived from the `groups` metadata (`--no-cache`; full `--format`/`--columns` support) |
 
 ### Metadata & Organization
@@ -258,12 +262,12 @@ active backend:
 |---------|-------------|
 | `xv upload <file>` | Quick upload (alias for `xv file upload`) |
 | `xv download <file>` | Quick download (alias for `xv file download`) |
-| `xv file upload` | Upload files (`--recursive`, `--prefix`, `--flatten`) |
-| `xv file download` | Download files (`--recursive`, `--flatten`, `--output`, `--force`) |
+| `xv file upload` | Upload files (`--recursive`, `--prefix`, `--flatten`); `--encrypt` age-encrypts with the vault attachment key (single-file only) |
+| `xv file download` | Download files (`--recursive`, `--flatten`, `--output`, `--force`); transparently decrypts `xv_encrypted=age` content |
 | `xv file list` | List files (hierarchical by default; `--recursive` for flat; `--names-only` (recursive, pipe-friendly), `--pager [auto\|always\|never]`, `--page-size`, `--page`, `--limit`, `--no-cache`) |
 | `xv file delete` | Delete files (`--force`, `--continue-on-error`) |
 | `xv file info` | File metadata |
-| `xv file sync` | Sync local directory with blob prefix (`--direction` up/down/both, `--dry-run`, `--delete`); supported on Azure and local, unsupported on AWS |
+| `xv file sync` | Sync local directory with blob prefix (`--direction` up/down/both, `--dry-run`, `--delete`); supported on Azure and local, unsupported on AWS. Skips encrypted attachment blobs under `attachments/` / flagged `xv_encrypted=age` |
 
 AWS supports upload/download/list/delete/info through S3. Attempting
 `xv file sync` on the AWS backend returns a setup-neutral error that recommends
@@ -272,6 +276,11 @@ recursive upload/download as the current bulk-transfer path.
 In a multi-vault workspace, file commands resolve through the workspace default
 entry's backend and vault. They do not provide a union listing or `alias:path`
 addressing for files.
+
+Secret-associated confidential files use `xv attach` / `xv attachments` /
+`xv detach` (blob path `attachments/<secret>/…`, key custody in
+`xv-attachment-key`). Full workflow, pitfalls, and lifecycle notes:
+[attachments.md](attachments.md).
 
 `xv file list --format csv` columns match the table: `Kind,Name,Size,Content-Type,Modified,Groups`.
 JSON/YAML keep the full-fidelity serialization (etags, raw byte sizes, extra metadata).
