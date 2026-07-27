@@ -20,7 +20,7 @@ had design/plan specs but no public workflow guide in `docs/`, `README.md`, or
 - [x] Mark the attachments design spec as shipped; correct the metadata key to
       `xv_encrypted` (Azure-valid underscore form).
 - [x] Note migrate limitations for attachment blobs in `docs/migration.md`.
-- [ ] Commit, push, open PR.
+- [x] Commit, push, open PR.
 
 ## Validation
 
@@ -28,3 +28,5 @@ had design/plan specs but no public workflow guide in `docs/`, `README.md`, or
 - Prefer updating existing public docs over inventing parallel guides.
 - Spot-check: `rg` for `xv_encrypted`, `xv attach`, `xv-attachment-key` in the
   updated files; confirm design banner no longer says "not yet implemented".
+- Clarified that `download_decrypted` keys off `xv_encrypted=age`, not path
+  prefix alone.
