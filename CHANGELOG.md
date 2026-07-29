@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.31.0 — Hierarchical tree grid for the web UI (2026-07-29)
+
+### Changed
+
+- **Web UI: folder sidebar replaced with a hierarchical tree grid.** Folders
+  and their contents now live in one table on both the secrets and files
+  surfaces, sharing a single tree-grid implementation.
+
+### Fixed
+
+- **"Expand/collapse does nothing"**: the old folder tree modelled folders
+  only, so a folder counted as expandable only when it held sub-folders. A
+  vault of single-segment folders had zero expandable nodes, every chevron
+  rendered empty, and Expand all / Collapse all were no-ops while staying
+  visible and enabled.
+- Saved expansion state was re-hydrated on every list refresh, clobbering
+  what the user had opened.
+- A prune that ran before the scope's token index arrived silently dropped
+  its write.
+
 ## v0.30.0 — Rotation scheduling, local audit trail, git-native versioning, first-party CI/CD (2026-07-25)
 
 ### Added
