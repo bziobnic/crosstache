@@ -41,6 +41,7 @@ pre-commit leak scanner that matches files against your *actual* vault values.
 - [Vault management](#vault-management)
 - [Cross-vault operations — diff, copy, move](#cross-vault-operations--diff-copy-move)
 - [Files (blob storage)](#files-blob-storage)
+- [Secret file attachments](#secret-file-attachments) — `xv attach`, age-encrypted
 - [Rotation & rotation policies](#rotation--rotation-policies) — `xv schedule` for automatic sweeps
 - [Git-native versioning & local audit trail](#git-native-versioning--local-audit-trail)
 - [Pre-commit leak scanner — `xv scan`](#pre-commit-leak-scanner--xv-scan)
@@ -1279,6 +1280,33 @@ xv file sync ./mydir --dry-run                   # show planned transfers
 xv file sync ./mydir --prefix backup/ --delete   # mirror; remove extra remote blobs
 ```
 
+`xv file sync` skips encrypted attachment blobs (anything under `attachments/`
+or flagged `xv_encrypted=age`) so it never decrypts ciphertext to disk or
+clobbers it with plaintext. Use the attachment commands below for those files.
+
+---
+
+## Secret file attachments
+
+Age-encrypt files client-side and associate them with a secret. The per-vault
+key lives in the secret store as `xv-attachment-key`, so plaintext requires
+vault access — not just storage-account/S3/local-disk access.
+
+```bash
+xv attach db-cert ./cert.pem                     # encrypt + upload
+xv attachments db-cert                           # list
+xv attachments db-cert --get cert.pem            # download decrypted
+xv detach db-cert cert.pem                       # remove one blob
+
+xv file upload ./license.key --encrypt           # confidential file, no secret link
+xv file download license.key                     # decrypts transparently
+```
+
+`xv delete db-cert` cascades the secret's attachments after confirmation.
+`xv list` hides `xv-attachment-key`. Full workflow, sync/rename/migrate
+pitfalls, and Azure's `xv_encrypted` metadata key:
+[`docs/attachments.md`](docs/attachments.md).
+
 ---
 
 ## Rotation & rotation policies
@@ -1568,6 +1596,11 @@ xv ui                                     # binds 127.0.0.1, opens your browser
 Same backend layer as the CLI (Azure, AWS, local all work). Loopback-only,
 per-session bearer token, no TLS and no login by design — see
 [`docs/web-ui.md`](docs/web-ui.md) for the full security model and reference.
+
+Secret detail drawers list attachments as download links and decrypt
+age-encrypted downloads the same way `xv file download` does; renaming a
+secret that still has attachments is refused. See
+[`docs/attachments.md`](docs/attachments.md).
 
 The workspace shows the resolved backend/vault context and includes protected
 value timing, Trash with Undo/restore, typed secret editing, command palette
@@ -1922,6 +1955,22 @@ az login                                 # re-authenticate with Azure CLI
 xv config show | grep credential         # check current priority
 xv list --credential-type cli            # try Azure CLI explicitly
 ```
+
+### Attachment decrypt / key errors
+
+```bash
+# Missing or deleted xv-attachment-key
+xv attachments db-cert --get cert.pem
+# → attachment key not found in vault '…'
+
+# Ciphertext encrypted under a different identity than the vault holds now
+# → wrong or rotated attachment key
+```
+
+Re-attaching mints a **new** key and will not recover old ciphertext. Prefer
+restoring the original `xv-attachment-key` secret. Sync deliberately skips
+encrypted attachment blobs — use `xv attach` / `xv attachments --get` instead.
+See [`docs/attachments.md`](docs/attachments.md).
 
 ### Debug logging
 
