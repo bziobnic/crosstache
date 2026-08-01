@@ -17,6 +17,8 @@ use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
 
 pub(crate) mod api;
+#[cfg(feature = "file-ops")]
+mod archive;
 pub(crate) mod auth;
 mod context;
 pub(crate) mod errors;
