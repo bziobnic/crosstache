@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.32.0 — Bulk file downloads (2026-08-01)
+
+### Added
+
+- **Download selected files as one ZIP from the Files tab.** The new bulk
+  Download action works through the shared file-backend interface, so local,
+  Azure, and AWS files—including Crosstache-encrypted attachments—use the same
+  existing download and decryption behavior. Selection remains available for
+  retry or reuse, and a response from a workspace the user has left is never
+  saved.
+- **Bounded authenticated archive endpoint.** ZIP exports validate portable
+  paths, enforce request, file, aggregate-size, and process-wide concurrency
+  limits, build all-or-nothing in temporary storage, and stream only completed
+  archives. A file literally named `archive` remains addressable.
+
+### Changed
+
+- Updated `quinn-proto` from 0.11.14 to 0.11.16 and refreshed its minimal
+  transitive lockfile dependencies.
+- Expanded the operator documentation for secret file attachments and clarified
+  scanner-hook hardening and validation guidance.
+
 ## v0.31.0 — Hierarchical tree grid for the web UI (2026-07-29)
 
 ### Changed
