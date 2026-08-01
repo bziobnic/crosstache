@@ -1,6 +1,6 @@
 import * as XvUiModel from './ui-model.js';
 import { buildMetadataIndex, searchIndex } from './commands.js';
-import { mountFilterControls, mountUploadQueue } from './files.js';
+import { downloadFileArchive, mountFilterControls, mountUploadQueue } from './files.js';
 import { renderTreeGrid } from './tree-grid.js';
 import { guardNavigation } from './dialogs.js';
 import {
@@ -934,6 +934,7 @@ function selectionElements(kind) {
     bulkBar: $(`#${singular}-bulk-bar`),
     count: $(`#${singular}-selection-count`),
     deleteButton: $(`#bulk-delete-${kind}`),
+    downloadButton: kind === 'files' ? $('#bulk-download-files') : null,
   };
 }
 
@@ -955,6 +956,8 @@ function resetSelectionControls(kind) {
     const moveButton = $('#bulk-move-secrets');
     resetConfirmation(moveButton, 'Move');
     $('#secret-move-folder').disabled = false;
+  } else {
+    resetConfirmation($('#bulk-download-files'), 'Download');
   }
 }
 
@@ -1021,6 +1024,9 @@ function updateSelectionControls(kind) {
   elements.selectAll.disabled = visible.visibleCount === 0;
   elements.count.textContent = `${state.ids.size} selected`;
   elements.deleteButton.disabled = state.pending || state.ids.size === 0;
+  if (elements.downloadButton) {
+    elements.downloadButton.disabled = state.pending || state.ids.size === 0;
+  }
   elements.selectAll.disabled = state.pending || visible.visibleCount === 0;
   if (kind === 'secrets') $('#bulk-move-secrets').disabled = state.pending || state.ids.size === 0;
 }
@@ -3647,6 +3653,42 @@ function setBulkPending(kind, pending, label) {
   renderSelectionKind(kind);
 }
 
+function setFileDownloadPending(pending) {
+  fileSelection.pending = pending;
+  $('#cancel-file-selection').disabled = pending;
+  const button = $('#bulk-download-files');
+  if (pending) beginPendingAction(button, 'Downloading…');
+  else resetConfirmation(button, 'Download');
+  updateSelectionControls('files');
+  renderFiles();
+}
+
+async function bulkDownloadFiles() {
+  const state = fileSelection;
+  const names = [...state.ids];
+  if (!names.length || state.pending) return;
+  const scope = captureOperationScope();
+  if (!canStartScopedAction(scope)) return;
+  const generation = state.generation;
+  setFileDownloadPending(true);
+  try {
+    await downloadFileArchive({
+      api,
+      path: `/api/files/archive${vaultQS(scope.vault, scope)}`,
+      names,
+    });
+    if (generation === state.generation && scopeMatchesCurrent(scope)) {
+      toast(`Downloaded ${names.length} file${names.length === 1 ? '' : 's'} in ${formatContextLine(scope)}`);
+    }
+  } catch (error) {
+    if (generation === state.generation && scopeMatchesCurrent(scope)) {
+      showListError('files', error);
+    }
+  } finally {
+    if (generation === state.generation) setFileDownloadPending(false);
+  }
+}
+
 async function bulkDelete(kind) {
   const state = selectionState(kind);
   const items = [...state.ids];
@@ -3799,6 +3841,7 @@ $('#select-all-secrets').onchange = (e) => setVisibleSelection('secrets', e.targ
 $('#select-all-files').onchange = (e) => setVisibleSelection('files', e.target.checked);
 $('#bulk-delete-secrets').onclick = () => bulkDelete('secrets').catch(fail);
 $('#bulk-delete-files').onclick = () => bulkDelete('files').catch(fail);
+$('#bulk-download-files').onclick = () => bulkDownloadFiles();
 $('#bulk-move-secrets').onclick = () => bulkMoveSecrets().catch(fail);
 
 async function downloadFile(name, saveAs = name) {
