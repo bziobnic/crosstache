@@ -1,6 +1,8 @@
 # Secret File Attachments — Design
 
-> **Status:** 📋 Approved design, not yet implemented (2026-07-21).
+> **Status:** ✅ Shipped in v0.27.0 (Azure metadata key fix in v0.27.1;
+> web UI attachment links in v0.28.0). Operator guide:
+> [`docs/attachments.md`](../../attachments.md).
 
 ## Problem
 
@@ -56,8 +58,9 @@ Rejected alternatives:
   existing `SecretBackend`, age-encrypt the buffer, call the existing
   `FileBackend::upload_file`; reverse for download. **No changes to the
   `FileBackend` trait or any backend implementation.**
-- Encrypted files carry file metadata **`xv-encrypted: age`**. `xv file
-  download` auto-decrypts when the flag is present.
+- Encrypted files carry file metadata **`xv_encrypted: age`** (underscore —
+  Azure Blob rejects hyphenated metadata keys). `xv file download`
+  auto-decrypts when the flag is present.
 - Buffered encryption, matching the existing `FileUploadRequest { content:
   Vec<u8> }` path. Streaming age is the upgrade path if large attachments
   become common.

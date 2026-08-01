@@ -111,3 +111,4 @@ A 100-secret migration completes in <60 s on a warm credential cache and `--conc
 - Only the current value is transferred. Full version history transfer is deferred (`--with-history` not yet implemented).
 - IAM resource policies on AWS source/target secrets are not preserved.
 - Cross-region AWS migrations require running `xv migrate` once per source/target region pair, using `[named_backends.*]` config.
+- **File attachments are not migrated.** `xv migrate` copies secrets only — ciphertext under `attachments/<secret>/` stays on the source file store. If the target vault already has its own `xv-attachment-key`, migrate preserves that key rather than overwriting it (even under `--force-replace`), so existing target attachments stay readable. Re-attach files on the destination, or copy blobs separately and ensure the matching key is present. See [`attachments.md`](attachments.md).
