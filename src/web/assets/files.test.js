@@ -2,12 +2,63 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   createUploadQueue,
+  downloadFileArchive,
   nextUploadState,
   uploadConflictDecision,
   uploadEvidenceState,
   validateUploadConfirmation,
   validatePreflightResults,
 } from './files.js';
+
+test('archive download posts exact names, clicks one zip anchor, and revokes its URL', async () => {
+  const calls = [];
+  const anchors = [];
+  const api = async (...args) => {
+    calls.push(args);
+    return { blob: async () => new Blob(['zip']) };
+  };
+  const document = { createElement: () => {
+    const anchor = { clickCount: 0, click() { this.clickCount++; } };
+    anchors.push(anchor);
+    return anchor;
+  } };
+  const revoked = [];
+  const objectUrls = {
+    createObjectURL: () => 'blob:archive',
+    revokeObjectURL: (value) => revoked.push(value),
+  };
+
+  await downloadFileArchive({
+    api,
+    path: '/api/files/archive?alias=primary&backend=local&vault=one',
+    names: ['docs/a.txt', 'b.txt'],
+    document,
+    objectUrls,
+  });
+
+  assert.deepEqual(calls, [[
+    'POST',
+    '/api/files/archive?alias=primary&backend=local&vault=one',
+    { files: ['docs/a.txt', 'b.txt'] },
+    true,
+  ]]);
+  assert.equal(anchors[0].download, 'crosstache-files.zip');
+  assert.equal(anchors[0].href, 'blob:archive');
+  assert.equal(anchors[0].clickCount, 1);
+  assert.deepEqual(revoked, ['blob:archive']);
+});
+
+test('archive download does not create an anchor when the API fails', async () => {
+  let created = 0;
+  await assert.rejects(() => downloadFileArchive({
+    api: async () => { throw new Error('failed'); },
+    path: '/api/files/archive',
+    names: ['a.txt'],
+    document: { createElement() { created++; } },
+    objectUrls: {},
+  }), /failed/);
+  assert.equal(created, 0);
+});
 
 test('retry selects only failed cancelled and ambiguous entries', () => {
   const queue = createUploadQueue([{ id: 'a' }, { id: 'b' }, { id: 'c' }]);

@@ -1,5 +1,25 @@
 import { activeFilterChips } from './ui-model.js';
 
+export async function downloadFileArchive({
+  api,
+  path,
+  names,
+  document = globalThis.document,
+  objectUrls = globalThis.URL,
+}) {
+  const response = await api('POST', path, { files: [...names] }, true);
+  const blob = await response.blob();
+  const href = objectUrls.createObjectURL(blob);
+  try {
+    const anchor = document.createElement('a');
+    anchor.href = href;
+    anchor.download = 'crosstache-files.zip';
+    anchor.click();
+  } finally {
+    objectUrls.revokeObjectURL(href);
+  }
+}
+
 export const UPLOAD_STATES = Object.freeze([
   'queued',
   'preflighting',
