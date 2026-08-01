@@ -1207,6 +1207,17 @@ async fn execute_vault_import(
     for secret_request in secrets_to_import {
         let secret_name = secret_request.name.clone();
 
+        // Never let an imported entry silently clobber the reserved
+        // attachment encryption key — same convention as bulk `xv set`.
+        if secret_name == crate::secret::attachments::ATTACHMENT_KEY_SECRET {
+            output::warn(&format!(
+                "Skipping '{secret_name}': reserved for attachment encryption; use 'xv set {secret_name}' \
+                 (single-secret form) to overwrite it interactively"
+            ));
+            skipped_count += 1;
+            continue;
+        }
+
         // Check if secret exists if not overwriting
         if !overwrite {
             match secrets_backend.secret_exists(name, &secret_name).await {

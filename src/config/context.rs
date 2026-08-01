@@ -128,6 +128,16 @@ impl ContextManager {
         Self::load_from(cwd.as_deref()).await
     }
 
+    /// Load context using an explicit working directory.
+    ///
+    /// Display and server startup paths use this seam so project discovery
+    /// and local-context discovery describe the same directory without
+    /// changing the process-wide current directory.
+    #[cfg(any(feature = "ui", test))]
+    pub(crate) async fn load_for_cwd(cwd: &std::path::Path) -> Result<Self> {
+        Self::load_from(Some(cwd)).await
+    }
+
     /// Core of [`Self::load`], parameterized over `cwd` so it's testable
     /// without changing the process-global working directory (which unit
     /// tests can't safely do under parallel `cargo test`). Production code

@@ -26,6 +26,8 @@ releases — they are part of the scripting contract.
 | `40`  | Azure API error       | Azure returned an error response                |
 | `43`  | Rename incomplete     | rename created the new secret but failed to delete the original; both copies still exist (`xv-rename-incomplete`) |
 | `50`  | Scan: leak detected   | `xv scan` found a finding (file with a secret value or pattern match) |
+| `51`  | Rotation due          | `xv rotate --check` found at least one secret past its rotation policy (`xv-rotation-due`) |
+| `52`  | Audit chain broken    | `xv audit --verify` found the local audit log's hash chain altered (`xv-audit-chain-broken`) |
 
 ## Error codes
 

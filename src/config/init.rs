@@ -4,7 +4,8 @@
 //! including Azure environment detection, configuration building, and vault creation.
 
 use crate::auth::provider::{AzureAuthProvider, DefaultAzureCredentialProvider};
-use crate::config::settings::{Config, LocalConfig};
+use crate::config::settings::Config;
+use crate::config::setup::{atomic_save_config, build_setup_config, SetupRequest};
 use crate::error::{CrosstacheError, Result};
 use crate::utils::azure_detect::{AzureDetector, AzureEnvironment, AzureSubscription};
 use crate::utils::interactive::{InteractivePrompt, ProgressIndicator, SetupHelper};
@@ -188,23 +189,26 @@ impl ConfigInitializer {
             .prompt
             .input_text("Default vault name", Some("default"))?;
 
-        // Create the local backend (generates keys and directories automatically)
-        let local_config = LocalConfig {
-            store_path: Some(store_path.clone()),
-            key_file: Some(key_file.clone()),
-            default_vault: Some(default_vault.clone()),
-            encrypt_metadata: None,
-            opaque_filenames: None,
+        // Validate and build the candidate before the backend creates keys or
+        // directories.
+        let request = SetupRequest::Local {
+            store_path: store_path.clone().into(),
+            key_file: key_file.clone().into(),
+            vault: default_vault.clone(),
         };
+        let config = build_setup_config(&request, Config::default())?;
+        let local_config = config.local.as_ref().ok_or_else(|| {
+            CrosstacheError::config("Local setup did not produce a local configuration")
+        })?;
 
         let progress = ProgressIndicator::new("Setting up local backend...");
-        crate::backend::local::LocalBackend::new(Some(&local_config))
+        crate::backend::local::LocalBackend::new(Some(local_config))
             .map_err(|e| CrosstacheError::config(format!("Failed to create local backend: {e}")))?;
         progress.finish_success("Local backend initialized");
 
         // Read the public key for the summary
         let resolved =
-            crate::backend::local::config::ResolvedLocalConfig::from_raw(Some(&local_config));
+            crate::backend::local::config::ResolvedLocalConfig::from_raw(Some(local_config));
         let public_key = if resolved.recipients_file.exists() {
             std::fs::read_to_string(&resolved.recipients_file)
                 .unwrap_or_default()
@@ -212,39 +216,6 @@ impl ConfigInitializer {
                 .to_string()
         } else {
             String::new()
-        };
-
-        // Build and save config
-        let config = Config {
-            backend: Some("local".to_string()),
-            local: Some(local_config),
-            aws: None,
-            named_backends: std::collections::HashMap::new(),
-            // Azure fields get sensible empty defaults
-            subscription_id: String::new(),
-            tenant_id: String::new(),
-            default_vault: default_vault.clone(),
-            default_resource_group: String::new(),
-            default_location: String::new(),
-            output_json: false,
-            runtime_output_format: crate::utils::format::OutputFormat::Auto,
-            template: None,
-            format_explicit: false,
-            runtime_columns: None,
-            no_color: false,
-            debug: false,
-            cache_enabled: true,
-            cache_ttl_secs: 900,
-            blob_config: None,
-            azure_credential_priority: crate::config::settings::AzureCredentialType::Default,
-            clipboard_timeout: 30,
-            gen_default_charset: None,
-            env_flag: None,
-            cli_backend: None,
-            cli_backend_was_arg: false,
-            disk_backend: None,
-            pre_flag_backend: None,
-            types: std::collections::HashMap::new(),
         };
 
         self.save_config(&config).await?;
@@ -295,42 +266,14 @@ impl ConfigInitializer {
             .clone()
             .unwrap_or_else(|| "default".to_string());
 
-        let config = Config {
-            backend: Some("aws".to_string()),
-            aws: Some(crate::config::settings::AwsConfig {
-                region: init_config.aws_region.clone(),
+        let config = build_setup_config(
+            &SetupRequest::Aws {
+                region: init_config.aws_region.clone().unwrap_or_default(),
                 profile: init_config.aws_profile.clone(),
-                default_vault: init_config.aws_default_vault.clone(),
-                endpoint_url: None,
-                s3_bucket: None,
-            }),
-            local: None,
-            named_backends: std::collections::HashMap::new(),
-            subscription_id: String::new(),
-            tenant_id: String::new(),
-            default_vault: aws_default_vault.clone(),
-            default_resource_group: String::new(),
-            default_location: String::new(),
-            output_json: false,
-            runtime_output_format: crate::utils::format::OutputFormat::Auto,
-            template: None,
-            format_explicit: false,
-            runtime_columns: None,
-            no_color: false,
-            debug: false,
-            cache_enabled: true,
-            cache_ttl_secs: 900,
-            blob_config: None,
-            azure_credential_priority: crate::config::settings::AzureCredentialType::Default,
-            clipboard_timeout: 30,
-            gen_default_charset: None,
-            env_flag: None,
-            cli_backend: None,
-            cli_backend_was_arg: false,
-            disk_backend: None,
-            pre_flag_backend: None,
-            types: std::collections::HashMap::new(),
-        };
+                vault_prefix: aws_default_vault.clone(),
+            },
+            Config::default(),
+        )?;
 
         self.save_config(&config).await?;
 
@@ -1033,11 +976,26 @@ impl ConfigInitializer {
     async fn build_config(&self, init_config: InitConfig) -> Result<Config> {
         use crate::config::settings::BlobConfig;
 
+        let InitConfig {
+            subscription_id,
+            tenant_id,
+            default_resource_group,
+            default_location,
+            default_vault,
+            storage_account_name,
+            blob_container_name,
+            backend_choice,
+            aws_region,
+            aws_profile,
+            aws_default_vault,
+            ..
+        } = init_config;
+
         // Create blob config if storage account was configured
-        let blob_config = if !init_config.storage_account_name.is_empty() {
+        let blob_config = if !storage_account_name.is_empty() {
             Some(BlobConfig {
-                storage_account: init_config.storage_account_name,
-                container_name: init_config.blob_container_name,
+                storage_account: storage_account_name,
+                container_name: blob_container_name,
                 endpoint: None, // Will be auto-generated
                 enable_large_file_support: true,
                 chunk_size_mb: 4,
@@ -1048,49 +1006,47 @@ impl ConfigInitializer {
             None
         };
 
-        let (backend_field, aws_config) = if init_config.backend_choice == "aws" {
-            let aws = crate::config::settings::AwsConfig {
-                region: init_config.aws_region.clone(),
-                profile: init_config.aws_profile.clone(),
-                default_vault: init_config.aws_default_vault.clone(),
-                endpoint_url: None,
-                s3_bucket: None,
-            };
-            (Some("aws".to_string()), Some(aws))
-        } else {
-            (None, None)
-        };
-
-        Ok(Config {
-            backend: backend_field,
-            subscription_id: init_config.subscription_id,
-            tenant_id: init_config.tenant_id,
-            default_vault: init_config.default_vault.unwrap_or_default(),
-            default_resource_group: init_config.default_resource_group,
-            default_location: init_config.default_location,
-            output_json: false,
-            runtime_output_format: crate::utils::format::OutputFormat::Auto,
-            template: None,
-            format_explicit: false,
-            runtime_columns: None,
-            no_color: false,
-            debug: false,
-            cache_enabled: true,
-            cache_ttl_secs: 900,
+        let mut base = Config {
             blob_config,
-            azure_credential_priority: crate::config::settings::AzureCredentialType::Default,
-            local: None,
-            aws: aws_config,
-            named_backends: std::collections::HashMap::new(),
-            clipboard_timeout: 30,
-            gen_default_charset: None,
-            env_flag: None,
-            cli_backend: None,
-            cli_backend_was_arg: false,
-            disk_backend: None,
-            pre_flag_backend: None,
-            types: std::collections::HashMap::new(),
-        })
+            ..Config::default()
+        };
+        if backend_choice == "aws" {
+            return build_setup_config(
+                &SetupRequest::Aws {
+                    region: aws_region.unwrap_or_default(),
+                    profile: aws_profile,
+                    vault_prefix: aws_default_vault.unwrap_or_default(),
+                },
+                base,
+            );
+        }
+
+        if let Some(vault) = default_vault {
+            return build_setup_config(
+                &SetupRequest::Azure {
+                    subscription_id,
+                    tenant_id,
+                    vault,
+                    resource_group: default_resource_group,
+                    location: default_location,
+                },
+                base,
+            );
+        }
+
+        // Compatibility-only branch for the existing interactive
+        // "Create a test vault? = no" flow. Shared non-interactive Azure setup
+        // remains strict and always requires a vault.
+        base.backend = None;
+        base.subscription_id = subscription_id;
+        base.tenant_id = tenant_id;
+        base.default_vault.clear();
+        base.default_resource_group = default_resource_group;
+        base.default_location = default_location;
+        base.local = None;
+        base.aws = None;
+        base.validate()?;
+        Ok(base)
     }
 
     /// Save configuration to file
@@ -1099,20 +1055,7 @@ impl ConfigInitializer {
 
         // Use the same config path as the settings module for consistency
         let config_file = Config::get_config_path()?;
-
-        // Create parent directories if they don't exist
-        if let Some(parent) = config_file.parent() {
-            tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                CrosstacheError::config(format!("Failed to create config directory: {e}"))
-            })?;
-        }
-
-        // Save configuration file
-        let config_content = toml::to_string_pretty(config).map_err(|e| {
-            CrosstacheError::serialization(format!("Failed to serialize config: {e}"))
-        })?;
-
-        crate::utils::helpers::write_sensitive_file_async(&config_file, config_content.as_bytes())
+        atomic_save_config(config, &config_file)
             .await
             .map_err(|e| CrosstacheError::config(format!("Failed to write config file: {e}")))?;
 
@@ -1202,5 +1145,77 @@ mod tests {
         assert_eq!(init_config.default_location, "eastus");
         assert!(init_config.create_test_vault);
         assert!(init_config.default_vault.is_some());
+    }
+
+    #[tokio::test]
+    async fn azure_without_vault_keeps_the_legacy_cli_shape_only() {
+        let initializer = ConfigInitializer::new();
+        let init_config = InitConfig {
+            subscription_id: "test-sub".to_string(),
+            tenant_id: "test-tenant".to_string(),
+            default_resource_group: "test-rg".to_string(),
+            default_location: "eastus".to_string(),
+            default_vault: None,
+            create_test_vault: false,
+            storage_account_name: String::new(),
+            blob_container_name: String::new(),
+            create_storage_account: false,
+            backend_choice: "azure".to_string(),
+            aws_region: None,
+            aws_profile: None,
+            aws_default_vault: None,
+        };
+
+        let config = initializer.build_config(init_config).await.unwrap();
+        assert_eq!(config.backend, None);
+        assert_eq!(config.default_vault, "");
+        assert_eq!(config.subscription_id, "test-sub");
+        assert_eq!(config.tenant_id, "test-tenant");
+
+        let strict_request = SetupRequest::Azure {
+            subscription_id: "test-sub".into(),
+            tenant_id: "test-tenant".into(),
+            vault: String::new(),
+            resource_group: "test-rg".into(),
+            location: "eastus".into(),
+        };
+        assert!(build_setup_config(&strict_request, Config::default()).is_err());
+    }
+
+    #[tokio::test]
+    async fn azure_with_vault_matches_the_shared_setup_builder() {
+        let initializer = ConfigInitializer::new();
+        let init_config = InitConfig {
+            subscription_id: "test-sub".to_string(),
+            tenant_id: "test-tenant".to_string(),
+            default_resource_group: "test-rg".to_string(),
+            default_location: "eastus".to_string(),
+            default_vault: Some("test-vault".to_string()),
+            create_test_vault: true,
+            storage_account_name: String::new(),
+            blob_container_name: String::new(),
+            create_storage_account: false,
+            backend_choice: "azure".to_string(),
+            aws_region: None,
+            aws_profile: None,
+            aws_default_vault: None,
+        };
+        let expected = build_setup_config(
+            &SetupRequest::Azure {
+                subscription_id: "test-sub".into(),
+                tenant_id: "test-tenant".into(),
+                vault: "test-vault".into(),
+                resource_group: "test-rg".into(),
+                location: "eastus".into(),
+            },
+            Config::default(),
+        )
+        .unwrap();
+
+        let actual = initializer.build_config(init_config).await.unwrap();
+        assert_eq!(
+            toml::to_string(&actual).unwrap(),
+            toml::to_string(&expected).unwrap()
+        );
     }
 }

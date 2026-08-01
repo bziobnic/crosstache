@@ -1,5 +1,9 @@
 # Build output
 /target/
+/node_modules/
+/test-results/
+/.playwright-browsers/
+/desktop/src-tauri/gen/
 
 # IDE files
 .vscode/
@@ -28,3 +32,6 @@ spikes/
 
 # CodeGraph local index/runtime data — machine-specific SQLite DB, logs, daemon state
 .codegraph/
+
+# Superpowers visual brainstorming sessions — transient, machine-specific
+.superpowers/

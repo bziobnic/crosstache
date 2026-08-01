@@ -26,6 +26,17 @@ use super::error::BackendError;
 /// [`list_files_hierarchical`]: FileBackend::list_files_hierarchical
 #[async_trait]
 pub trait FileBackend: Send + Sync {
+    /// Validate a logical file key using this backend's actual storage rules.
+    fn validate_file_name(&self, _name: &str) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    /// Truthful implementation-side capability for atomic create-only upload.
+    #[cfg(any(feature = "ui", test))]
+    fn supports_atomic_create(&self) -> bool {
+        false
+    }
+
     /// Upload a file. The optional [`ProgressReporter`] enables progress bars.
     async fn upload_file(
         &self,
@@ -33,6 +44,23 @@ pub trait FileBackend: Send + Sync {
         request: FileUploadRequest,
         reporter: Option<&dyn ProgressReporter>,
     ) -> Result<FileInfo, BackendError>;
+
+    /// Create a file only when the destination is absent at the backend's
+    /// commit point. Implementations must never replace an existing file.
+    ///
+    /// Backends that cannot provide this atomic guarantee reject the
+    /// operation; callers must not emulate it with a check-then-upload race.
+    #[cfg(any(feature = "ui", test))]
+    async fn upload_file_if_absent(
+        &self,
+        _vault: &str,
+        _request: FileUploadRequest,
+        _reporter: Option<&dyn ProgressReporter>,
+    ) -> Result<FileInfo, BackendError> {
+        Err(BackendError::Unsupported(
+            "atomic create-only file upload".into(),
+        ))
+    }
 
     /// Download a file's contents by name.
     async fn download_file(

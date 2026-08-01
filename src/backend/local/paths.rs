@@ -73,7 +73,6 @@ pub(crate) fn trash_base_dir(store_path: &Path, vault: &str) -> Result<PathBuf, 
     Ok(vault_dir(store_path, vault)?.join(".trash"))
 }
 
-#[cfg(feature = "file-ops")]
 pub(crate) fn files_dir(store_path: &Path, vault: &str) -> Result<PathBuf, BackendError> {
     Ok(vault_dir(store_path, vault)?.join("files"))
 }

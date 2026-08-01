@@ -573,8 +573,8 @@ mod tests {
             "set() must not overwrite/consume the legacy file"
         );
         assert!(
-            key.to_path(dir.path()).ends_with("secrets-list-v3.json"),
-            "current schema must resolve to the v3 filename"
+            key.to_path(dir.path()).ends_with("secrets-list-v4.json"),
+            "current schema must resolve to the v4 filename"
         );
     }
 
@@ -620,9 +620,48 @@ mod tests {
             dir.path()
                 .join("azure")
                 .join("myvault")
-                .join("secrets-list-v3.json"),
-            "v3 schema must nest under a backend directory"
+                .join("secrets-list-v4.json"),
+            "current schema must nest under a backend directory"
         );
+    }
+
+    #[test]
+    fn test_get_misses_legacy_pre_v4_secrets_list_cache_file() {
+        let dir = tempdir().unwrap();
+        let mgr = make_manager(dir.path(), true, 300);
+        let key = CacheKey::SecretsList {
+            backend: "azure".to_string(),
+            vault_name: "myvault".to_string(),
+        };
+        let legacy_dir = dir.path().join("azure").join("myvault");
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        let legacy_path = legacy_dir.join("secrets-list-v3.json");
+        let legacy_json = serde_json::json!({
+            "created_at": chrono::Utc::now().to_rfc3339(),
+            "ttl_secs": 300,
+            "vault_name": "myvault",
+            "entry_type": "SecretsList",
+            "data": [{
+                "name": "cred",
+                "original_name": "cred",
+                "note": null,
+                "folder": null,
+                "groups": null,
+                "updated_on": "",
+                "enabled": true,
+                "content_type": "",
+                "tags": {}
+            }]
+        });
+        std::fs::write(&legacy_path, legacy_json.to_string()).unwrap();
+
+        let result: Option<Vec<crate::secret::manager::SecretSummary>> = mgr.get(&key);
+        assert!(
+            result.is_none(),
+            "pre-expiry v3 cache entry must miss instead of classifying expiry as absent"
+        );
+        assert!(legacy_path.exists());
+        assert!(key.to_path(dir.path()).ends_with("secrets-list-v4.json"));
     }
 
     #[test]
@@ -796,7 +835,7 @@ mod tests {
         // under backend "local-a") must survive.
         assert!(
             mgr.get::<Vec<String>>(&nested_secrets_key).is_some(),
-            "nested secrets-list-v3.json for a different vault must survive"
+            "nested current-schema secrets list for a different vault must survive"
         );
         // But "local-a"'s own FileList entries (both recursive and not)
         // must be gone — no longer left stale forever.
@@ -816,7 +855,11 @@ mod tests {
         let backend_dir = dir.path().join("azure");
         let vault_dir = backend_dir.join("some-vault");
         std::fs::create_dir_all(&vault_dir).unwrap();
-        std::fs::write(vault_dir.join("secrets-list-v3.json"), b"{}").unwrap();
+        std::fs::write(
+            vault_dir.join(crate::cache::models::SECRETS_LIST_FILENAME),
+            b"{}",
+        )
+        .unwrap();
 
         assert!(looks_like_v3_backend_dir(&backend_dir));
     }

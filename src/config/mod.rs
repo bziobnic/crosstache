@@ -8,6 +8,7 @@ pub mod context;
 pub mod init;
 pub mod project;
 pub mod settings;
+pub mod setup;
 
 pub use context::*;
 pub use settings::*;

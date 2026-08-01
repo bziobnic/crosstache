@@ -1,31 +1,32 @@
-# Documentation automation plan
+# Documentation automation — secret file attachments
 
 ## Goal
 
-Keep engineering and user-facing documentation aligned with recently shipped
-changes without adding redundant pages.
+Ship operator-facing docs for secret file attachments (v0.27.0+) — the feature
+had design/plan specs but no public workflow guide in `docs/`, `README.md`, or
+`docs/FEATURES.md`.
 
-## Current pass: scanner hook/CI hardening
+## Plan
 
-Recent v0.25.1 security hardening made `xv scan --hook` use a trusted,
-fail-closed baseline. The existing scanner guide still described older
-repository-controlled `[scan]` behavior for all `--staged` runs, so this pass
-updates the existing guide instead of creating a redundant page.
+- [x] Inventory recent feature work vs public docs; confirm attachments as the
+      largest post-ship gap (schedule/rotation/git/CI already documented).
+- [x] Add `docs/attachments.md` verified against
+      `src/secret/attachments.rs`, `src/cli/attach_ops.rs`, `src/cli/file_ops.rs`,
+      `src/cli/secret_ops.rs`, `src/cli/migrate_ops.rs`, and `src/web/api.rs`.
+- [x] Update `docs/FEATURES.md` command tables for `attach` / `attachments` /
+      `detach` and `xv file upload --encrypt`.
+- [x] Update `README.md` TOC, Files section, Web UI note, and troubleshooting.
+- [x] Update `docs/web-ui.md` for secret-drawer attachment download links.
+- [x] Mark the attachments design spec as shipped; correct the metadata key to
+      `xv_encrypted` (Azure-valid underscore form).
+- [x] Note migrate limitations for attachment blobs in `docs/migration.md`.
+- [x] Commit, push, open PR.
 
-## Steps
+## Validation
 
-- [x] Confirm branch and working-tree state (`cursor/engineering-documentation-updates-a31b`, clean).
-- [x] Review recent commits, automation memory, existing docs, and scanner
-      source/tests to identify a focused documentation gap.
-- [x] Update `docs/scan.md` to distinguish normal scan config from `--hook` /
-      CI behavior:
-  - [x] Fix scan-mode notes for `--staged` and `--all` when combined with
-        `--hook`.
-  - [x] Document the trusted hook baseline: all built-in patterns, default
-        minimum secret length, built-in excludes only, and no repository
-        `[scan]` overrides.
-  - [x] Document fail-closed behavior for unreadable/oversized files and
-        incomplete vault secret coverage.
-- [x] Verify the documentation-only change against source/tests:
-      `cargo +stable test --test scan_tests hook_scan_ignores_repository_policy_that_excludes_a_leak`.
-- [x] Commit and push the branch, then open the documentation PR.
+- Cross-check constants and commands against source (no fabricated behavior).
+- Prefer updating existing public docs over inventing parallel guides.
+- Spot-check: `rg` for `xv_encrypted`, `xv attach`, `xv-attachment-key` in the
+  updated files; confirm design banner no longer says "not yet implemented".
+- Clarified that `download_decrypted` keys off `xv_encrypted=age`, not path
+  prefix alone.

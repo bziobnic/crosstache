@@ -1,6 +1,6 @@
 [package]
 name = "crosstache"
-version = "0.25.1"
+version = "0.31.0"
 edition = "2021"
 authors = ["crosstache Team"]
 description = "A comprehensive tool for managing secrets across Azure Key Vault, AWS Secrets Manager, and local age-encrypted storage"
@@ -8,6 +8,11 @@ license = "MIT"
 repository = "https://github.com/bziobnic/crosstache"
 keywords = ["secrets", "cli", "azure", "aws", "keyvault"]
 categories = ["command-line-utilities", "authentication"]
+
+[workspace]
+members = ["desktop/src-tauri"]
+default-members = ["."]
+resolver = "2"
 
 [[bin]]
 name = "xv"
@@ -48,6 +53,7 @@ aws-sdk-cloudtrail = { version = "1", optional = true, default-features = false,
 aws-sdk-s3 = { version = "1", optional = true, default-features = false, features = ["default-https-client", "rt-tokio", "behavior-version-latest"] }
 aws-config = { version = "1", optional = true, features = ["behavior-version-latest"] }
 aws-smithy-runtime-api = { version = "1", optional = true }
+aws-smithy-http-client = { version = "1", optional = true, default-features = false, features = ["default-client"] }
 
 # HTTP client
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
@@ -110,13 +116,18 @@ csv = "1"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 zip = "2"
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+] }
 
 [features]
 default = ["file-ops"]
 file-ops = []
 tui = []
-aws = ["dep:aws-sdk-secretsmanager", "dep:aws-sdk-cloudtrail", "dep:aws-config", "dep:aws-smithy-runtime-api", "dep:aws-sdk-s3"]
+aws = ["dep:aws-sdk-secretsmanager", "dep:aws-sdk-cloudtrail", "dep:aws-config", "dep:aws-smithy-runtime-api", "dep:aws-smithy-http-client", "dep:aws-sdk-s3"]
 ui = ["dep:axum"]
 
 [build-dependencies]
@@ -140,6 +151,16 @@ panic = "abort"
 
 [profile.dev]
 debug = true
+
+# At opt-level 0 the clap-derive command-tree build (`Cli::command()` and the
+# per-enum `augment_subcommands` chain) transiently uses ~1.9MB of stack, and
+# libtest runs each #[test] on a 2MB thread — unit tests that call
+# `Cli::try_parse_from` overflow once the subcommand tree grows a few more
+# variants. opt-level 1 makes rustc reuse stack slots, collapsing that usage.
+# The shipped binary is unaffected either way: `main` parses on the 8MB main
+# thread, and release builds optimize fully.
+[profile.test]
+opt-level = 1
 
 # cargo-release configuration for GitHub-only releases
 [package.metadata.release]

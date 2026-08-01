@@ -3,9 +3,13 @@
 
 use std::sync::Arc;
 
-use axum::response::Html;
+use axum::body::{to_bytes, Body};
+use axum::extract::{Path, Request};
+use axum::http::{header::CONTENT_TYPE, StatusCode};
+use axum::middleware::Next;
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::Router;
+use axum::{Json, Router};
 use rand::Rng;
 
 use crate::backend::{Backend, BackendRegistry};
@@ -14,29 +18,275 @@ use crate::error::{CrosstacheError, Result};
 
 pub(crate) mod api;
 pub(crate) mod auth;
+mod context;
+pub(crate) mod errors;
+#[cfg(feature = "file-ops")]
+mod files;
+mod folder_tokens;
+mod preferences;
+mod secrets;
 #[cfg(test)]
 pub(crate) mod testutil;
 
+#[cfg(test)]
 const INDEX_HTML: &str = include_str!("assets/index.html");
-const APP_JS: &str = include_str!("assets/app.js");
+#[cfg(test)]
+const UI_MODEL_JS: &str = include_str!("assets/ui-model.js");
+#[cfg(test)]
+const ACCESSIBILITY_JS: &str = include_str!("assets/accessibility.js");
+#[cfg(test)]
+const TREE_GRID_JS: &str = include_str!("assets/tree-grid.js");
+#[cfg(test)]
+const APP_JS: &str = concat!(
+    include_str!("assets/app.js"),
+    include_str!("assets/context.js"),
+    include_str!("assets/secrets.js"),
+    include_str!("assets/settings.js"),
+);
+#[cfg(test)]
 const STYLE_CSS: &str = include_str!("assets/style.css");
+
+fn asset(path: &str) -> Option<(&'static str, &'static str)> {
+    match path {
+        "/app.js" => Some(("application/javascript", include_str!("assets/app.js"))),
+        "/api-client.js" => Some((
+            "application/javascript",
+            include_str!("assets/api-client.js"),
+        )),
+        "/store.js" => Some(("application/javascript", include_str!("assets/store.js"))),
+        "/dialogs.js" => Some(("application/javascript", include_str!("assets/dialogs.js"))),
+        "/context.js" => Some(("application/javascript", include_str!("assets/context.js"))),
+        "/accessibility.js" => Some((
+            "application/javascript",
+            include_str!("assets/accessibility.js"),
+        )),
+        "/secrets.js" => Some(("application/javascript", include_str!("assets/secrets.js"))),
+        "/commands.js" => Some(("application/javascript", include_str!("assets/commands.js"))),
+        "/files.js" => Some(("application/javascript", include_str!("assets/files.js"))),
+        "/preferences.js" => Some((
+            "application/javascript",
+            include_str!("assets/preferences.js"),
+        )),
+        "/settings.js" => Some(("application/javascript", include_str!("assets/settings.js"))),
+        "/ui-model.js" => Some(("application/javascript", include_str!("assets/ui-model.js"))),
+        "/tree-grid.js" => Some((
+            "application/javascript",
+            include_str!("assets/tree-grid.js"),
+        )),
+        "/style.css" => Some(("text/css", include_str!("assets/style.css"))),
+        _ => None,
+    }
+}
+
+async fn get_asset(Path(path): Path<String>) -> Response {
+    let path = format!("/{path}");
+    match asset(&path) {
+        Some((content_type, body)) => ([(CONTENT_TYPE, content_type)], body).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// Ensures every API failure has the safe, stable error envelope. Axum
+/// extractor, body-limit, middleware, and fallback rejections otherwise emit
+/// framework-generated text that may be unstable or reveal request details.
+pub(crate) async fn normalize_api_errors(req: Request, next: Next) -> Response {
+    let is_api = req.uri().path() == "/api" || req.uri().path().starts_with("/api/");
+    let response = next.run(req).await;
+    if !is_api || response.status().is_success() {
+        return response;
+    }
+
+    let (parts, body) = response.into_parts();
+    let status = parts.status;
+    if let Ok(bytes) = to_bytes(body, 64 * 1024).await {
+        if is_api_error_envelope(&bytes) {
+            return Response::from_parts(parts, Body::from(bytes));
+        }
+    }
+
+    let mut response = (
+        status,
+        Json(errors::ApiErrorEnvelope {
+            error: errors::status_error(status),
+        }),
+    )
+        .into_response();
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
+fn is_api_error_envelope(bytes: &[u8]) -> bool {
+    let Ok(body) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return false;
+    };
+    let Some(error) = body.get("error").and_then(serde_json::Value::as_object) else {
+        return false;
+    };
+    error
+        .get("code")
+        .and_then(serde_json::Value::as_str)
+        .is_some()
+        && error
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+        && error
+            .get("hint")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+}
 
 /// Shared state for all handlers.
 pub(crate) struct WebState {
-    pub backend: Arc<dyn Backend>,
     pub token: String,
-    /// Default vault, resolved once at startup. Requests may override per-call.
-    pub vault: String,
     /// Record types (builtin + [types.*] config), resolved once at startup.
     pub types: Vec<crate::records::RecordType>,
+    /// Versioned presentation-only preferences. This store is independent of
+    /// backend and vault state and never receives secret data.
+    pub(crate) preferences: preferences::PreferenceStore,
+    pub(crate) folder_tokens: folder_tokens::FolderTokenService,
+    pub(crate) registry: Arc<BackendRegistry>,
+    backend: Arc<dyn Backend>,
+    context: context::EffectiveUiContext,
+}
+
+pub(crate) struct ScopedWebTarget {
+    pub(crate) backend: Arc<dyn Backend>,
+    pub(crate) context: context::EffectiveUiContext,
+}
+
+impl WebState {
+    pub(crate) fn new(
+        backend: Arc<dyn Backend>,
+        context: context::EffectiveUiContext,
+        token: String,
+        types: Vec<crate::records::RecordType>,
+        preferences: preferences::PreferenceStore,
+        registry: Arc<BackendRegistry>,
+    ) -> Self {
+        Self {
+            token,
+            types,
+            preferences,
+            folder_tokens: folder_tokens::FolderTokenService::random(),
+            registry,
+            backend,
+            context,
+        }
+    }
+
+    fn with_folder_tokens(mut self, folder_tokens: folder_tokens::FolderTokenService) -> Self {
+        self.folder_tokens = folder_tokens;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn base_backend(&self) -> Arc<dyn Backend> {
+        self.backend.clone()
+    }
+
+    pub(crate) fn base_context(&self) -> context::EffectiveUiContext {
+        self.context.clone()
+    }
+
+    pub(crate) fn scoped_target(
+        &self,
+        alias: Option<&str>,
+        backend: Option<&str>,
+        vault: Option<&str>,
+    ) -> std::result::Result<ScopedWebTarget, api::ApiError> {
+        if alias.is_none() && backend.is_none() && vault.is_none() {
+            return Ok(ScopedWebTarget {
+                backend: self.backend.clone(),
+                context: self.context.clone(),
+            });
+        }
+        let (Some(alias), Some(backend_name), Some(vault)) = (alias, backend, vault) else {
+            return Err(api::ApiError::Validation {
+                status: StatusCode::BAD_REQUEST,
+                message: "Provide workspace alias, backend, and vault together.",
+                field: Some("workspace"),
+            });
+        };
+        let entry = self
+            .context
+            .workspace
+            .entries
+            .iter()
+            .find(|entry| {
+                entry.alias == alias && entry.backend == backend_name && entry.vault == vault
+            })
+            .ok_or(api::ApiError::Validation {
+                status: StatusCode::BAD_REQUEST,
+                message: "Choose an attached workspace entry.",
+                field: Some("workspace"),
+            })?;
+        let backend = self.registry.materialize(&entry.backend)?;
+        let mut context = self.context.clone();
+        context.backend = entry.backend.clone();
+        context.backend_kind = backend.kind();
+        context.vault = entry.vault.clone();
+        context.workspace.alias = entry.alias.clone();
+        context.sources.backend = context::ContextSource::WorkspaceEntry;
+        context.sources.vault = context::ContextSource::WorkspaceEntry;
+        context.capabilities = context::CapabilitySummary::from_backend(backend.as_ref());
+        Ok(ScopedWebTarget { backend, context })
+    }
+}
+
+/// A bound web UI server that has not started accepting requests yet.
+///
+/// Keeping binding separate from serving lets native shells obtain the
+/// tokenized URL before they navigate their webview to it.
+pub struct PreparedWebServer {
+    url: String,
+    listener: tokio::net::TcpListener,
+    app: Router,
+}
+
+impl PreparedWebServer {
+    /// The loopback-only URL for this server, including its session token.
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// Serve until the supplied shutdown signal completes.
+    pub async fn serve_with_shutdown<F>(self, shutdown: F) -> Result<()>
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        axum::serve(self.listener, self.app)
+            .with_graceful_shutdown(shutdown)
+            .await
+            .map_err(|e| CrosstacheError::config(format!("web server error: {e}")))
+    }
+
+    /// Serve until the process exits.
+    #[allow(dead_code)] // Used by the desktop crate; the xv binary module copy does not call it.
+    pub async fn serve(self) -> Result<()> {
+        axum::serve(self.listener, self.app)
+            .await
+            .map_err(|e| CrosstacheError::config(format!("web server error: {e}")))
+    }
 }
 
 pub(crate) fn build_router(state: Arc<WebState>) -> Router {
     let api = Router::new()
-        .route("/context", get(api::get_context))
+        .route("/context", get(context::get_context))
+        .route("/context/activate", post(context::activate_context))
+        .route("/workspaces/activate", post(context::activate_workspace))
         .route("/vaults", get(api::list_vaults))
         .route("/types", get(api::list_types))
+        .route("/folder-tokens", post(folder_tokens::issue_tokens))
+        .route(
+            "/preferences",
+            get(preferences::get_preferences).put(preferences::put_preferences),
+        )
         .route("/secrets", get(api::list_secrets))
+        .route("/secrets/deleted", get(secrets::list_deleted))
         .route(
             "/secrets/{name}",
             get(api::get_secret)
@@ -45,17 +295,55 @@ pub(crate) fn build_router(state: Arc<WebState>) -> Router {
                 .delete(api::delete_secret),
         )
         .route("/secrets/{name}/value", post(api::reveal_secret))
-        .route("/secrets/{name}/move", post(api::move_secret));
+        .route("/secrets/{name}/move", post(api::move_secret))
+        .route(
+            "/secrets/{name}/conversion/preview",
+            post(secrets::preview_conversion_route).layer(axum::extract::DefaultBodyLimit::max(
+                secrets::MAX_CONVERSION_REQUEST_BYTES,
+            )),
+        )
+        .route(
+            "/secrets/{name}/conversion",
+            post(secrets::apply_conversion_route).layer(axum::extract::DefaultBodyLimit::max(
+                secrets::MAX_CONVERSION_REQUEST_BYTES,
+            )),
+        )
+        .route(
+            "/secrets/{name}/rename",
+            post(secrets::rename).layer(axum::extract::DefaultBodyLimit::max(
+                secrets::MAX_RENAME_REQUEST_BYTES,
+            )),
+        )
+        .route("/secrets/{name}/restore", post(secrets::restore))
+        .route(
+            "/secrets/{name}/purge",
+            axum::routing::delete(secrets::purge),
+        );
 
     #[cfg(feature = "file-ops")]
     let api = api
         .route(
+            "/files/preflight",
+            post(files::preflight).layer(axum::extract::DefaultBodyLimit::max(
+                files::MAX_PREFLIGHT_BODY_BYTES,
+            )),
+        )
+        .route(
             "/files",
-            get(api::files::list_files).post(api::files::upload_file),
+            get(api::files::list_files)
+                .post(files::upload)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    files::MAX_MULTIPART_ENVELOPE_BYTES,
+                ))
+                .layer(axum::middleware::from_fn(files::enforce_upload_envelope)),
         )
         .route(
             "/files/{name}",
             get(api::files::download_file).delete(api::files::delete_file),
+        )
+        .route(
+            "/secrets/{name}/attachments",
+            get(api::files::list_attachments),
         );
 
     let api = api
@@ -73,50 +361,69 @@ pub(crate) fn build_router(state: Arc<WebState>) -> Router {
         .layer(axum::middleware::from_fn(auth::no_store));
 
     Router::new()
-        .route("/", get(|| async { Html(INDEX_HTML) }))
         .route(
-            "/app.js",
-            get(|| async {
-                (
-                    [(axum::http::header::CONTENT_TYPE, "application/javascript")],
-                    APP_JS,
-                )
-            }),
+            "/",
+            get(|| async { Html(include_str!("assets/index.html")) }),
         )
-        .route(
-            "/style.css",
-            get(|| async { ([(axum::http::header::CONTENT_TYPE, "text/css")], STYLE_CSS) }),
-        )
+        .route("/{*path}", get(get_asset))
         .nest("/api", api)
         .with_state(state)
+        .layer(axum::middleware::from_fn(normalize_api_errors))
 }
 
-/// Entry point for `xv ui`.
-pub async fn run_web(
+fn folder_token_service_for_config(
+    config_path: &std::path::Path,
+) -> Result<folder_tokens::FolderTokenService> {
+    folder_tokens::FolderTokenService::load_or_create(&folder_tokens::folder_token_key_path_for(
+        config_path,
+    ))
+}
+
+/// Bind the embedded web UI and return it without starting the accept loop.
+pub async fn prepare_web(
     config: Config,
-    registry: Option<&BackendRegistry>,
+    _registry: Option<&BackendRegistry>,
     port: Option<u16>,
-    no_open: bool,
-) -> Result<()> {
-    let registry = registry.ok_or_else(|| {
-        CrosstacheError::config("backend initialization failed; `xv ui` needs a working backend")
-    })?;
-    let vault = crate::cli::helpers::resolve_vault_for_trait(&config, Some(registry)).await?;
-    let backend = registry.active_arc();
+) -> Result<PreparedWebServer> {
+    let config_path = Config::get_config_path()?;
+    let preference_path = preferences::preference_path_for(&config_path);
+    let preference_store =
+        preferences::PreferenceStore::new(preference_path, config.clipboard_timeout);
+    let folder_tokens = folder_token_service_for_config(&config_path)?;
+    let cwd = std::env::current_dir()?;
+    let effective = crate::config::project::resolve_effective_backend_config(&config, &cwd).await?;
+    effective.config.validate()?;
+    let mut backend_names = vec!["azure".to_string(), "local".to_string(), "aws".to_string()];
+    for name in effective.config.named_backends.keys() {
+        if !backend_names.contains(name) {
+            backend_names.push(name.clone());
+        }
+    }
+    let registry = Arc::new(
+        BackendRegistry::with_lazy(&effective.config, &backend_names)
+            .map_err(CrosstacheError::from)?,
+    );
+    let resolved = context::resolve_ui_context_from_effective(&effective, &registry, &cwd).await?;
+    let backend = resolved.backend;
     // Fail loud at startup on a broken [types.*] block, matching the CLI's
     // eager type-resolution paths.
-    let types = config.resolve_record_types().await?;
+    let types = effective.config.resolve_record_types().await?;
 
     let mut buf = [0u8; 32];
     rand::rng().fill_bytes(&mut buf);
     let token = hex::encode(buf);
 
-    let state = Arc::new(WebState {
-        backend,
-        token: token.clone(),
-        vault,
-        types,
-    });
+    let state = Arc::new(
+        WebState::new(
+            backend,
+            resolved.context,
+            token.clone(),
+            types,
+            preference_store,
+            registry,
+        )
+        .with_folder_tokens(folder_tokens),
+    );
     let app = build_router(state);
 
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port.unwrap_or(0)))
@@ -127,6 +434,19 @@ pub async fn run_web(
         .map_err(|e| CrosstacheError::config(format!("local_addr: {e}")))?;
     let url = format!("http://127.0.0.1:{}/?token={token}", addr.port());
 
+    Ok(PreparedWebServer { url, listener, app })
+}
+
+/// Entry point for `xv ui`.
+pub async fn run_web(
+    config: Config,
+    registry: Option<&BackendRegistry>,
+    port: Option<u16>,
+    no_open: bool,
+) -> Result<()> {
+    let server = prepare_web(config, registry, port).await?;
+    let url = server.url().to_string();
+
     println!("xv ui listening at {url}");
     println!("Press Ctrl-C to stop.");
     if !no_open {
@@ -135,12 +455,11 @@ pub async fn run_web(
         }
     }
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async {
+    server
+        .serve_with_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })
         .await
-        .map_err(|e| CrosstacheError::config(format!("web server error: {e}")))
 }
 
 #[cfg(test)]
@@ -150,11 +469,40 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 
+    #[test]
+    fn prepare_web_token_setup_supports_a_fresh_xdg_config_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let config_path = root
+            .path()
+            .join("xdg-config")
+            .join("xv")
+            .join("config.toml");
+
+        folder_token_service_for_config(&config_path).unwrap();
+
+        let key_path = folder_tokens::folder_token_key_path_for(&config_path);
+        assert_eq!(std::fs::read(&key_path).unwrap().len(), 32);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            assert_eq!(
+                std::fs::metadata(key_path.parent().unwrap())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
+    }
+
     #[tokio::test]
     async fn serves_index_and_assets() {
         let app = build_router(testutil::test_state());
         for (path, ct) in [
             ("/", "text/html; charset=utf-8"),
+            ("/ui-model.js", "application/javascript"),
             ("/app.js", "application/javascript"),
             ("/style.css", "text/css"),
         ] {
@@ -167,5 +515,745 @@ mod tests {
             let got = res.headers()["content-type"].to_str().unwrap().to_string();
             assert_eq!(got, ct, "{path}");
         }
+    }
+
+    #[test]
+    fn ui_serves_native_module_graph() {
+        assert!(INDEX_HTML.contains("<script type=\"module\" src=\"/app.js\"></script>"));
+        for path in [
+            "/api-client.js",
+            "/store.js",
+            "/dialogs.js",
+            "/accessibility.js",
+            "/secrets.js",
+            "/preferences.js",
+            "/settings.js",
+            "/commands.js",
+            "/files.js",
+            "/tree-grid.js",
+        ] {
+            assert!(asset(path).is_some(), "missing {path}");
+        }
+    }
+
+    #[test]
+    fn ui_persists_token_for_tab_reloads() {
+        assert!(APP_JS.contains("sessionStorage.setItem(TOKEN_STORAGE_KEY"));
+        assert!(APP_JS.contains("sessionStorage.getItem(TOKEN_STORAGE_KEY)"));
+        assert!(!APP_JS.contains("localStorage.setItem(TOKEN_STORAGE_KEY"));
+    }
+
+    #[test]
+    fn ui_persists_pointer_and_keyboard_column_resizing() {
+        assert!(INDEX_HTML.contains("<colgroup>"));
+        for class in [
+            "column-secret-name",
+            "column-secret-folder",
+            "column-groups",
+            "column-note",
+            "column-secret-updated",
+            "column-file-name",
+            "column-file-size",
+            "column-file-type",
+            "column-file-modified",
+        ] {
+            assert!(
+                INDEX_HTML.contains(&format!("<col class=\"{class}\">")),
+                "missing responsive col class {class}"
+            );
+        }
+        assert!(INDEX_HTML.contains("class=\"column-resizer\""));
+        assert!(INDEX_HTML.contains("role=\"separator\""));
+        assert!(APP_JS.contains("xv.ui.columns.secrets.v1"));
+        assert!(APP_JS.contains("xv.ui.columns.files.v1"));
+        assert!(APP_JS.contains("handle.onpointerdown"));
+        assert!(APP_JS.contains("handle.onkeydown"));
+        assert!(APP_JS.contains("window.addEventListener('pointercancel', stop"));
+        assert!(APP_JS.contains("window.removeEventListener('pointercancel', stop"));
+    }
+
+    #[test]
+    fn ui_has_persistent_missing_token_recovery() {
+        assert!(INDEX_HTML.contains("id=\"auth-recovery\""));
+        assert!(INDEX_HTML.contains("Reopen the URL printed by"));
+        assert!(INDEX_HTML.contains("<code>xv ui</code>"));
+        assert!(APP_JS.contains("showAuthRecovery"));
+    }
+
+    #[test]
+    fn ui_auth_recovery_hides_header_controls_but_keeps_brand() {
+        assert!(INDEX_HTML.contains("id=\"vault-context\""));
+        assert!(INDEX_HTML.contains("id=\"vault-tabs\""));
+        assert!(INDEX_HTML.contains("class=\"brand\""));
+        assert!(APP_JS.contains("$('#vault-context').hidden = true;"));
+        assert!(APP_JS.contains("$('#vault-tabs').hidden = true;"));
+        assert!(!APP_JS.contains("$('#app-header').hidden = true;"));
+    }
+
+    #[test]
+    fn ui_auth_recovery_cannot_be_dismissed_by_tabs() {
+        assert!(APP_JS.contains("authRecoveryActive = true;"));
+        assert!(APP_JS
+            .contains("if (authRecoveryActive || store.snapshot().contextSwitchPending) return;"));
+    }
+
+    #[test]
+    fn ui_guards_list_loads_against_stale_responses() {
+        assert!(APP_JS.contains("let secretLoadGeneration = 0"));
+        assert!(APP_JS.contains("let fileLoadGeneration = 0"));
+        assert!(APP_JS.contains(
+            "async function loadSecrets(vault, scope = captureOperationScope(), errorOwner = null)"
+        ));
+        assert!(APP_JS.contains(
+            "async function loadFiles(vault, scope = captureOperationScope(), errorOwner = null)"
+        ));
+        assert!(APP_JS.contains("if (generation !== secretLoadGeneration) return"));
+        assert!(APP_JS.contains("if (generation !== fileLoadGeneration) return"));
+    }
+
+    #[test]
+    fn ui_renders_purposeful_list_states() {
+        assert!(APP_JS.contains("function showListState(tbody, kind, state, cols)"));
+        assert!(APP_JS.contains("for (let index = 0; index < 3; index++)"));
+        assert!(APP_JS.contains("button.onclick = () => openDrawer(null)"));
+        assert!(APP_JS.contains("button.onclick = () => $('#file-input').click()"));
+        assert!(APP_JS.contains("showListState($('#secrets-table tbody'), 'secrets', 'loading'"));
+        assert!(APP_JS.contains("showListState($('#files-table tbody'), 'files', 'failed'"));
+        assert!(STYLE_CSS.contains(".skeleton-row"));
+        assert!(STYLE_CSS.contains(".empty-state"));
+    }
+
+    #[test]
+    fn ui_skeleton_keeps_spanning_table_cell_semantics() {
+        assert!(APP_JS.contains("content.className = 'skeleton-content'"));
+        assert!(STYLE_CSS.contains(".skeleton-content { display:grid;"));
+        assert!(!STYLE_CSS.contains(".skeleton-row td { display:grid;"));
+    }
+
+    #[test]
+    fn ui_resets_list_summaries_for_current_load_generation() {
+        assert!(APP_JS.contains("function setListLoadStatus(kind, state)"));
+        for marker in [
+            "setListLoadStatus('secrets', 'loading');",
+            "setListLoadStatus('secrets', 'failed');",
+            "setListLoadStatus('files', 'loading');",
+            "setListLoadStatus('files', 'failed');",
+            "Loading secrets…",
+            "Secrets unavailable",
+            "Loading files…",
+            "Files unavailable",
+        ] {
+            assert!(APP_JS.contains(marker), "missing {marker}");
+        }
+
+        let secret_load = APP_JS
+            .split_once(
+                "async function loadSecrets(vault, scope = captureOperationScope(), errorOwner = null) {",
+            )
+            .unwrap()
+            .1
+            .split_once("function renderSecrets()")
+            .unwrap()
+            .0;
+        assert!(secret_load.contains("if (!hasSuccessfulSecretsSnapshot) {"));
+        assert!(secret_load.contains("secrets = [];\n    setListLoadStatus('secrets', 'loading');"));
+        assert!(secret_load
+            .contains("secretsState = hasSuccessfulSecretsSnapshot ? 'ready' : 'failed';"));
+        assert!(
+            secret_load
+                .find("if (generation !== secretLoadGeneration) return false;")
+                .unwrap()
+                < secret_load
+                    .find("setListLoadStatus('secrets', 'failed');")
+                    .unwrap(),
+            "a stale failed secret request must not overwrite the current vault status"
+        );
+
+        let file_load = APP_JS
+            .split_once(
+                "async function loadFiles(vault, scope = captureOperationScope(), errorOwner = null) {",
+            )
+            .unwrap()
+            .1
+            .split_once("function renderFiles()")
+            .unwrap()
+            .0;
+        assert!(file_load.contains("if (!hasSuccessfulFilesSnapshot) {"));
+        assert!(file_load.contains("files = [];\n    setListLoadStatus('files', 'loading');"));
+        assert!(
+            file_load
+                .find("if (generation !== fileLoadGeneration) return false;")
+                .unwrap()
+                < file_load
+                    .find("setListLoadStatus('files', 'failed');")
+                    .unwrap(),
+            "a stale failed file request must not overwrite the current vault status"
+        );
+    }
+
+    #[test]
+    fn ui_stops_stale_init_before_loading_files() {
+        assert!(APP_JS.contains("if (!(await loadSecrets(vault))) return;"));
+    }
+
+    #[test]
+    fn ui_guards_drawer_loads_against_stale_responses() {
+        assert!(APP_JS.contains("let drawerGeneration = 0"));
+        assert!(APP_JS.contains("if (generation !== drawerGeneration) return"));
+    }
+
+    #[test]
+    fn ui_masks_every_existing_protected_value_with_fixed_length() {
+        assert!(UI_MODEL_JS.contains("const PROTECTED_MASK = '***************';"));
+        assert!(APP_JS.contains("XvUiModel.createProtectedState(value, value !== undefined)"));
+        assert!(APP_JS.contains("input.readOnly = state.masked;"));
+        assert!(APP_JS.contains("input.value = XvUiModel.protectedDisplay(state);"));
+    }
+
+    #[test]
+    fn ui_plain_secret_toggles_and_never_submits_the_mask() {
+        assert!(APP_JS.contains("let plainSecretState = null;"));
+        assert!(APP_JS.contains("async function loadPlainSecretValue(generation, selection)"));
+        assert!(APP_JS.contains("XvUiModel.loadProtected(state"));
+        assert!(APP_JS.contains("const revision = state.revision;"));
+        assert!(APP_JS.contains("state.revision === revision"));
+        assert!(APP_JS.contains("isExposureScopeCurrent(scope)"));
+        assert!(APP_JS.contains("else if (plainSecretState?.dirty"));
+        assert!(!APP_JS.contains("value: XvUiModel.PROTECTED_MASK"));
+    }
+
+    #[test]
+    fn ui_expiration_is_blank_when_absent_and_updated_is_date_only() {
+        assert!(APP_JS.contains("f.elements.expires_on.value = '';"));
+        assert!(APP_JS.contains("XvUiModel.expirationDate(meta.expires_on)"));
+        assert!(APP_JS.contains("XvUiModel.formatDate(secret.updated_on)"));
+        assert!(INDEX_HTML.contains("name=\"expires_on\" type=\"date\""));
+        assert!(INDEX_HTML.contains("id=\"no-expiry\""));
+        assert!(INDEX_HTML.contains("id=\"clear-expiry\""));
+        assert!(!INDEX_HTML.contains("placeholder=\"YYYY-MM-DD\""));
+    }
+
+    #[test]
+    fn ui_resets_secret_delete_confirmation_on_drawer_transitions() {
+        assert!(APP_JS.contains("function resetConfirmation"));
+        assert!(APP_JS.contains("resetConfirmation($('#delete'), 'Delete')"));
+    }
+
+    #[test]
+    fn ui_files_are_links_without_row_actions() {
+        assert!(APP_JS.contains("const link = document.createElement('a');"));
+        assert!(APP_JS.contains("link.className = 'item-name-content file-link'"));
+        assert!(APP_JS.contains("downloadFile(name)"));
+        assert!(!INDEX_HTML.contains("class=\"file-actions\""));
+        assert!(!APP_JS.contains("dl.textContent = 'Download'"));
+        assert!(!APP_JS.contains("del.dataset.fileName"));
+    }
+
+    #[test]
+    fn ui_file_delete_exists_only_in_selection_toolbar() {
+        assert_eq!(INDEX_HTML.matches("id=\"bulk-delete-files\"").count(), 1);
+        assert!(APP_JS.contains("$('#bulk-delete-files').onclick"));
+        assert!(!APP_JS.contains("pendingFileDeletes"));
+    }
+
+    #[test]
+    fn ui_file_colspans_match_four_data_columns() {
+        assert!(APP_JS.contains("fileSelection.enabled ? 5 : 4"));
+    }
+
+    #[test]
+    fn ui_unifies_actions_upload_and_feedback_components() {
+        for marker in [
+            "class=\"search-field\"",
+            "class=\"dropzone-content\"",
+            "role=\"status\"",
+            "aria-live=\"polite\"",
+        ] {
+            assert!(INDEX_HTML.contains(marker), "missing {marker}");
+        }
+        for marker in [
+            "id=\"secret-error\" class=\"error-panel\" role=\"alert\"",
+            "id=\"file-error\" class=\"error-panel\" role=\"alert\"",
+            "id=\"secret-form-error\" class=\"error-panel\" role=\"alert\"",
+            "function showFormError(error)",
+            "function showListLoadError(kind, error)",
+        ] {
+            assert!(
+                INDEX_HTML.contains(marker) || APP_JS.contains(marker),
+                "missing {marker}"
+            );
+        }
+        assert!(!APP_JS.contains("toast(e.message, true)"));
+        assert!(!APP_JS.contains("isError ? 'error' : 'success'"));
+        assert!(STYLE_CSS.contains(".bulk-toolbar {"));
+        assert!(STYLE_CSS.contains(".dropzone-content {"));
+        assert!(STYLE_CSS.contains(".toast.success {"));
+        assert!(STYLE_CSS.contains(".error-panel {"));
+        assert!(
+            !STYLE_CSS.contains("#toast {"),
+            "legacy toast id styles override the unified toast component"
+        );
+    }
+
+    #[test]
+    fn ui_delete_buttons_enter_non_repeatable_pending_state() {
+        assert!(APP_JS.contains("function beginPendingAction(button, label)"));
+        assert!(APP_JS.contains("button.disabled = true;"));
+        assert!(APP_JS.contains("button.disabled = false;"));
+        assert!(APP_JS.contains("beginPendingAction(btn, 'Deleting…')"));
+    }
+
+    #[test]
+    fn ui_guards_drawer_action_continuations_by_selection() {
+        assert!(APP_JS.contains("function isCurrentDrawer(generation, selection)"));
+        assert!(
+            APP_JS
+                .matches("if (!isCurrentDrawer(generation, selection)) return;")
+                .count()
+                >= 7
+        );
+        assert!(APP_JS.contains("function conversionOperationIsCurrent(operation)"));
+        for marker in [
+            "operation.operationGeneration === conversionOperationGeneration",
+            "operation.lifecycleEpoch === conversionLifecycleEpoch",
+            "operation.drawerGeneration === drawerGeneration",
+            "operation.selection === editing",
+            "sameOperationScope(operation.scope, drawerScope)",
+        ] {
+            assert!(APP_JS.contains(marker), "missing conversion guard {marker}");
+        }
+    }
+
+    #[test]
+    fn ui_hides_and_clears_drawer_while_selection_loads() {
+        assert!(APP_JS.contains(
+            "async function openDrawer(name, invoker = document.activeElement) {\n  const scope = captureOperationScope();\n  if (!canStartScopedAction(scope)) return false;"
+        ));
+        assert!(APP_JS.contains(
+            "async function openDrawerNow(name, invoker, scope) {\n  const generation = ++drawerGeneration;\n  $('#drawer').hidden = true;"
+        ));
+        assert!(APP_JS.contains("function clearDrawerState()"));
+    }
+
+    #[test]
+    fn ui_exposes_selection_controls_for_both_tables() {
+        for id in [
+            "select-secrets",
+            "select-files",
+            "select-all-secrets",
+            "select-all-files",
+            "secret-bulk-bar",
+            "file-bulk-bar",
+        ] {
+            assert!(INDEX_HTML.contains(&format!("id=\"{id}\"")), "{id}");
+        }
+    }
+
+    #[test]
+    fn ui_secret_drawer_lists_attachments_as_links() {
+        assert!(INDEX_HTML.contains("id=\"attachments-section\""));
+        assert!(INDEX_HTML.contains("id=\"attachments-list\""));
+        assert!(APP_JS.contains("/attachments${vaultQS(scope.vault, scope)}"));
+        assert!(APP_JS.contains("downloadFile(f.name, base)"));
+        assert!(STYLE_CSS.contains(".attachment-link"));
+    }
+
+    #[test]
+    fn ui_replaces_flat_group_indentation_with_folder_navigation() {
+        assert!(!APP_JS.contains("tr.classList.add('folder-child')"));
+        assert!(TREE_GRID_JS.contains("`tree-cell item-name ${treeCellClass}`"));
+        assert!(INDEX_HTML.contains("id=\"secrets-table\" role=\"treegrid\""));
+    }
+
+    #[test]
+    fn ui_exposes_semantic_scoped_folder_navigation() {
+        for marker in [
+            "id=\"secrets-table\" role=\"treegrid\"",
+            "id=\"files-table\" role=\"treegrid\"",
+            "id=\"secrets-expand-all\"",
+            "id=\"secrets-collapse-all\"",
+            "id=\"files-expand-all\"",
+            "id=\"files-collapse-all\"",
+        ] {
+            assert!(INDEX_HTML.contains(marker), "missing {marker}");
+        }
+        assert!(!INDEX_HTML.contains("folder-sidebar"));
+        assert!(!INDEX_HTML.contains("folder-sheet"));
+        assert!(TREE_GRID_JS.contains("tr.setAttribute('role', 'row')"));
+        assert!(TREE_GRID_JS.contains("tr.setAttribute('aria-expanded', String(row.expanded))"));
+        assert!(TREE_GRID_JS.contains("tr.setAttribute('aria-level', String(row.level))"));
+        assert!(TREE_GRID_JS.contains("tr.setAttribute('aria-selected'"));
+        assert!(UI_MODEL_JS.contains("function createFolderTokenIndex(response)"));
+        assert!(UI_MODEL_JS.contains("function folderPreferenceKey(tokenIndex)"));
+        assert!(UI_MODEL_JS.contains("const FOLDER_EXPANSION_VERSION = 5;"));
+        assert!(APP_JS.contains("`/api/folder-tokens${vaultQS(scope.vault, scope)}`"));
+        assert!(APP_JS.contains("function syncTreeExpansion(kind, allItems)"));
+        assert!(APP_JS.contains("surface: kind"));
+        assert!(STYLE_CSS.contains("tbody tr.selected-row {"));
+    }
+
+    #[test]
+    fn ui_selection_uses_visible_items_and_mixed_header_state() {
+        assert!(APP_JS.contains("function syncSelectionUi(kind, visibleIds)"));
+        assert!(ACCESSIBILITY_JS.contains("export function syncVisibleSelection({"));
+        assert!(APP_JS.contains("elements.selectAll.indeterminate = visible.mixed"));
+        assert!(APP_JS.contains("visible.mixed ? 'mixed' : String(visible.checked)"));
+        assert!(APP_JS.contains("for (const id of visibleIds)"));
+        assert!(APP_JS.contains("clearSelection('secrets')"));
+        assert!(APP_JS.contains("clearSelection('files')"));
+    }
+
+    #[test]
+    fn ui_bulk_actions_are_bounded_and_reuse_item_routes() {
+        assert!(APP_JS.contains("async function runBounded(items, limit, operation)"));
+        assert!(APP_JS.contains("runBounded(targets, 4"));
+        assert!(APP_JS.contains("api('DELETE', `/api/secrets/"));
+        assert!(APP_JS.contains("api('DELETE', `/api/files/"));
+        assert!(APP_JS.contains("/move${vaultQS(vault, operationScope)}`, { folder }"));
+    }
+
+    #[test]
+    fn ui_bulk_deletes_require_confirmation() {
+        assert!(APP_JS.contains("if (!(await confirmDeletion("));
+        assert!(APP_JS.contains("      operationScope,\n    ))"));
+        assert!(APP_JS.contains("recoverable: kind === 'secret'"));
+    }
+
+    #[test]
+    fn ui_cancelling_selection_restores_bulk_controls() {
+        assert!(APP_JS.contains("function resetSelectionControls(kind)"));
+        assert!(APP_JS.contains("if (!enabled) {\n    resetSelectionControls(kind);"));
+        assert!(APP_JS.contains("resetConfirmation(moveButton, 'Move');"));
+        assert!(APP_JS.contains("cancelButton.disabled = false;"));
+    }
+
+    #[test]
+    fn ui_selection_changes_reset_bulk_confirmation() {
+        let between = |start, end| {
+            APP_JS
+                .split_once(start)
+                .unwrap_or_else(|| panic!("missing selection path {start}"))
+                .1
+                .split_once(end)
+                .unwrap_or_else(|| panic!("missing selection boundary {end}"))
+                .0
+        };
+        let reset = between(
+            "function resetBulkConfirmation(kind) {",
+            "function renderSelectionKind(kind) {",
+        );
+        assert!(reset.contains("if (!state.pending)"));
+        assert!(reset.contains("resetConfirmation(selectionElements(kind).deleteButton, 'Delete')"));
+
+        let mode = between(
+            "function setSelectionMode(kind, enabled) {",
+            "function clearSelection(kind) {",
+        );
+        assert!(mode.contains("state.ids.clear();"));
+        assert!(mode.contains("resetConfirmation(elements.deleteButton, 'Delete');"));
+
+        let reconcile = between(
+            "function syncSelectionUi(kind, visibleIds) {",
+            "function updateSelectionControls(kind) {",
+        );
+        assert!(reconcile.contains("state.ids.delete(id);"));
+        assert!(reconcile.contains("if (selectionChanged) resetBulkConfirmation(kind);"));
+
+        let stacked_checkbox = between(
+            "function selectionCheckbox(kind, id) {",
+            "// ---- state ----",
+        );
+        assert!(stacked_checkbox.contains("if (checkbox.checked) state.ids.add(id);"));
+        assert!(stacked_checkbox.contains("else state.ids.delete(id);"));
+        assert!(stacked_checkbox.contains("resetBulkConfirmation(kind);"));
+        // The tree grid mutates the shared id set through the model helper so a
+        // checked branch puts every descendant in bulk-action scope.
+        assert!(TREE_GRID_JS.contains("applyBranchSelection(selectedIds, row.itemIds,"));
+        assert!(TREE_GRID_JS.contains("onSelectionChange?.(row);"));
+        assert!(APP_JS.contains("resetBulkConfirmation(kind);\n      renderSelectionKind(kind);"));
+
+        let visible = between(
+            "function setVisibleSelection(kind, checked) {",
+            "async function runBounded(items, limit, operation) {",
+        );
+        assert!(visible.contains("if (checked) state.ids.add(id);"));
+        assert!(visible.contains("else state.ids.delete(id);"));
+        assert!(visible.contains("resetBulkConfirmation(kind);"));
+
+        let bulk_delete = between(
+            "async function bulkDelete(kind) {",
+            "async function bulkMoveSecrets() {",
+        );
+        assert!(bulk_delete.contains("if (result.ok) state.ids.delete(result.item);"));
+        assert!(bulk_delete.contains("setBulkPending(kind, false, '');"));
+
+        let bulk_move = between(
+            "async function bulkMoveSecrets() {",
+            "$('#select-secrets').onclick",
+        );
+        assert!(bulk_move.contains("if (result.ok) state.ids.delete(result.item);"));
+        assert!(bulk_move.contains("resetConfirmation(moveButton, 'Move');"));
+    }
+
+    #[test]
+    fn ui_bulk_actions_reconcile_same_vault_after_tab_switch() {
+        assert!(APP_JS.contains("const selectionIsCurrent = generation === state.generation;"));
+        assert!(
+            APP_JS
+                .matches("if (!scopeMatchesCurrent(operationScope)) return;")
+                .count()
+                >= 4,
+            "bulk delete and move must reconcile only their captured immutable operation scope"
+        );
+        assert!(!APP_JS
+            .contains("if (generation !== state.generation || vault !== currentVault) return;"));
+    }
+
+    #[test]
+    fn ui_preserves_failed_file_load_state_during_bulk_recovery() {
+        assert!(APP_JS.contains("let filesState = 'ready';"));
+        assert!(APP_JS.contains("filesState = 'loading';"));
+        assert!(APP_JS.contains("filesState = hasSuccessfulFilesSnapshot ? 'ready' : 'failed';"));
+        assert!(APP_JS.contains("if (!hasSuccessfulFilesSnapshot) {"));
+        let render = APP_JS
+            .split_once("function renderFiles() {")
+            .expect("file renderer")
+            .1
+            .split_once("$('#file-search').oninput")
+            .expect("file renderer boundary")
+            .0;
+        assert!(render.contains("if (!ctx?.capabilities.files) {"));
+        assert!(render.contains("if (filesState !== 'ready') return;"));
+    }
+
+    #[test]
+    fn ui_uses_wait_cursor_only_for_pending_buttons() {
+        assert!(APP_JS.contains("button.classList.add('pending');"));
+        assert!(APP_JS.contains("button.classList.remove('pending');"));
+        assert!(STYLE_CSS.contains("button:disabled { cursor:not-allowed;"));
+        assert!(STYLE_CSS.contains("button.pending:disabled { cursor:wait;"));
+    }
+
+    #[test]
+    fn ui_has_semantic_visual_shell_and_tokens() {
+        for marker in [
+            "id=\"app-header\"",
+            "class=\"app-header-inner\"",
+            "class=\"brand-mark\"",
+            "class=\"brand-name\"",
+            "class=\"vault-context\"",
+            "class=\"tab-list\"",
+            "id=\"secret-item-count\"",
+            "id=\"file-item-count\"",
+        ] {
+            assert!(INDEX_HTML.contains(marker), "missing {marker}");
+        }
+        for token in [
+            "--color-canvas:",
+            "--color-surface:",
+            "--color-surface-subtle:",
+            "--color-text:",
+            "--color-text-muted:",
+            "--color-border:",
+            "--color-accent:",
+            "--color-accent-quiet:",
+            "--color-danger:",
+            "--shadow-raised:",
+        ] {
+            assert!(STYLE_CSS.contains(token), "missing {token}");
+        }
+    }
+
+    #[test]
+    fn ui_has_embedded_icons_and_data_surface_summaries() {
+        for marker in [
+            "id=\"xv-icon-sprite\"",
+            "id=\"icon-secret\"",
+            "id=\"icon-folder\"",
+            "id=\"icon-check\"",
+            "id=\"icon-alert\"",
+            "class=\"data-surface\"",
+            "id=\"secret-list-summary\"",
+            "id=\"file-list-summary\"",
+        ] {
+            assert!(INDEX_HTML.contains(marker), "missing {marker}");
+        }
+        assert!(APP_JS.contains("function icon(name)"));
+        assert!(
+            APP_JS.contains("function setListSummary(kind, visibleCount, totalCount, folderCount)")
+        );
+        assert!(APP_JS.contains("icon('secret')"));
+        assert!(APP_JS.contains("icon('file')"));
+        assert!(TREE_GRID_JS.contains("disclosure.className = 'tree-disclosure'"));
+        assert!(STYLE_CSS.contains(".tree-cell-inner { display:flex;"));
+        assert!(STYLE_CSS.contains(".tree-disclosure {"));
+    }
+
+    #[test]
+    fn ui_has_structured_drawer_and_button_hierarchy() {
+        for marker in [
+            "class=\"drawer-header\"",
+            "id=\"drawer-kicker\"",
+            "class=\"drawer-body\"",
+            "class=\"drawer-footer\"",
+            "class=\"button primary\"",
+            "class=\"button ghost\"",
+            "class=\"button danger\"",
+        ] {
+            assert!(INDEX_HTML.contains(marker), "missing {marker}");
+        }
+        assert!(APP_JS.contains("field.className = 'form-field'"));
+        assert!(APP_JS.contains("label.className = 'field-label'"));
+        assert!(APP_JS.contains("label.htmlFor = inputId"));
+        assert!(APP_JS.contains("field.append(label, input, help, protection, row)"));
+        assert!(APP_JS.contains("input.setAttribute('aria-describedby', help.id)"));
+        assert!(!APP_JS.contains("label.append(input, protection, row)"));
+        assert!(APP_JS
+            .contains("$('#drawer-kicker').textContent = name ? 'Edit secret' : 'Create secret'"));
+        assert!(STYLE_CSS.contains(".drawer-footer {"));
+        assert!(STYLE_CSS.contains("position:sticky"));
+        assert!(!STYLE_CSS.contains("#drawer label {"));
+        assert!(!STYLE_CSS.contains("#drawer input, #drawer textarea {"));
+        assert!(STYLE_CSS.contains(".form-field { display:block;"));
+        assert!(STYLE_CSS.contains("input, select, textarea { width:100%;"));
+        assert!(STYLE_CSS.contains("textarea { padding:.65rem; resize:vertical; }"));
+    }
+
+    #[test]
+    fn ui_bulk_move_uses_pending_button_state() {
+        assert!(APP_JS.contains("beginPendingAction(moveButton, 'Moving…');"));
+        assert!(APP_JS.contains("resetConfirmation(moveButton, 'Move');"));
+    }
+
+    #[test]
+    fn ui_bulk_toolbar_sync_does_not_depend_on_table_render() {
+        assert!(APP_JS.contains("function updateSelectionControls(kind)"));
+        assert!(APP_JS.contains(
+            "function setBulkPending(kind, pending, label) {\n  const state = selectionState(kind);"
+        ));
+        assert!(APP_JS.contains("updateSelectionControls(kind);\n  renderSelectionKind(kind);"));
+    }
+
+    #[test]
+    fn ui_has_dark_responsive_and_accessible_visual_rules() {
+        for marker in [
+            "class=\"column-groups sortable\"",
+            "class=\"column-note sortable\"",
+            "class=\"column-file-type sortable\"",
+            "aria-label=\"Vault content\"",
+            "aria-labelledby=\"drawer-title\"",
+            "role=\"dialog\"",
+            "aria-modal=\"true\"",
+            "id=\"drawer-backdrop\" class=\"drawer-backdrop\" aria-hidden=\"true\" tabindex=\"-1\"",
+        ] {
+            assert!(INDEX_HTML.contains(marker), "missing {marker}");
+        }
+        for rule in [
+            "@media (prefers-color-scheme: dark)",
+            "@media (max-width: 48rem)",
+            "@media (max-width: 34rem)",
+            "@media (prefers-reduced-motion: reduce)",
+            ":focus-visible",
+            ".stacked-list",
+            ".stacked-activation:focus-visible",
+            ".stacked-selection",
+        ] {
+            assert!(STYLE_CSS.contains(rule), "missing {rule}");
+        }
+    }
+
+    #[test]
+    fn ui_keeps_file_table_cells_semantic_on_phone() {
+        assert!(APP_JS.contains("content.className = 'item-name-content'"));
+        assert!(!STYLE_CSS.contains(".item-name { display:flex;"));
+        assert!(!STYLE_CSS.contains(".file-actions { display:flex;"));
+        assert!(STYLE_CSS.contains(".item-name-content { display:flex;"));
+        for marker in ["column-file-size", "column-file-modified"] {
+            assert!(INDEX_HTML.contains(marker), "missing {marker}");
+            assert!(APP_JS.contains(marker), "missing {marker}");
+        }
+        for marker in [
+            "column-secret-name",
+            "column-secret-folder",
+            "column-secret-updated",
+            "column-file-name",
+        ] {
+            assert!(INDEX_HTML.contains(marker), "missing {marker}");
+            assert!(APP_JS.contains(marker), "missing {marker}");
+        }
+        assert!(APP_JS.contains("table.hidden = !tableMode"));
+        assert!(APP_JS.contains("stacked.hidden = tableMode"));
+        assert!(!STYLE_CSS.contains("#secrets-table, #files-table { table-layout:auto; }"));
+        for rule in [
+            "#secrets-table:not(.selection-mode) .column-secret-name { width:50%; }",
+            "#secrets-table:not(.selection-mode) .column-secret-folder { width:22%; }",
+            "#secrets-table:not(.selection-mode) .column-secret-updated { width:28%; }",
+            ".selection-column { width:12.36%; }",
+            "#secrets-table.selection-mode .column-secret-name { width:37.64%; }",
+            "#files-table:not(.selection-mode) .column-file-name { width:46%; }",
+            "#files-table:not(.selection-mode) .file-actions { width:54%; }",
+            "#files-table.selection-mode .column-file-name { width:87.64%; }",
+        ] {
+            assert!(!STYLE_CSS.contains(rule), "unexpected {rule}");
+        }
+        for calc_width in [
+            "width:calc(50% - 2.75rem)",
+            "width:calc(100% - 12rem)",
+            "width:calc(100% - 2.75rem)",
+        ] {
+            assert!(!STYLE_CSS.contains(calc_width), "unexpected {calc_width}");
+        }
+        assert!(!STYLE_CSS.contains("#files-table.selection-mode .file-actions { display:none; }"));
+    }
+
+    #[test]
+    fn ui_row_and_upload_workflows_are_keyboard_operable() {
+        assert!(INDEX_HTML.contains("id=\"browse-files\""));
+        assert!(INDEX_HTML.contains("<button id=\"browse-files\""));
+        assert!(!INDEX_HTML.contains("<label class=\"linkish\""));
+        assert!(APP_JS.contains("$('#browse-files').onclick = () => {"));
+        assert!(APP_JS.contains("if (!canStartScopedAction()) return;"));
+        assert!(APP_JS.contains("function treeNameContent(kind, row)"));
+        assert!(APP_JS.contains("button.className = 'item-name-content row-action'"));
+        assert!(APP_JS.contains("`Edit secret ${name}`"));
+        assert!(APP_JS.contains("`Select ${singular} ${row.identifier}`"));
+        assert!(APP_JS.contains("`Select all ${kind} in folder ${row.path}`"));
+        assert!(STYLE_CSS.contains(".row-action:focus-visible"));
+    }
+
+    #[test]
+    fn ui_compact_controls_keep_minimum_interaction_height() {
+        assert!(STYLE_CSS.contains(".tab { min-height:2.25rem;"));
+        assert!(STYLE_CSS.contains(".button.compact { min-height:2.25rem;"));
+        assert!(STYLE_CSS.contains(".linkish { min-height:2.25rem;"));
+    }
+
+    #[test]
+    fn ui_exposes_accessible_sortable_headers() {
+        for key in [
+            "name", "folder", "groups", "note", "updated", "size", "type", "modified",
+        ] {
+            assert!(
+                INDEX_HTML.contains(&format!("data-sort-key=\"{key}\"")),
+                "missing {key}"
+            );
+        }
+        assert!(APP_JS.contains("function syncSortHeaders(kind)"));
+        assert!(APP_JS.contains("header.setAttribute('aria-sort'"));
+    }
+
+    #[test]
+    fn ui_sorts_filtered_folder_rows() {
+        assert!(APP_JS.contains(
+            "const sorted = query.trim() ? visible : sortedTableItems('secrets', visible);"
+        ));
+        assert!(APP_JS.contains(
+            "const sorted = query.trim() ? visible : sortedTableItems('files', visible);"
+        ));
+        assert!(APP_JS.contains("const rows = XvUiModel.contentRows('secrets', sorted);"));
+        assert!(APP_JS.contains("const rows = XvUiModel.contentRows('files', sorted"));
+        assert!(APP_JS.contains("const tree = XvUiModel.buildContentTree(rows);"));
+        assert!(APP_JS.contains("renderSecretTreeGrid(gridRows);"));
+        assert!(APP_JS.contains("mountTreeGrid('files', gridRows);"));
     }
 }

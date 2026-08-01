@@ -1,0 +1,315 @@
+name: 'Setup crosstache (xv)'
+description: 'Install the xv secrets CLI and optionally fetch secrets into the environment using OIDC — no stored credentials required.'
+author: 'crosstache'
+
+branding:
+  icon: 'lock'
+  color: 'purple'
+
+inputs:
+  version:
+    description: >-
+      Release to install: a tag like `v0.28.0`, or `latest`. Pin an exact tag for
+      reproducible builds — `latest` changes what it installs over time.
+    required: false
+    default: 'latest'
+
+  backend:
+    description: 'Secrets backend: azure, aws, or local.'
+    required: false
+    default: 'azure'
+
+  vault:
+    description: 'Vault to read from. Defaults to whatever the resolved config selects.'
+    required: false
+    default: ''
+
+  secrets:
+    description: >-
+      Secrets to fetch, one `ENV_NAME=secret-name` pair per line. Each value is
+      registered as a masked value and exported to `GITHUB_ENV`, so later steps
+      in the job can read it as an environment variable. Omit to install the CLI
+      without reading anything.
+    required: false
+    default: ''
+
+  auth:
+    description: >-
+      How to authenticate. `oidc` federates this job's GitHub OIDC token into
+      Azure AD — no stored secret, and no separate `azure/login` step. Requires
+      `permissions: id-token: write` on the job plus a federated credential on
+      the app registration. `default` uses the standard credential chain (which
+      picks up whatever `azure/login` or the AWS credentials action already set
+      up). `none` skips auth configuration entirely.
+    required: false
+    default: 'oidc'
+
+  client-id:
+    description: 'Azure app registration (client) ID. Required for auth=oidc.'
+    required: false
+    default: ''
+
+  tenant-id:
+    description: 'Azure tenant ID. Required for auth=oidc.'
+    required: false
+    default: ''
+
+  subscription-id:
+    description: 'Azure subscription ID.'
+    required: false
+    default: ''
+
+  verify-signature:
+    description: >-
+      Also verify the release archive's minisign signature. Requires `minisign`
+      on PATH (install it in a prior step). The SHA-256 digest published with the
+      release is ALWAYS verified regardless of this setting; see the README for
+      exactly what each check does and does not prove.
+    required: false
+    default: 'false'
+
+outputs:
+  version:
+    description: 'The release tag that was installed.'
+    value: ${{ steps.install.outputs.version }}
+  path:
+    description: 'Absolute path to the installed xv binary.'
+    value: ${{ steps.install.outputs.path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install xv
+      id: install
+      shell: bash
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
+        INPUT_VERIFY_SIGNATURE: ${{ inputs.verify-signature }}
+        # Used only for the release API lookup and archive download. Falls back
+        # to unauthenticated requests, which are rate-limited on busy runners.
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+
+        REPO="bziobnic/crosstache"
+
+        # ── Resolve the platform to a published archive name ───────────────
+        case "${RUNNER_OS}:${RUNNER_ARCH}" in
+          Linux:X64)    ARCHIVE="xv-linux-x64.tar.gz" ;;
+          macOS:X64)    ARCHIVE="xv-macos-intel.tar.gz" ;;
+          macOS:ARM64)  ARCHIVE="xv-macos-apple-silicon.tar.gz" ;;
+          Windows:X64)  ARCHIVE="xv-windows-x64.zip" ;;
+          *)
+            echo "::error::crosstache publishes no release binary for ${RUNNER_OS}/${RUNNER_ARCH}." >&2
+            echo "Supported: Linux/X64, macOS/X64, macOS/ARM64, Windows/X64. Build from source with cargo for other targets." >&2
+            exit 1
+            ;;
+        esac
+
+        # ── Resolve the version ───────────────────────────────────────────
+        if [[ "${INPUT_VERSION}" == "latest" ]]; then
+          VERSION="$(curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            ${GH_TOKEN:+-H "Authorization: Bearer ${GH_TOKEN}"} \
+            "https://api.github.com/repos/${REPO}/releases/latest" \
+            | grep -o '"tag_name": *"[^"]*"' | head -1 | cut -d'"' -f4)"
+          if [[ -z "${VERSION}" ]]; then
+            echo "::error::Could not determine the latest crosstache release. Pin an explicit version instead." >&2
+            exit 1
+          fi
+        else
+          VERSION="${INPUT_VERSION}"
+        fi
+        echo "Installing crosstache ${VERSION} (${ARCHIVE})"
+
+        # ── Cache lookup ──────────────────────────────────────────────────
+        # Keyed by version AND platform so a cache restored on one runner can
+        # never hand a foreign binary to another.
+        CACHE_ROOT="${RUNNER_TOOL_CACHE:-${HOME}/.cache}/crosstache/${VERSION}/${RUNNER_OS}-${RUNNER_ARCH}"
+        BIN_NAME="xv"
+        [[ "${RUNNER_OS}" == "Windows" ]] && BIN_NAME="xv.exe"
+        BIN_PATH="${CACHE_ROOT}/${BIN_NAME}"
+
+        if [[ ! -x "${BIN_PATH}" ]]; then
+          WORK="$(mktemp -d)"
+          trap 'rm -rf "${WORK}"' EXIT
+          BASE="https://github.com/${REPO}/releases/download/${VERSION}"
+
+          echo "Downloading ${BASE}/${ARCHIVE}"
+          curl -fsSL -o "${WORK}/${ARCHIVE}" "${BASE}/${ARCHIVE}"
+          curl -fsSL -o "${WORK}/${ARCHIVE}.sha256" "${BASE}/${ARCHIVE}.sha256"
+
+          # ── Integrity: always, fail-closed ──────────────────────────────
+          EXPECTED="$(tr -d ' \t\r\n*' < "${WORK}/${ARCHIVE}.sha256" | tr 'A-Z' 'a-z')"
+          # The published file may be a bare digest or `digest  filename`; the
+          # trim above collapses both, so take the leading 64 hex chars.
+          EXPECTED="${EXPECTED:0:64}"
+          if [[ ! "${EXPECTED}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::Published checksum for ${ARCHIVE} is not a SHA-256 digest; refusing to install." >&2
+            exit 1
+          fi
+          if command -v sha256sum >/dev/null 2>&1; then
+            ACTUAL="$(sha256sum "${WORK}/${ARCHIVE}" | cut -d' ' -f1)"
+          else
+            ACTUAL="$(shasum -a 256 "${WORK}/${ARCHIVE}" | cut -d' ' -f1)"
+          fi
+          if [[ "${ACTUAL}" != "${EXPECTED}" ]]; then
+            echo "::error::Checksum mismatch for ${ARCHIVE}. Expected ${EXPECTED}, got ${ACTUAL}. Refusing to install." >&2
+            exit 1
+          fi
+          echo "SHA-256 verified: ${ACTUAL}"
+
+          # ── Authenticity: opt-in, needs minisign on PATH ────────────────
+          if [[ "${INPUT_VERIFY_SIGNATURE}" == "true" ]]; then
+            if ! command -v minisign >/dev/null 2>&1; then
+              echo "::error::verify-signature was requested but minisign is not on PATH. Install it in a prior step." >&2
+              exit 1
+            fi
+            curl -fsSL -o "${WORK}/${ARCHIVE}.minisig" "${BASE}/${ARCHIVE}.minisig"
+            # Public key is the one embedded in `xv upgrade` (generated 2026-05-04).
+            minisign -Vm "${WORK}/${ARCHIVE}" \
+              -P 'RWRuXFh34rB613dgsXyAMmtKvYK0SFwxq4i44dhGFXVTrhAQ7hJXf6Ym' \
+              -x "${WORK}/${ARCHIVE}.minisig"
+            echo "minisign signature verified"
+          fi
+
+          # ── Unpack ─────────────────────────────────────────────────────
+          mkdir -p "${CACHE_ROOT}"
+          if [[ "${ARCHIVE}" == *.zip ]]; then
+            unzip -q -o "${WORK}/${ARCHIVE}" -d "${WORK}/out"
+          else
+            mkdir -p "${WORK}/out"
+            tar xzf "${WORK}/${ARCHIVE}" -C "${WORK}/out"
+          fi
+          if [[ ! -f "${WORK}/out/${BIN_NAME}" ]]; then
+            echo "::error::Release archive did not contain ${BIN_NAME}." >&2
+            exit 1
+          fi
+          mv "${WORK}/out/${BIN_NAME}" "${BIN_PATH}"
+          chmod +x "${BIN_PATH}"
+        else
+          echo "Using cached ${BIN_PATH}"
+        fi
+
+        echo "${CACHE_ROOT}" >> "${GITHUB_PATH}"
+        echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+        echo "path=${BIN_PATH}" >> "${GITHUB_OUTPUT}"
+        "${BIN_PATH}" --version || true
+
+    - name: Configure authentication
+      if: inputs.auth != 'none'
+      shell: bash
+      env:
+        INPUT_AUTH: ${{ inputs.auth }}
+        INPUT_BACKEND: ${{ inputs.backend }}
+        INPUT_CLIENT_ID: ${{ inputs.client-id }}
+        INPUT_TENANT_ID: ${{ inputs.tenant-id }}
+        INPUT_SUBSCRIPTION_ID: ${{ inputs.subscription-id }}
+        INPUT_VAULT: ${{ inputs.vault }}
+      run: |
+        set -euo pipefail
+
+        # `XV_BACKEND` is read during config load, unlike the `--backend` flag,
+        # which resolves too late to affect early validation.
+        echo "XV_BACKEND=${INPUT_BACKEND}" >> "${GITHUB_ENV}"
+        [[ -n "${INPUT_VAULT}" ]] && echo "DEFAULT_VAULT=${INPUT_VAULT}" >> "${GITHUB_ENV}"
+        [[ -n "${INPUT_TENANT_ID}" ]] && echo "AZURE_TENANT_ID=${INPUT_TENANT_ID}" >> "${GITHUB_ENV}"
+        [[ -n "${INPUT_CLIENT_ID}" ]] && echo "AZURE_CLIENT_ID=${INPUT_CLIENT_ID}" >> "${GITHUB_ENV}"
+        [[ -n "${INPUT_SUBSCRIPTION_ID}" ]] && echo "AZURE_SUBSCRIPTION_ID=${INPUT_SUBSCRIPTION_ID}" >> "${GITHUB_ENV}"
+
+        case "${INPUT_AUTH}" in
+          oidc)
+            if [[ "${INPUT_BACKEND}" != "azure" ]]; then
+              echo "::error::auth=oidc federates into Azure AD and requires backend=azure. For AWS, use aws-actions/configure-aws-credentials (which is itself OIDC-based) with auth=default." >&2
+              exit 1
+            fi
+            if [[ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]]; then
+              echo "::error::auth=oidc needs an OIDC token, but this job cannot request one. Add:" >&2
+              echo "    permissions:" >&2
+              echo "      id-token: write" >&2
+              echo "  to the job (or workflow) definition." >&2
+              exit 1
+            fi
+            if [[ -z "${INPUT_CLIENT_ID}" || -z "${INPUT_TENANT_ID}" ]]; then
+              echo "::error::auth=oidc requires both client-id and tenant-id, naming an app registration with a federated credential for this repository." >&2
+              exit 1
+            fi
+            echo "AZURE_CREDENTIAL_PRIORITY=oidc" >> "${GITHUB_ENV}"
+            echo "Configured OIDC federation for client ${INPUT_CLIENT_ID} in tenant ${INPUT_TENANT_ID}"
+            ;;
+          default)
+            echo "Using the default credential chain"
+            ;;
+          *)
+            echo "::error::Unknown auth mode '${INPUT_AUTH}'. Valid values: oidc, default, none." >&2
+            exit 1
+            ;;
+        esac
+
+    - name: Fetch secrets
+      if: inputs.secrets != ''
+      shell: bash
+      env:
+        INPUT_SECRETS: ${{ inputs.secrets }}
+        INPUT_VAULT: ${{ inputs.vault }}
+      run: |
+        set -euo pipefail
+
+        VAULT_ARGS=()
+        [[ -n "${INPUT_VAULT}" ]] && VAULT_ARGS=(--vault "${INPUT_VAULT}")
+
+        COUNT=0
+        while IFS= read -r LINE; do
+          LINE="${LINE%%$'\r'}"                      # tolerate CRLF workflows
+          LINE="$(printf '%s' "${LINE}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+          [[ -z "${LINE}" || "${LINE}" == \#* ]] && continue
+
+          if [[ "${LINE}" != *=* ]]; then
+            echo "::error::Malformed secrets entry '${LINE}'. Use ENV_NAME=secret-name, one per line." >&2
+            exit 1
+          fi
+          ENV_NAME="${LINE%%=*}"
+          SECRET_NAME="${LINE#*=}"
+
+          # A bad env name would corrupt GITHUB_ENV rather than fail cleanly.
+          if [[ ! "${ENV_NAME}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            echo "::error::'${ENV_NAME}' is not a valid environment variable name." >&2
+            exit 1
+          fi
+          if [[ -z "${SECRET_NAME}" ]]; then
+            echo "::error::No secret name given for ${ENV_NAME}." >&2
+            exit 1
+          fi
+
+          # `--raw` writes the bare value to stdout; status chrome goes to stderr.
+          if ! VALUE="$(xv get "${SECRET_NAME}" --raw "${VAULT_ARGS[@]+"${VAULT_ARGS[@]}"}")"; then
+            echo "::error::Failed to read secret '${SECRET_NAME}'." >&2
+            exit 1
+          fi
+
+          # Mask BEFORE the value can reach any later log line. Mask each line
+          # separately: the runner matches masks per line, so a multi-line
+          # secret registered whole would still leak line by line.
+          while IFS= read -r MASK_LINE; do
+            [[ -n "${MASK_LINE}" ]] && echo "::add-mask::${MASK_LINE}"
+          done <<< "${VALUE}"
+
+          # Heredoc form so multi-line values survive. The delimiter is random
+          # per value, and a value containing it is rejected rather than
+          # allowed to terminate the block early and inject arbitrary env vars.
+          DELIM="XV_EOF_$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+          if printf '%s' "${VALUE}" | grep -qF "${DELIM}"; then
+            echo "::error::Secret '${SECRET_NAME}' contains the generated delimiter; refusing to write it to GITHUB_ENV." >&2
+            exit 1
+          fi
+          {
+            printf '%s<<%s\n' "${ENV_NAME}" "${DELIM}"
+            printf '%s\n' "${VALUE}"
+            printf '%s\n' "${DELIM}"
+          } >> "${GITHUB_ENV}"
+
+          COUNT=$((COUNT + 1))
+          echo "Exported ${ENV_NAME} from secret '${SECRET_NAME}'"
+        done <<< "${INPUT_SECRETS}"
+
+        echo "Fetched ${COUNT} secret(s)"

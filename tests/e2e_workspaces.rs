@@ -2163,20 +2163,24 @@ fn purge_unqualified_targets_default_never_searches() {
     ]);
 
     // Secret exists (soft-deleted) ONLY in "stage"; an unqualified purge
-    // must target "work" only, never "stage". The local backend's purge is
-    // idempotent on a name with nothing to purge (no trash entries — a
-    // no-op `Ok(())`, not a not-found error), so "unqualified purge
-    // succeeds" alone doesn't prove anything; the proof is that the stage
-    // copy is STILL RESTORABLE afterward (i.e. still in trash, not
-    // actually purged) — if the unqualified purge had wrongly searched and
-    // purged the stage copy, this restore would fail. This is the
+    // must target "work" only, never "stage". The default vault has no
+    // matching trash entry, so the purge must fail not-found there. The
+    // stage copy must also remain RESTORABLE afterward (i.e. still in trash,
+    // not actually purged) — if the unqualified purge had wrongly searched
+    // and purged the stage copy, this restore would fail. This is the
     // trait-path proof for the Bugbot HIGH fix: purge's legacy-vs-trait
     // decision now runs on the RESOLVED target, and on this (local-backend)
     // trait path that means default-only, never-searched addressing — same
     // contract as delete/update/rotate.
     env.ok(&["set", "stage:PURGE_ONLY_STAGE", "--value", "v"]);
     env.ok(&["delete", "stage:PURGE_ONLY_STAGE", "--force"]);
-    env.ok(&["purge", "PURGE_ONLY_STAGE", "--force"]); // no-op against "work"
+    let default_purge = env.err(&["purge", "PURGE_ONLY_STAGE", "--force"]);
+    let default_purge_message = combined(&default_purge);
+    assert!(
+        default_purge_message.contains("Secret not found: PURGE_ONLY_STAGE (deleted)")
+            && default_purge_message.contains("Secret is not in the trash"),
+        "{default_purge_message}"
+    );
 
     env.ok(&["restore", "stage:PURGE_ONLY_STAGE"]);
     assert_eq!(env.ok(&["get", "stage:PURGE_ONLY_STAGE", "--raw"]), "v");

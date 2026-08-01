@@ -26,7 +26,7 @@
 
 use crosstache::auth::provider::DefaultAzureCredentialProvider;
 use crosstache::backend::azure::AzureBackend;
-use crosstache::backend::Backend;
+use crosstache::backend::{Backend, BackendError};
 use crosstache::config::settings::Config;
 use crosstache::secret::manager::{FieldUpdate, SecretRequest, SecretUpdateRequest};
 use std::sync::Arc;
@@ -209,6 +209,7 @@ async fn e2e_azure_secret_full_lifecycle() {
     // --- UPDATE METADATA (note + groups) ---
     let update = SecretUpdateRequest {
         name: secret.clone(),
+        expected_revision: None,
         value: None,
         content_type: None,
         enabled: None,
@@ -295,7 +296,7 @@ async fn e2e_azure_secret_full_lifecycle() {
 
 #[tokio::test]
 #[ignore]
-async fn e2e_azure_rename_roundtrip() {
+async fn e2e_azure_rename_fails_closed() {
     let backend = azure_backend().await;
     let vault = test_vault();
     let source = unique_name("rn-src");
@@ -310,46 +311,36 @@ async fn e2e_azure_rename_roundtrip() {
         .await
         .expect("create rename source");
 
-    let created = backend
+    let err = backend
         .secrets()
         .rename_secret(&vault, &source, &dest)
         .await
-        .expect("rename_secret should succeed");
-    assert_eq!(created.name, dest);
+        .expect_err("Azure rename must be rejected without atomic support");
+    assert!(matches!(err, BackendError::Unsupported(_)));
 
     let got = backend
         .secrets()
-        .get_secret(&vault, &dest, true)
+        .get_secret(&vault, &source, true)
         .await
-        .expect("get renamed secret");
+        .expect("source must remain after rejected rename");
     assert_eq!(got.value.as_ref().map(|v| v.as_str()), Some("rename-me"));
     assert_eq!(got.tags.get("note").map(String::as_str), Some("rename e2e"));
     assert_eq!(got.tags.get("groups").map(String::as_str), Some("e2e"));
 
-    // The old name must be soft-deleted (GET returns 404 once the delete
-    // lands; Key Vault applies it promptly after DELETE returns).
-    let exists = backend
+    assert!(!backend
         .secrets()
-        .secret_exists(&vault, &source)
+        .secret_exists(&vault, &dest)
         .await
-        .expect("exists check on the old name");
-    assert!(
-        !exists,
-        "source '{source}' should be soft-deleted after rename"
-    );
+        .expect("destination existence check"));
 
-    // Cleanup: soft-delete the destination. The vault has purge protection,
-    // so purging is blocked by policy — soft delete + unique names is the
-    // documented harness contract. `source` is already soft-deleted.
-    cleanup(&backend, &vault, &[&dest]).await;
+    cleanup(&backend, &vault, &[&source]).await;
 }
 
-/// mv semantics = folder tag update, then rename. Exercise the exact
-/// two-call sequence `execute_secret_mv` performs (`xv mv db/<src>
-/// app/<dst>`) against real Azure Key Vault.
+/// The folder update remains applied, but unsupported rename must preserve the
+/// source and must not create a destination.
 #[tokio::test]
 #[ignore]
-async fn e2e_azure_mv_sequence_roundtrip() {
+async fn e2e_azure_mv_sequence_fails_closed_at_rename() {
     let backend = azure_backend().await;
     let vault = test_vault();
     let source = unique_name("mv-src");
@@ -367,6 +358,7 @@ async fn e2e_azure_mv_sequence_roundtrip() {
     // 2. Folder update — what mv does first.
     let update = SecretUpdateRequest {
         name: source.clone(),
+        expected_revision: None,
         value: None,
         content_type: None,
         enabled: None,
@@ -385,33 +377,30 @@ async fn e2e_azure_mv_sequence_roundtrip() {
         .await
         .expect("folder update");
 
-    // 3. Rename — what mv does second.
-    let renamed = backend
+    // 3. Rename — what mv does second — is rejected before any copy/delete.
+    let err = backend
         .secrets()
         .rename_secret(&vault, &source, &dest)
         .await
-        .expect("rename_secret should succeed");
-    assert_eq!(renamed.name, dest);
+        .expect_err("Azure rename must be rejected without atomic support");
+    assert!(matches!(err, BackendError::Unsupported(_)));
 
-    // 4. Verify: value + new folder tag on dest, source soft-deleted.
+    // 4. Verify: source + folder update remain and no destination was created.
     let got = backend
         .secrets()
-        .get_secret(&vault, &dest, true)
+        .get_secret(&vault, &source, true)
         .await
-        .expect("get moved secret");
+        .expect("source must remain after rejected rename");
     assert_eq!(got.value.as_ref().map(|v| v.as_str()), Some("mv-me"));
     assert_eq!(got.tags.get("folder").map(String::as_str), Some("app"));
 
-    let exists = backend
+    assert!(!backend
         .secrets()
-        .secret_exists(&vault, &source)
+        .secret_exists(&vault, &dest)
         .await
-        .expect("exists check on the old name");
-    assert!(!exists, "source '{source}' should be soft-deleted after mv");
+        .expect("destination existence check"));
 
-    // Cleanup: soft-delete the destination (best-effort; matches the file's
-    // other tests). `source` is already soft-deleted.
-    cleanup(&backend, &vault, &[&dest]).await;
+    cleanup(&backend, &vault, &[&source]).await;
 }
 
 #[tokio::test]

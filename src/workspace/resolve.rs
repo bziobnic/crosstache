@@ -144,6 +144,31 @@ fn materialize(registry: &BackendRegistry, entry: &WorkspaceEntry) -> Result<Arc
     })
 }
 
+/// Materialize the workspace's effective default entry without probing any
+/// other attached backend.
+///
+/// The process registry is normally enough for the active backend. A
+/// workspace may select a different named backend, so this falls back to a
+/// lazy one-name registry built from the same config. This preserves the
+/// workspace layer's "construct only what is touched" rule.
+#[cfg(any(feature = "ui", test))]
+pub(crate) fn materialize_default_entry(
+    config: &crate::config::Config,
+    workspace: &Workspace,
+    registry: &BackendRegistry,
+) -> Result<TargetVault> {
+    let entry = workspace.default_entry()?.clone();
+    let backend = match registry.materialize(&entry.backend) {
+        Ok(backend) => backend,
+        Err(_) => {
+            let scoped = BackendRegistry::with_lazy(config, std::slice::from_ref(&entry.backend))
+                .map_err(|error| CrosstacheError::config(error.to_string()))?;
+            materialize(&scoped, &entry)?
+        }
+    };
+    Ok(TargetVault { backend, entry })
+}
+
 fn unknown_alias_error(ws: &Workspace, alias: &str) -> CrosstacheError {
     let attached: Vec<&str> = ws.entries.iter().map(|e| e.alias.as_str()).collect();
     CrosstacheError::invalid_argument(format!(
@@ -204,6 +229,8 @@ mod tests {
                 default_vault: Some("default".into()),
                 encrypt_metadata: None,
                 opaque_filenames: None,
+                audit: None,
+                git: None,
             }),
         );
         named_backends.insert(
@@ -214,6 +241,8 @@ mod tests {
                 default_vault: Some("default".into()),
                 encrypt_metadata: None,
                 opaque_filenames: None,
+                audit: None,
+                git: None,
             }),
         );
         let config = Config {
@@ -534,6 +563,8 @@ mod tests {
                 default_vault: Some("default".into()),
                 encrypt_metadata: None,
                 opaque_filenames: None,
+                audit: None,
+                git: None,
             }),
         );
         // No top-level `backend`/`local`/`azure` config at all — this
@@ -608,6 +639,8 @@ mod tests {
                 default_vault: Some("default".into()),
                 encrypt_metadata: None,
                 opaque_filenames: None,
+                audit: None,
+                git: None,
             }),
         );
         // No top-level `backend`/`local`/`azure` config at all — same

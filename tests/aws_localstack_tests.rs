@@ -13,7 +13,7 @@
 #![allow(dead_code)]
 
 use crosstache::backend::aws::AwsBackend;
-use crosstache::backend::Backend;
+use crosstache::backend::{Backend, BackendError};
 use crosstache::config::settings::AwsConfig;
 use crosstache::secret::manager::{FieldUpdate, SecretRequest, SecretUpdateRequest};
 use zeroize::Zeroizing;
@@ -92,7 +92,7 @@ async fn localstack_set_get_round_trip() {
 }
 
 #[tokio::test]
-async fn localstack_rename_round_trip() {
+async fn localstack_rename_fails_closed() {
     if skip_unless_enabled() {
         return;
     }
@@ -113,48 +113,36 @@ async fn localstack_rename_round_trip() {
     };
     backend.secrets().set_secret(&vault, request).await.unwrap();
 
-    let created = backend
+    let err = backend
         .secrets()
         .rename_secret(&vault, "rename-src", "rename-dst")
         .await
-        .unwrap();
-    assert_eq!(created.name, "rename-dst");
+        .unwrap_err();
+    assert!(matches!(err, BackendError::Unsupported(_)));
 
     let got = backend
         .secrets()
-        .get_secret(&vault, "rename-dst", true)
+        .get_secret(&vault, "rename-src", true)
         .await
         .unwrap();
     assert_eq!(
         got.value.as_ref().map(|v| v.as_str().to_string()),
         Some("rename-value".to_string())
     );
-    // props_from_describe re-exposes xv: tags under the canonical keys.
     assert_eq!(got.tags.get("groups").map(String::as_str), Some("team"));
     assert_eq!(got.tags.get("note").map(String::as_str), Some("ride along"));
 
-    // The old name is scheduled for deletion (30-day recovery window — the
-    // same delete `xv delete` performs), so it drops out of ListSecrets.
-    // NOTE: don't assert via secret_exists — DescribeSecret still returns
-    // scheduled-deletion entries, which is what makes the rename-back-within-
-    // the-window case a Conflict by design.
     let listed = backend.secrets().list_secrets(&vault, None).await.unwrap();
-    assert!(
-        !listed.iter().any(|s| s.name == "rename-src"),
-        "old name still listed: {listed:?}"
-    );
-    assert!(listed.iter().any(|s| s.name == "rename-dst"));
+    assert!(listed.iter().any(|s| s.name == "rename-src"));
+    assert!(!listed.iter().any(|s| s.name == "rename-dst"));
 
-    // Cleanup: force-purge both names so reruns never hit the recovery window.
-    let _ = backend.secrets().purge_secret(&vault, "rename-dst").await;
     let _ = backend.secrets().purge_secret(&vault, "rename-src").await;
 }
 
-/// mv semantics = folder tag update, then rename. Exercise the exact
-/// two-call sequence `execute_secret_mv` performs (`xv mv db/<src>
-/// app/<dst>`) against LocalStack's Secrets Manager.
+/// The metadata update remains applied, but the unsupported rename must leave
+/// the source in place and must not create a destination.
 #[tokio::test]
-async fn localstack_mv_sequence_roundtrip() {
+async fn localstack_mv_sequence_fails_closed_at_rename() {
     if skip_unless_enabled() {
         return;
     }
@@ -179,6 +167,7 @@ async fn localstack_mv_sequence_roundtrip() {
     // 2. Folder update — what mv does first.
     let update = SecretUpdateRequest {
         name: "mv-src".into(),
+        expected_revision: None,
         value: None,
         content_type: None,
         enabled: None,
@@ -197,18 +186,18 @@ async fn localstack_mv_sequence_roundtrip() {
         .await
         .unwrap();
 
-    // 3. Rename — what mv does second.
-    let created = backend
+    // 3. Rename — what mv does second — is rejected before any copy/delete.
+    let err = backend
         .secrets()
         .rename_secret(&vault, "mv-src", "mv-dst")
         .await
-        .unwrap();
-    assert_eq!(created.name, "mv-dst");
+        .unwrap_err();
+    assert!(matches!(err, BackendError::Unsupported(_)));
 
-    // 4. Verify: value + new folder tag on dest, old name gone from listings.
+    // 4. Verify: the source and its folder update remain, and no dest exists.
     let got = backend
         .secrets()
-        .get_secret(&vault, "mv-dst", true)
+        .get_secret(&vault, "mv-src", true)
         .await
         .unwrap();
     assert_eq!(
@@ -218,14 +207,9 @@ async fn localstack_mv_sequence_roundtrip() {
     assert_eq!(got.tags.get("folder").map(String::as_str), Some("app"));
 
     let listed = backend.secrets().list_secrets(&vault, None).await.unwrap();
-    assert!(
-        !listed.iter().any(|s| s.name == "mv-src"),
-        "old name still listed: {listed:?}"
-    );
-    assert!(listed.iter().any(|s| s.name == "mv-dst"));
+    assert!(listed.iter().any(|s| s.name == "mv-src"));
+    assert!(!listed.iter().any(|s| s.name == "mv-dst"));
 
-    // Cleanup: force-purge both names so reruns never hit the recovery window.
-    let _ = backend.secrets().purge_secret(&vault, "mv-dst").await;
     let _ = backend.secrets().purge_secret(&vault, "mv-src").await;
 }
 

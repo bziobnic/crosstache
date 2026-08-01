@@ -802,6 +802,10 @@ fn ensure_folder_prefix(full_prefix: String, user_prefix: &str, delimiter: &str)
 
 #[async_trait]
 impl FileBackend for AwsFileBackend {
+    fn validate_file_name(&self, name: &str) -> Result<(), BackendError> {
+        validate_file_name(name)
+    }
+
     async fn upload_file(
         &self,
         vault: &str,

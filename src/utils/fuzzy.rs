@@ -219,6 +219,7 @@ mod tests {
             groups: Some("backend,prod".to_string()),
             updated_on: String::new(),
             enabled: true,
+            expires_on: None,
             content_type: String::new(),
             tags: std::collections::HashMap::new(),
         };

@@ -8,6 +8,12 @@ use crate::backend::aws::config::AwsConfig;
 use crate::backend::error::BackendError;
 use aws_sdk_secretsmanager::Client as SecretsManagerClient;
 
+fn uses_http_only_transport(endpoint: &str) -> bool {
+    endpoint
+        .get(..7)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("http://"))
+}
+
 /// Load the shared AWS `SdkConfig` from the resolved `AwsConfig` plus
 /// per-invocation overrides (region, profile from CLI flags or env vars).
 /// Service clients (Secrets Manager, CloudTrail, S3) are built from this
@@ -38,6 +44,9 @@ pub async fn load_sdk_config(
     if let Some(ref endpoint) = aws_cfg.endpoint_url {
         if !endpoint.is_empty() {
             loader = loader.endpoint_url(endpoint);
+            if uses_http_only_transport(endpoint) {
+                loader = loader.http_client(aws_smithy_http_client::Builder::new().build_http());
+            }
         }
     }
 
@@ -75,4 +84,17 @@ pub fn build_s3_client(
         builder = builder.force_path_style(true);
     }
     aws_sdk_s3::Client::from_conf(builder.build())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::uses_http_only_transport;
+
+    #[test]
+    fn only_plain_http_endpoints_use_the_http_only_transport() {
+        assert!(uses_http_only_transport("http://127.0.0.1:4566"));
+        assert!(uses_http_only_transport("HTTP://localhost:4566"));
+        assert!(!uses_http_only_transport("https://s3.example.com"));
+        assert!(!uses_http_only_transport(""));
+    }
 }

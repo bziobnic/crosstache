@@ -17,6 +17,7 @@ mod config;
 mod error;
 mod records;
 mod scan;
+mod schedule;
 mod secret;
 #[cfg(feature = "tui")]
 mod tui;

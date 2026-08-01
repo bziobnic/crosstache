@@ -11,8 +11,42 @@ Typed records are supported: create one via the type picker on the "New
 secret" drawer or open an existing one to edit it field-by-field, with
 secret-kind fields masked and individually revealable/copyable.
 
-Entries in both tables are grouped by folder into collapsible sections
-(collapsed by default), with file sizes shown in human-readable units.
+Opening a secret lists its file attachments (if any) as download links in the
+detail drawer (`GET /api/secrets/{name}/attachments`). Downloads decrypt
+age-encrypted blobs the same way `xv file download` does. Renaming a secret
+that still has attachments is refused (`xv-attachments-block-rename`) —
+detach first, or keep the current name. See
+[`docs/attachments.md`](attachments.md).
+
+Both surfaces render a single hierarchical tree grid: folders and their
+contents live in one table, each row indented by depth, with a disclosure
+chevron on folder rows. Vaults with 50 or fewer items open fully expanded;
+larger ones start collapsed. **Expand all** / **Collapse all** sit in the
+toolbar, expansion is remembered per backend/vault/surface, and searching or
+filtering temporarily reveals matches inside collapsed folders without
+changing what you had open. Each surface keeps its own columns (secrets show
+folder, groups, note and updated; files show size, type and modified), and
+file sizes use human-readable units.
+
+Use **Select** to reveal per-row checkboxes. Folder rows are containers rather
+than selectable entities: checking a folder selects every item beneath it,
+partial selection shows the indeterminate state, and unchecking clears the
+branch. Bulk actions therefore always operate on items — a checked folder puts
+its descendants in scope. The header checkbox selects every item currently
+listed (honouring the active search and filters). Both tables support bulk
+deletion; selected secrets can also be moved to another folder. Bulk file moves
+are not available because file backends do not expose a portable move
+operation.
+
+Keyboard: arrow up/down move between rows, arrow right expands a folder then
+steps into it, arrow left collapses or moves to the parent, Home/End jump to
+the ends, Space toggles selection, and Enter opens a secret, downloads a file,
+or toggles a folder.
+
+The URL token is copied into per-tab `sessionStorage`, so reloads in that tab
+remain authenticated while the server is running. Closing the tab discards the
+app's session access. Opening the scrubbed URL in a new tab requires the
+original tokenized URL printed in the terminal.
 
 Scope note: the UI operates on the **active backend** — the vault switcher
 lists that backend's vaults and every operation targets it. Multi-backend
@@ -22,9 +56,10 @@ default vault, not the workspace seam. Workspace-aware switching is tracked
 as a follow-up.
 
 Security model: loopback bind only; per-session bearer token (the `?token=`
-in the URL, held in page memory); Host/Origin validation; secret values only
-in POST bodies; `Cache-Control: no-store`. There is no TLS and no login —
-if you need network access to your vaults from another device, this is
+in the URL, held in per-tab session storage); Host/Origin validation; secret
+values only in POST bodies; `Cache-Control: no-store`. There is no TLS and no
+login — if you need network access to your vaults from another device, this is
 deliberately not the tool.
 
-Design: `docs/superpowers/specs/2026-07-08-web-ui-design.md`.
+Designs: `docs/superpowers/specs/2026-07-08-web-ui-design.md` and
+`docs/superpowers/specs/2026-07-14-web-ui-selection-design.md`.

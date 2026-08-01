@@ -17,6 +17,16 @@ fn preserves_request_tag(key: &str) -> bool {
     !key.starts_with("xv:") || key == TAG_MIGRATED_FROM || key == TAG_MIGRATED_AT
 }
 
+fn update_after_create_conflict(
+    update_existing: bool,
+    error: BackendError,
+) -> Result<bool, BackendError> {
+    match error {
+        BackendError::Conflict(_) if update_existing => Ok(true),
+        other => Err(other),
+    }
+}
+
 pub struct AwsSecretBackend {
     pub(crate) client: Arc<SecretsManagerClient>,
 }
@@ -355,14 +365,12 @@ impl AwsSecretBackend {
     }
 }
 
-#[async_trait::async_trait]
-impl SecretBackend for AwsSecretBackend {
-    // Required methods — real impls added in Tasks 13-22.
-
-    async fn set_secret(
+impl AwsSecretBackend {
+    async fn set_secret_with_mode(
         &self,
         vault: &str,
         request: SecretRequest,
+        update_existing: bool,
     ) -> Result<SecretProperties, BackendError> {
         use crate::backend::aws::encoding::{aws_name, validate_full_secret_name};
         use crate::backend::aws::metadata::{
@@ -421,14 +429,17 @@ impl SecretBackend for AwsSecretBackend {
 
         let version_id = match create_result {
             Ok(out) => out.version_id().unwrap_or("").to_string(),
-            Err(e) => match super::errors::from_create(e) {
-                BackendError::Conflict(_) => {
-                    return self
-                        .update_existing_secret(vault, &request, &aws_full_name)
-                        .await;
+            Err(e) => {
+                match update_after_create_conflict(update_existing, super::errors::from_create(e)) {
+                    Ok(true) => {
+                        return self
+                            .update_existing_secret(vault, &request, &aws_full_name)
+                            .await;
+                    }
+                    Ok(false) => unreachable!("create conflict decision is boolean-total"),
+                    Err(error) => return Err(error),
                 }
-                other => return Err(other),
-            },
+            }
         };
 
         Ok(SecretProperties {
@@ -447,6 +458,30 @@ impl SecretBackend for AwsSecretBackend {
             content_type: request.content_type.unwrap_or_default(),
             recovery_level: None,
         })
+    }
+}
+
+#[async_trait::async_trait]
+impl SecretBackend for AwsSecretBackend {
+    // Required methods — real impls added in Tasks 13-22.
+
+    async fn set_secret(
+        &self,
+        vault: &str,
+        request: SecretRequest,
+    ) -> Result<SecretProperties, BackendError> {
+        self.set_secret_with_mode(vault, request, true).await
+    }
+
+    async fn create_secret_if_absent(
+        &self,
+        vault: &str,
+        request: SecretRequest,
+    ) -> Result<SecretProperties, BackendError> {
+        // AWS CreateSecret is the conditional commit point: a concurrent
+        // destination returns ResourceExistsException, mapped to Conflict,
+        // and is never routed into UpdateSecret.
+        self.set_secret_with_mode(vault, request, false).await
     }
 
     async fn get_secret(
@@ -661,6 +696,7 @@ impl SecretBackend for AwsSecretBackend {
                     groups: groups_val,
                     updated_on: String::new(),
                     enabled: true,
+                    expires_on: None,
                     content_type: String::new(),
                     tags: tags_val,
                 });
@@ -1046,5 +1082,26 @@ impl SecretBackend for AwsSecretBackend {
             .await
             .map_err(|e| super::errors::from_rotate(name, &aws_full_name, e))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod atomic_create_tests {
+    use super::*;
+
+    #[test]
+    fn atomic_create_conflict_never_enters_the_update_path() {
+        let error =
+            update_after_create_conflict(false, BackendError::Conflict("destination".into()))
+                .unwrap_err();
+        assert!(matches!(error, BackendError::Conflict(_)));
+    }
+
+    #[test]
+    fn ordinary_set_keeps_its_existing_upsert_contract() {
+        assert!(
+            update_after_create_conflict(true, BackendError::Conflict("destination".into()))
+                .unwrap()
+        );
     }
 }

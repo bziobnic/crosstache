@@ -308,6 +308,7 @@ async fn e2e_aws_secret_full_lifecycle() {
     // updates round-trip correctly.
     let update = SecretUpdateRequest {
         name: secret.to_string(),
+        expected_revision: None,
         value: None,
         content_type: None,
         enabled: None,

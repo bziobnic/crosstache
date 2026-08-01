@@ -1,6 +1,7 @@
 #!/bin/bash
 
-# crosstache (xv) installer for Unix systems (Linux/macOS)
+# crosstache (xv) installer for Linux, macOS, and Windows bash
+# environments (Git Bash / MSYS2 / Cygwin)
 # https://github.com/bziobnic/crosstache
 
 set -e
@@ -111,6 +112,14 @@ install_azure_cli() {
                 curl -L https://aka.ms/InstallAzureCli | bash
             fi
             ;;
+        mingw*|msys*|cygwin*|windows_nt*)
+            if command -v winget.exe >/dev/null 2>&1; then
+                info "Installing Azure CLI via winget..."
+                winget.exe install --exact --id Microsoft.AzureCLI || error "winget installation failed. Install Azure CLI manually from https://learn.microsoft.com/cli/azure/install-azure-cli-windows"
+            else
+                error "Automatic Azure CLI installation requires winget. Install Azure CLI manually from https://learn.microsoft.com/cli/azure/install-azure-cli-windows"
+            fi
+            ;;
         *)
             error "Unsupported operating system for automatic Azure CLI installation: $os"
             ;;
@@ -146,6 +155,12 @@ detect_platform() {
                 *) error "Unsupported architecture: $arch" ;;
             esac
             ;;
+        mingw*|msys*|cygwin*|windows_nt*)
+            case "$arch" in
+                x86_64|amd64) echo "windows-x64" ;;
+                *) error "Unsupported architecture: $arch" ;;
+            esac
+            ;;
         *)
             error "Unsupported operating system: $os"
             ;;
@@ -170,7 +185,10 @@ download_and_install() {
     local platform version download_url archive_name
     
     platform=$(detect_platform)
-    
+    if [ "$platform" = "windows-x64" ]; then
+        BINARY_NAME="xv.exe"
+    fi
+
     if [ "$VERSION" = "latest" ]; then
         version=$(get_latest_version)
         if [ -z "$version" ]; then
@@ -183,7 +201,11 @@ download_and_install() {
     # Remove 'v' prefix if present
     version_clean=${version#v}
     
-    archive_name="xv-${platform}.tar.gz"
+    if [ "$platform" = "windows-x64" ]; then
+        archive_name="xv-${platform}.zip"
+    else
+        archive_name="xv-${platform}.tar.gz"
+    fi
     download_url="https://github.com/$GITHUB_REPO/releases/download/$version/$archive_name"
     checksum_url="https://github.com/$GITHUB_REPO/releases/download/$version/$archive_name.sha256"
     signature_url="https://github.com/$GITHUB_REPO/releases/download/$version/$archive_name.minisig"
@@ -210,12 +232,14 @@ download_and_install() {
     fi
 
     if ! command -v minisign >/dev/null 2>&1; then
-        error "minisign is required to authenticate releases. Install minisign and retry."
+        error "minisign is required to authenticate releases. Install minisign (e.g. 'brew install minisign', 'apt install minisign', or 'scoop install minisign' on Windows) and retry."
     fi
     if ! minisign -Vm "$archive_name" -x "$archive_name.minisig" -P "$RELEASE_SIGNING_KEY" >/dev/null; then
         error "Release signature verification failed. Refusing to install."
     fi
-    trusted_comment=$(sed -n '3s/^trusted comment: //p' "$archive_name.minisig")
+    # Windows-built minisig files have CRLF line endings; strip the CR so the
+    # comparison below doesn't fail on an invisible trailing '\r'.
+    trusted_comment=$(sed -n '3s/^trusted comment: //p' "$archive_name.minisig" | tr -d '\r')
     if [ "$trusted_comment" != "crosstache $version" ]; then
         error "Release signature belongs to '$trusted_comment', not 'crosstache $version'. Refusing a replayed archive."
     fi
@@ -251,7 +275,20 @@ download_and_install() {
     
     # Extract archive
     info "Extracting archive..."
-    tar -xzf "$archive_name" || error "Failed to extract archive"
+    case "$archive_name" in
+        *.zip)
+            if command -v unzip >/dev/null 2>&1; then
+                unzip -oq "$archive_name" || error "Failed to extract archive"
+            elif command -v powershell.exe >/dev/null 2>&1 && command -v cygpath >/dev/null 2>&1; then
+                powershell.exe -NoProfile -Command "Expand-Archive -Force -Path '$(cygpath -w "$archive_name")' -DestinationPath '$(cygpath -w .)'" || error "Failed to extract archive"
+            else
+                error "unzip is required to extract the archive but was not found"
+            fi
+            ;;
+        *)
+            tar -xzf "$archive_name" || error "Failed to extract archive"
+            ;;
+    esac
     
     # Create install directory
     mkdir -p "$INSTALL_DIR" || error "Failed to create installation directory: $INSTALL_DIR"
@@ -389,8 +426,12 @@ main() {
     info "Repository: https://github.com/$GITHUB_REPO"
     echo ""
     
-    # Check dependencies
-    if ! command -v tar >/dev/null 2>&1; then
+    # Check dependencies (Windows archives are .zip; everything else .tar.gz)
+    if [ "$(detect_platform)" = "windows-x64" ]; then
+        if ! command -v unzip >/dev/null 2>&1 && ! command -v powershell.exe >/dev/null 2>&1; then
+            error "unzip (or powershell.exe) is required but not installed"
+        fi
+    elif ! command -v tar >/dev/null 2>&1; then
         error "tar is required but not installed"
     fi
     

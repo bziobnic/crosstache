@@ -1,5 +1,281 @@
 # Changelog
 
+## v0.31.0 — Hierarchical tree grid for the web UI (2026-07-29)
+
+### Changed
+
+- **Web UI: folder sidebar replaced with a hierarchical tree grid.** Folders
+  and their contents now live in one table on both the secrets and files
+  surfaces, sharing a single tree-grid implementation.
+
+### Fixed
+
+- **"Expand/collapse does nothing"**: the old folder tree modelled folders
+  only, so a folder counted as expandable only when it held sub-folders. A
+  vault of single-segment folders had zero expandable nodes, every chevron
+  rendered empty, and Expand all / Collapse all were no-ops while staying
+  visible and enabled.
+- Saved expansion state was re-hydrated on every list refresh, clobbering
+  what the user had opened.
+- A prune that ran before the scope's token index arrived silently dropped
+  its write.
+
+## v0.30.0 — Rotation scheduling, local audit trail, git-native versioning, first-party CI/CD (2026-07-25)
+
+### Added
+
+- **First-party GitHub Action** (`action.yml`): `uses: bziobnic/crosstache@v1`
+  installs the CLI (per-platform release archive, SHA-256 verified fail-closed,
+  cached in the runner tool cache) and optionally fetches secrets into
+  `GITHUB_ENV` with `::add-mask::` applied per line before anything logs.
+  Optional `verify-signature: true` checks the release `.minisig` against the
+  same minisign key embedded in `xv upgrade`. Outputs `version` and `path`.
+  Guide: `docs/ci-cd.md`.
+
+- **OIDC-native Azure authentication**: `AZURE_CREDENTIAL_PRIORITY=oidc` (or
+  `--credential-type oidc`) federates a GitHub Actions OIDC token into Azure AD
+  as a `client_assertion`, so CI needs no stored client secret and no
+  `azure/login` step. The `default` credential chain now also prefers OIDC when
+  the Actions runtime variables are present, falling back silently if federation
+  is incompletely configured; the explicit `oidc` selection never falls back, so
+  a misconfiguration cannot authenticate as a different identity. Azure AD
+  rejections surface the `AADSTS…` description with the actionable first line.
+
+- **Rotation policies on every backend** (closes the Azure/local rotation gap):
+  a policy is stored with the secret as the `xv:rotate_every` interval plus
+  `xv:rotated_at` timestamp.
+  - `xv update <name> --rotate-every 90d` sets a policy without rotating (clock
+    starts now); `--clear-rotate-every` removes it. Standalone, like `--field`.
+  - `xv rotate <name> --every 90d` rotates and sets/refreshes the policy.
+  - `xv rotate --due` rotates everything currently due; `--force` for cron/CI.
+  - `xv rotate --check` reports status and changes nothing, exiting **51**
+    (`xv-rotation-due`) when any secret is due, so a pipeline can gate on
+    staleness. Honors `--format`.
+  - Every rotation, `--every` or not, restamps `xv:rotated_at`, so `--due` cannot
+    re-rotate the same secret on every run.
+  - An unparseable interval is reported as `invalid` by `--check` and **fails**
+    `--due` rather than being skipped: unknown due-ness must not look like a
+    clean run. Intervals require a unit (`m`/`h`/`d`/`w`); a bare `90` is
+    rejected rather than guessed. Guide: `docs/rotation.md`.
+  - Not a scheduler: nothing rotates unless cron, a systemd timer, or CI invokes
+    `xv`. `--native` (AWS server-side Lambda rotation) is unchanged.
+
+- **Automatic rotation scheduling** (`xv schedule install|status|uninstall`):
+  installs and manages a **per-user** job in the platform's own scheduler that
+  runs `xv rotate --due --force` on a cadence — launchd agent on macOS, systemd
+  **user** timer on Linux, Task Scheduler task on Windows. Nothing system-wide,
+  no root, and no daemon: a resident process would reimplement reboot survival,
+  sleep catch-up, and log capture worse than the OS already does, while holding
+  decryption credentials for its whole lifetime.
+  - `--interval hourly|daily|weekly` and `--at HH:MM` (default daily 03:00);
+    `HH:MM` is strict, so `3:0` is rejected rather than landing an hour off.
+  - `--print` renders the unit and the exact command line without writing or
+    registering anything — also how to drive a scheduler `xv` does not manage
+    (cron, Kubernetes CronJob, CI schedule).
+  - `--vault` pins the target; without it the scheduled run re-resolves whatever
+    context it finds at fire time, and install warns about that.
+  - Units carry only an absolute binary path, the rotate arguments, a log path,
+    and `HOME`/`XDG_CONFIG_HOME` — **never credentials or secret values**. The env
+    pair is what stops a scheduled run from resolving a different config than the
+    user tested against.
+  - The scheduled command is always `rotate --due --force`: bounded to secrets
+    that already carry a policy and are already past it, and `--every` is never
+    passed, so a schedule cannot redefine what it sweeps.
+  - Install requires confirmation (or `--force`) and states plainly that
+    unattended rotation breaks anything that does not re-read its secrets. On a
+    non-TTY without `--force` it errors naming `--force`/`--print` instead of
+    surfacing a generic "not a terminal" I/O failure.
+  - Output is captured to `$XDG_STATE_HOME/xv/rotate.log` (else
+    `~/.local/state/xv/rotate.log`) on every platform. Reinstall is idempotent;
+    uninstall converges on "absent" and succeeds when nothing was installed.
+  - A Linux host with no systemd gets a diagnostic error plus the cron line to
+    use, not a silently-absent schedule. Guide: `docs/rotation.md`.
+
+- **Failed local operations are now audited.** The local trail records attempts,
+  not just outcomes: a missing secret, a denied path, or ciphertext that would not
+  decrypt each produce a record. Status tokens come from a **closed set** derived
+  from the error's variant, never its message, so no future error string can widen
+  what the log captures. Secret values never appear; secret *names* do, exactly as
+  for successful operations.
+  - New `BackendError::Decryption` variant, so a read that reached a secret's
+    ciphertext and could not open it records as `DecryptionFailed` rather than
+    collapsing into a generic internal error. That is the one status worth
+    alerting on — it means the wrong age identity, or altered material.
+  - Metadata-only probes stay unlogged on the failure path too, matching the
+    success path: a `NotFound` from an existence check is normal listing traffic.
+  - If the audit append for a failure itself fails, both failures are reported
+    rather than the original error being replaced or the record silently dropped.
+
+- **Audit trail for the local backend** (`[local].audit = true`): append-only
+  hash-chained log at `<store>/vaults/<vault>/.audit/log.jsonl`, surfaced through
+  the existing `xv audit`. Records `PutSecretValue`, `GetSecretValue`,
+  `UpdateSecret`, `DeleteSecret`, `RestoreSecret`, `PurgeSecret`,
+  `RollbackSecret`, and vault-wide `ListSecrets`; only reads that actually
+  decrypt a value count as `GetSecretValue`. Each record carries
+  `HMAC-SHA256(chain_key, prev_mac || record)` with the key HKDF-derived from the
+  age identity, and `xv audit --verify` recomputes the chain and exits non-zero
+  on a break. Fail-closed: a failed append fails the triggering operation.
+  `has_audit` is true only when the log is actually being written.
+  **Tamper-evident, not tamper-proof** — anyone holding the age identity can
+  rewrite the chain, and anyone who can write the file can truncate it; push the
+  store to a remote for off-box copies. Guide: `docs/git-versioning.md`.
+
+- **Git-native versioning for the local store** (`[local].git = true`): the store
+  becomes a real git repository committed after every mutation, so `git log`,
+  `git diff`, `git bisect`, and `git push` operate on actual history.
+  `xv git init|log|status|diff|push|pull`. Only age **ciphertext** and metadata
+  are committed; the age identity is excluded by a managed `.gitignore`, by a
+  pre-commit **content scan** of the staged index for the `AGE-SECRET-KEY-1`
+  identity marker (catches a key at any path under any name, in every layout,
+  surviving `git add -f` and renames), and by a path check for the configured
+  key/recipients files when they resolve inside the store. `xv git diff`
+  reports names only, never contents. `xv git pull` is fast-forward only, since a
+  merge conflict inside age ciphertext is unresolvable. Additive:
+  `xv history`/`xv rollback` are unchanged on every backend. Azure and AWS are
+  excluded by design — mirroring cloud secret values into git would create a
+  second, effectively permanent copy of every version.
+
+### Changed
+
+- `xv rotate`'s secret name is now optional, since `--due` and `--check` are
+  vault-scoped. Invoking `xv rotate` with neither a name nor a mode flag errors
+  and names the alternatives.
+- The local backend's `has_audit` capability reflects `[local].audit` rather than
+  being hard-coded `false`.
+- New `[local]` config keys: `audit`, `git` (both default `false`, so existing
+  stores are byte-for-byte unchanged until opted in).
+- New `AzureCredentialType::Oidc` variant (`oidc`, `github-oidc`,
+  `workload-identity`).
+- New `BackendError::Decryption` variant, split out of `Internal`, so decryption
+  failures are distinguishable by callers and by the audit trail. It converts to
+  `CrosstacheError::Unknown` with a message naming the two likely causes.
+- New exit code **52** (`xv-audit-chain-broken`) for `xv audit --verify` on an
+  altered chain. It previously reported as `xv-config-invalid` (exit 3), which
+  misdescribed an integrity failure as a configuration problem.
+## v0.29.0 — App UX modernization (2026-07-24)
+
+### Added
+
+- Added first-run desktop setup and actionable startup recovery for local,
+  Azure, and AWS backends, including safe previews, retry, configuration
+  access, and redacted diagnostics.
+- Added recoverable Trash and Undo workflows, typed secret editing, global
+  command search, structured filters, managed upload queues, and persistent
+  Settings and Help surfaces.
+- Added time-bounded reveal and clipboard protection, workspace-aware context,
+  hierarchical folders, and responsive stacked content layouts down to 390 px.
+
+### Changed
+
+- Reworked core secret and file workflows for keyboard and screen-reader use,
+  with modal focus management, ARIA tabs and trees, durable errors, explicit
+  operation status, and safer destructive confirmations.
+- Made navigation, vault switching, window closing, and setup application
+  respect dirty drafts and in-flight saves without silently losing work.
+
+### Fixed
+
+- Prevented stale asynchronous results from replacing newer workspace, list,
+  upload, setup, and protected-value state.
+- Preserved unreadable existing configuration during desktop setup and granted
+  the startup shell only its explicit Tauri command permissions.
+
+## v0.28.0 — Web UI attachment links (2026-07-22)
+
+### Added
+
+- The web UI's secret detail drawer now lists a secret's attachments as
+  clickable links (base filename + size) that download through the
+  authenticated session, backed by a new `GET /api/secrets/{name}/attachments`
+  endpoint.
+
+### Fixed
+
+- Web UI file downloads now decrypt age-encrypted content flagged
+  `xv_encrypted` — parity with `xv file download`. Previously the UI served
+  attachment ciphertext; unflagged files (including foreign `.age` files)
+  still pass through untouched.
+
+## v0.27.1 — Azure attachment upload fix (2026-07-21)
+
+### Fixed
+
+- `xv attach` and `xv file upload --encrypt` failed on Azure with a 400 error:
+  the `xv-encrypted` metadata flag is not a valid Azure blob metadata key
+  (hyphens are rejected). The flag is now `xv_encrypted`.
+
+## v0.27.0 — Secret file attachments (2026-07-21)
+
+### Added
+
+- **Secret File Attachments**: `xv attach <secret> <file>`, `xv attachments <secret> [--get <name>]`, `xv detach <secret> <name>` — files age-encrypted client-side with a per-vault key stored as the reserved `xv-attachment-key` secret, so attachment access is gated by vault permissions on every backend (Azure/AWS/local). Also `xv file upload --encrypt` for standalone confidential files; `xv file download` decrypts transparently. `xv delete` cascades a secret's attachments.
+
+## v0.26.2 — Tauri secret and file table polish (2026-07-16)
+
+### Added
+
+- Sortable, resizable table columns with per-table width persistence while
+  retaining folder groups and sorting rows within each group.
+- Authenticated file-name links that download directly from the file table.
+
+### Changed
+
+- File deletion is available only from the top selection toolbar; per-row
+  download and delete actions were removed.
+- Every protected field now uses the same fixed-length mask and Reveal/Hide
+  behavior, including protected fields in typed records.
+
+### Fixed
+
+- Missing expirations remain visibly blank, stored expirations display as
+  `YYYY-MM-DD`, and Updated values no longer include a time.
+- Protected-value loads cannot overwrite newer edits, and the secret drawer
+  supports both textarea and record-input controls without runtime errors.
+
+## v0.26.1 — Windows upgrade and bare-update prompt fixes (2026-07-15)
+
+### Fixed
+
+- **`xv upgrade` failed on Windows with ERROR_SHARING_VIOLATION (os error 32).**
+  The updater spawned the downloaded binary for `--version` validation while
+  its write handle was still open, which Windows rejects. The handle is now
+  synced and closed before the validation spawn; the sync also surfaces write
+  errors previously swallowed at implicit close.
+- **Bare `xv update NAME` silently did nothing.** Despite the documented
+  "if not provided, will prompt" behavior, no prompt existed — the command
+  reported success without changing anything. It now prompts for the new
+  value (hidden input, same as `xv set`) when no value, `--stdin`, or other
+  update flag is supplied; a prompted value on a typed record updates the
+  primary field, and empty input is rejected.
+
+## v0.26.0 — Web UI UX and visual refresh (2026-07-14)
+
+### Added
+
+- **Bulk selection for secrets and files.** Selection mode adds visible-only
+  select-all, bounded-concurrency bulk delete, and bulk folder moves for
+  secrets. Expanded folder members are indented for clearer hierarchy.
+- **Responsive, accessible visual system.** The embedded UI now uses a refined
+  app shell, semantic data surfaces, consistent action and feedback styles,
+  purposeful loading/empty/error states, automatic light/dark theming, and
+  keyboard-operable controls across desktop, tablet, and phone layouts.
+
+### Changed
+
+- **Polished primary workflows.** Vault tables, the secret editor drawer,
+  file uploads, destructive confirmations, and toasts have clearer hierarchy,
+  stronger status feedback, and more consistent interaction targets.
+- **Reload-safe per-tab sessions.** The UI preserves its bearer token in
+  `sessionStorage`, scrubs it from the URL, and presents a persistent recovery
+  state when a valid session link is unavailable.
+
+### Fixed
+
+- Prevented stale vault, list, drawer, bulk-action, and delete responses from
+  overwriting newer UI state or acting on the wrong secret, file, or vault.
+- Made destructive actions non-repeatable while pending and resilient to list
+  rerenders, tab changes, vault switches, and reconciliation failures.
+
 ## v0.25.1 — Security hardening (2026-07-11)
 
 ### Security

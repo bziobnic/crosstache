@@ -1,0 +1,17 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-window",
+  "description": "Minimal permissions for the local xv desktop window",
+  "windows": ["main"],
+  "permissions": [
+    "core:event:allow-emit",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "allow-startup-status",
+    "allow-preview-setup",
+    "allow-apply-setup",
+    "allow-retry-startup",
+    "allow-open-config",
+    "allow-copy-diagnostics"
+  ]
+}

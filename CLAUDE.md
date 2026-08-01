@@ -221,10 +221,21 @@ As of `v0.14.0` plus current `main`:
 - **Web UI**: Embedded localhost browser UI (`xv ui`, `--features ui`) — secret CRUD, folder/group metadata, rename/move, file upload/download, vault switching; loopback-only with a per-session bearer token. See `docs/web-ui.md`.
 - **Leak Scanner**: `xv scan` pre-commit scanner, shipped v0.7.0-rc.1.
 - **Self-update**: `xv upgrade`, shipped v0.5.1.
+- **Secret File Attachments**: `xv attach`/`xv attachments`/`xv detach` plus `xv file upload --encrypt` — client-side age encryption with per-vault key custody in the vault's secret store (`xv-attachment-key`); see `docs/superpowers/specs/2026-07-21-secret-file-attachments-design.md`.
+- **Rotation policies (all backends)**: `xv:rotate_every` + `xv:rotated_at` tags, `xv update --rotate-every`, `xv rotate --every/--due/--check` (exit 51 `xv-rotation-due`). AWS `--native` is still the only *server-side* rotation. See `src/secret/rotation.rs`, `docs/rotation.md`.
+- **Automatic rotation scheduling**: `xv schedule install|status|uninstall` manages a per-user job in the OS scheduler (launchd / systemd user timer / Task Scheduler) running `xv rotate --due --force`. No daemon, nothing system-wide. `--print` renders without installing. Units carry no credentials; `HOME`/`XDG_CONFIG_HOME` are pinned so the scheduled run resolves the same config. Lifecycle logic is tested against a fake `CommandRunner` — no test registers a real job. See `src/schedule/mod.rs`, `src/cli/schedule_ops.rs`.
+- **Local audit trail** (`[local].audit`): hash-chained append-only JSONL, `xv audit --verify` (exit 52 `xv-audit-chain-broken`). Fail-closed appends; `has_audit` reflects the flag. Tamper-*evident* only — the age-identity holder can rewrite it. Records **failures as well as successes**, with status tokens from a closed set keyed off the error variant (`DecryptionFailed`, `NotFound`, …) — never from error messages. `BackendError::Decryption` exists to make failed decryption its own status. See `src/backend/local/audit.rs`, `docs/git-versioning.md`.
+- **Git-native versioning** (`[local].git`, local backend only): store is a real git repo, auto-commit per mutation, `xv git init/log/status/diff/push/pull`. Age identity protected by a managed `.gitignore` **and** a pre-commit staged-path refusal. Azure/AWS excluded by design (would create a permanent second copy of every cloud secret). See `src/backend/local/git.rs`.
+- **First-party CI/CD**: root `action.yml` composite GitHub Action (per-OS release archive, fail-closed SHA-256, tool cache, masked secret export to `GITHUB_ENV`) plus OIDC-native Azure auth (`AZURE_CREDENTIAL_PRIORITY=oidc`) federating a GitHub OIDC token as a `client_assertion` — no stored secret, no `azure/login`. See `src/backend/azure/oidc.rs`, `docs/ci-cd.md`, `.github/workflows/action-test.yml`.
 
 Known partial / known limitations (tracked in `ROADMAP.md`):
 
 - **Azure Secret Backup/Restore**: stub on Azure backend (`src/backend/azure/secrets.rs`).
 - **AWS capability gap**: `xv file sync` is not supported on AWS S3 storage yet.
+- **Local audit trail has no off-box sink** (a git remote is the current answer); the chain is tamper-evident, not tamper-proof.
+- **Rotation has no external-system hook** (`--generator` or AWS `--native` are the escape hatches) and no rollout coordination — a rotated credential still needs the consumer to re-read it.
+- **Scheduler lifecycle is untested on a real runner** (rendering + command sequencing are tested against a fake runner; macOS was verified manually). systemd-less Linux gets a diagnostic error with the cron line, not an auto-installed fallback.
+- **CI/CD is GitHub-only** as a first-party integration; GitLab/CircleCI use a documented plain install step.
+- **`xv rotate --check --format json` emits two JSON documents on stdout** when something is due (rows + the error envelope) — same shape `xv scan --format json` has always had; the framework's error path owns this.
 
 For open work items, see `ROADMAP.md` at the repo root. Implementation history is in `CHANGELOG.md`; shipped designs live under `docs/superpowers/specs/` with version banners.

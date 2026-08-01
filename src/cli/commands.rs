@@ -582,6 +582,42 @@ pub enum Commands {
         #[arg(short, long)]
         force: bool,
     },
+    /// Attach an encrypted file to a secret (stored age-encrypted; readable
+    /// only with vault access)
+    #[cfg(feature = "file-ops")]
+    Attach {
+        /// Secret name
+        secret: String,
+        /// Local file path
+        file: String,
+        /// Attachment name (defaults to the file's basename)
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// List a secret's attachments, or download one with --get
+    #[cfg(feature = "file-ops")]
+    Attachments {
+        /// Secret name
+        secret: String,
+        /// Download this attachment (decrypted)
+        #[arg(long)]
+        get: Option<String>,
+        /// Output path for --get (defaults to the attachment name in the
+        /// current directory)
+        #[arg(short, long, requires = "get")]
+        output: Option<String>,
+    },
+    /// Remove an attachment from a secret
+    #[cfg(feature = "file-ops")]
+    Detach {
+        /// Secret name
+        secret: String,
+        /// Attachment name
+        name: String,
+        /// Skip confirmation
+        #[arg(short, long)]
+        force: bool,
+    },
     /// Show version history of a secret
     History {
         /// Secret name
@@ -600,13 +636,32 @@ pub enum Commands {
     },
     /// Rotate a secret with a new random value
     Rotate {
-        /// Secret name
-        name: String,
+        /// Secret name. Omit it with --due or --check, which operate on every
+        /// secret in the vault that carries a rotation policy.
+        name: Option<String>,
         /// Target vault (overrides context/config default). Matches an
         /// attached workspace alias when given; otherwise a literal vault on
         /// the current backend.
         #[arg(long)]
         vault: Option<String>,
+        /// Set (or refresh) this secret's rotation policy while rotating.
+        ///
+        /// Interval syntax: `<n>m|h|d|w`, e.g. `90d`, `12h`, `6w`. The policy
+        /// is stored with the secret and works on every backend. Nothing
+        /// rotates on a timer by itself — run `xv rotate --due` from cron, a
+        /// systemd timer, or CI to act on it.
+        #[arg(long, value_name = "INTERVAL", conflicts_with_all = ["native", "due", "check"])]
+        every: Option<String>,
+        /// Rotate every secret in the vault whose rotation policy is due.
+        ///
+        /// Secrets without a policy are untouched. Intended for cron/CI.
+        #[arg(long, conflicts_with_all = ["name", "native", "check"])]
+        due: bool,
+        /// Report which secrets are due for rotation without rotating anything.
+        ///
+        /// Exits 51 when at least one secret is due, so CI can gate on it.
+        #[arg(long, conflicts_with_all = ["name", "native", "due"])]
+        check: bool,
         /// Length of the generated value (default: 32)
         #[arg(long, default_value = "32")]
         length: usize,
@@ -759,6 +814,31 @@ pub enum Commands {
         /// Clear the folder
         #[arg(long, conflicts_with = "folder")]
         clear_folder: bool,
+        /// Set the secret's rotation policy without rotating it now.
+        ///
+        /// Interval syntax: `<n>m|h|d|w`, e.g. `90d`. The rotation clock starts
+        /// at the moment this runs, so the secret is not immediately reported as
+        /// due. Act on the policy with `xv rotate --due`; inspect it with
+        /// `xv rotate --check`.
+        ///
+        /// A standalone operation, like --field: combine with other edits by
+        /// running two commands.
+        #[arg(long, value_name = "INTERVAL", conflicts_with_all = [
+            "type", "untype", "fields", "secret_fields",
+            "value", "stdin", "trim", "tags", "group", "rename", "note", "folder",
+            "replace_tags", "replace_groups", "expires", "not_before",
+            "clear_expires", "clear_not_before", "clear_note", "clear_folder", "enabled",
+        ])]
+        rotate_every: Option<String>,
+        /// Remove the secret's rotation policy. Standalone, like --rotate-every.
+        #[arg(long, conflicts_with_all = [
+            "rotate_every",
+            "type", "untype", "fields", "secret_fields",
+            "value", "stdin", "trim", "tags", "group", "rename", "note", "folder",
+            "replace_tags", "replace_groups", "expires", "not_before",
+            "clear_expires", "clear_not_before", "clear_note", "clear_folder", "enabled",
+        ])]
+        clear_rotate_every: bool,
         /// Enable or disable the secret (true/false)
         #[arg(long)]
         enabled: Option<bool>,
@@ -789,9 +869,10 @@ pub enum Commands {
             "clear_expires", "clear_not_before", "clear_note", "clear_folder", "enabled",
         ])]
         secret_fields: Vec<(String, String)>,
-        /// Explicitly convert a bare secret into a typed record: its
-        /// current value becomes the primary field. Errors if the secret
-        /// is already a record. Mutually exclusive with --untype/--field/
+        /// Convert a plain or typed secret to this record type. Plain values
+        /// become the target primary field; typed records retain exact field
+        /// matches and map the old primary when needed. Lossy conversion
+        /// prompts unless --yes is given. Mutually exclusive with --untype/--field/
         /// --field-secret and with every classic update flag, INCLUDING
         /// --value/--stdin: converting and replacing the primary value in
         /// one step is not supported in v1 — convert first (this command,
@@ -805,8 +886,8 @@ pub enum Commands {
         ])]
         r#type: Option<String>,
         /// Flatten a typed record back to a bare secret holding the
-        /// primary field's value. Dropping non-primary secret fields
-        /// prompts for confirmation unless --yes is given. Mutually
+        /// primary field's value. Dropping any other record fields prompts
+        /// for confirmation unless --yes is given. Mutually
         /// exclusive with --type/--field/--field-secret and with every
         /// classic update flag; see --field's note.
         #[arg(long, conflicts_with_all = [
@@ -816,8 +897,7 @@ pub enum Commands {
             "clear_expires", "clear_not_before", "clear_note", "clear_folder", "enabled",
         ])]
         untype: bool,
-        /// Skip the confirmation prompt when --untype would drop
-        /// non-primary secret fields.
+        /// Skip the confirmation prompt when --type or --untype would drop fields.
         #[arg(long, short = 'y')]
         yes: bool,
     },
@@ -971,6 +1051,15 @@ pub enum Commands {
         /// Azure resource group (defaults to config value)
         #[arg(long)]
         resource_group: Option<String>,
+        /// Verify the integrity of the local backend's hash-chained audit log
+        /// instead of listing events.
+        ///
+        /// Recomputes every record's MAC and link. Reports the first break and
+        /// exits non-zero when the chain has been altered. Local backend only:
+        /// Azure and AWS audit trails live in the platform, which is what makes
+        /// them independently trustworthy.
+        #[arg(long, conflicts_with_all = ["days", "operation", "resource_group"])]
+        verify: bool,
     },
     /// Initialize default configuration
     Init,
@@ -1022,6 +1111,26 @@ pub enum Commands {
     Type {
         #[command(subcommand)]
         command: TypeCommands,
+    },
+    /// Manage the automatic rotation schedule.
+    ///
+    /// Installs a per-user job in the platform's own scheduler (launchd on
+    /// macOS, a systemd user timer on Linux, Task Scheduler on Windows) that
+    /// runs `xv rotate --due --force` on a cadence. No daemon, and nothing
+    /// system-wide.
+    Schedule {
+        #[command(subcommand)]
+        command: ScheduleCommands,
+    },
+    /// Git-native versioning for the local age-encrypted store.
+    ///
+    /// Only age ciphertext and metadata are committed — never the age identity.
+    /// Local backend only: on Azure and AWS, version history lives in the
+    /// backend (`xv history` / `xv rollback`), and mirroring cloud secrets into
+    /// a git history would create a second permanent copy of every value.
+    Git {
+        #[command(subcommand)]
+        command: GitCommands,
     },
     /// Quick file upload (alias for file upload)
     #[cfg(feature = "file-ops")]
@@ -1408,6 +1517,104 @@ pub enum CacheCommands {
     Refresh {
         #[arg(long)]
         key: String,
+    },
+}
+
+/// Rotation-schedule subcommands.
+#[derive(Subcommand)]
+pub enum ScheduleCommands {
+    /// Install (or reinstall) the automatic rotation schedule.
+    ///
+    /// The scheduled job runs `xv rotate --due --force`, so only secrets that
+    /// already carry a rotation policy and are already past it are touched.
+    /// Reinstalling replaces the existing job.
+    Install {
+        /// How often the sweep runs.
+        #[arg(long, default_value = "daily", value_parser = ["hourly", "daily", "weekly"])]
+        interval: String,
+
+        /// Time of day in 24-hour `HH:MM`. Ignored for `--interval hourly`
+        /// except for its minute; weekly runs on Sunday.
+        #[arg(long, default_value = "03:00")]
+        at: String,
+
+        /// Vault to sweep. Defaults to the configured `default_vault`; pin it
+        /// explicitly so the scheduled run cannot follow a context that changes
+        /// later.
+        #[arg(long)]
+        vault: Option<String>,
+
+        /// Where the scheduled run's output is appended (default:
+        /// `$XDG_STATE_HOME/xv/rotate.log`, else `~/.local/state/xv/rotate.log`).
+        #[arg(long)]
+        log_file: Option<String>,
+
+        /// Print the unit file(s) and the exact command instead of installing.
+        /// Writes nothing and registers nothing — use it to review, or to copy
+        /// the command into a scheduler this tool does not manage.
+        #[arg(long)]
+        print: bool,
+
+        /// Skip the confirmation prompt.
+        #[arg(short, long)]
+        force: bool,
+    },
+
+    /// Show whether a rotation schedule is installed and what the scheduler
+    /// reports about it.
+    Status,
+
+    /// Remove the rotation schedule. Succeeds when none is installed.
+    Uninstall,
+}
+
+/// Git-native versioning subcommands for the local store.
+#[derive(Subcommand)]
+pub enum GitCommands {
+    /// Initialize a git repository in the local store.
+    ///
+    /// Writes a managed `.gitignore` that excludes the age identity and
+    /// recipients files. Safe to re-run. Auto-commit still requires
+    /// `git = true` under `[local]`.
+    Init,
+
+    /// Show the store's commit history, newest first.
+    Log {
+        /// Restrict history to commits recorded for this secret (matched by
+        /// commit subject, so it works with opaque on-disk filenames too).
+        secret: Option<String>,
+        /// Maximum commits to show (0 = all).
+        #[arg(long, default_value = "20")]
+        limit: usize,
+    },
+
+    /// Show uncommitted changes in the store.
+    Status,
+
+    /// Show which files a commit changed (names only, never contents).
+    Diff {
+        /// Revision to inspect (default: HEAD).
+        rev: Option<String>,
+    },
+
+    /// Push the store to a git remote.
+    Push {
+        /// Remote name.
+        #[arg(default_value = "origin")]
+        remote: String,
+        /// Branch to push (default: the current branch's upstream).
+        #[arg(long)]
+        branch: Option<String>,
+    },
+
+    /// Pull the store from a git remote (fast-forward only).
+    Pull {
+        /// Remote name.
+        #[arg(default_value = "origin")]
+        remote: String,
+        /// Branch to pull.
+        #[arg(long)]
+        branch: Option<String>,
     },
 }
 
@@ -1860,6 +2067,22 @@ impl Cli {
                 )
                 .await
             }
+            #[cfg(feature = "file-ops")]
+            Commands::Attach { secret, file, name } => {
+                crate::cli::attach_ops::execute_attach(secret, file, name, config).await
+            }
+            #[cfg(feature = "file-ops")]
+            Commands::Attachments {
+                secret,
+                get,
+                output,
+            } => crate::cli::attach_ops::execute_attachments(secret, get, output, config).await,
+            #[cfg(feature = "file-ops")]
+            Commands::Detach {
+                secret,
+                name,
+                force,
+            } => crate::cli::attach_ops::execute_detach(secret, name, force, config).await,
             Commands::History { name } => {
                 crate::cli::secret_ops::execute_secret_history_direct(&name, config, registry).await
             }
@@ -1882,10 +2105,13 @@ impl Cli {
                 native,
                 show_value,
                 force,
+                every,
+                due,
+                check,
             } => {
-                crate::cli::secret_ops::execute_secret_rotate_direct(
-                    &name, vault, length, charset, generator, native, show_value, force, config,
-                    registry,
+                crate::cli::secret_ops::execute_rotate(
+                    name, vault, length, charset, generator, native, show_value, force, every, due,
+                    check, config, registry,
                 )
                 .await
             }
@@ -1968,7 +2194,22 @@ impl Cli {
                 r#type,
                 untype,
                 yes,
+                rotate_every,
+                clear_rotate_every,
             } => {
+                // Rotation-policy edits are a standalone operation (clap
+                // enforces the exclusions), so they short-circuit the classic
+                // update path rather than threading two more fields through it.
+                if rotate_every.is_some() || clear_rotate_every {
+                    return crate::cli::secret_ops::execute_rotation_policy_update(
+                        &name,
+                        rotate_every,
+                        clear_rotate_every,
+                        config,
+                        registry,
+                    )
+                    .await;
+                }
                 crate::cli::secret_ops::execute_secret_update_direct(
                     &name,
                     value,
@@ -2111,17 +2352,22 @@ impl Cli {
                 days,
                 operation,
                 resource_group,
+                verify,
             } => {
-                crate::cli::system_ops::execute_audit_command(
-                    name,
-                    vault,
-                    days,
-                    operation,
-                    resource_group,
-                    config,
-                    registry,
-                )
-                .await
+                if verify {
+                    crate::cli::system_ops::execute_audit_verify_command(vault, config).await
+                } else {
+                    crate::cli::system_ops::execute_audit_command(
+                        name,
+                        vault,
+                        days,
+                        operation,
+                        resource_group,
+                        config,
+                        registry,
+                    )
+                    .await
+                }
             }
             Commands::Init => crate::cli::system_ops::execute_init_command(config).await,
             Commands::Info {
@@ -2159,6 +2405,12 @@ impl Cli {
             }
             Commands::Type { command } => {
                 crate::cli::type_ops::execute_type_command(command, config).await
+            }
+            Commands::Git { command } => {
+                crate::cli::git_ops::execute_git_command(command, config).await
+            }
+            Commands::Schedule { command } => {
+                crate::cli::schedule_ops::execute_schedule_command(command, config).await
             }
             #[cfg(feature = "file-ops")]
             Commands::Upload {

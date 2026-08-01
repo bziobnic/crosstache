@@ -53,6 +53,7 @@ async fn test_file_upload_command_basic() -> Result<()> {
         tag: vec![("environment".to_string(), "test".to_string())],
         content_type: Some("text/plain".to_string()),
         continue_on_error: false,
+        encrypt: false,
     };
 
     match upload_command {
@@ -67,6 +68,7 @@ async fn test_file_upload_command_basic() -> Result<()> {
             tag,
             content_type,
             continue_on_error,
+            encrypt: _,
         } => {
             assert_eq!(files, vec![temp_file.path().to_string_lossy().to_string()]);
             assert_eq!(name, Some("test-file.txt".to_string()));
@@ -110,6 +112,7 @@ async fn test_file_upload_command_with_multiple_groups() -> Result<()> {
         ],
         content_type: None,
         continue_on_error: false,
+        encrypt: false,
     };
 
     match upload_command {
@@ -124,6 +127,7 @@ async fn test_file_upload_command_with_multiple_groups() -> Result<()> {
             tag,
             content_type,
             continue_on_error: _,
+            encrypt: _,
         } => {
             assert_eq!(files, vec![temp_file.path().to_string_lossy().to_string()]);
             assert!(name.is_none());
@@ -300,6 +304,7 @@ async fn test_file_upload_validation() -> Result<()> {
         tag: vec![],
         content_type: None,
         continue_on_error: false,
+        encrypt: false,
     };
 
     match upload_command {
@@ -314,6 +319,7 @@ async fn test_file_upload_validation() -> Result<()> {
             tag,
             content_type,
             continue_on_error,
+            encrypt: _,
         } => {
             assert_eq!(files, vec![non_existent_file]);
             assert!(name.is_none());
@@ -352,6 +358,7 @@ async fn test_metadata_and_tag_parsing() -> Result<()> {
         ],
         content_type: Some("text/plain".to_string()),
         continue_on_error: false,
+        encrypt: false,
     };
 
     match upload_command {
@@ -366,6 +373,7 @@ async fn test_metadata_and_tag_parsing() -> Result<()> {
             tag,
             content_type: _,
             continue_on_error: _,
+            encrypt: _,
         } => {
             assert_eq!(metadata.len(), 2);
             assert!(metadata.contains(&("author".to_string(), "John Doe".to_string())));

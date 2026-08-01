@@ -4,7 +4,7 @@ use crate::backend::BackendCapabilities;
 use crate::backend::{BackendKind, BackendRef, BackendRegistry};
 use crate::cli::commands::{CharsetType, SecretWriteArgs, ShareCommands};
 use crate::cli::helpers::{
-    confirm_destructive, copy_to_clipboard, generate_random_value, mask_secrets,
+    confirm_destructive, confirm_proceed, copy_to_clipboard, generate_random_value, mask_secrets,
     resolve_vault_for_trait, schedule_clipboard_clear, share_unsupported_error, use_trait_path,
 };
 use crate::config::Config;
@@ -501,6 +501,15 @@ pub(crate) async fn execute_secret_set_direct(
                 )
                 .await?;
             let name = &name;
+            if !confirm_reserved_key_write(
+                name,
+                false,
+                "Overwriting",
+                "an interactive terminal (xv set has no override flag)",
+            )? {
+                output::info("Aborted; secret not set.");
+                return Ok(());
+            }
             let request = build_record_set_request(
                 name,
                 value.clone(),
@@ -536,6 +545,15 @@ pub(crate) async fn execute_secret_set_direct(
                 )
                 .await?;
             let name = &name;
+            if !confirm_reserved_key_write(
+                name,
+                false,
+                "Overwriting",
+                "an interactive terminal (xv set has no override flag)",
+            )? {
+                output::info("Aborted; secret not set.");
+                return Ok(());
+            }
             let secret_value = if let Some(v) = value.clone() {
                 v
             } else if stdin {
@@ -610,6 +628,17 @@ pub(crate) async fn execute_secret_set_direct(
                             continue;
                         }
                     };
+                // Bulk set has no per-item confirmation flow (unlike the
+                // single-secret path above), so the reserved attachment key
+                // is refused outright rather than prompted for.
+                if is_reserved_attachment_key(&resolved_key) {
+                    output::warn(&format!(
+                        "  ✗ {resolved_key}: reserved for attachment encryption; use 'xv set {resolved_key}' \
+                         (single-secret form) to overwrite it interactively"
+                    ));
+                    error_count += 1;
+                    continue;
+                }
                 // Build each request via the shared helper so bulk set applies
                 // the same write-time metadata (--group/--note/--folder/--tag)
                 // as the single-secret path. (--expires/--not-before are rejected
@@ -1042,11 +1071,53 @@ pub(crate) fn invalidate_trait_secret_cache(config: &Config, backend_name: &str,
     cache_manager.invalidate(&trait_secret_cache_key(backend_name, vault_name));
 }
 
+/// Extra confirmation gate for any CLI write that targets the reserved
+/// attachment-encryption-key secret (`xv-attachment-key`) — overwriting,
+/// retyping, or renaming it makes every attachment in the vault permanently
+/// unreadable. Only `delete` warned about this before; `set`, `update`,
+/// `rollback`, and `mv` displaced/overwrote the key silently. No-op (returns
+/// `Ok(true)` without prompting) for every other secret name.
+///
+/// `action` is a gerund phrase describing the write, e.g. "Overwriting",
+/// "Renaming"; `force` follows each caller's own skip-confirmation flag (or
+/// `false` — always prompt — where the caller has none). `flag_hint` names
+/// that flag for the non-interactive refusal message (`confirm_proceed`'s
+/// "Re-run with {flag_hint} to confirm") — must match what `force` actually
+/// is, since `set` has no override flag at all and `mv` uses `--yes`, not
+/// `--force`.
+/// True if `name` is the reserved attachment-encryption-key secret. Bulk set
+/// has no per-item confirmation flow, so it uses this to refuse outright
+/// instead of going through [`confirm_reserved_key_write`]'s prompt.
+fn is_reserved_attachment_key(name: &str) -> bool {
+    name == crate::secret::attachments::ATTACHMENT_KEY_SECRET
+}
+
+pub(crate) fn confirm_reserved_key_write(
+    name: &str,
+    force: bool,
+    action: &str,
+    flag_hint: &str,
+) -> Result<bool> {
+    if name != crate::secret::attachments::ATTACHMENT_KEY_SECRET {
+        return Ok(true);
+    }
+    confirm_proceed(
+        force,
+        &format!(
+            "{action} '{name}' — the attachment encryption key for this vault — will make ALL \
+             attachments in this vault unreadable. Continue?"
+        ),
+        flag_hint,
+    )
+}
+
 fn filter_secret_summaries_for_display(
     mut secrets: Vec<crate::secret::manager::SecretSummary>,
     group: Option<&str>,
     all: bool,
 ) -> Vec<crate::secret::manager::SecretSummary> {
+    // The attachment key is infrastructure, not a user secret.
+    secrets.retain(|s| s.name != crate::secret::attachments::ATTACHMENT_KEY_SECRET);
     if !all {
         secrets.retain(|s| s.enabled);
     }
@@ -2653,22 +2724,69 @@ pub(crate) async fn execute_secret_delete_direct(
                 output::info(&format!("No secrets found in group '{group_name}'"));
                 return Ok(());
             }
+            // Exclude reserved-key entries from the prompt count (they're refused below anyway)
+            let deletable_count = secrets
+                .iter()
+                .filter(|s| !is_reserved_attachment_key(&s.name))
+                .count();
             if !confirm_destructive(
                 force,
                 &format!(
                     "Delete {} secret(s) in group '{group_name}'?",
-                    secrets.len()
+                    deletable_count
                 ),
             )? {
                 output::info("Aborted; no secrets deleted.");
                 return Ok(());
             }
             for s in &secrets {
+                // Group delete has no per-item confirmation (unlike the
+                // single-secret path below, which prompts specifically for
+                // the reserved key), so refuse outright rather than sweep it
+                // up silently — mirrors bulk `xv set`'s `is_reserved_attachment_key`
+                // refusal.
+                if is_reserved_attachment_key(&s.name) {
+                    output::warn(&format!(
+                        "  ✗ {}: reserved for attachment encryption; use 'xv delete {}' \
+                         (single-secret form) to delete it interactively",
+                        s.name, s.name
+                    ));
+                    continue;
+                }
                 backend
                     .secrets()
                     .delete_secret(&vault_name, &s.name)
                     .await?;
                 output::success(&format!("Deleted '{}'", s.name));
+                #[cfg(feature = "file-ops")]
+                if s.name.contains('/') || s.name.contains('\\') {
+                    // A path separator can't safely address the
+                    // attachments/<name>/ prefix without risking a
+                    // cross-secret cascade — skip rather than guess.
+                    output::warn(&format!(
+                        "'{}' contains a path separator; skipping attachment cascade",
+                        s.name
+                    ));
+                } else if let Some(files) = backend.files() {
+                    match crate::secret::attachments::delete_attachments(
+                        files,
+                        &vault_name,
+                        &s.name,
+                    )
+                    .await
+                    {
+                        Ok(n) if n > 0 => {
+                            output::info(&format!("Deleted {n} attachment(s) of '{}'", s.name));
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            output::warn(&format!(
+                                "failed to delete attachments of '{}': {e}",
+                                s.name
+                            ));
+                        }
+                    }
+                }
             }
             invalidate_trait_secret_cache(&config, &backend_name, &vault_name);
         } else if let Some(secret_name) = name {
@@ -2682,7 +2800,52 @@ pub(crate) async fn execute_secret_delete_direct(
                     crate::workspace::TargetMode::Write,
                 )
                 .await?;
-            if !confirm_destructive(force, &format!("Delete secret '{resolved_name}'?"))? {
+            // Attachments cascade: count first so the confirmation is honest.
+            // A resolved name containing a path separator can't safely
+            // address the attachments/<name>/ prefix (risk of cross-secret
+            // cascade — see delete-cascade path traversal finding), so skip
+            // listing/cascading under it and warn instead of guessing.
+            #[cfg(feature = "file-ops")]
+            let attachment_count = if resolved_name.contains('/') || resolved_name.contains('\\') {
+                output::warn(&format!(
+                    "'{resolved_name}' contains a path separator; skipping attachment cascade"
+                ));
+                0
+            } else {
+                match backend.files() {
+                    Some(files) => match crate::secret::attachments::list_attachments(
+                        files,
+                        &vault_name,
+                        &resolved_name,
+                    )
+                    .await
+                    {
+                        Ok(a) => a.len(),
+                        Err(e) => {
+                            // Listing failure must not block deletion, but it
+                            // must not be silent either.
+                            output::warn(&format!(
+                                "could not list attachments of '{resolved_name}' before delete: {e}"
+                            ));
+                            0
+                        }
+                    },
+                    None => 0,
+                }
+            };
+            #[cfg(not(feature = "file-ops"))]
+            let attachment_count = 0;
+            let prompt = if resolved_name == crate::secret::attachments::ATTACHMENT_KEY_SECRET {
+                format!(
+                    "'{resolved_name}' is the attachment encryption key for vault '{vault_name}'. \
+                     Deleting it makes ALL attachments in this vault permanently unreadable. Delete anyway?"
+                )
+            } else if attachment_count > 0 {
+                format!("Delete secret '{resolved_name}' and its {attachment_count} attachment(s)?")
+            } else {
+                format!("Delete secret '{resolved_name}'?")
+            };
+            if !confirm_destructive(force, &prompt)? {
                 output::info("Aborted; secret not deleted.");
                 return Ok(());
             }
@@ -2691,7 +2854,22 @@ pub(crate) async fn execute_secret_delete_direct(
                 .delete_secret(&vault_name, &resolved_name)
                 .await?;
             output::success(&format!("Successfully deleted secret '{resolved_name}'"));
+            // Invalidate before the (possibly-failing) attachment cascade so
+            // a cascade error can never leave a stale cached secret list
+            // behind — the secret delete above already committed.
             invalidate_trait_secret_cache(&config, &backend_name, &vault_name);
+            #[cfg(feature = "file-ops")]
+            if attachment_count > 0 {
+                if let Some(files) = backend.files() {
+                    let n = crate::secret::attachments::delete_attachments(
+                        files,
+                        &vault_name,
+                        &resolved_name,
+                    )
+                    .await?;
+                    output::info(&format!("Deleted {n} attachment(s)"));
+                }
+            }
         } else {
             return Err(CrosstacheError::invalid_argument(
                 "Either secret name or --group must be specified",
@@ -2836,6 +3014,10 @@ pub(crate) async fn execute_secret_rollback_direct(
     }
 
     let name = resolved_name.as_str();
+    if !confirm_reserved_key_write(name, force, "Rolling back", "--force")? {
+        output::info("Aborted; no rollback performed.");
+        return Ok(());
+    }
     if !confirm_destructive(
         force,
         &format!("Roll back secret '{name}' to version {version}?"),
@@ -2907,6 +3089,7 @@ pub(crate) async fn execute_secret_rotate_direct(
     native: bool,
     show_value: bool,
     force: bool,
+    every: Option<String>,
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
@@ -2914,6 +3097,13 @@ pub(crate) async fn execute_secret_rotate_direct(
     if native {
         return execute_secret_rotate_native(name, vault, force, config, registry).await;
     }
+
+    // Parse the policy interval up front: a typo must fail before anything
+    // rotates, not after the value has already been replaced.
+    let interval = every
+        .as_deref()
+        .map(crate::secret::rotation::parse_interval)
+        .transpose()?;
 
     // Route through the active backend trait so default (client-side) rotation
     // works on every backend; the Azure trait impl delegates to the same ops.
@@ -2947,6 +3137,7 @@ pub(crate) async fn execute_secret_rotate_direct(
         generator,
         show_value,
         force,
+        interval,
         &config,
     )
     .await?;
@@ -2964,6 +3155,431 @@ pub(crate) async fn execute_secret_rotate_direct(
     });
 
     Ok(())
+}
+
+/// `xv update <name> --rotate-every <interval>` / `--clear-rotate-every`.
+///
+/// Sets or removes a rotation policy without rotating the value. Setting one
+/// also stamps `xv:rotated_at = now`, so the interval is measured from the
+/// moment the policy was established rather than reporting the secret as
+/// immediately due.
+///
+/// Implemented as a read-modify-write with `replace_tags`, because removing a
+/// single tag is not otherwise expressible: merge semantics can only add or
+/// overwrite. Every unrelated tag is carried across verbatim.
+pub(crate) async fn execute_rotation_policy_update(
+    name: &str,
+    rotate_every: Option<String>,
+    clear: bool,
+    config: Config,
+    registry: Option<&BackendRegistry>,
+) -> Result<()> {
+    use crate::secret::manager::{FieldUpdate, SecretUpdateRequest};
+    use crate::secret::rotation::{
+        format_interval, parse_interval, TAG_ROTATED_AT, TAG_ROTATE_EVERY,
+    };
+
+    let reg = registry.ok_or_else(|| {
+        CrosstacheError::config(
+            "No backend registry available. Run 'xv config show' to check your configuration.",
+        )
+    })?;
+
+    // Validate before touching the backend.
+    let interval = rotate_every.as_deref().map(parse_interval).transpose()?;
+
+    let (backend, backend_name, vault_name, resolved_name) =
+        resolve_rotate_target(name, None, &config, reg).await?;
+    let name = resolved_name.as_str();
+
+    // Read current tags (metadata only — no value is decrypted, so this does
+    // not register as secret-value access in an audit trail).
+    let existing = backend
+        .secrets()
+        .get_secret(&vault_name, name, false)
+        .await
+        .map_err(CrosstacheError::from)?;
+
+    let mut tags = existing.tags;
+    let had_policy = tags.contains_key(TAG_ROTATE_EVERY);
+
+    if clear {
+        if !had_policy {
+            output::info(&format!(
+                "Secret '{name}' has no rotation policy; nothing to clear."
+            ));
+            return Ok(());
+        }
+        tags.remove(TAG_ROTATE_EVERY);
+        tags.remove(TAG_ROTATED_AT);
+    } else if let Some(interval) = interval {
+        tags.insert(TAG_ROTATE_EVERY.to_string(), format_interval(interval));
+        tags.insert(TAG_ROTATED_AT.to_string(), chrono::Utc::now().to_rfc3339());
+    }
+
+    let request = SecretUpdateRequest {
+        name: name.to_string(),
+        value: None,
+        content_type: None,
+        enabled: None,
+        expires_on: FieldUpdate::Unchanged,
+        not_before: FieldUpdate::Unchanged,
+        tags: Some(tags.into_iter().collect()),
+        groups: None,
+        note: FieldUpdate::Unchanged,
+        folder: FieldUpdate::Unchanged,
+        // Authoritative rewrite: this is the only way to drop a tag.
+        replace_tags: true,
+        replace_groups: false,
+        expected_revision: None,
+    };
+
+    backend
+        .secrets()
+        .update_secret(&vault_name, name, request)
+        .await
+        .map_err(CrosstacheError::from)?;
+
+    let cache_manager = crate::cache::CacheManager::from_config(&config);
+    cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
+        backend: backend_name,
+        vault_name: vault_name.clone(),
+    });
+
+    if clear {
+        output::success(&format!("Removed the rotation policy from '{name}'."));
+    } else {
+        let rendered = format_interval(interval.expect("validated above"));
+        output::success(&format!(
+            "Rotation policy for '{name}' set to every {rendered}; the clock starts now."
+        ));
+        output::hint(
+            "Nothing rotates on its own — run 'xv rotate --due' from cron, a systemd timer, or \
+             CI. 'xv rotate --check' reports status and exits 51 when something is due.",
+        );
+    }
+    Ok(())
+}
+
+/// `xv rotate` entry point: dispatches between single-secret rotation, the
+/// batch `--due` run, and the read-only `--check` report.
+///
+/// `name` is optional because `--due`/`--check` are vault-scoped; clap enforces
+/// the mutual exclusions, and this rejects the one combination it cannot
+/// express (no name and no mode flag).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn execute_rotate(
+    name: Option<String>,
+    vault: Option<String>,
+    length: usize,
+    charset: CharsetType,
+    generator: Option<String>,
+    native: bool,
+    show_value: bool,
+    force: bool,
+    every: Option<String>,
+    due: bool,
+    check: bool,
+    config: Config,
+    registry: Option<&BackendRegistry>,
+) -> Result<()> {
+    if check {
+        return execute_rotate_check(vault, config, registry).await;
+    }
+    if due {
+        return execute_rotate_due(vault, length, charset, generator, force, config, registry)
+            .await;
+    }
+
+    let name = name.ok_or_else(|| {
+        CrosstacheError::InvalidArgument(
+            "a secret name is required. Pass a name to rotate one secret, --due to rotate \
+             everything whose policy has come due, or --check to report status without rotating."
+                .to_string(),
+        )
+    })?;
+
+    execute_secret_rotate_direct(
+        &name, vault, length, charset, generator, native, show_value, force, every, config,
+        registry,
+    )
+    .await
+}
+
+/// One row of `xv rotate --check`.
+#[derive(tabled::Tabled, serde::Serialize)]
+struct RotationRow {
+    #[tabled(rename = "Name")]
+    name: String,
+    #[tabled(rename = "Status")]
+    status: String,
+    #[tabled(rename = "Interval")]
+    interval: String,
+    #[tabled(rename = "Due")]
+    due: String,
+}
+
+/// Evaluate every secret in the resolved vault against its rotation policy.
+///
+/// Returns `(vault_name, rows)` where each row pairs a secret with its
+/// [`RotationStatus`]. Only policy-bearing secrets are included — an unmanaged
+/// secret is not "ok", it is simply out of scope.
+async fn collect_rotation_status(
+    vault: Option<String>,
+    config: &Config,
+    registry: Option<&BackendRegistry>,
+) -> Result<(
+    String,
+    Vec<(String, crate::secret::rotation::RotationStatus)>,
+)> {
+    use crate::secret::rotation::{evaluate, RotationStatus};
+
+    let reg = registry.ok_or_else(|| {
+        CrosstacheError::config(
+            "No backend registry available. Run 'xv config show' to check your configuration.",
+        )
+    })?;
+
+    // Same resolution as a single-secret rotate, minus the name: `--due` and
+    // `--check` are vault-scoped, and a write verb never searches attached
+    // vaults, so the default entry (or explicit `--vault`) is the target.
+    let (backend, _backend_name, vault_name, _resolved) =
+        resolve_rotate_target("", vault, config, reg).await?;
+
+    let secrets = backend
+        .secrets()
+        .list_secrets(&vault_name, None)
+        .await
+        .map_err(CrosstacheError::from)?;
+
+    let now = chrono::Utc::now();
+    let mut rows: Vec<(String, RotationStatus)> = secrets
+        .into_iter()
+        .map(|s| {
+            // `updated_on` on a summary is a display string (and empty on some
+            // backends), so it is not usable as a machine baseline. A policy
+            // with no `xv:rotated_at` therefore evaluates as due-once, which
+            // then stamps a real timestamp. `xv update --rotate-every` stamps
+            // one at policy-set time so this is not the normal path.
+            let status = evaluate(&s.tags, None, now);
+            (s.name, status)
+        })
+        .filter(|(_, status)| !matches!(status, RotationStatus::NoPolicy))
+        .collect();
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok((vault_name, rows))
+}
+
+/// `xv rotate --check` — report rotation status without changing anything.
+///
+/// Exits 51 (`xv-rotation-due`) when at least one secret is due, so a pipeline
+/// can gate on staleness.
+async fn execute_rotate_check(
+    vault: Option<String>,
+    config: Config,
+    registry: Option<&BackendRegistry>,
+) -> Result<()> {
+    use crate::secret::rotation::{humanize, RotationStatus, TAG_ROTATE_EVERY};
+    use crate::utils::format::{OutputFormat, TableFormatter};
+
+    let (vault_name, statuses) = collect_rotation_status(vault, &config, registry).await?;
+
+    let rows: Vec<RotationRow> = statuses
+        .iter()
+        .map(|(name, status)| match status {
+            RotationStatus::Ok { due_in, due_at } => RotationRow {
+                name: name.clone(),
+                status: "ok".to_string(),
+                interval: String::new(),
+                due: format!("in {} ({})", humanize(*due_in), due_at.format("%Y-%m-%d")),
+            },
+            RotationStatus::Due { overdue_by, due_at } => RotationRow {
+                name: name.clone(),
+                status: "due".to_string(),
+                interval: String::new(),
+                due: format!(
+                    "{} ago ({})",
+                    humanize(*overdue_by),
+                    due_at.format("%Y-%m-%d")
+                ),
+            },
+            RotationStatus::Invalid { value, .. } => RotationRow {
+                name: name.clone(),
+                status: "invalid".to_string(),
+                interval: value.clone(),
+                due: format!("unparseable {TAG_ROTATE_EVERY}"),
+            },
+            RotationStatus::NoPolicy => unreachable!("filtered out by collect_rotation_status"),
+        })
+        .collect();
+
+    let fmt = config.runtime_output_format;
+    let human_table_like = matches!(
+        fmt,
+        OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw
+    );
+    let formatter = TableFormatter::new(
+        fmt,
+        config.no_color,
+        config.template.clone(),
+        config.runtime_columns.clone(),
+    );
+
+    if rows.is_empty() {
+        if human_table_like {
+            formatter.validate_columns::<RotationRow>()?;
+            output::info(&format!(
+                "No secrets in '{vault_name}' have a rotation policy. Set one with \
+                 'xv update <name> --rotate-every 90d'."
+            ));
+        } else {
+            println!("{}", formatter.format_table(&rows)?);
+        }
+        return Ok(());
+    }
+
+    println!("{}", formatter.format_table(&rows)?);
+
+    let due: Vec<&str> = statuses
+        .iter()
+        .filter(|(_, s)| s.is_due())
+        .map(|(n, _)| n.as_str())
+        .collect();
+    let invalid = statuses.iter().filter(|(_, s)| s.is_invalid()).count();
+
+    if invalid > 0 {
+        output::warn(&format!(
+            "{invalid} secret(s) have an unparseable {TAG_ROTATE_EVERY} tag and are not being \
+             evaluated. Fix them with 'xv update <name> --rotate-every <interval>'."
+        ));
+    }
+
+    if due.is_empty() {
+        output::success(&format!(
+            "Nothing due in '{vault_name}' ({} policy-managed secret(s)).",
+            statuses.len()
+        ));
+        return Ok(());
+    }
+
+    output::warn(&format!(
+        "{} secret(s) due for rotation in '{vault_name}': {}",
+        due.len(),
+        due.join(", ")
+    ));
+    output::hint("Run 'xv rotate --due' to rotate them.");
+    Err(CrosstacheError::rotation_due(due.len()))
+}
+
+/// `xv rotate --due` — rotate every secret whose policy has come due.
+async fn execute_rotate_due(
+    vault: Option<String>,
+    length: usize,
+    charset: CharsetType,
+    generator: Option<String>,
+    force: bool,
+    config: Config,
+    registry: Option<&BackendRegistry>,
+) -> Result<()> {
+    use crate::utils::interactive::InteractivePrompt;
+
+    let (vault_name, statuses) = collect_rotation_status(vault.clone(), &config, registry).await?;
+
+    let invalid: Vec<&str> = statuses
+        .iter()
+        .filter(|(_, s)| s.is_invalid())
+        .map(|(n, _)| n.as_str())
+        .collect();
+    if !invalid.is_empty() {
+        // Fail rather than skip: an unreadable policy means we cannot know
+        // whether that secret is overdue, and silently passing over it would
+        // make a green `--due` run misleading.
+        return Err(CrosstacheError::InvalidArgument(format!(
+            "{} secret(s) in '{vault_name}' have an unparseable rotation interval: {}. Fix them \
+             with 'xv update <name> --rotate-every <interval>' before running --due, so this run \
+             cannot silently skip an overdue secret.",
+            invalid.len(),
+            invalid.join(", ")
+        )));
+    }
+
+    let due: Vec<String> = statuses
+        .iter()
+        .filter(|(_, s)| s.is_due())
+        .map(|(n, _)| n.clone())
+        .collect();
+
+    if due.is_empty() {
+        output::success(&format!(
+            "Nothing due in '{vault_name}' ({} policy-managed secret(s)).",
+            statuses.len()
+        ));
+        return Ok(());
+    }
+
+    output::info(&format!(
+        "{} secret(s) due for rotation in '{vault_name}': {}",
+        due.len(),
+        due.join(", ")
+    ));
+
+    // One confirmation for the batch, rather than per secret.
+    if !force {
+        let prompt = InteractivePrompt::new();
+        if !prompt.confirm(
+            &format!(
+                "Rotate {} secret(s)? Each gets a newly generated value and a new version.",
+                due.len()
+            ),
+            false,
+        )? {
+            output::info("Rotation cancelled.");
+            return Ok(());
+        }
+    }
+
+    let mut rotated = 0usize;
+    let mut failures: Vec<(String, String)> = Vec::new();
+
+    for name in &due {
+        // Rotate each secret through the same single-secret path, so record
+        // handling, reserved-key guards, and audit/git hooks all apply
+        // identically to a manual rotate. `--every` is not passed: `--due`
+        // acts on the existing policy and must never redefine it.
+        match execute_secret_rotate_direct(
+            name,
+            vault.clone(),
+            length,
+            charset,
+            generator.clone(),
+            false,
+            false,
+            true, // already confirmed for the batch
+            None,
+            config.clone(),
+            registry,
+        )
+        .await
+        {
+            Ok(()) => rotated += 1,
+            Err(e) => failures.push((name.clone(), e.to_string())),
+        }
+    }
+
+    if failures.is_empty() {
+        output::success(&format!("Rotated {rotated} secret(s) in '{vault_name}'."));
+        return Ok(());
+    }
+
+    // Report every failure — a partial batch must not look like a success.
+    for (name, err) in &failures {
+        output::error(&format!("  {name}: {err}"));
+    }
+    Err(CrosstacheError::config(format!(
+        "rotated {rotated} of {} due secret(s) in '{vault_name}'; {} failed (listed above)",
+        due.len(),
+        failures.len()
+    )))
 }
 
 /// Capability error for `xv rotate --native` on a backend without native
@@ -3119,8 +3735,8 @@ pub(crate) async fn execute_secret_inject_direct(
 
 /// Like [`crate::cli::helpers::confirm_proceed`], but exits with code 3
 /// (`CrosstacheError::config`) instead of 2 — record-types plan Task 9
-/// requires `xv update --untype` (when it would drop non-primary secret
-/// fields) to exit 3 without `--yes` on a non-interactive session,
+/// requires lossy record conversion to exit 3 without `--yes` on a
+/// non-interactive session,
 /// consistent with every other record-types validation failure, even
 /// though it mirrors `mv`'s bulk-confirm *behavior* (prompt unless `--yes`,
 /// hard-fail without a TTY).
@@ -3394,6 +4010,7 @@ async fn apply_record_field_changes(
 
     let request = crate::secret::manager::SecretUpdateRequest {
         name: name.to_string(),
+        expected_revision: None,
         value: new_value,
         content_type,
         enabled: enabled_override,
@@ -3479,110 +4096,42 @@ async fn execute_record_primary_update(
     .await
 }
 
-/// `xv update <name> --type <type>` (record-types plan Task 9): explicit
-/// conversion of a bare secret into a typed record. The current value
-/// becomes the primary field; existing groups/note/folder/user tags are
-/// untouched. Errors if the secret is already a record.
+/// Shared plain-to-record or record-to-record CLI adapter. The service keeps
+/// exact field matches, maps the source primary when needed, preserves
+/// metadata, and prepares the single atomic backend update.
 async fn execute_record_type_conversion(
     name: &str,
     type_name: &str,
+    yes: bool,
     vault_name: &str,
     config: &Config,
     backend: &dyn crate::backend::Backend,
     backend_name: &str,
 ) -> Result<()> {
+    crate::records::validate_conversion_backend(backend)?;
     let secret = backend.secrets().get_secret(vault_name, name, true).await?;
-    if crate::records::is_record(&secret.content_type) {
-        return Err(CrosstacheError::config(format!(
-            "secret '{name}' is already a typed record (type: {}); use --field/--field-secret to \
-             edit it, or --untype first to convert it back to a bare secret.",
-            secret.tags.get(TYPE_TAG).cloned().unwrap_or_default()
-        )));
-    }
-
     let types = config.resolve_record_types().await?;
-    let Some(record_type) = find_type(&types, type_name) else {
-        let mut known: Vec<&str> = types.iter().map(|t| t.name.as_str()).collect();
-        known.sort_unstable();
-        return Err(CrosstacheError::config(format!(
-            "unknown type '{type_name}'. Known types: {}",
-            known.join(", ")
-        )));
-    };
-
-    let current_value = secret.value.clone().unwrap_or_default();
-    if current_value.is_empty() {
-        return Err(CrosstacheError::config(format!(
-            "secret '{name}' has no value to convert"
-        )));
+    let mut request = crate::records::ConversionRequest::to_type(type_name);
+    request.confirm_lossy = yes;
+    let mut preview = crate::records::preview_conversion(&secret, &types, request)?;
+    print_conversion_preview(&preview);
+    if preview.requires_confirmation {
+        let impact = conversion_confirmation_impact(&preview);
+        let prompt = format!(
+            "Converting '{name}' to type '{type_name}' requires confirmation ({impact}). Continue?"
+        );
+        if !confirm_record_action(false, &prompt)? {
+            output::info("Aborted; secret not converted.");
+            return Ok(());
+        }
+        let mut confirmed = crate::records::ConversionRequest::to_type(type_name);
+        confirmed.confirm_lossy = true;
+        preview = crate::records::preview_conversion(&secret, &types, confirmed)?;
     }
-
-    let mut envelope = BTreeMap::new();
-    envelope.insert(
-        record_type.primary().name.clone(),
-        current_value.as_str().to_string(),
-    );
-    let envelope_value = encode_envelope(&envelope)?;
-
-    // Tag budget: existing tags (unchanged) + the new xv-type tag. No f.*
-    // fields are added by a bare `--type` conversion (only the primary is
-    // set, and the primary never gets an f.* tag).
-    let user_tags = user_tags_of(&secret.tags);
-    let reserved_count = crate::records::predicted_reserved_tag_count(
-        backend.kind(),
-        true,
-        secret.tags.contains_key("groups"),
-        secret.tags.contains_key("note"),
-        secret.tags.contains_key("folder"),
-        secret.expires_on.is_some(),
-    );
-    crate::records::check_tag_budget(
-        &backend.capabilities(),
-        reserved_count,
-        &BTreeMap::new(),
-        &user_tags,
-    )?;
-
-    let mut new_tags = secret.tags.clone();
-    // Strip denormalized groups/note/folder (see
-    // `split_denormalized_tags`'s doc comment) before this becomes a
-    // `replace_tags: true` write, and USE the extracted values via the
-    // request's dedicated fields (`groups: Some(vec)` +
-    // `replace_groups: true`, `note`/`folder` as `Set`-when-known) rather
-    // than `None`/`Unchanged` — a value-changing update takes Azure's
-    // full-PUT path, which does not treat `groups: None` as "leave
-    // unchanged" the way local/AWS's delta model does: `prepare_secret_
-    // request` only re-adds the `groups` tag when the request field is
-    // `Some`, so `None` here previously erased group membership on Azure
-    // (Bugbot review, round 3).
-    let (groups, note, folder) = crate::backend::secret::split_denormalized_tags(&mut new_tags);
-    new_tags.insert(TYPE_TAG.to_string(), record_type.name.clone());
-
-    let request = crate::secret::manager::SecretUpdateRequest {
-        name: name.to_string(),
-        value: Some(Zeroizing::new(envelope_value)),
-        content_type: Some(RECORD_CONTENT_TYPE.to_string()),
-        enabled: None,
-        expires_on: crate::secret::manager::FieldUpdate::Unchanged,
-        not_before: crate::secret::manager::FieldUpdate::Unchanged,
-        tags: Some(new_tags),
-        groups,
-        note: note
-            .map(crate::secret::manager::FieldUpdate::Set)
-            .unwrap_or(crate::secret::manager::FieldUpdate::Unchanged),
-        folder: folder
-            .map(crate::secret::manager::FieldUpdate::Set)
-            .unwrap_or(crate::secret::manager::FieldUpdate::Unchanged),
-        replace_tags: true,
-        replace_groups: true,
-    };
-    let props = backend
-        .secrets()
-        .update_secret(vault_name, name, request)
-        .await?;
+    let props = crate::records::apply_atomic_conversion(backend, vault_name, name, preview).await?;
     output::success(&format!(
         "Successfully converted '{}' to type '{}'",
-        props.original_name, record_type.name
+        props.original_name, type_name
     ));
     invalidate_trait_secret_cache(config, backend_name, vault_name);
     Ok(())
@@ -3590,9 +4139,8 @@ async fn execute_record_type_conversion(
 
 /// `xv update <name> --untype` (record-types plan Task 9): flattens a
 /// typed record back to a bare secret holding the primary field's value.
-/// Non-primary secret fields are dropped with an interactive confirmation
-/// (or `--yes`); metadata fields are removed from tags. Non-TTY without
-/// `--yes` when fields would be dropped exits 3.
+/// All other record fields are dropped with an interactive confirmation
+/// (or `--yes`). Non-TTY without `--yes` when fields would be dropped exits 3.
 async fn execute_record_untype(
     name: &str,
     yes: bool,
@@ -3601,6 +4149,7 @@ async fn execute_record_untype(
     reg: &BackendRegistry,
     backend_name: &str,
 ) -> Result<()> {
+    crate::records::validate_conversion_backend(reg.active())?;
     let secret = reg
         .active()
         .secrets()
@@ -3613,88 +4162,68 @@ async fn execute_record_untype(
     }
 
     let type_name = secret.tags.get(TYPE_TAG).cloned().unwrap_or_default();
-    let raw = secret.value.as_deref().map(|s| s.as_str()).unwrap_or("");
-    let envelope = parse_record_envelope_or_fail(name, &secret.content_type, raw)?;
-
     let types = config.resolve_record_types().await?;
-    let Some(record_type) = find_type(&types, &type_name) else {
-        return Err(CrosstacheError::config(format!(
-            "secret '{name}' has type '{type_name}', which has no resolvable type definition \
-             (check your [types.*] config); its primary field can't be determined, so it can't be \
-             untyped automatically. Use 'xv get {name} --record' to inspect its raw fields."
-        )));
-    };
-
-    let primary_name = &record_type.primary().name;
-    let Some(primary_value) = envelope.get(primary_name) else {
-        return Err(CrosstacheError::config(format!(
-            "secret '{name}' is missing its primary field '{primary_name}' in the record envelope"
-        )));
-    };
-    let primary_value = primary_value.clone();
-
-    let mut dropped: Vec<String> = envelope
-        .keys()
-        .filter(|k| *k != primary_name)
-        .cloned()
-        .collect();
-    dropped.sort();
-
-    if !dropped.is_empty() {
-        let prompt = format!(
-            "Untyping '{name}' will permanently drop {} non-primary secret field(s): {}. Continue?",
-            dropped.len(),
-            dropped.join(", ")
-        );
-        if !confirm_record_action(yes, &prompt)? {
+    let mut request = crate::records::ConversionRequest::plain();
+    request.confirm_lossy = yes;
+    let mut preview = crate::records::preview_conversion(&secret, &types, request)?;
+    print_conversion_preview(&preview);
+    if preview.requires_confirmation {
+        let impact = conversion_confirmation_impact(&preview);
+        let prompt = format!("Untyping '{name}' requires confirmation ({impact}). Continue?");
+        if !confirm_record_action(false, &prompt)? {
             output::info("Aborted; secret not untyped.");
             return Ok(());
         }
-        output::warn(&format!("Dropped field(s): {}", dropped.join(", ")));
+        let mut confirmed = crate::records::ConversionRequest::plain();
+        confirmed.confirm_lossy = true;
+        preview = crate::records::preview_conversion(&secret, &types, confirmed)?;
     }
-
-    let mut new_tags = secret.tags.clone();
-    new_tags.remove(TYPE_TAG);
-    new_tags.retain(|k, _| !k.starts_with(FIELD_TAG_PREFIX));
-    // Strip denormalized groups/note/folder — see
-    // `split_denormalized_tags`'s doc comment — and USE the extracted
-    // values via the request's dedicated fields. Untyping is a
-    // value-changing update (Azure's full-PUT path), which does not treat
-    // `groups: None` as "leave unchanged": `prepare_secret_request` only
-    // re-adds the `groups` tag when the request field is `Some`, so
-    // `None` here previously erased group membership on Azure (Bugbot
-    // review, round 3).
-    let (groups, note, folder) = crate::backend::secret::split_denormalized_tags(&mut new_tags);
-
-    let request = crate::secret::manager::SecretUpdateRequest {
-        name: name.to_string(),
-        value: Some(Zeroizing::new(primary_value)),
-        content_type: Some(String::new()),
-        enabled: None,
-        expires_on: crate::secret::manager::FieldUpdate::Unchanged,
-        not_before: crate::secret::manager::FieldUpdate::Unchanged,
-        tags: Some(new_tags),
-        groups,
-        note: note
-            .map(crate::secret::manager::FieldUpdate::Set)
-            .unwrap_or(crate::secret::manager::FieldUpdate::Unchanged),
-        folder: folder
-            .map(crate::secret::manager::FieldUpdate::Set)
-            .unwrap_or(crate::secret::manager::FieldUpdate::Unchanged),
-        replace_tags: true,
-        replace_groups: true,
-    };
-    let props = reg
-        .active()
-        .secrets()
-        .update_secret(vault_name, name, request)
-        .await?;
+    let props =
+        crate::records::apply_atomic_conversion(reg.active(), vault_name, name, preview).await?;
     output::success(&format!(
         "Successfully untyped '{}' (was type '{type_name}')",
         props.original_name
     ));
     invalidate_trait_secret_cache(config, backend_name, vault_name);
     Ok(())
+}
+
+fn print_conversion_preview(preview: &crate::records::ConversionPreview) {
+    if !preview.retained.is_empty() {
+        output::info(&format!(
+            "Retained field(s): {}",
+            preview.retained.join(", ")
+        ));
+    }
+    if !preview.renamed.is_empty() {
+        output::info(&format!("Renamed field(s): {}", preview.renamed.join(", ")));
+    }
+    if !preview.copied.is_empty() {
+        output::info(&format!("Copied field(s): {}", preview.copied.join(", ")));
+    }
+    if !preview.sensitivity_changes.is_empty() {
+        output::info(&format!(
+            "Sensitivity change(s): {}",
+            preview.sensitivity_changes.join(", ")
+        ));
+    }
+    if !preview.dropped.is_empty() {
+        output::warn(&format!("Dropped field(s): {}", preview.dropped.join(", ")));
+    }
+}
+
+fn conversion_confirmation_impact(preview: &crate::records::ConversionPreview) -> String {
+    let mut impacts = Vec::new();
+    if !preview.dropped.is_empty() {
+        impacts.push(format!("drop field(s): {}", preview.dropped.join(", ")));
+    }
+    if !preview.exposed.is_empty() {
+        impacts.push(format!(
+            "expose protected field(s) as metadata: {}",
+            preview.exposed.join(", ")
+        ));
+    }
+    impacts.join("; ")
 }
 
 /// Every classic (non-record) `xv update` metadata flag that was actually
@@ -3817,8 +4346,53 @@ pub(crate) async fn execute_secret_update_direct(
             )
             .await?;
         let name = resolved_name.as_str();
+        if !confirm_reserved_key_write(name, yes, "Updating", "--yes")? {
+            output::info("Aborted; secret not updated.");
+            return Ok(());
+        }
         let local_registry = BackendRegistry::new(resolved_backend);
         let reg = &local_registry;
+        if rename.is_some() {
+            crate::cli::mv_ops::validate_atomic_rename_backend(reg.active())?;
+        }
+
+        // A bare `xv update NAME` — no value, no --stdin, and no other
+        // update flag — prompts for the new value, matching the `value`
+        // arg's documented "if not provided, will prompt" and `xv set`.
+        // Without this it fell through to the all-unchanged update call
+        // below and reported success without changing anything.
+        let mut value = value;
+        if value.is_none()
+            && !stdin
+            && type_name.is_none()
+            && !untype
+            && fields.is_empty()
+            && secret_fields.is_empty()
+            && classic_flags_present(
+                &tags,
+                &groups,
+                &rename,
+                &note,
+                &folder,
+                replace_tags,
+                replace_groups,
+                &expires,
+                &not_before,
+                clear_expires,
+                clear_not_before,
+                clear_note,
+                clear_folder,
+                enabled,
+            )
+            .is_empty()
+        {
+            let prompted =
+                rpassword::prompt_password(format!("Enter new value for secret '{name}': "))?;
+            if prompted.is_empty() {
+                return Err(CrosstacheError::config("Secret value cannot be empty"));
+            }
+            value = Some(prompted);
+        }
 
         // Record-types edit/conversion paths (record-types plan Tasks 8/9)
         // take over completely — clap's `conflicts_with_all` on --type/
@@ -3829,6 +4403,7 @@ pub(crate) async fn execute_secret_update_direct(
                 return execute_record_type_conversion(
                     name,
                     &type_name,
+                    yes,
                     &vault_name,
                     &config,
                     reg.active(),
@@ -4005,6 +4580,7 @@ pub(crate) async fn execute_secret_update_direct(
         if has_other_updates || !renaming {
             let request = crate::secret::manager::SecretUpdateRequest {
                 name: name.to_string(),
+                expected_revision: None,
                 value: resolved_value,
                 content_type: None,
                 enabled,
@@ -5187,6 +5763,8 @@ async fn execute_secret_rotate(
     custom_generator: Option<String>,
     show_value: bool,
     force: bool,
+    // When `Some`, also set/refresh the secret's rotation policy.
+    rotation_interval: Option<chrono::Duration>,
     config: &Config,
 ) -> Result<()> {
     use crate::config::ContextManager;
@@ -5242,6 +5820,15 @@ async fn execute_secret_rotate(
         }
     }
 
+    // Rotating the reserved attachment-encryption-key secret replaces its
+    // value with freshly generated garbage, making ALL attachments in this
+    // vault unreadable — the generic confirmation above doesn't say that,
+    // and with `--force` it wouldn't say anything at all.
+    if !confirm_reserved_key_write(name, force, "Rotating", "--force")? {
+        output::info("Aborted; secret not rotated.");
+        return Ok(());
+    }
+
     // Generate the new value
     let new_value = generate_random_value(length, charset, custom_generator)?;
 
@@ -5259,7 +5846,14 @@ async fn execute_secret_rotate(
     // review NIT): the untyped path's `SecretRequest.enabled: Some(true)`
     // and this `SecretUpdateRequest.enabled` override are the same
     // deliberate choice, made consistent across both code shapes.
-    let new_version = if crate::records::is_record(&existing_secret.content_type) {
+    // Stamp the rotation bookkeeping tags. `xv:rotated_at` is refreshed on
+    // every rotation — including a plain `xv rotate` with no `--every` — so an
+    // existing policy's clock restarts from the rotation that actually
+    // happened. Without that, `--due` would re-rotate the same secret forever.
+    let stamp = crate::secret::rotation::rotation_tags(rotation_interval, chrono::Utc::now());
+    let is_record = crate::records::is_record(&existing_secret.content_type);
+
+    let new_version = if is_record {
         let props = execute_record_primary_update(
             name,
             new_value.as_str(),
@@ -5273,7 +5867,10 @@ async fn execute_secret_rotate(
         .await?;
         props.version
     } else {
-        // Preserve existing secret metadata
+        // Preserve existing secret metadata, with the rotation stamp merged
+        // over it so a refreshed interval replaces the old one.
+        let mut tags = existing_secret.tags;
+        tags.extend(stamp.clone());
         let set_request = SecretRequest {
             name: name.to_string(),
             value: new_value.clone(),
@@ -5285,11 +5882,7 @@ async fn execute_secret_rotate(
             enabled: Some(true),
             expires_on: existing_secret.expires_on,
             not_before: existing_secret.not_before,
-            tags: if existing_secret.tags.is_empty() {
-                None
-            } else {
-                Some(existing_secret.tags)
-            },
+            tags: Some(tags),
             groups: None, // Groups are managed via tags
             note: None,
             folder: None,
@@ -5304,6 +5897,33 @@ async fn execute_secret_rotate(
             .map_err(CrosstacheError::from)?;
         result.version
     };
+
+    // A record's value is rewritten through the envelope-aware update path,
+    // which owns its own tag handling, so the stamp is applied afterwards as a
+    // metadata-only update (merge semantics — no `replace_tags`). Metadata-only
+    // updates do not create a further version on any backend.
+    if is_record {
+        let stamp_request = crate::secret::manager::SecretUpdateRequest {
+            name: name.to_string(),
+            value: None,
+            content_type: None,
+            enabled: None,
+            expires_on: crate::secret::manager::FieldUpdate::Unchanged,
+            not_before: crate::secret::manager::FieldUpdate::Unchanged,
+            tags: Some(stamp.into_iter().collect()),
+            groups: None,
+            note: crate::secret::manager::FieldUpdate::Unchanged,
+            folder: crate::secret::manager::FieldUpdate::Unchanged,
+            replace_tags: false,
+            replace_groups: false,
+            expected_revision: None,
+        };
+        reg.active()
+            .secrets()
+            .update_secret(&vault_name, name, stamp_request)
+            .await
+            .map_err(CrosstacheError::from)?;
+    }
 
     output::success(&format!("Successfully rotated secret '{}'", name));
     println!("New version: {}", new_version);
@@ -6604,6 +7224,14 @@ async fn execute_secret_copy(
     // Determine target name (use new_name if provided, otherwise use original)
     let target_name = new_name.as_deref().unwrap_or(name);
 
+    // A copy (or `xv move`, which calls this) landing on the reserved
+    // attachment key would silently replace this vault's attachment
+    // identity — same guard as `xv mv`'s rename path.
+    if !confirm_reserved_key_write(target_name, force, "Copying to", "--force")? {
+        output::info("Aborted; secret not copied.");
+        return Ok(());
+    }
+
     println!(
         "Copying secret '{}' from vault '{}' to vault '{}' as '{}'...",
         name, from_vault, to_vault, target_name
@@ -7187,12 +7815,20 @@ mod tests {
 
         fn capabilities(&self) -> BackendCapabilities {
             BackendCapabilities {
+                has_atomic_record_conversion: false,
+                has_conditional_record_conversion: false,
+                has_atomic_rename: false,
+                has_atomic_file_create: false,
+                has_enable_disable: false,
                 has_vaults: self.kind == BackendKind::Local,
                 has_file_storage: false,
                 has_rbac: false,
                 has_audit: false,
                 has_versioning: true,
                 has_soft_delete: true,
+                has_restore: true,
+                has_purge: true,
+                has_scheduled_purge: self.kind != BackendKind::Local,
                 has_secret_rotation: self.kind == BackendKind::Aws,
                 has_groups: true,
                 has_folders: true,
@@ -7283,6 +7919,7 @@ mod tests {
             groups: groups.map(str::to_string),
             updated_on: "2026-04-28".to_string(),
             enabled,
+            expires_on: None,
             content_type: String::new(),
             tags: std::collections::HashMap::new(),
         }
@@ -7330,6 +7967,8 @@ mod tests {
                 default_vault: Some("local-vault".to_string()),
                 encrypt_metadata: None,
                 opaque_filenames: None,
+                audit: None,
+                git: None,
             }),
             ..Default::default()
         };
@@ -7478,6 +8117,27 @@ mod tests {
         let config = Config {
             backend: Some("local".to_string()),
             default_vault: String::new(),
+            local: Some(crate::config::settings::LocalConfig {
+                store_path: Some(
+                    temp_context_dir
+                        .path()
+                        .join("store")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                key_file: Some(
+                    temp_context_dir
+                        .path()
+                        .join("key.txt")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                default_vault: Some("default".to_string()),
+                encrypt_metadata: None,
+                opaque_filenames: None,
+                audit: None,
+                git: None,
+            }),
             ..Default::default()
         };
 
@@ -7490,6 +8150,22 @@ mod tests {
             "unexpected error: {msg}"
         );
         assert!(msg.contains("local"), "should name the backend: {msg}");
+    }
+
+    #[tokio::test]
+    async fn record_conversion_preflights_atomic_capability_before_read_or_prompt() {
+        let backend = TestBackend::aws();
+        let config = Config::default();
+
+        let error = execute_record_type_conversion(
+            "cred", "api-key", false, "default", &config, &backend, "aws",
+        )
+        .await
+        .expect_err("AWS conversion must fail before reading or prompting");
+        let message = error.to_string();
+        assert!(message.contains("atomic record conversion"), "{message}");
+        assert!(!message.contains("test backend"), "{message}");
+        assert!(!message.contains("--yes"), "{message}");
     }
 
     /// When `--backend local` is requested but backend init failed (registry
@@ -7584,6 +8260,7 @@ mod tests {
                 groups: groups.map(str::to_string),
                 updated_on: String::new(),
                 enabled: true,
+                expires_on: None,
                 content_type: String::new(),
                 tags: std::collections::HashMap::new(),
             }
@@ -7838,6 +8515,7 @@ mod tests {
                 groups: None,
                 updated_on: String::new(),
                 enabled: true,
+                expires_on: None,
                 content_type: String::new(),
                 tags: std::collections::HashMap::new(),
             }
@@ -7922,6 +8600,8 @@ mod tests {
                 default_vault: Some(vault_name.clone()),
                 encrypt_metadata: None,
                 opaque_filenames: None,
+                audit: None,
+                git: None,
             }),
             ..Default::default()
         };
@@ -8226,6 +8906,7 @@ mod tests {
             groups: None,
             updated_on: "2026-07-01 00:00:00 UTC".to_string(),
             enabled: true,
+            expires_on: None,
             content_type: String::new(),
             tags: std::collections::HashMap::new(),
         };
@@ -8250,6 +8931,7 @@ mod tests {
             groups: None,
             updated_on: String::new(),
             enabled: true,
+            expires_on: None,
             content_type: String::new(),
             tags: std::collections::HashMap::new(),
         };
@@ -8330,6 +9012,77 @@ mod tests {
         assert!(
             buggy.is_empty(),
             "demonstrates the pre-fix bug: filtering after alias-prefixing loses the match"
+        );
+    }
+
+    #[test]
+    fn reserved_attachment_key_is_hidden_from_listings() {
+        fn summary(name: &str) -> crate::secret::manager::SecretSummary {
+            crate::secret::manager::SecretSummary {
+                name: name.to_string(),
+                original_name: name.to_string(),
+                note: None,
+                folder: None,
+                groups: None,
+                updated_on: String::new(),
+                enabled: true,
+                expires_on: None,
+                content_type: String::new(),
+                tags: std::collections::HashMap::new(),
+            }
+        }
+        let secrets = vec![
+            summary("normal"),
+            summary(crate::secret::attachments::ATTACHMENT_KEY_SECRET),
+        ];
+        let out = filter_secret_summaries_for_display(secrets, None, true);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "normal");
+    }
+
+    #[test]
+    fn bulk_set_refuses_reserved_key_name() {
+        assert!(is_reserved_attachment_key(
+            crate::secret::attachments::ATTACHMENT_KEY_SECRET
+        ));
+        assert!(!is_reserved_attachment_key("normal-secret"));
+    }
+
+    #[test]
+    fn confirm_reserved_key_write_is_a_noop_for_other_secrets() {
+        // No TTY in the test process, so a real prompt would error out
+        // (`confirm_proceed`'s non-interactive-session refusal); a
+        // non-reserved name must never reach that path at all.
+        assert!(
+            confirm_reserved_key_write("normal-secret", false, "Overwriting", "--force").unwrap()
+        );
+    }
+
+    #[test]
+    fn confirm_reserved_key_write_skips_prompt_when_forced() {
+        assert!(confirm_reserved_key_write(
+            crate::secret::attachments::ATTACHMENT_KEY_SECRET,
+            true,
+            "Overwriting",
+            "--force"
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn confirm_reserved_key_write_refuses_unattended_without_force() {
+        // Not a TTY here, so `confirm_proceed(false, ..)` can't prompt — it
+        // must refuse loudly rather than silently defaulting either way.
+        let err = confirm_reserved_key_write(
+            crate::secret::attachments::ATTACHMENT_KEY_SECRET,
+            false,
+            "Overwriting",
+            "--force",
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("attachment encryption key"),
+            "{err}"
         );
     }
 }

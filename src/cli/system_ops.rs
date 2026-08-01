@@ -138,6 +138,88 @@ pub(crate) async fn execute_audit_command(
     .await
 }
 
+/// `xv audit --verify` — recompute the local audit log's hash chain.
+///
+/// Local-only by design: Azure and AWS audit trails are produced and held by
+/// the platform, so there is no client-side chain for `xv` to verify. That
+/// asymmetry is the point — a cloud trail the caller cannot rewrite needs no
+/// integrity proof from us, whereas a log living in the caller's own store
+/// does.
+pub(crate) async fn execute_audit_verify_command(
+    vault: Option<String>,
+    config: Config,
+) -> Result<()> {
+    use crate::backend::local::audit::ChainStatus;
+    use crate::backend::local::LocalBackend;
+
+    if config.effective_backend_name() != "local" {
+        return Err(CrosstacheError::InvalidArgument(format!(
+            "`xv audit --verify` checks the local backend's hash-chained log, but the active \
+             backend is '{}'. Azure and AWS audit trails are maintained by the platform \
+             (Activity Log / CloudTrail), so there is no local chain to verify — query them \
+             with 'xv audit' instead.",
+            config.effective_backend_name()
+        )));
+    }
+
+    let backend = LocalBackend::new(config.local.as_ref())
+        .map_err(|e| CrosstacheError::config(format!("failed to open local backend: {e}")))?;
+
+    let log = backend.audit_log().ok_or_else(|| {
+        CrosstacheError::config(
+            "Auditing is not enabled for the local backend. Set `audit = true` under [local] \
+             in your config; records are written from that point on."
+                .to_string(),
+        )
+    })?;
+
+    let vault_name = match vault {
+        Some(v) => v,
+        None => {
+            let (_backend, _name, resolved) =
+                crate::cli::vault_ops::resolve_current_vault(&config, None).await?;
+            resolved
+        }
+    };
+
+    match log
+        .verify_chain(&vault_name)
+        .map_err(|e| CrosstacheError::config(e.to_string()))?
+    {
+        ChainStatus::Empty => {
+            output::info(&format!(
+                "No audit records for vault '{vault_name}' yet — nothing to verify."
+            ));
+            Ok(())
+        }
+        ChainStatus::Intact { records } => {
+            output::success(&format!(
+                "Audit chain intact: {records} record(s) verified for vault '{vault_name}'."
+            ));
+            output::hint(
+                "This proves the log has not been edited or reordered since it was written. It \
+                 cannot prove completeness: whoever holds the age identity could have rewritten \
+                 the chain wholesale, and anyone who can write the file could truncate its tail. \
+                 Push the store to a remote ('xv git push') to keep off-box copies.",
+            );
+            Ok(())
+        }
+        ChainStatus::Broken {
+            seq,
+            verified,
+            reason,
+        } => {
+            output::error(&format!(
+                "Audit chain BROKEN at record {seq} for vault '{vault_name}': {reason}"
+            ));
+            output::info(&format!(
+                "  {verified} record(s) before the break verified successfully."
+            ));
+            Err(CrosstacheError::audit_chain_broken(seq, reason))
+        }
+    }
+}
+
 /// Render audit logs fetched through the backend-agnostic [`AuditBackend`]
 /// trait via the shared `AuditRow` renderer (global `--format` honored).
 async fn execute_backend_audit(
@@ -747,6 +829,19 @@ async fn save_generated_secret(
     // `xv set` — see `apply_profile_write_defaults` for the shared logic.
     let mut meta = meta.clone();
     crate::cli::secret_ops::apply_profile_write_defaults(&mut meta, config).await?;
+
+    // `xv gen --save` has no `--force`/override flag at all, so this always
+    // prompts (or refuses outright in a non-interactive session) — same
+    // guard as `xv set`, see `confirm_reserved_key_write`.
+    if !crate::cli::secret_ops::confirm_reserved_key_write(
+        name,
+        false,
+        "Overwriting",
+        "an interactive terminal (xv gen --save has no override flag)",
+    )? {
+        output::info("Aborted; secret not saved.");
+        return Ok(());
+    }
 
     let request = meta.to_secret_request(name, zeroize::Zeroizing::new(value.to_string()))?;
 
