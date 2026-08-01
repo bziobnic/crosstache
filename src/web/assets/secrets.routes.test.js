@@ -17,6 +17,7 @@ class Element {
   constructor(id, document) {
     this.key = id;
     this.id = id.startsWith('#') ? id.slice(1) : id;
+    this.tagName = id.startsWith('#') ? '' : id.toUpperCase();
     this.document = document;
     this.hidden = false;
     this.disabled = false;
@@ -70,6 +71,10 @@ class Element {
   querySelector(selector) { return this.document.element(`${this.key} ${selector}`); }
   addEventListener(type, listener) { this.listeners.set(type, listener); }
   dispatch(type, event = {}) { return this.listeners.get(type)?.({ preventDefault() {}, target: this, ...event }); }
+  click() {
+    this.clickCount = (this.clickCount || 0) + 1;
+    return this.onclick?.({ preventDefault() {}, stopPropagation() {}, currentTarget: this });
+  }
   focus() { this.document.activeElement = this; }
   contains(target) {
     if (this === target) return true;
@@ -79,8 +84,10 @@ class Element {
 
 function createDocument() {
   const elements = new Map();
+  const createdElements = [];
   const document = {
     activeElement: null,
+    createdElements,
     listeners: new Map(),
     element(id) {
       if (!elements.has(id)) elements.set(id, new Element(id, document));
@@ -96,7 +103,11 @@ function createDocument() {
       return document.element(selector);
     },
     querySelectorAll() { return []; },
-    createElement(name) { return new Element(name, document); },
+    createElement(name) {
+      const element = new Element(name, document);
+      createdElements.push(element);
+      return element;
+    },
     createElementNS(_namespace, name) { return new Element(name, document); },
     createTextNode(value) { return value; },
     addEventListener(type, listener) { document.listeners.set(type, listener); },
@@ -789,6 +800,190 @@ test('tree selection propagates through folders and keeps bulk actions scoped to
     ui.elements.get('#cancel-secret-selection').onclick();
     assert.equal(ui.elements.get('#secret-selection-count').textContent, '0 selected');
     assert.equal(ui.elements.get('#select-all-secrets').hidden, true);
+  } finally {
+    ui.restore();
+  }
+});
+
+test('downloads selected files as one zip', async () => {
+  const context = {
+    ...routedContext('primary', 'one'),
+    capabilities: { ...routedContext('primary', 'one').capabilities, files: true },
+  };
+  const listed = [
+    { name: 'docs/a.txt', size: 1, content_type: 'text/plain' },
+    { name: 'docs/b.txt', size: 1, content_type: 'text/plain' },
+  ];
+  const archiveCalls = [];
+  const archiveResponse = { blob: async () => new Blob(['zip']) };
+  const api = async (method, requestPath, body, raw) => {
+    if (method === 'GET' && requestPath === '/api/context') return context;
+    if (requestPath === '/api/types') return { types: [] };
+    if (requestPath === '/api/vaults') return { vaults: [{ name: 'one' }] };
+    if (method === 'POST' && requestPath.startsWith('/api/folder-tokens')) {
+      return {
+        version: 1,
+        scope_token: 'S'.repeat(43),
+        folders: body.folders.map((folder) => ({ path: folder, token: 'F'.repeat(43) })),
+      };
+    }
+    if (method === 'POST' && requestPath.startsWith('/api/files/archive')) {
+      archiveCalls.push({ method, path: requestPath, body, raw });
+      return archiveResponse;
+    }
+    if (method === 'GET' && requestPath.startsWith('/api/secrets')) return [];
+    if (method === 'GET' && requestPath.startsWith('/api/files')) return listed;
+    return [];
+  };
+  const ui = await mountRouteUi({ apiImpl: api });
+  try {
+    await ui.elements.get('#tab-files').onclick();
+    ui.elements.get('#select-files').onclick();
+    ui.elements.get('#select-all-files').onchange({ target: { checked: true } });
+
+    assert.equal(ui.elements.get('#bulk-download-files').disabled, false);
+    await ui.elements.get('#bulk-download-files').onclick();
+    assert.deepEqual(archiveCalls, [{
+      method: 'POST',
+      path: '/api/files/archive?alias=primary&backend=local&vault=one',
+      body: { files: ['docs/a.txt', 'docs/b.txt'] },
+      raw: true,
+    }]);
+    assert.equal(ui.elements.get('#file-selection-count').textContent, '2 selected');
+    assert.equal(ui.elements.get('#file-bulk-bar').hidden, false);
+    assert.equal(ui.elements.get('#bulk-download-files').textContent, 'Download');
+    assert.equal(ui.elements.get('#bulk-download-files').disabled, false);
+    const createdArchiveAnchors = ui.document.createdElements.filter((element) => (
+      element.tagName === 'A' && element.download === 'crosstache-files.zip'
+    ));
+    assert.equal(createdArchiveAnchors.length, 1);
+    assert.equal(createdArchiveAnchors[0].clickCount, 1);
+  } finally {
+    ui.restore();
+  }
+});
+
+test('a zip response from a previous workspace is not saved', async () => {
+  const primary = {
+    ...routedContext('primary', 'one'),
+    capabilities: { ...routedContext('primary', 'one').capabilities, files: true },
+  };
+  const stage = {
+    ...routedContext('stage', 'two'),
+    capabilities: { ...routedContext('stage', 'two').capabilities, files: true },
+  };
+  const archive = deferred();
+  let archiveStarted = false;
+  const api = async (method, requestPath) => {
+    if (method === 'GET' && requestPath === '/api/context') return primary;
+    if (method === 'POST' && requestPath === '/api/workspaces/activate') {
+      return { context: stage, secrets: [] };
+    }
+    if (requestPath === '/api/types') return { types: [] };
+    if (requestPath === '/api/vaults') return { vaults: [{ name: 'one' }, { name: 'two' }] };
+    if (method === 'POST' && requestPath.startsWith('/api/folder-tokens')) {
+      return { version: 1, scope_token: 'S'.repeat(43), folders: [] };
+    }
+    if (method === 'POST' && requestPath.startsWith('/api/files/archive')) {
+      archiveStarted = true;
+      return archive.promise;
+    }
+    if (method === 'GET' && requestPath.startsWith('/api/secrets')) return [];
+    if (method === 'GET' && requestPath.startsWith('/api/files')) {
+      return requestPath.includes('vault=two')
+        ? []
+        : [{ name: 'docs/a.txt', size: 1, content_type: 'text/plain' }];
+    }
+    return [];
+  };
+  const ui = await mountRouteUi({ apiImpl: api, withContextRail: true });
+  let download;
+  try {
+    await ui.elements.get('#tab-files').onclick();
+    ui.elements.get('#select-files').onclick();
+    ui.elements.get('#select-all-files').onchange({ target: { checked: true } });
+
+    download = ui.elements.get('#bulk-download-files').onclick();
+    await settleUntil(() => archiveStarted);
+    assert.equal(await ui.contextRail.switchTo('stage'), true);
+
+    archive.resolve({ blob: async () => new Blob(['zip']) });
+    await download;
+
+    const createdArchiveAnchors = ui.document.createdElements.filter((element) => (
+      element.tagName === 'A' && element.download === 'crosstache-files.zip'
+    ));
+    assert.equal(createdArchiveAnchors.length, 0);
+    assert.doesNotMatch(ui.document.getElementById('toast').textContent, /Downloaded/);
+  } finally {
+    archive.resolve({ blob: async () => new Blob(['zip']) });
+    await Promise.allSettled(download ? [download] : []);
+    ui.restore();
+  }
+});
+
+test('zip download failure retains file selection', async () => {
+  const context = {
+    ...routedContext('primary', 'one'),
+    capabilities: { ...routedContext('primary', 'one').capabilities, files: true },
+  };
+  const listed = [
+    { name: 'docs/a.txt', size: 1, content_type: 'text/plain' },
+    { name: 'docs/b.txt', size: 1, content_type: 'text/plain' },
+  ];
+  const archiveCalls = [];
+  let rejectArchive;
+  const archiveResponse = new Promise((_resolve, reject) => { rejectArchive = reject; });
+  const api = async (method, requestPath, body, raw) => {
+    if (method === 'GET' && requestPath === '/api/context') return context;
+    if (requestPath === '/api/types') return { types: [] };
+    if (requestPath === '/api/vaults') return { vaults: [{ name: 'one' }] };
+    if (method === 'POST' && requestPath.startsWith('/api/folder-tokens')) {
+      return {
+        version: 1,
+        scope_token: 'S'.repeat(43),
+        folders: body.folders.map((folder) => ({ path: folder, token: 'F'.repeat(43) })),
+      };
+    }
+    if (method === 'POST' && requestPath.startsWith('/api/files/archive')) {
+      archiveCalls.push({ method, path: requestPath, body, raw });
+      return archiveResponse;
+    }
+    if (method === 'GET' && requestPath.startsWith('/api/secrets')) return [];
+    if (method === 'GET' && requestPath.startsWith('/api/files')) return listed;
+    return [];
+  };
+  const ui = await mountRouteUi({ apiImpl: api });
+  try {
+    await ui.elements.get('#tab-files').onclick();
+    ui.elements.get('#select-files').onclick();
+    ui.elements.get('#select-all-files').onchange({ target: { checked: true } });
+
+    const download = ui.elements.get('#bulk-download-files').onclick();
+    await settleUntil(() => archiveCalls.length === 1);
+    assert.equal(ui.elements.get('#bulk-download-files').textContent, 'Downloading…');
+    assert.equal(ui.elements.get('#bulk-download-files').disabled, true);
+    assert.equal(ui.elements.get('#bulk-delete-files').disabled, true);
+    assert.equal(ui.elements.get('#cancel-file-selection').disabled, true);
+    const fileCheckboxes = ui.findAll('#files-table tbody', (element) => (
+      element.tagName === 'INPUT' && element.getAttribute('aria-label')?.startsWith('Select file ')
+    ));
+    assert.equal(fileCheckboxes.length, 2);
+    assert.equal(fileCheckboxes.every((checkbox) => checkbox.disabled), true);
+
+    rejectArchive(new Error('archive failed'));
+    await download;
+
+    const createdArchiveAnchors = ui.document.createdElements.filter((element) => (
+      element.tagName === 'A' && element.download === 'crosstache-files.zip'
+    ));
+    assert.equal(createdArchiveAnchors.length, 0);
+    assert.equal(ui.elements.get('#file-error').hidden, false);
+    assert.equal(ui.elements.get('#file-selection-count').textContent, '2 selected');
+    assert.equal(ui.elements.get('#bulk-download-files').textContent, 'Download');
+    assert.equal(ui.elements.get('#bulk-download-files').disabled, false);
+    assert.equal(ui.elements.get('#bulk-delete-files').disabled, false);
+    assert.equal(ui.elements.get('#cancel-file-selection').disabled, false);
   } finally {
     ui.restore();
   }
