@@ -151,6 +151,10 @@ pub(crate) struct WebState {
     pub(crate) preferences: preferences::PreferenceStore,
     pub(crate) folder_tokens: folder_tokens::FolderTokenService,
     pub(crate) registry: Arc<BackendRegistry>,
+    #[cfg(feature = "file-ops")]
+    pub(crate) archive_jobs: Arc<tokio::sync::Semaphore>,
+    #[cfg(feature = "file-ops")]
+    pub(crate) archive_limits: archive::ArchiveLimits,
     backend: Arc<dyn Backend>,
     context: context::EffectiveUiContext,
 }
@@ -175,6 +179,10 @@ impl WebState {
             preferences,
             folder_tokens: folder_tokens::FolderTokenService::random(),
             registry,
+            #[cfg(feature = "file-ops")]
+            archive_jobs: archive::archive_job_limiter(),
+            #[cfg(feature = "file-ops")]
+            archive_limits: archive::ArchiveLimits::default(),
             backend,
             context,
         }
@@ -182,6 +190,18 @@ impl WebState {
 
     fn with_folder_tokens(mut self, folder_tokens: folder_tokens::FolderTokenService) -> Self {
         self.folder_tokens = folder_tokens;
+        self
+    }
+
+    #[cfg(all(test, feature = "file-ops"))]
+    pub(crate) fn with_archive_jobs(mut self, archive_jobs: Arc<tokio::sync::Semaphore>) -> Self {
+        self.archive_jobs = archive_jobs;
+        self
+    }
+
+    #[cfg(all(test, feature = "file-ops"))]
+    pub(crate) fn with_archive_limits(mut self, archive_limits: archive::ArchiveLimits) -> Self {
+        self.archive_limits = archive_limits;
         self
     }
 
@@ -341,9 +361,12 @@ pub(crate) fn build_router(state: Arc<WebState>) -> Router {
         )
         .route(
             "/files/archive",
-            post(archive::download).layer(axum::extract::DefaultBodyLimit::max(
-                archive::MAX_ARCHIVE_BODY_BYTES,
-            )),
+            post(archive::download)
+                .get(archive::download_literal_file)
+                .delete(archive::delete_literal_file)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    archive::MAX_ARCHIVE_BODY_BYTES,
+                )),
         )
         .route(
             "/files/{name}",

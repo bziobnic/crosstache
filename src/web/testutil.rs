@@ -20,14 +20,19 @@ fn test_state_with_token_and_preferences(
     let backend: Arc<dyn crate::backend::Backend> = Arc::new(stub::StubBackend::new());
     let context = test_context(backend.as_ref(), "default", clipboard_timeout);
     let registry = Arc::new(crate::backend::BackendRegistry::new(backend.clone()));
-    Arc::new(WebState::new(
-        backend,
-        context,
-        token.to_string(),
-        crate::records::builtin_types(),
-        super::preferences::PreferenceStore::new(path, clipboard_timeout),
-        registry,
-    ))
+    Arc::new(
+        WebState::new(
+            backend,
+            context,
+            token.to_string(),
+            crate::records::builtin_types(),
+            super::preferences::PreferenceStore::new(path, clipboard_timeout),
+            registry,
+        )
+        .with_archive_jobs(Arc::new(tokio::sync::Semaphore::new(
+            super::archive::MAX_CONCURRENT_ARCHIVES,
+        ))),
+    )
 }
 
 pub(crate) fn test_context(
@@ -130,9 +135,13 @@ pub(crate) mod stub {
         #[cfg(feature = "file-ops")]
         file_info_calls: AtomicUsize,
         #[cfg(feature = "file-ops")]
+        download_file_calls: AtomicUsize,
+        #[cfg(feature = "file-ops")]
         file_name_validation_calls: AtomicUsize,
         #[cfg(feature = "file-ops")]
         file_name_limit: Option<usize>,
+        #[cfg(feature = "file-ops")]
+        reported_file_sizes: Mutex<HashMap<String, u64>>,
     }
 
     impl StubBackend {
@@ -189,9 +198,13 @@ pub(crate) mod stub {
                 #[cfg(feature = "file-ops")]
                 file_info_calls: AtomicUsize::new(0),
                 #[cfg(feature = "file-ops")]
+                download_file_calls: AtomicUsize::new(0),
+                #[cfg(feature = "file-ops")]
                 file_name_validation_calls: AtomicUsize::new(0),
                 #[cfg(feature = "file-ops")]
                 file_name_limit: None,
+                #[cfg(feature = "file-ops")]
+                reported_file_sizes: Mutex::new(HashMap::new()),
             }
         }
 
@@ -265,6 +278,11 @@ pub(crate) mod stub {
         }
 
         #[cfg(feature = "file-ops")]
+        pub(crate) fn download_file_calls(&self) -> usize {
+            self.download_file_calls.load(Ordering::SeqCst)
+        }
+
+        #[cfg(feature = "file-ops")]
         pub(crate) fn file_name_validation_calls(&self) -> usize {
             self.file_name_validation_calls.load(Ordering::SeqCst)
         }
@@ -278,6 +296,15 @@ pub(crate) mod stub {
         #[cfg(feature = "file-ops")]
         pub(crate) fn with_file_name_limit(mut self, limit: usize) -> Self {
             self.file_name_limit = Some(limit);
+            self
+        }
+
+        #[cfg(feature = "file-ops")]
+        pub(crate) fn with_reported_file_size(self, name: &str, size: u64) -> Self {
+            self.reported_file_sizes
+                .lock()
+                .unwrap()
+                .insert(name.to_string(), size);
             self
         }
     }
@@ -814,6 +841,7 @@ pub(crate) mod stub {
             name: &str,
             _reporter: Option<&dyn crate::utils::progress::ProgressReporter>,
         ) -> Result<Vec<u8>, BackendError> {
+            self.download_file_calls.fetch_add(1, Ordering::SeqCst);
             self.files
                 .lock()
                 .unwrap()
@@ -862,7 +890,16 @@ pub(crate) mod stub {
                 .lock()
                 .unwrap()
                 .get(name)
-                .map(|(b, ct, m)| file_info(name, b.len() as u64, ct, m.clone()))
+                .map(|(b, ct, m)| {
+                    let size = self
+                        .reported_file_sizes
+                        .lock()
+                        .unwrap()
+                        .get(name)
+                        .copied()
+                        .unwrap_or(b.len() as u64);
+                    file_info(name, size, ct, m.clone())
+                })
                 .ok_or_else(|| BackendError::NotFound {
                     name: name.to_string(),
                     suggestion: None,

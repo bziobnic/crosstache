@@ -3,7 +3,7 @@ use std::io::{Seek, SeekFrom, Write};
 use std::sync::Arc;
 
 use axum::body::{Body, Bytes};
-use axum::extract::{Json, Query, State};
+use axum::extract::{Json, Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::Response;
 use serde::Deserialize;
@@ -20,8 +20,44 @@ use super::api::{ApiError, VaultQuery};
 use super::WebState;
 
 pub(crate) const MAX_ARCHIVE_BODY_BYTES: usize = 512 * 1024;
+pub(crate) const MAX_ARCHIVE_FILE_BYTES: u64 = 100 * 1024 * 1024;
+pub(crate) const MAX_ARCHIVE_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
+pub(crate) const MAX_CONCURRENT_ARCHIVES: usize = 2;
 const MAX_ARCHIVE_FILES: usize = 1000;
 const MAX_ARCHIVE_NAME_BYTES: usize = 1024;
+
+const _: () = assert!(MAX_ARCHIVE_FILE_BYTES < u32::MAX as u64);
+
+#[derive(Clone, Copy)]
+pub(crate) struct ArchiveLimits {
+    max_file_bytes: u64,
+    max_total_bytes: u64,
+}
+
+impl Default for ArchiveLimits {
+    fn default() -> Self {
+        Self {
+            max_file_bytes: MAX_ARCHIVE_FILE_BYTES,
+            max_total_bytes: MAX_ARCHIVE_TOTAL_BYTES,
+        }
+    }
+}
+
+#[cfg(test)]
+impl ArchiveLimits {
+    const fn for_test(max_file_bytes: u64, max_total_bytes: u64) -> Self {
+        Self {
+            max_file_bytes,
+            max_total_bytes,
+        }
+    }
+}
+
+pub(crate) fn archive_job_limiter() -> Arc<tokio::sync::Semaphore> {
+    static LIMITER: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+        std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_ARCHIVES)));
+    LIMITER.clone()
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -37,6 +73,35 @@ fn archive_validation(message: &'static str) -> ApiError {
     }
 }
 
+fn archive_status_error(status: StatusCode) -> ApiError {
+    ApiError::Structured {
+        status,
+        error: Box::new(super::errors::status_error(status)),
+    }
+}
+
+fn reserve_archive_bytes(
+    total: &mut u64,
+    file_bytes: u64,
+    limits: ArchiveLimits,
+) -> Result<(), ApiError> {
+    let next_total = total
+        .checked_add(file_bytes)
+        .filter(|total| *total <= limits.max_total_bytes);
+    if file_bytes > limits.max_file_bytes || next_total.is_none() {
+        return Err(archive_status_error(StatusCode::PAYLOAD_TOO_LARGE));
+    }
+    *total = next_total.expect("archive total was checked");
+    Ok(())
+}
+
+fn is_windows_drive_qualified(name: &str) -> bool {
+    matches!(
+        name.as_bytes(),
+        [drive, b':', ..] if drive.is_ascii_alphabetic()
+    )
+}
+
 fn validate_names(files: &dyn FileBackend, names: &[String]) -> Result<(), ApiError> {
     if names.is_empty() || names.len() > MAX_ARCHIVE_FILES {
         return Err(archive_validation("Choose between 1 and 1000 files."));
@@ -49,6 +114,7 @@ fn validate_names(files: &dyn FileBackend, names: &[String]) -> Result<(), ApiEr
             || name.starts_with('/')
             || name.contains('\\')
             || name.contains('\0')
+            || is_windows_drive_qualified(name)
             || components
                 .iter()
                 .any(|part| part.is_empty() || *part == "." || *part == "..")
@@ -97,7 +163,10 @@ async fn add_entry(
         writer
             .start_file(
                 name,
-                SimpleFileOptions::default().compression_method(CompressionMethod::Deflated),
+                // Accepted entries are capped well below ZIP32's 4 GiB boundary.
+                SimpleFileOptions::default()
+                    .compression_method(CompressionMethod::Deflated)
+                    .large_file(false),
             )
             .map_err(zip_io)?;
         writer.write_all(&bytes)?;
@@ -130,7 +199,20 @@ pub(crate) async fn download(
     let files = target.backend.files().ok_or_else(files_unsupported)?;
     validate_names(files, &request.files)?;
 
+    let permit = state
+        .archive_jobs
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| archive_status_error(StatusCode::TOO_MANY_REQUESTS))?;
+
+    let mut reported_total = 0;
+    for name in &request.files {
+        let info = files.get_file_info(&target.context.vault, name).await?;
+        reserve_archive_bytes(&mut reported_total, info.size, state.archive_limits)?;
+    }
+
     let mut writer = ZipWriter::new(tempfile::tempfile().map_err(CrosstacheError::from)?);
+    let mut actual_total = 0;
     for name in request.files {
         let bytes = attachments::download_decrypted(
             target.backend.secrets(),
@@ -140,21 +222,24 @@ pub(crate) async fn download(
             None,
         )
         .await?;
+        reserve_archive_bytes(&mut actual_total, bytes.len() as u64, state.archive_limits)?;
         writer = add_entry(writer, name, bytes).await?;
     }
 
     let file = finish_archive(writer).await?;
-    let stream =
-        futures::stream::try_unfold(tokio::fs::File::from_std(file), |mut file| async move {
+    let stream = futures::stream::try_unfold(
+        (tokio::fs::File::from_std(file), permit),
+        |(mut file, permit)| async move {
             let mut buffer = vec![0; 64 * 1024];
             let read = file.read(&mut buffer).await?;
             if read == 0 {
                 Ok::<_, std::io::Error>(None)
             } else {
                 buffer.truncate(read);
-                Ok(Some((Bytes::from(buffer), file)))
+                Ok(Some((Bytes::from(buffer), (file, permit))))
             }
-        });
+        },
+    );
     Response::builder()
         .header(header::CONTENT_TYPE, "application/zip")
         .header(
@@ -163,6 +248,20 @@ pub(crate) async fn download(
         )
         .body(Body::from_stream(stream))
         .map_err(response_error)
+}
+
+pub(crate) async fn download_literal_file(
+    state: State<Arc<WebState>>,
+    query: Query<VaultQuery>,
+) -> Result<Response, ApiError> {
+    super::api::files::download_file(state, Path("archive".to_string()), query).await
+}
+
+pub(crate) async fn delete_literal_file(
+    state: State<Arc<WebState>>,
+    query: Query<VaultQuery>,
+) -> Result<StatusCode, ApiError> {
+    super::api::files::delete_file(state, Path("archive".to_string()), query).await
 }
 
 #[cfg(test)]
@@ -178,7 +277,7 @@ mod tests {
     use tower::ServiceExt;
     use zip::ZipArchive;
 
-    use super::validate_names;
+    use super::{validate_names, ArchiveLimits};
     use crate::backend::FileBackend;
     use crate::blob::models::FileUploadRequest;
     use crate::secret::attachments;
@@ -213,10 +312,10 @@ mod tests {
         bytes
     }
 
-    fn scoped_state(
+    fn scoped_state_value(
         primary: Arc<testutil::stub::StubBackend>,
         secondary: Arc<testutil::stub::StubBackend>,
-    ) -> Arc<web::WebState> {
+    ) -> web::WebState {
         let mut context = testutil::test_context(primary.as_ref(), "default", 30);
         context
             .workspace
@@ -234,7 +333,7 @@ mod tests {
                 ("secondary", secondary.clone()),
             ],
         ));
-        Arc::new(web::WebState::new(
+        web::WebState::new(
             primary,
             context,
             "test-token".into(),
@@ -242,6 +341,48 @@ mod tests {
             super::super::preferences::PreferenceStore::new(
                 std::env::temp_dir()
                     .join(format!("xv-archive-scope-{}", uuid::Uuid::new_v4()))
+                    .join("ui.json"),
+                30,
+            ),
+            registry,
+        )
+    }
+
+    fn scoped_state(
+        primary: Arc<testutil::stub::StubBackend>,
+        secondary: Arc<testutil::stub::StubBackend>,
+    ) -> Arc<web::WebState> {
+        Arc::new(
+            scoped_state_value(primary, secondary).with_archive_jobs(Arc::new(
+                tokio::sync::Semaphore::new(super::MAX_CONCURRENT_ARCHIVES),
+            )),
+        )
+    }
+
+    fn limited_state(
+        primary: Arc<testutil::stub::StubBackend>,
+        limits: ArchiveLimits,
+    ) -> Arc<web::WebState> {
+        Arc::new(
+            scoped_state_value(primary, Arc::new(StubBackend::new()))
+                .with_archive_jobs(Arc::new(tokio::sync::Semaphore::new(
+                    super::MAX_CONCURRENT_ARCHIVES,
+                )))
+                .with_archive_limits(limits),
+        )
+    }
+
+    fn process_state(backend: Arc<testutil::stub::StubBackend>) -> Arc<web::WebState> {
+        let context = testutil::test_context(backend.as_ref(), "default", 30);
+        let registry = Arc::new(crate::backend::BackendRegistry::new(backend.clone()));
+        Arc::new(web::WebState::new(
+            backend,
+            context,
+            "test-token".into(),
+            crate::records::builtin_types(),
+            super::super::preferences::PreferenceStore::new(
+                std::env::temp_dir()
+                    .join(format!("xv-archive-process-{}", uuid::Uuid::new_v4()))
                     .join("ui.json"),
                 30,
             ),
@@ -283,6 +424,48 @@ mod tests {
         assert_eq!(read_entry(&mut archive, "docs/report.txt"), b"report");
         assert_eq!(read_entry(&mut archive, "root.txt"), b"root");
         assert_eq!(archive.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn literal_archive_file_can_be_downloaded_and_deleted() {
+        let state = testutil::test_state();
+        state
+            .base_backend()
+            .files()
+            .unwrap()
+            .upload_file("default", file_request("archive", b"literal file"), None)
+            .await
+            .unwrap();
+        let app = web::build_router(state);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/api/files/archive")
+                    .header(header::HOST, "127.0.0.1:1")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            "literal file"
+        );
+
+        let response = app
+            .oneshot(
+                Request::delete("/api/files/archive")
+                    .header(header::HOST, "127.0.0.1:1")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -379,6 +562,197 @@ mod tests {
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
+    #[tokio::test]
+    async fn archive_rejects_a_file_over_100_mib_before_downloading_it() {
+        let primary = Arc::new(
+            StubBackend::new().with_reported_file_size("large.bin", 100 * 1024 * 1024 + 1),
+        );
+        primary
+            .upload_file("default", file_request("large.bin", b"x"), None)
+            .await
+            .unwrap();
+        let state = scoped_state(primary.clone(), Arc::new(StubBackend::new()));
+
+        let response = web::build_router(state)
+            .oneshot(archive_request(
+                "/api/files/archive",
+                json!({"files": ["large.bin"]}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["error"]["code"], "xv-request-too-large");
+        assert_eq!(primary.download_file_calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn archive_rejects_more_than_512_mib_aggregate_before_downloading_any_file() {
+        let mut backend = StubBackend::new();
+        let names = (0..6)
+            .map(|index| format!("file-{index}.bin"))
+            .collect::<Vec<_>>();
+        for name in &names {
+            backend = backend.with_reported_file_size(name, 100 * 1024 * 1024);
+        }
+        let primary = Arc::new(backend);
+        for name in &names {
+            primary
+                .upload_file("default", file_request(name, b"x"), None)
+                .await
+                .unwrap();
+        }
+        let state = scoped_state(primary.clone(), Arc::new(StubBackend::new()));
+
+        let response = web::build_router(state)
+            .oneshot(archive_request(
+                "/api/files/archive",
+                json!({"files": names}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["error"]["code"], "xv-request-too-large");
+        assert_eq!(primary.download_file_calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn archive_actual_file_limit_accepts_exact_and_rejects_underreported_plus_one() {
+        let exact = Arc::new(StubBackend::new().with_reported_file_size("exact.bin", 3));
+        exact
+            .upload_file("default", file_request("exact.bin", b"123"), None)
+            .await
+            .unwrap();
+        let response = web::build_router(limited_state(exact, ArchiveLimits::for_test(3, 5)))
+            .oneshot(archive_request(
+                "/api/files/archive",
+                json!({"files": ["exact.bin"]}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        response.into_body().collect().await.unwrap();
+
+        let underreported =
+            Arc::new(StubBackend::new().with_reported_file_size("too-large.bin", 1));
+        underreported
+            .upload_file("default", file_request("too-large.bin", b"1234"), None)
+            .await
+            .unwrap();
+        let response = web::build_router(limited_state(
+            underreported.clone(),
+            ArchiveLimits::for_test(3, 5),
+        ))
+        .oneshot(archive_request(
+            "/api/files/archive",
+            json!({"files": ["too-large.bin"]}),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(underreported.download_file_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn archive_actual_total_limit_accepts_exact_and_rejects_underreported_plus_one() {
+        let exact = Arc::new(StubBackend::new());
+        for (name, bytes) in [("two.bin", b"12".as_slice()), ("three.bin", b"123")] {
+            exact
+                .upload_file("default", file_request(name, bytes), None)
+                .await
+                .unwrap();
+        }
+        let response = web::build_router(limited_state(exact, ArchiveLimits::for_test(3, 5)))
+            .oneshot(archive_request(
+                "/api/files/archive",
+                json!({"files": ["two.bin", "three.bin"]}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        response.into_body().collect().await.unwrap();
+
+        let underreported = Arc::new(
+            StubBackend::new()
+                .with_reported_file_size("first.bin", 1)
+                .with_reported_file_size("second.bin", 1),
+        );
+        for name in ["first.bin", "second.bin"] {
+            underreported
+                .upload_file("default", file_request(name, b"123"), None)
+                .await
+                .unwrap();
+        }
+        let response = web::build_router(limited_state(
+            underreported.clone(),
+            ArchiveLimits::for_test(3, 5),
+        ))
+        .oneshot(archive_request(
+            "/api/files/archive",
+            json!({"files": ["first.bin", "second.bin"]}),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(underreported.download_file_calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn archive_process_limit_is_shared_across_states_until_a_stream_is_dropped() {
+        let first_backend = Arc::new(StubBackend::new());
+        let second_backend = Arc::new(StubBackend::new());
+        for backend in [&first_backend, &second_backend] {
+            backend
+                .upload_file("default", file_request("small.txt", b"small"), None)
+                .await
+                .unwrap();
+        }
+        let first_app = web::build_router(process_state(first_backend));
+        let second_app = web::build_router(process_state(second_backend));
+        let mut active = Vec::new();
+        for app in [&first_app, &second_app] {
+            let response = app
+                .to_owned()
+                .oneshot(archive_request(
+                    "/api/files/archive",
+                    json!({"files": ["small.txt"]}),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            active.push(response);
+        }
+
+        let response = second_app
+            .clone()
+            .oneshot(archive_request(
+                "/api/files/archive",
+                json!({"files": ["small.txt"]}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["error"]["code"], "xv-rate-limited");
+
+        active.pop();
+        let response = second_app
+            .oneshot(archive_request(
+                "/api/files/archive",
+                json!({"files": ["small.txt"]}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
     #[test]
     fn archive_names_are_relative_unique_backend_validated_paths() {
         let backend = StubBackend::new();
@@ -401,6 +775,22 @@ mod tests {
                 "accepted {names:?}"
             );
         }
+    }
+
+    #[test]
+    fn archive_rejects_windows_drive_qualified_names_but_allows_other_colons() {
+        let backend = StubBackend::new();
+        for name in ["C:/escape.txt", "C:escape.txt"] {
+            assert!(
+                validate_names(&backend, &[name.to_string()]).is_err(),
+                "accepted {name:?}"
+            );
+        }
+        assert!(validate_names(
+            &backend,
+            &["report:final.txt".into(), "docs/report:final.txt".into()],
+        )
+        .is_ok());
     }
 
     #[test]
