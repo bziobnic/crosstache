@@ -3676,6 +3676,7 @@ async function bulkDownloadFiles() {
       api,
       path: `/api/files/archive${vaultQS(scope.vault, scope)}`,
       names,
+      shouldSave: () => generation === state.generation && scopeMatchesCurrent(scope),
     });
     if (generation === state.generation && scopeMatchesCurrent(scope)) {
       toast(`Downloaded ${names.length} file${names.length === 1 ? '' : 's'} in ${formatContextLine(scope)}`);

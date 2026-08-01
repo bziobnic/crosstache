@@ -6,9 +6,11 @@ export async function downloadFileArchive({
   names,
   document = globalThis.document,
   objectUrls = globalThis.URL,
+  shouldSave = () => true,
 }) {
   const response = await api('POST', path, { files: [...names] }, true);
   const blob = await response.blob();
+  if (!shouldSave()) return;
   const href = objectUrls.createObjectURL(blob);
   try {
     const anchor = document.createElement('a');

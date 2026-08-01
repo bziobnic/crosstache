@@ -863,6 +863,65 @@ test('downloads selected files as one zip', async () => {
   }
 });
 
+test('a zip response from a previous workspace is not saved', async () => {
+  const primary = {
+    ...routedContext('primary', 'one'),
+    capabilities: { ...routedContext('primary', 'one').capabilities, files: true },
+  };
+  const stage = {
+    ...routedContext('stage', 'two'),
+    capabilities: { ...routedContext('stage', 'two').capabilities, files: true },
+  };
+  const archive = deferred();
+  let archiveStarted = false;
+  const api = async (method, requestPath) => {
+    if (method === 'GET' && requestPath === '/api/context') return primary;
+    if (method === 'POST' && requestPath === '/api/workspaces/activate') {
+      return { context: stage, secrets: [] };
+    }
+    if (requestPath === '/api/types') return { types: [] };
+    if (requestPath === '/api/vaults') return { vaults: [{ name: 'one' }, { name: 'two' }] };
+    if (method === 'POST' && requestPath.startsWith('/api/folder-tokens')) {
+      return { version: 1, scope_token: 'S'.repeat(43), folders: [] };
+    }
+    if (method === 'POST' && requestPath.startsWith('/api/files/archive')) {
+      archiveStarted = true;
+      return archive.promise;
+    }
+    if (method === 'GET' && requestPath.startsWith('/api/secrets')) return [];
+    if (method === 'GET' && requestPath.startsWith('/api/files')) {
+      return requestPath.includes('vault=two')
+        ? []
+        : [{ name: 'docs/a.txt', size: 1, content_type: 'text/plain' }];
+    }
+    return [];
+  };
+  const ui = await mountRouteUi({ apiImpl: api, withContextRail: true });
+  let download;
+  try {
+    await ui.elements.get('#tab-files').onclick();
+    ui.elements.get('#select-files').onclick();
+    ui.elements.get('#select-all-files').onchange({ target: { checked: true } });
+
+    download = ui.elements.get('#bulk-download-files').onclick();
+    await settleUntil(() => archiveStarted);
+    assert.equal(await ui.contextRail.switchTo('stage'), true);
+
+    archive.resolve({ blob: async () => new Blob(['zip']) });
+    await download;
+
+    const createdArchiveAnchors = ui.document.createdElements.filter((element) => (
+      element.tagName === 'A' && element.download === 'crosstache-files.zip'
+    ));
+    assert.equal(createdArchiveAnchors.length, 0);
+    assert.doesNotMatch(ui.document.getElementById('toast').textContent, /Downloaded/);
+  } finally {
+    archive.resolve({ blob: async () => new Blob(['zip']) });
+    await Promise.allSettled(download ? [download] : []);
+    ui.restore();
+  }
+});
+
 test('zip download failure retains file selection', async () => {
   const context = {
     ...routedContext('primary', 'one'),
