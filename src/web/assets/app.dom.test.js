@@ -8,6 +8,18 @@ import * as model from './ui-model.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+test('the command-center shell owns one tab set inside the context rail', () => {
+  const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
+  const railStart = html.indexOf('<aside id="context-rail"');
+  const railEnd = html.indexOf('</aside>', railStart);
+  const tabsStart = html.indexOf('<nav id="vault-tabs"', railStart);
+  assert.ok(tabsStart > railStart && tabsStart < railEnd);
+  assert.equal((html.match(/id="vault-tabs"/g) || []).length, 1);
+  assert.equal((html.match(/role="tab"/g) || []).length, 3);
+  assert.match(html, /class="context-rail-top"/);
+  assert.match(html, /class="context-rail-footer"/);
+});
+
 function loadProtectedRenderer() {
   const appPath = path.join(__dirname, 'secrets.js');
   const appSource = fs.readFileSync(appPath, 'utf8');
@@ -99,6 +111,7 @@ function bootstrapDocument() {
     appendChild() {},
     addEventListener() {},
     removeEventListener() {},
+    click() { this.onclick?.(); },
     querySelector() { return { textContent: '', hidden: false, setAttribute() {} }; },
   });
   const get = (selector) => {
@@ -184,6 +197,33 @@ test('missing-token bootstrap never starts context loading or leaks a rejection'
     assert.deepEqual(unhandled, []);
   } finally {
     process.off('unhandledRejection', onUnhandled);
+    for (const [key, descriptor] of original) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else delete globalThis[key];
+    }
+  }
+});
+
+test('top command trigger delegates to the existing commands control', async () => {
+  const original = new Map(['document', 'location', 'sessionStorage', 'history', 'fetch']
+    .map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+  const document = bootstrapDocument();
+  let commandOpens = 0;
+  Object.assign(globalThis, {
+    document,
+    location: { search: '', pathname: '/' },
+    sessionStorage: { getItem: () => null, setItem() {} },
+    history: { replaceState() {} },
+    fetch: async () => ({ ok: false, status: 401, statusText: 'Unauthorized', json: async () => ({ error: 'Unauthorized' }) }),
+  });
+
+  try {
+    const appUrl = pathToFileURL(path.join(__dirname, 'app.js')).href;
+    await import(`${appUrl}?command-trigger-test=${Date.now()}`);
+    document.getElementById('commands-open').onclick = () => { commandOpens++; };
+    document.getElementById('top-command-open').click();
+    assert.equal(commandOpens, 1);
+  } finally {
     for (const [key, descriptor] of original) {
       if (descriptor) Object.defineProperty(globalThis, key, descriptor);
       else delete globalThis[key];

@@ -11,47 +11,53 @@
   <span>Working in <strong id="progress-context" data-context-copy></strong></span>
 </div>
 <aside id="context-rail" class="context-rail" aria-label="Effective context">
-  <div class="brand" role="img" aria-label="Crosstache Vault">
-    <span class="brand-mark" aria-hidden="true">xv</span>
-    <span class="brand-name">Crosstache Vault</span>
+  <div class="context-rail-top">
+    <div class="brand" role="img" aria-label="Crosstache Vault">
+      <span class="brand-mark" aria-hidden="true">xv</span>
+      <span class="brand-name">Crosstache Vault</span>
+    </div>
+    <section class="context-primary" aria-labelledby="context-heading">
+      <span id="context-heading" class="context-kicker">Effective context</span>
+      <strong id="context-line"></strong>
+      <span id="context-backend-kind" class="context-kind"></span>
+    </section>
+    <div id="vault-context" class="vault-context">
+      <span id="backend-badge" class="sr-only"></span>
+      <label class="workspace-picker">
+        <span>Workspace</span>
+        <select id="workspace-select" title="Current workspace" aria-describedby="context-line"></select>
+      </label>
+    </div>
+    <div class="context-status">
+      <span id="context-connection" class="connection-state"></span>
+      <span id="context-capabilities"></span>
+    </div>
+    <div id="context-error" class="context-error" role="alert" hidden>
+      <span id="context-error-message"></span>
+    </div>
+    <details id="context-details" class="context-details" tabindex="-1">
+      <summary>Context details</summary>
+      <dl id="context-details-list"></dl>
+    </details>
   </div>
-  <section class="context-primary" aria-labelledby="context-heading">
-    <span id="context-heading" class="context-kicker">Effective context</span>
-    <strong id="context-line"></strong>
-    <span id="context-backend-kind" class="context-kind"></span>
-  </section>
-  <div id="vault-context" class="vault-context">
-    <span id="backend-badge" class="sr-only"></span>
-    <label class="workspace-picker">
-      <span>Workspace</span>
-      <select id="workspace-select" title="Current workspace" aria-describedby="context-line"></select>
-    </label>
-  </div>
-  <div class="context-status">
-    <span id="context-connection" class="connection-state"></span>
-    <span id="context-capabilities"></span>
-  </div>
-  <div id="context-error" class="context-error" role="alert" hidden>
-    <span id="context-error-message"></span>
-  </div>
-  <details id="context-details" class="context-details" tabindex="-1">
-    <summary>Context details</summary>
-    <dl id="context-details-list"></dl>
-  </details>
-  <nav class="context-actions" aria-label="Application">
-    <button id="commands-open" type="button">Commands <kbd>⌘K</kbd></button>
-    <button id="help-open" type="button">Help</button>
-    <button id="settings-open" type="button">Settings</button>
+  <nav id="vault-tabs" class="tab-list" role="tablist" aria-label="Vault content">
+    <button id="tab-secrets" class="tab active" type="button" role="tab" aria-selected="true" aria-controls="secrets-view">Secrets <span id="tab-secret-count" class="rail-count"></span></button>
+    <button id="tab-files" class="tab" type="button" role="tab" aria-selected="false" aria-controls="files-view" tabindex="-1">Files <span id="tab-file-count" class="rail-count"></span></button>
+    <button id="tab-trash" class="tab" type="button" role="tab" aria-selected="false" aria-controls="trash-view" tabindex="-1">Trash <span id="tab-trash-count" class="rail-count"></span></button>
   </nav>
-  <span id="context-version" class="context-version"></span>
+  <div class="context-rail-footer">
+    <nav class="context-actions" aria-label="Application">
+      <button id="commands-open" type="button">Commands <kbd>⌘K</kbd></button>
+      <button id="help-open" type="button">Help</button>
+      <button id="settings-open" type="button">Settings</button>
+    </nav>
+    <span id="context-version" class="context-version"></span>
+  </div>
 </aside>
 <header id="app-header" class="app-header" data-context-scoped>
   <div class="app-header-inner">
-    <nav id="vault-tabs" class="tab-list" role="tablist" aria-label="Vault content">
-      <button id="tab-secrets" class="tab active" type="button" role="tab" aria-selected="true" aria-controls="secrets-view">Secrets</button>
-      <button id="tab-files" class="tab" type="button" role="tab" aria-selected="false" aria-controls="files-view" tabindex="-1">Files</button>
-      <button id="tab-trash" class="tab" type="button" role="tab" aria-selected="false" aria-controls="trash-view" tabindex="-1">Trash</button>
-    </nav>
+    <span id="top-context-line" class="top-context-line" data-context-copy></span>
+    <button id="top-command-open" class="command-trigger" type="button" aria-label="Open Commands">Search or run a command <kbd>⌘K</kbd></button>
   </div>
 </header>
 

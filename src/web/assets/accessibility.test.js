@@ -105,6 +105,20 @@ test('mountTabs activates focused tabs with arrows and Home/End', () => {
   mounted.destroy();
 });
 
+test('mountTabs reads its current orientation for every arrow key', () => {
+  const { document, tablist, tabs } = tabFixture();
+  let orientation = 'vertical';
+  const mounted = mountTabs(tablist, { orientation: () => orientation });
+  tabs[0].focus();
+  assert.equal(key(tablist, tabs[0], 'ArrowDown'), true);
+  assert.equal(document.activeElement, tabs[1]);
+  assert.equal(key(tablist, tabs[1], 'ArrowRight'), false);
+  orientation = 'horizontal';
+  assert.equal(key(tablist, tabs[1], 'ArrowRight'), true);
+  assert.equal(document.activeElement, tabs[2]);
+  mounted.destroy();
+});
+
 test('mountTabs sync replaces a dynamically unavailable selected tab exactly once', async () => {
   const { document, tablist, tabs } = tabFixture();
   const mounted = mountTabs(tablist);

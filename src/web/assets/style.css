@@ -21,13 +21,15 @@
 [hidden] { display: none !important; }
 .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden;
   clip:rect(0,0,0,0); white-space:nowrap; border:0; }
-body { min-height:100vh; margin:0; min-width:20rem; display:grid; grid-template-columns:18rem minmax(0, 1fr);
+body { min-height:100vh; margin:0; min-width:20rem; display:grid; grid-template-columns:13rem minmax(0, 1fr);
   grid-template-rows:auto 1fr; color:var(--color-text); background:var(--color-canvas);
   font-size:.875rem; line-height:1.5; }
 button, input, select, textarea { font:inherit; }
 .context-rail { position:sticky; z-index:10; top:0; grid-column:1; grid-row:1 / span 2; height:100vh;
   display:flex; flex-direction:column; gap:1rem; padding:1.2rem; overflow:auto; color:#f4faf6;
   background:#123426; border-right:1px solid #365747; box-shadow:8px 0 24px rgb(10 32 23 / 10%); }
+.context-rail-top { display:grid; gap:1rem; }
+.context-rail-footer { display:grid; gap:.75rem; margin-top:auto; }
 .context-rail .brand { padding-bottom:1rem; border-bottom:1px solid #46665a; }
 .context-rail .brand-mark { color:#123426; background:#8bd2a8; box-shadow:none; }
 .context-primary { display:grid; gap:.3rem; }
@@ -59,10 +61,11 @@ button, input, select, textarea { font:inherit; }
 .context-rail.auth-recovery-mode {
   grid-row:1 / span 2;
 }
-.context-rail.auth-recovery-mode > :not(.brand) { display:none; }
+.context-rail.auth-recovery-mode > :not(.context-rail-top) { display:none; }
+.context-rail.auth-recovery-mode .context-rail-top > :not(.brand) { display:none; }
 .app-header { grid-column:2; border-bottom:1px solid var(--color-border); background:color-mix(in srgb, var(--color-surface) 92%, transparent); }
 .app-header-inner { width:min(100%, 76rem); min-height:4.125rem; margin:0 auto; padding:.75rem 1.5rem;
-  display:flex; align-items:center; gap:.875rem; }
+  display:flex; align-items:center; justify-content:space-between; gap:.875rem; }
 .brand { display:flex; align-items:center; gap:.625rem; font-weight:720; letter-spacing:-.025em; }
 .brand-mark { width:2.125rem; height:2.125rem; display:grid; place-items:center; border-radius:.625rem;
   color:#fff; background:var(--color-accent); font-weight:850; letter-spacing:-.08em;
@@ -73,11 +76,16 @@ button, input, select, textarea { font:inherit; }
 .status-dot { width:.45rem; height:.45rem; border-radius:50%; background:var(--color-accent);
   box-shadow:0 0 0 3px var(--color-accent-quiet); }
 .vault-picker select { max-width:14rem; border:0; color:var(--color-text); background:transparent; font-weight:650; }
-.tab-list { margin-left:auto; display:flex; gap:.1875rem; padding:.25rem; border:1px solid var(--color-border);
-  border-radius:.625rem; background:color-mix(in srgb, var(--color-text) 4%, transparent); }
-.tab { min-height:2.25rem; padding:.4rem .75rem; border:0; border-radius:.4375rem; color:var(--color-text-muted);
-  background:transparent; cursor:pointer; font-weight:650; }
-.tab[aria-selected="true"] { color:var(--color-accent-hover); background:var(--color-surface); box-shadow:0 1px 4px rgb(28 44 34 / 8%); }
+.tab-list { display:grid; gap:.25rem; margin:1rem 0; }
+.tab { width:100%; min-height:2.35rem; display:grid; grid-template-columns:1fr auto; align-items:center;
+  padding:.45rem .65rem; border:0; border-radius:var(--radius-control); color:#bcd2c5; background:transparent;
+  cursor:pointer; font-weight:650; text-align:left; }
+.tab[aria-selected="true"] { color:#fff; background:#285943; box-shadow:none; }
+.rail-count { color:#acd1bc; font-size:.72rem; font-weight:650; }
+.top-context-line { min-width:0; overflow:hidden; color:var(--color-text-muted); font-size:.78rem; font-weight:650;
+  text-overflow:ellipsis; white-space:nowrap; }
+.command-trigger { display:flex; align-items:center; gap:.75rem; color:var(--color-text-muted); background:var(--color-surface-subtle); }
+.command-trigger kbd { color:var(--color-text-muted); font-size:.7rem; }
 main { grid-column:2; width:min(100%, 76rem); margin:0 auto; padding:2rem 1.5rem 3rem; }
 .view-heading { display:flex; align-items:flex-end; justify-content:space-between; gap:1.5rem; margin-bottom:1.375rem; }
 .view-heading h1 { margin:.2rem 0 0; font-size:1.625rem; line-height:1.15; letter-spacing:-.04em; }

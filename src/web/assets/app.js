@@ -42,7 +42,14 @@ const dialogs = createDialogManager(document);
 const preferences = createPreferenceClient(api);
 const themeSelect = document.getElementById('theme-select');
 const commandRegistry = createCommandRegistry();
-const tabs = mountTabs(document.getElementById('vault-tabs'));
+const tabs = mountTabs(document.getElementById('vault-tabs'), {
+  orientation: () => (
+    globalThis.matchMedia?.('(max-width: 48rem)').matches ? 'horizontal' : 'vertical'
+  ),
+});
+document.getElementById('top-command-open').onclick = () => {
+  document.getElementById('commands-open').click();
+};
 
 const confirmNavigation = () => guardNavigation({
   draft: store.snapshot().draft,

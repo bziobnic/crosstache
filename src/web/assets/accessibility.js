@@ -34,14 +34,21 @@ function availableItems(container, selector) {
   ));
 }
 
+function resolvedOrientation(orientation) {
+  const value = typeof orientation === 'function' ? orientation() : orientation;
+  return value === 'vertical' ? 'vertical' : 'horizontal';
+}
+
+function directions(orientation) {
+  return resolvedOrientation(orientation) === 'vertical'
+    ? new Map([['ArrowDown', 1], ['ArrowUp', -1]])
+    : new Map([['ArrowRight', 1], ['ArrowLeft', -1]]);
+}
+
 export function mountRovingFocus(container, selector, {
   orientation = 'horizontal',
   activate = null,
 } = {}) {
-  const directions = orientation === 'vertical'
-    ? new Map([['ArrowDown', 1], ['ArrowUp', -1]])
-    : new Map([['ArrowRight', 1], ['ArrowLeft', -1]]);
-
   function setCurrent(target) {
     const items = availableItems(container, selector);
     for (const item of items) item.tabIndex = item === target ? 0 : -1;
@@ -59,8 +66,9 @@ export function mountRovingFocus(container, selector, {
     const index = items.indexOf(target);
     if (index === -1) return;
     let next = null;
-    if (directions.has(event.key)) {
-      next = items[(index + directions.get(event.key) + items.length) % items.length];
+    const keyDirections = directions(orientation);
+    if (keyDirections.has(event.key)) {
+      next = items[(index + keyDirections.get(event.key) + items.length) % items.length];
     } else if (event.key === 'Home') {
       next = items[0];
     } else if (event.key === 'End') {
@@ -80,7 +88,7 @@ export function mountRovingFocus(container, selector, {
   });
 }
 
-export function mountTabs(tablist) {
+export function mountTabs(tablist, { orientation = 'horizontal' } = {}) {
   tablist.setAttribute('role', 'tablist');
   const selector = '[role="tab"]';
   const document = tablist.ownerDocument;
@@ -129,7 +137,7 @@ export function mountTabs(tablist) {
   }
 
   const roving = mountRovingFocus(tablist, selector, {
-    orientation: 'horizontal',
+    orientation,
     activate,
   });
   const onClick = () => queueMicrotask(sync);
