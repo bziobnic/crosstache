@@ -24,20 +24,24 @@ function modalDocument() {
     listeners: new Map(),
     header: null,
     main: null,
+    contextRail: null,
     contextRailTop: null,
     vaultTabs: null,
+    quickAccess: null,
     contextRailFooter: null,
     querySelectorAll(selector) {
-      return selector === '#app-header, main, .context-rail-top, #vault-tabs, .context-rail-footer'
-        ? [this.header, this.main, this.contextRailTop, this.vaultTabs, this.contextRailFooter]
+      return selector === '#app-header, main, #context-rail, .context-rail-top, #vault-tabs, .quick-access, .context-rail-footer'
+        ? [this.header, this.main, this.contextRail, this.contextRailTop, this.vaultTabs, this.quickAccess, this.contextRailFooter]
         : [];
     },
     addEventListener(type, listener) { this.listeners.set(type, listener); },
   };
   document.header = new DialogElement(document);
   document.main = new DialogElement(document);
+  document.contextRail = new DialogElement(document);
   document.contextRailTop = new DialogElement(document);
   document.vaultTabs = new DialogElement(document);
+  document.quickAccess = new DialogElement(document);
   document.contextRailFooter = new DialogElement(document);
   return document;
 }
@@ -67,8 +71,10 @@ test('modal manager keeps the page unavailable until the nested modal closes', (
   assert.equal(manager.topModal(), sheet);
   assert.equal(document.main.getAttribute('aria-hidden'), 'true');
   assert.equal(document.header.getAttribute('aria-hidden'), 'true');
+  assert.equal(document.contextRail.getAttribute('aria-hidden'), 'true');
   assert.equal(document.contextRailTop.getAttribute('aria-hidden'), 'true');
   assert.equal(document.vaultTabs.getAttribute('aria-hidden'), 'true');
+  assert.equal(document.quickAccess.getAttribute('aria-hidden'), 'true');
   assert.equal(document.contextRailFooter.getAttribute('aria-hidden'), 'true');
 
   manager.openModal(confirmation, { initialFocus: keepEditing, invoker: keepEditing });
@@ -83,8 +89,10 @@ test('modal manager keeps the page unavailable until the nested modal closes', (
   assert.equal(manager.topModal(), null);
   assert.equal(document.activeElement, invoker);
   assert.equal(document.main.getAttribute('aria-hidden'), null);
+  assert.equal(document.contextRail.getAttribute('aria-hidden'), null);
   assert.equal(document.contextRailTop.getAttribute('aria-hidden'), null);
   assert.equal(document.vaultTabs.getAttribute('aria-hidden'), null);
+  assert.equal(document.quickAccess.getAttribute('aria-hidden'), null);
   assert.equal(document.contextRailFooter.getAttribute('aria-hidden'), null);
 });
 

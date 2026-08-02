@@ -14,7 +14,7 @@ export function setProtectedValueStatus(document, message) {
 
 export function setBackgroundInert(document, active) {
   const supportsInert = typeof HTMLElement !== 'undefined' && 'inert' in HTMLElement.prototype;
-  for (const element of document.querySelectorAll('#app-header, main, .context-rail-top, #vault-tabs, .context-rail-footer')) {
+  for (const element of document.querySelectorAll('#app-header, main, #context-rail, .context-rail-top, #vault-tabs, .quick-access, .context-rail-footer')) {
     if (supportsInert) {
       element.inert = active;
     } else if (active) {

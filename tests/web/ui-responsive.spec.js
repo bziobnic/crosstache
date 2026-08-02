@@ -46,15 +46,38 @@ test('the single tab set becomes bottom navigation at the content breakpoint', a
   await page.setViewportSize({ width: 769, height: 700 });
   await page.goto(baseURL);
   const tabs = page.locator('#vault-tabs');
+  const contextRail = page.locator('#context-rail');
   await expect(page.locator('[role="tablist"]')).toHaveCount(1);
   await expect(tabs).toHaveCSS('position', 'static');
   await page.setViewportSize({ width: 768, height: 700 });
   await expect(page.locator('[role="tablist"]')).toHaveCount(1);
-  await expect(tabs).toHaveCSS('position', 'sticky');
+  await expect(contextRail).toHaveCSS('display', 'grid');
+  await expect(tabs).toHaveCSS('position', 'fixed');
   await expect(tabs).toHaveCSS('bottom', '0px');
-  expect(await page.locator('#context-rail').ariaSnapshot()).toContain('complementary "Effective context"');
+  expect(await contextRail.ariaSnapshot()).toContain('complementary "Effective context"');
   await expectNoHorizontalOverflow(page);
   await expectNoSeriousOrCriticalAxeViolations(page);
+});
+
+test('desktop Quick access is unavailable behind a sheet and restored after close', async ({ page, baseURL }) => {
+  await page.setViewportSize({ width: 900, height: 760 });
+  await page.goto(baseURL);
+  const quickAccess = page.locator('.quick-access');
+  const recent = page.locator('#quick-recent');
+  await recent.focus();
+  await expect(recent).toBeFocused();
+
+  await page.locator('#new-secret').click();
+  await expect(page.locator('#context-rail')).toHaveAttribute('inert', '');
+  await expect(quickAccess).toHaveAttribute('inert', '');
+  await recent.evaluate((button) => button.focus());
+  await expect(recent).not.toBeFocused();
+
+  await page.getByRole('button', { name: 'Cancel' }).click();
+  await expect(page.locator('#context-rail')).not.toHaveAttribute('inert', '');
+  await expect(quickAccess).not.toHaveAttribute('inert', '');
+  await recent.focus();
+  await expect(recent).toBeFocused();
 });
 
 async function uploadDirect(page, {

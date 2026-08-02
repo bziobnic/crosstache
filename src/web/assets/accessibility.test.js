@@ -213,27 +213,29 @@ test('syncVisibleSelection reports visible-only checked and mixed state', () => 
 test('background inert targets app surfaces without disabling an active utility header', () => {
   const appHeader = new TestElement('app-header');
   const main = new TestElement('main');
+  const contextRail = new TestElement('context-rail');
   const contextRailTop = new TestElement('context-rail-top');
   const vaultTabs = new TestElement('vault-tabs');
+  const quickAccess = new TestElement('quick-access');
   const contextRailFooter = new TestElement('context-rail-footer');
   const dialogHeader = new TestElement('help-header');
   const close = new TestElement('help-close');
   const document = {
     querySelectorAll(selector) {
-      assert.equal(selector, '#app-header, main, .context-rail-top, #vault-tabs, .context-rail-footer');
-      return [appHeader, main, contextRailTop, vaultTabs, contextRailFooter];
+      assert.equal(selector, '#app-header, main, #context-rail, .context-rail-top, #vault-tabs, .quick-access, .context-rail-footer');
+      return [appHeader, main, contextRail, contextRailTop, vaultTabs, quickAccess, contextRailFooter];
     },
   };
 
   setBackgroundInert(document, true);
-  for (const surface of [appHeader, main, contextRailTop, vaultTabs, contextRailFooter]) {
+  for (const surface of [appHeader, main, contextRail, contextRailTop, vaultTabs, quickAccess, contextRailFooter]) {
     assert.equal(surface.getAttribute('aria-hidden'), 'true');
   }
   assert.equal(dialogHeader.getAttribute('aria-hidden'), null);
   assert.equal(close.getAttribute('aria-hidden'), null);
 
   setBackgroundInert(document, false);
-  for (const surface of [appHeader, main, contextRailTop, vaultTabs, contextRailFooter]) {
+  for (const surface of [appHeader, main, contextRail, contextRailTop, vaultTabs, quickAccess, contextRailFooter]) {
     assert.equal(surface.getAttribute('aria-hidden'), null);
   }
 });
