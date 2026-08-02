@@ -4,8 +4,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createPreferenceClient } from './preferences.js';
+import { PALETTES } from './theme.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+const FOREST_CUSTOM_THEME = { light: { ...PALETTES.forest.light }, dark: { ...PALETTES.forest.dark } };
 
 function withStorage(run) {
   const original = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
@@ -108,8 +111,8 @@ test('preference saves are debounced and contain only whitelisted keys', async (
   assert.equal(calls[1].method, 'PUT');
   assert.equal(calls[1].path, '/api/preferences');
   assert.deepEqual(Object.keys(calls[1].body).sort(), [
-    'column_widths', 'density', 'exposure_timeout_seconds',
-    'folder_expansion', 'theme', 'version',
+    'column_widths', 'custom_theme', 'density', 'exposure_timeout_seconds',
+    'folder_expansion', 'palette', 'theme', 'version',
   ]);
   assert.equal(calls[1].body.theme, 'dark');
   assert.equal(calls[1].body.density, 'compact');
@@ -243,4 +246,142 @@ test('default Settings renderer shows failures and clears after a successful ret
     if (original) Object.defineProperty(globalThis, 'document', original);
     else delete globalThis.document;
   }
+});
+
+test('version-2 defaults include palette forest and matching Forest custom-theme defaults', () => {
+  const preferences = createPreferenceClient(null);
+  const snapshot = preferences.snapshot();
+  assert.equal(snapshot.version, 2);
+  assert.equal(snapshot.palette, 'forest');
+  assert.deepEqual(snapshot.custom_theme, FOREST_CUSTOM_THEME);
+});
+
+test('v0/v1 data migrates to v2 by retaining prior fields and supplying palette+custom defaults', async () => {
+  const preferences = createPreferenceClient(async (method) => {
+    if (method === 'GET') return { theme: 'dark', density: 'compact' };
+    throw new Error('unexpected write');
+  });
+  const loaded = await preferences.load();
+  assert.equal(loaded.version, 2);
+  assert.equal(loaded.theme, 'dark');
+  assert.equal(loaded.density, 'compact');
+  assert.equal(loaded.palette, 'forest');
+  assert.deepEqual(loaded.custom_theme, FOREST_CUSTOM_THEME);
+});
+
+test('missing, v0, and v1 preference data ignores same-named v2 extension fields', async () => {
+  for (const version of [undefined, 0, 1]) {
+    const legacy = {
+      theme: 'dark',
+      density: 'compact',
+      palette: 'custom',
+      custom_theme: {
+        light: { canvas: '#ffffff', surface: '#ffffff', text: '#000000', accent: '#000000', danger: '#000000' },
+        dark: { canvas: '#000000', surface: '#000000', text: '#ffffff', accent: '#ffffff', danger: '#ffffff' },
+      },
+    };
+    if (version !== undefined) legacy.version = version;
+    const preferences = createPreferenceClient(async (method) => {
+      if (method === 'GET') return legacy;
+      throw new Error('unexpected write');
+    });
+    const loaded = await preferences.load();
+    assert.equal(loaded.theme, 'dark', `version ${String(version)}`);
+    assert.equal(loaded.density, 'compact', `version ${String(version)}`);
+    assert.equal(loaded.palette, 'forest', `version ${String(version)}`);
+    assert.deepEqual(loaded.custom_theme, FOREST_CUSTOM_THEME, `version ${String(version)}`);
+  }
+});
+
+test('future preference versions fail safe to defaults without retaining future fields', async () => {
+  const preferences = createPreferenceClient(async (method) => {
+    if (method === 'GET') return {
+      version: 3,
+      theme: 'dark',
+      density: 'compact',
+      palette: 'custom',
+      custom_theme: {
+        light: { canvas: '#ffffff', surface: '#ffffff', text: '#000000', accent: '#000000', danger: '#000000' },
+        dark: { canvas: '#000000', surface: '#000000', text: '#ffffff', accent: '#ffffff', danger: '#ffffff' },
+      },
+    };
+    throw new Error('unexpected write');
+  });
+  const loaded = await preferences.load();
+  assert.equal(loaded.theme, 'system');
+  assert.equal(loaded.density, 'comfortable');
+  assert.equal(loaded.palette, 'forest');
+  assert.deepEqual(loaded.custom_theme, FOREST_CUSTOM_THEME);
+});
+
+test('unknown palette values fall back to the forest default', async () => {
+  const preferences = createPreferenceClient(async (method) => {
+    if (method === 'GET') return { version: 2, palette: 'not-a-real-palette' };
+    throw new Error('unexpected write');
+  });
+  const loaded = await preferences.load();
+  assert.equal(loaded.palette, 'forest');
+});
+
+test('set(palette, ...) only accepts the five known palette values', () => {
+  const preferences = createPreferenceClient(null);
+  for (const value of ['forest', 'nord', 'solarized', 'high-contrast', 'custom']) {
+    assert.equal(preferences.set('palette', value), true, value);
+  }
+  for (const value of ['Forest', 'unknown', '', null, 42]) {
+    assert.equal(preferences.set('palette', value), false, String(value));
+  }
+});
+
+test('set(custom_theme, ...) requires exact shape, strict hex, and passing contrast in both variants', () => {
+  const preferences = createPreferenceClient(null);
+  const valid = {
+    light: { canvas: '#ffffff', surface: '#fafafa', text: '#000000', accent: '#003399', danger: '#a30000' },
+    dark: { canvas: '#000000', surface: '#0a0a0a', text: '#ffffff', accent: '#3399ff', danger: '#ff5555' },
+  };
+  assert.equal(preferences.set('custom_theme', valid), true);
+  assert.deepEqual(preferences.get('custom_theme'), valid);
+
+  const missingDark = { light: valid.light };
+  assert.equal(preferences.set('custom_theme', missingDark), false);
+
+  const extraKey = { ...valid, light: { ...valid.light, extra: '#000000' } };
+  assert.equal(preferences.set('custom_theme', extraKey), false);
+
+  const badHex = { ...valid, light: { ...valid.light, accent: 'not-a-hex' } };
+  assert.equal(preferences.set('custom_theme', badHex), false);
+
+  const lowContrast = {
+    light: { canvas: '#808080', surface: '#888888', text: '#7a7a7a', accent: '#8a8a8a', danger: '#8f8f8f' },
+    dark: valid.dark,
+  };
+  assert.equal(preferences.set('custom_theme', lowContrast), false);
+
+  assert.deepEqual(preferences.get('custom_theme'), valid, 'last valid custom theme must remain after rejected writes');
+});
+
+test('valid custom_theme round-trips through save and reload unchanged', async () => {
+  let stored = null;
+  const api = async (method, _path, body) => {
+    if (method === 'GET') return stored ?? { version: 2 };
+    stored = body;
+    return body;
+  };
+  const preferences = createPreferenceClient(api, {
+    setTimeoutImpl: (callback) => { callback(); return 1; },
+    clearTimeoutImpl() {},
+  });
+  await preferences.load();
+  const custom = {
+    light: { canvas: '#ffffff', surface: '#fafafa', text: '#000000', accent: '#003399', danger: '#a30000' },
+    dark: { canvas: '#000000', surface: '#0a0a0a', text: '#ffffff', accent: '#3399ff', danger: '#ff5555' },
+  };
+  assert.equal(preferences.set('palette', 'custom'), true);
+  assert.equal(preferences.set('custom_theme', custom), true);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const reloaded = createPreferenceClient(async (method) => (method === 'GET' ? stored : stored));
+  const snapshot = await reloaded.load();
+  assert.equal(snapshot.palette, 'custom');
+  assert.deepEqual(snapshot.custom_theme, custom);
 });

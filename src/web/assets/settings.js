@@ -1,10 +1,57 @@
 import { boundTimeout } from './preferences.js';
+import {
+  CUSTOM_COLOR_KEYS,
+  PALETTES,
+  PALETTE_NAMES,
+  isValidHex,
+  isValidCustomVariant,
+  resolveTokens,
+  validateCustomVariantContrast,
+} from './theme.js';
 
 const THEMES = new Set(['system', 'light', 'dark']);
 const DENSITIES = new Set(['comfortable', 'compact']);
+const VARIANTS = new Set(['light', 'dark']);
+const PALETTE_VALUES = new Set([...PALETTE_NAMES, 'custom']);
+const FOREST_CUSTOM_THEME = Object.freeze({
+  light: Object.freeze({ ...PALETTES.forest.light }),
+  dark: Object.freeze({ ...PALETTES.forest.dark }),
+});
 const DEFAULT_COLUMN_WIDTHS = Object.freeze({
   secrets: Object.freeze([28, 15, 14, 25, 18]),
   files: Object.freeze([42, 12, 24, 22]),
+});
+const TOKEN_CSS_VARS = Object.freeze({
+  canvas: '--color-canvas',
+  surface: '--color-surface',
+  text: '--color-text',
+  accent: '--color-accent',
+  danger: '--color-danger',
+  surfaceSubtle: '--color-surface-subtle',
+  textMuted: '--color-text-muted',
+  border: '--color-border',
+  accentHover: '--color-accent-hover',
+  accentQuiet: '--color-accent-quiet',
+  accentText: '--color-accent-text',
+  accentTextHover: '--color-accent-text-hover',
+  dangerQuiet: '--color-danger-quiet',
+  primaryForeground: '--color-primary-foreground',
+  focusColor: '--color-focus',
+  focusRing: '--focus-ring',
+  shadowRaised: '--shadow-raised',
+  railBg: '--rail-bg',
+  railBorder: '--rail-border',
+  railFg: '--rail-fg',
+  railFgMuted: '--rail-fg-muted',
+  railAccent: '--rail-accent',
+  railAccentFg: '--rail-accent-fg',
+  railHoverBg: '--rail-hover-bg',
+  railConnectionOk: '--rail-connection-ok',
+  railConnectionBad: '--rail-connection-bad',
+  railErrorBg: '--rail-error-bg',
+  railErrorBorder: '--rail-error-border',
+  railErrorFg: '--rail-error-fg',
+  railErrorAccent: '--rail-error-accent',
 });
 
 function nonNegativeInteger(value) {
@@ -23,13 +70,28 @@ export function effectiveTheme(preference, mediaQuery) {
 
 export { boundTimeout };
 
-function applyPresentation(document, preference, density, mediaQuery) {
+function cloneCustomTheme(customTheme) {
+  return {
+    light: { ...(customTheme?.light ?? FOREST_CUSTOM_THEME.light) },
+    dark: { ...(customTheme?.dark ?? FOREST_CUSTOM_THEME.dark) },
+  };
+}
+
+function applyPresentation(document, { theme, density, palette, customTheme, mediaQuery } = {}) {
   const root = document?.documentElement;
   if (!root) return;
-  const theme = THEMES.has(preference) ? preference : 'system';
-  root.dataset.theme = theme;
-  root.dataset.effectiveTheme = effectiveTheme(theme, mediaQuery);
+  const resolvedTheme = THEMES.has(theme) ? theme : 'system';
+  const resolvedPalette = PALETTE_VALUES.has(palette) ? palette : 'forest';
+  const effective = effectiveTheme(resolvedTheme, mediaQuery);
+  root.dataset.theme = resolvedTheme;
+  root.dataset.effectiveTheme = effective;
   root.dataset.density = DENSITIES.has(density) ? density : 'comfortable';
+  root.dataset.palette = resolvedPalette;
+  root.style?.setProperty?.('color-scheme', effective);
+  const tokens = resolveTokens(resolvedPalette, effective, customTheme);
+  for (const [key, cssVar] of Object.entries(TOKEN_CSS_VARS)) {
+    root.style?.setProperty?.(cssVar, tokens[key]);
+  }
 }
 
 function setControlValue(control, value) {
@@ -60,6 +122,18 @@ export function mountSettings({
   const reset = document?.getElementById?.('layout-reset');
   const status = document?.getElementById?.('settings-live');
   const policyCopy = document?.getElementById?.('timeout-policy-copy');
+  const palette = document?.getElementById?.('palette-select');
+  const customFieldset = document?.getElementById?.('custom-theme-fieldset');
+  const customVariantSelect = document?.getElementById?.('custom-variant-select');
+  const customReset = document?.getElementById?.('custom-theme-reset');
+  const customStatus = document?.getElementById?.('custom-theme-status');
+  const customColorInputs = Object.fromEntries(
+    CUSTOM_COLOR_KEYS.map((key) => [key, document?.getElementById?.(`custom-color-${key}`)]),
+  );
+
+  function announceCustom(message) {
+    if (customStatus) customStatus.textContent = message;
+  }
 
   function policyLimit() {
     const policy = resolve(securityPolicy);
@@ -68,9 +142,53 @@ export function mountSettings({
     );
   }
 
+  function currentCustomTheme() {
+    return cloneCustomTheme(preferences.get('custom_theme', FOREST_CUSTOM_THEME));
+  }
+
+  function currentVariant() {
+    return VARIANTS.has(customVariantSelect?.value) ? customVariantSelect.value : 'light';
+  }
+
+  const customDraft = currentCustomTheme();
+  const dirtyDraftVariants = new Set();
+
+  function renderCustomInputs(variant) {
+    const core = customDraft[variant] ?? FOREST_CUSTOM_THEME[variant];
+    const shapeValid = isValidCustomVariant(core);
+    const contrastResult = shapeValid
+      ? validateCustomVariantContrast(core)
+      : { valid: false, failures: [] };
+    const invalidContrastKeys = new Set(contrastResult.failures
+      .flatMap(({ pair }) => pair.split('-')));
+    for (const key of CUSTOM_COLOR_KEYS) {
+      const input = customColorInputs[key];
+      if (!input) continue;
+      input.value = core[key];
+      input.ariaInvalid = isValidHex(core[key]) && !invalidContrastKeys.has(key) ? 'false' : 'true';
+    }
+  }
+
+  function applyCurrentPresentation() {
+    applyPresentation(document, {
+      theme: preferences.get('theme', 'system'),
+      density: preferences.get('density', 'comfortable'),
+      palette: preferences.get('palette', 'forest'),
+      customTheme: currentCustomTheme(),
+      mediaQuery,
+    });
+  }
+
   function refresh() {
     const selectedTheme = preferences.get('theme', 'system');
     const selectedDensity = preferences.get('density', 'comfortable');
+    const selectedPalette = PALETTE_VALUES.has(preferences.get('palette', 'forest'))
+      ? preferences.get('palette', 'forest')
+      : 'forest';
+    const customTheme = currentCustomTheme();
+    for (const variant of VARIANTS) {
+      if (!dirtyDraftVariants.has(variant)) customDraft[variant] = { ...customTheme[variant] };
+    }
     const requestedTimeout = nonNegativeInteger(
       preferences.get('exposure_timeout_seconds', 30),
     );
@@ -82,7 +200,17 @@ export function mountSettings({
     setControlValue(theme, selectedTheme);
     setControlValue(density, selectedDensity);
     setControlValue(timeout, selectedTimeout);
-    applyPresentation(document, selectedTheme, selectedDensity, mediaQuery);
+    setControlValue(palette, selectedPalette);
+    if (customFieldset) customFieldset.hidden = selectedPalette !== 'custom';
+    setControlValue(customVariantSelect, currentVariant());
+    renderCustomInputs(currentVariant());
+    applyPresentation(document, {
+      theme: selectedTheme,
+      density: selectedDensity,
+      palette: selectedPalette,
+      customTheme,
+      mediaQuery,
+    });
 
     for (const option of timeout?.querySelectorAll?.('option') ?? []) {
       const value = nonNegativeInteger(option.value);
@@ -96,12 +224,12 @@ export function mountSettings({
   const onTheme = () => {
     const value = THEMES.has(theme?.value) ? theme.value : 'system';
     preferences.set('theme', value);
-    applyPresentation(document, value, preferences.get('density', 'comfortable'), mediaQuery);
+    applyCurrentPresentation();
   };
   const onDensity = () => {
     const value = DENSITIES.has(density?.value) ? density.value : 'comfortable';
     preferences.set('density', value);
-    applyPresentation(document, preferences.get('theme', 'system'), value, mediaQuery);
+    applyCurrentPresentation();
   };
   const onTimeout = () => {
     const value = boundTimeout(timeout?.value, policyLimit());
@@ -110,6 +238,76 @@ export function mountSettings({
     if (status) status.textContent = value > 0
       ? `Protected values hide after ${value} seconds.`
       : 'Protected values hide immediately.';
+  };
+  const onPalette = () => {
+    const value = PALETTE_VALUES.has(palette?.value) ? palette.value : 'forest';
+    preferences.set('palette', value);
+    if (customFieldset) customFieldset.hidden = value !== 'custom';
+    applyCurrentPresentation();
+  };
+  const onCustomVariant = () => {
+    renderCustomInputs(currentVariant());
+  };
+  function onCustomColorChange(key) {
+    return () => {
+      const input = customColorInputs[key];
+      const variant = currentVariant();
+      customDraft[variant][key] = input?.value;
+      dirtyDraftVariants.add(variant);
+      const candidateVariant = { ...customDraft[variant] };
+      if (candidateVariant[key] === '' || /^#[0-9a-fA-F]{0,5}$/.test(candidateVariant[key])) {
+        if (input) input.ariaInvalid = 'true';
+        announceCustom('');
+        return;
+      }
+      const shapeValid = isValidCustomVariant(candidateVariant);
+      const contrastResult = shapeValid
+        ? validateCustomVariantContrast(candidateVariant)
+        : { valid: false, failures: [] };
+      const valid = shapeValid && contrastResult.valid;
+      renderCustomInputs(variant);
+      if (!valid) {
+        announceCustom(shapeValid
+          ? `Increase contrast to update the preview: ${contrastResult.failures
+            .map((failure) => `${failure.pair.replace('-', ' vs ')} is ${failure.ratio.toFixed(2)}:1, needs 4.5:1`)
+            .join('; ')}.`
+          : 'Enter a six-digit hex color, for example #216446.');
+        return;
+      }
+      const updated = { ...currentCustomTheme(), [variant]: candidateVariant };
+      preferences.set('custom_theme', updated);
+      if (preferences.get('palette', 'forest') === 'custom') {
+        applyPresentation(document, {
+          theme: preferences.get('theme', 'system'),
+          density: preferences.get('density', 'comfortable'),
+          palette: 'custom',
+          customTheme: updated,
+          mediaQuery,
+        });
+      }
+      announceCustom('Custom color preview updated; persistence is pending.');
+    };
+  }
+  const customColorHandlers = Object.fromEntries(
+    CUSTOM_COLOR_KEYS.map((key) => [key, onCustomColorChange(key)]),
+  );
+  const onCustomReset = () => {
+    const resetTheme = cloneCustomTheme(FOREST_CUSTOM_THEME);
+    customDraft.light = { ...resetTheme.light };
+    customDraft.dark = { ...resetTheme.dark };
+    dirtyDraftVariants.clear();
+    preferences.set('custom_theme', resetTheme);
+    renderCustomInputs(currentVariant());
+    if (preferences.get('palette', 'forest') === 'custom') {
+      applyPresentation(document, {
+        theme: preferences.get('theme', 'system'),
+        density: preferences.get('density', 'comfortable'),
+        palette: 'custom',
+        customTheme: resetTheme,
+        mediaQuery,
+      });
+    }
+    announceCustom('Custom color preview reset to Forest defaults; persistence is pending.');
   };
   const onReset = () => {
     const widths = {
@@ -132,6 +330,12 @@ export function mountSettings({
   theme?.addEventListener?.('change', onTheme);
   density?.addEventListener?.('change', onDensity);
   timeout?.addEventListener?.('change', onTimeout);
+  palette?.addEventListener?.('change', onPalette);
+  customVariantSelect?.addEventListener?.('change', onCustomVariant);
+  for (const key of CUSTOM_COLOR_KEYS) {
+    customColorInputs[key]?.addEventListener?.('input', customColorHandlers[key]);
+  }
+  customReset?.addEventListener?.('click', onCustomReset);
   reset?.addEventListener?.('click', onReset);
   mediaQuery?.addEventListener?.('change', onSystemTheme);
 
@@ -145,6 +349,12 @@ export function mountSettings({
       theme?.removeEventListener?.('change', onTheme);
       density?.removeEventListener?.('change', onDensity);
       timeout?.removeEventListener?.('change', onTimeout);
+      palette?.removeEventListener?.('change', onPalette);
+      customVariantSelect?.removeEventListener?.('change', onCustomVariant);
+      for (const key of CUSTOM_COLOR_KEYS) {
+        customColorInputs[key]?.removeEventListener?.('input', customColorHandlers[key]);
+      }
+      customReset?.removeEventListener?.('click', onCustomReset);
       reset?.removeEventListener?.('click', onReset);
       mediaQuery?.removeEventListener?.('change', onSystemTheme);
     },

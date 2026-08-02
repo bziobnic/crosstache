@@ -70,6 +70,7 @@ fn asset(path: &str) -> Option<(&'static str, &'static str)> {
             include_str!("assets/preferences.js"),
         )),
         "/settings.js" => Some(("application/javascript", include_str!("assets/settings.js"))),
+        "/theme.js" => Some(("application/javascript", include_str!("assets/theme.js"))),
         "/ui-model.js" => Some(("application/javascript", include_str!("assets/ui-model.js"))),
         "/tree-grid.js" => Some((
             "application/javascript",
@@ -559,6 +560,7 @@ mod tests {
             "/secrets.js",
             "/preferences.js",
             "/settings.js",
+            "/theme.js",
             "/commands.js",
             "/files.js",
             "/tree-grid.js",

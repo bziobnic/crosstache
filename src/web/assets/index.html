@@ -436,13 +436,50 @@
   <div class="utility-sheet-body">
     <section class="utility-group" aria-labelledby="settings-appearance-title">
       <h3 id="settings-appearance-title">Appearance</h3>
-      <label class="form-field" for="theme-select"><span class="field-label">Theme</span>
+      <label class="form-field" for="theme-select"><span class="field-label">Mode</span>
         <select id="theme-select">
           <option value="system">System</option>
           <option value="light">Light</option>
           <option value="dark">Dark</option>
         </select>
       </label>
+      <label class="form-field" for="palette-select"><span class="field-label">Color palette</span>
+        <select id="palette-select">
+          <option value="forest">Forest</option>
+          <option value="nord">Nord</option>
+          <option value="solarized">Solarized</option>
+          <option value="high-contrast">High Contrast</option>
+          <option value="custom">Custom</option>
+        </select>
+      </label>
+      <fieldset id="custom-theme-fieldset" class="custom-theme-fieldset" hidden>
+        <legend class="field-label">Custom palette</legend>
+        <label class="form-field" for="custom-variant-select"><span class="field-label">Edit variant</span>
+          <select id="custom-variant-select">
+            <option value="light">Light</option>
+            <option value="dark">Dark</option>
+          </select>
+        </label>
+        <div class="custom-color-grid">
+          <label class="form-field" for="custom-color-canvas"><span class="field-label">Canvas</span>
+            <input id="custom-color-canvas" type="text" inputmode="text" autocomplete="off" pattern="^#[0-9a-fA-F]{6}$" maxlength="7" aria-describedby="custom-theme-status">
+          </label>
+          <label class="form-field" for="custom-color-surface"><span class="field-label">Surface</span>
+            <input id="custom-color-surface" type="text" inputmode="text" autocomplete="off" pattern="^#[0-9a-fA-F]{6}$" maxlength="7" aria-describedby="custom-theme-status">
+          </label>
+          <label class="form-field" for="custom-color-text"><span class="field-label">Text</span>
+            <input id="custom-color-text" type="text" inputmode="text" autocomplete="off" pattern="^#[0-9a-fA-F]{6}$" maxlength="7" aria-describedby="custom-theme-status">
+          </label>
+          <label class="form-field" for="custom-color-accent"><span class="field-label">Accent</span>
+            <input id="custom-color-accent" type="text" inputmode="text" autocomplete="off" pattern="^#[0-9a-fA-F]{6}$" maxlength="7" aria-describedby="custom-theme-status">
+          </label>
+          <label class="form-field" for="custom-color-danger"><span class="field-label">Danger</span>
+            <input id="custom-color-danger" type="text" inputmode="text" autocomplete="off" pattern="^#[0-9a-fA-F]{6}$" maxlength="7" aria-describedby="custom-theme-status">
+          </label>
+        </div>
+        <p id="custom-theme-status" class="field-help" role="status" aria-live="polite"></p>
+        <button type="button" id="custom-theme-reset" class="button secondary">Reset custom colors</button>
+      </fieldset>
     </section>
     <section class="utility-group" aria-labelledby="settings-protection-title">
       <h3 id="settings-protection-title">Protected values</h3>

@@ -1,4 +1,9 @@
 import { test, expect, expectNoSeriousOrCriticalAxeViolations } from './fixtures.js';
+import { PALETTES } from '../../src/web/assets/theme.js';
+
+async function rootVar(page, name) {
+  return page.evaluate((cssVar) => getComputedStyle(document.documentElement).getPropertyValue(cssVar).trim(), name);
+}
 
 async function createSecret(page, name) {
   await page.locator('#new-secret').click();
@@ -59,9 +64,9 @@ test('Commands, Help, and Settings are real keyboard-accessible surfaces', async
 
   await page.locator('#settings-open').click();
   const settings = page.getByRole('dialog', { name: 'Settings' });
-  await expect(settings.getByLabel('Theme')).toBeFocused();
+  await expect(settings.getByLabel('Mode')).toBeFocused();
   await expect(settings.locator('#settings-error')).toHaveCount(1);
-  await settings.getByLabel('Theme').selectOption('dark');
+  await settings.getByLabel('Mode').selectOption('dark');
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
   await expectNoSeriousOrCriticalAxeViolations(page);
   await page.keyboard.press('Escape');
@@ -312,7 +317,7 @@ test('Settings failures remain global after close and explicit Retry recovers sa
   await expect(page.locator('#settings-open')).not.toHaveAttribute('data-error', 'true');
 
   await page.locator('#settings-open').click();
-  await page.getByRole('dialog', { name: 'Settings' }).getByLabel('Theme').selectOption('dark');
+  await page.getByRole('dialog', { name: 'Settings' }).getByLabel('Mode').selectOption('dark');
   await page.keyboard.press('Escape');
   await expect(page.locator('#settings-open')).toBeFocused();
   await expect(status).toBeVisible();
@@ -429,4 +434,118 @@ test('committed capability loss clears Trash while a failed transition preserves
   await expect(page.getByText('old-deleted-secret')).toHaveCount(0);
   await expect(page.locator('#vault-tabs [role="tab"][aria-selected="true"]')).toHaveCount(1);
   await expect(page.locator('#vault-tabs [role="tab"][tabindex="0"]')).toHaveCount(1);
+});
+
+test('built-in palettes and mode combine, persist across reload, and stay axe-clean', async ({ page, baseURL }) => {
+  await page.goto(baseURL);
+  await page.locator('#settings-open').click();
+  const settings = page.getByRole('dialog', { name: 'Settings' });
+  await expect(settings.getByLabel('Mode')).toBeFocused();
+
+  await settings.getByLabel('Color palette').selectOption('nord');
+  await settings.getByLabel('Mode').selectOption('dark');
+  await expect(page.locator('html')).toHaveAttribute('data-palette', 'nord');
+  await expect(page.locator('html')).toHaveAttribute('data-effective-theme', 'dark');
+  await expect.poll(() => rootVar(page, '--color-canvas')).toBe(PALETTES.nord.dark.canvas);
+  await expectNoSeriousOrCriticalAxeViolations(page);
+
+  await page.reload();
+  await expect(page.locator('html')).toHaveAttribute('data-palette', 'nord');
+  await expect(page.locator('html')).toHaveAttribute('data-effective-theme', 'dark');
+  await expect.poll(() => rootVar(page, '--color-canvas')).toBe(PALETTES.nord.dark.canvas);
+});
+
+test('Custom palette: valid edits preview and persist, invalid contrast is blocked with a message, reset restores Forest', async ({ page, baseURL }) => {
+  await page.goto(baseURL);
+  await page.locator('#settings-open').click();
+  const settings = page.getByRole('dialog', { name: 'Settings' });
+
+  const paletteSaved = page.waitForRequest((request) => (
+    request.method() === 'PUT' && request.url().includes('/api/preferences')
+  ));
+  await settings.getByLabel('Color palette').selectOption('custom');
+  await expect(page.locator('#custom-theme-fieldset')).toBeVisible();
+  await expect(page.locator('html')).toHaveAttribute('data-palette', 'custom');
+  await paletteSaved;
+
+  const accentInput = page.locator('#custom-color-accent');
+  const accentSaved = page.waitForRequest((request) => (
+    request.method() === 'PUT' && request.url().includes('/api/preferences')
+  ));
+  await accentInput.fill('#003399');
+  await accentInput.dispatchEvent('input');
+  await expect.poll(() => rootVar(page, '--color-accent')).toBe('#003399');
+  await accentSaved;
+
+  const beforeInvalid = await rootVar(page, '--color-accent');
+  await accentInput.fill('#cccccc');
+  await accentInput.dispatchEvent('input');
+  await expect(page.locator('#custom-theme-status')).toContainText('accent vs surface');
+  await expect(page.locator('#settings-live')).toHaveText('');
+  await expect(accentInput).toHaveAttribute('aria-invalid', 'true');
+  expect(await rootVar(page, '--color-accent')).toBe(beforeInvalid);
+
+  const multiFieldSaved = page.waitForRequest((request) => (
+    request.method() === 'PUT' && request.url().includes('/api/preferences')
+  ));
+  for (const [key, value] of [
+    ['canvas', '#000000'],
+    ['surface', '#000000'],
+    ['text', '#ffffff'],
+    ['accent', '#ffffff'],
+    ['danger', '#ffffff'],
+  ]) {
+    await page.locator(`#custom-color-${key}`).fill(value);
+  }
+  await expect.poll(() => rootVar(page, '--color-canvas')).toBe('#000000');
+  await expect.poll(() => rootVar(page, '--color-accent')).toBe('#ffffff');
+  await multiFieldSaved;
+
+  await page.reload();
+  await page.locator('#settings-open').click();
+  await expect(page.locator('html')).toHaveAttribute('data-palette', 'custom');
+  await expect.poll(() => rootVar(page, '--color-canvas')).toBe('#000000');
+  await expect.poll(() => rootVar(page, '--color-accent')).toBe('#ffffff');
+  await expectNoSeriousOrCriticalAxeViolations(page);
+
+  await page.locator('#theme-select').selectOption('dark');
+  await page.locator('#custom-variant-select').selectOption('dark');
+  const darkSaved = page.waitForRequest((request) => (
+    request.method() === 'PUT' && request.url().includes('/api/preferences')
+  ));
+  await page.locator('#custom-color-accent').fill('#3399ff');
+  await expect.poll(() => rootVar(page, '--color-accent')).toBe('#3399ff');
+  await darkSaved;
+
+  const resetSaved = page.waitForRequest((request) => (
+    request.method() === 'PUT' && request.url().includes('/api/preferences')
+  ));
+  await page.locator('#custom-theme-reset').click();
+  await expect.poll(() => rootVar(page, '--color-accent')).toBe(PALETTES.forest.dark.accent);
+  await resetSaved;
+  await page.reload();
+  await expect(page.locator('html')).toHaveAttribute('data-palette', 'custom');
+  await expect(page.locator('html')).toHaveAttribute('data-effective-theme', 'dark');
+  await expect.poll(() => rootVar(page, '--color-accent')).toBe(PALETTES.forest.dark.accent);
+});
+
+test('accepted custom accents derive readable eyebrow text on the canvas', async ({ page, baseURL }) => {
+  await page.goto(baseURL);
+  await page.locator('#settings-open').click();
+  await page.locator('#palette-select').selectOption('custom');
+
+  for (const [key, value] of [
+    ['canvas', '#767676'],
+    ['text', '#000000'],
+    ['accent', '#767676'],
+    ['danger', '#000000'],
+  ]) {
+    await page.locator(`#custom-color-${key}`).fill(value);
+  }
+
+  await expect.poll(() => rootVar(page, '--color-canvas')).toBe('#767676');
+  await expect.poll(() => rootVar(page, '--color-accent')).toBe('#767676');
+  await expect.poll(() => rootVar(page, '--color-accent-text')).not.toBe('#767676');
+  await expect(page.locator('.eyebrow').first()).not.toHaveCSS('color', 'rgb(118, 118, 118)');
+  await expectNoSeriousOrCriticalAxeViolations(page);
 });
