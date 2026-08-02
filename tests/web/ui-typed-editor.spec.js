@@ -72,7 +72,7 @@ test('guided cards create plain and typed secrets with only selected fields', as
   await expect(page.getByRole('button', { name: 'Edit secret guided-plain' })).toBeVisible();
 });
 
-test('typed property labels are capitalized and the note field is vertically resizable', async ({ page, baseURL }) => {
+test('typed property hints align and the Notes field is vertically resizable', async ({ page, baseURL }) => {
   await page.goto(baseURL);
   await putSecret(page, 'property-labels', {
     value: JSON.stringify({ password: 'browser-password' }),
@@ -91,8 +91,23 @@ test('typed property labels are capitalized and the note field is vertically res
     'Url',
     'Password Protected',
   ]);
+  const protectedLabel = page.locator('#record-fields .field-label').filter({ hasText: 'Password' });
+  const protectedAlignment = await protectedLabel.evaluate((label) => {
+    const heading = label.firstElementChild;
+    const hint = label.querySelector('.field-hint');
+    const labelBox = label.getBoundingClientRect();
+    const headingBox = heading.getBoundingClientRect();
+    const hintBox = hint.getBoundingClientRect();
+    return {
+      headingLeft: Math.abs(labelBox.left - headingBox.left),
+      hintRight: Math.abs(labelBox.right - hintBox.right),
+    };
+  });
+  expect(protectedAlignment.headingLeft).toBeLessThan(1);
+  expect(protectedAlignment.hintRight).toBeLessThan(1);
   const note = page.locator('#secret-form textarea[name="note"]');
   await expect(note).toBeVisible();
+  await expect(note.locator('xpath=..').locator('.field-label')).toHaveText('Notes');
   await expect(note).toHaveCSS('resize', 'vertical');
 });
 

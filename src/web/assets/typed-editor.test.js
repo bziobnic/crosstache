@@ -25,9 +25,14 @@ test('property labels begin with a capital letter', () => {
   assert.equal(model.propertyLabel?.('password'), 'Password');
 });
 
-test('production markup uses the same resizable control for Note as Value', async () => {
+test('production markup uses the same resizable control for Notes as Value', async () => {
   const html = await readFile(new URL('./index.html', import.meta.url), 'utf8');
   assert.match(html, /<textarea[^>]*name="note"[^>]*><\/textarea>/);
+});
+
+test('production markup labels the note field as Notes', async () => {
+  const html = await readFile(new URL('./index.html', import.meta.url), 'utf8');
+  assert.match(html, /<span class="field-label">Notes<\/span><textarea name="note"/);
 });
 
 test('type cards expose required protected and primary fields', () => {
