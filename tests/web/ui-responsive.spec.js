@@ -257,6 +257,8 @@ test('constrained desktop keeps the single tree grid in table mode without a fol
   await expect(page.locator('#secrets-table')).toBeVisible();
   await expect(page.locator('#secrets-stacked')).toBeHidden();
   await expect(page.locator('#secrets-table')).toHaveAttribute('role', 'treegrid');
+  await page.locator('#secret-filters-toggle').click();
+  await expect(page.locator('#secret-filter-controls')).toBeVisible();
   await expect(page.locator('#secrets-expand-all')).toBeVisible();
   await expect(page.locator('#secrets-collapse-all')).toBeVisible();
   await expectNoHorizontalOverflow(page);

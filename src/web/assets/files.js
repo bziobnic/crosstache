@@ -1030,6 +1030,14 @@ export function mountFilterControls({
 
   return Object.freeze({
     render,
+    setValue(key, value) {
+      const control = controls.get(key);
+      if (!control) return false;
+      control.value = value == null ? '' : String(value);
+      filters[key] = readControl(key, control);
+      onChange();
+      return true;
+    },
     reset() {
       for (const [key, control] of controls) {
         filters[key] = inactiveValue(key);

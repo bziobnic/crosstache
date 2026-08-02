@@ -3,12 +3,47 @@ import assert from 'node:assert/strict';
 import {
   createUploadQueue,
   downloadFileArchive,
+  mountFilterControls,
   nextUploadState,
   uploadConflictDecision,
   uploadEvidenceState,
   validateUploadConfirmation,
   validatePreflightResults,
 } from './files.js';
+
+test('filter controller sets a programmatic value through the normal change path', () => {
+  const elements = new Map();
+  const document = {
+    querySelector(selector) { return elements.get(selector); },
+    createElement() { return { value: '', textContent: '', setAttribute() {} }; },
+  };
+  const element = (selector, children = []) => {
+    const value = {
+      value: '', hidden: false, children, ownerDocument: document,
+      replaceChildren(...next) { this.children = next; },
+    };
+    elements.set(selector, value);
+    return value;
+  };
+  const expiry = element('#secret-filter-expiry', [{ value: '', textContent: 'Any expiry' }]);
+  element('#secret-filter-chips');
+  element('#secret-filters-clear');
+  const filters = { expiry: '' };
+  const changes = [];
+  const mounted = mountFilterControls({
+    document,
+    surface: 'secret',
+    filters,
+    labels: { expiry: 'Expiry' },
+    keys: ['expiry'],
+    onChange: () => changes.push({ ...filters }),
+  });
+
+  assert.equal(mounted.setValue('expiry', 'expiring'), true);
+  assert.equal(expiry.value, 'expiring');
+  assert.deepEqual(changes, [{ expiry: 'expiring' }]);
+  assert.equal(mounted.setValue('missing', 'value'), false);
+});
 
 test('archive download posts exact names, clicks one zip anchor, and revokes its URL', async () => {
   const calls = [];

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  mountDisclosure,
   mountRovingFocus,
   mountTabs,
   setBackgroundInert,
@@ -74,6 +75,23 @@ function key(container, target, key) {
   });
   return prevented;
 }
+
+test('mountDisclosure synchronizes hidden and aria-expanded', () => {
+  const trigger = new TestElement('secret-filters-toggle');
+  const panel = new TestElement('secret-filter-controls', { hidden: true });
+  const mounted = mountDisclosure(trigger, panel);
+
+  assert.equal(trigger.getAttribute('aria-expanded'), 'false');
+  assert.equal(trigger.getAttribute('aria-controls'), 'secret-filter-controls');
+  trigger.click();
+  assert.equal(panel.hidden, false);
+  assert.equal(trigger.getAttribute('aria-expanded'), 'true');
+  mounted.setOpen(false);
+  assert.equal(panel.hidden, true);
+  mounted.destroy();
+  trigger.click();
+  assert.equal(panel.hidden, true);
+});
 
 test('mountRovingFocus skips unavailable items and wraps keyboard focus', () => {
   const { document, tablist, tabs } = tabFixture();

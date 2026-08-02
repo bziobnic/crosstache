@@ -50,6 +50,7 @@
   <nav class="quick-access context-actions" aria-label="Quick access">
     <span class="context-kicker">Quick access</span>
     <button id="quick-recent" type="button">Recent secrets</button>
+    <button id="quick-expiring" type="button">Expiring secrets</button>
   </nav>
   <div class="context-rail-footer">
     <nav class="context-actions" aria-label="Application">
@@ -97,18 +98,20 @@
     <div class="toolbar">
       <label class="search-field"><span class="sr-only">Search secrets</span><svg class="icon" aria-hidden="true"><use href="#icon-search"></use></svg><input id="search" type="search" placeholder="Search names, folders, groups, and record types"></label>
       <button id="secret-search-clear" class="button ghost compact search-clear" type="button" hidden>Clear search</button>
-      <button class="button secondary compact" type="button" disabled aria-disabled="true">Filters</button>
+      <button id="secret-filters-toggle" class="button secondary compact" type="button">Filters <span id="secret-filter-count" aria-live="polite" hidden></span></button>
       <button id="select-secrets" class="button secondary" type="button">Select</button>
       <button id="refresh-secrets" class="button secondary compact" type="button" aria-label="Refresh secrets">Refresh</button>
-      <button id="secrets-expand-all" class="button ghost compact" type="button">Expand all</button>
-      <button id="secrets-collapse-all" class="button ghost compact" type="button">Collapse all</button>
     </div>
-    <div id="secret-filter-controls" class="filter-controls" role="group" aria-label="Secret filters">
+    <div id="secret-filter-controls" class="filter-controls" role="group" aria-label="Secret filters" hidden>
       <label>Group<select id="secret-filter-group"><option value="">All groups</option></select></label>
       <label>Record type<select id="secret-filter-type"><option value="">All record types</option></select></label>
       <label>Expiry<select id="secret-filter-expiry"><option value="">Any expiry</option><option value="none">No expiry</option><option value="expiring">Expiring</option><option value="expired">Expired</option></select></label>
       <label>Status<select id="secret-filter-enabled"><option value="">Any status</option><option value="true">Enabled</option><option value="false">Disabled</option></select></label>
-      <button id="secret-filters-clear" class="button ghost compact" type="button" hidden>Clear filters</button>
+      <div class="filter-panel-footer">
+        <button id="secrets-expand-all" class="button ghost compact" type="button">Expand all</button>
+        <button id="secrets-collapse-all" class="button ghost compact" type="button">Collapse all</button>
+        <button id="secret-filters-clear" class="button ghost compact" type="button" hidden>Clear filters</button>
+      </div>
     </div>
     <div id="secret-filter-chips" class="filter-chips" role="group" aria-label="Active secret filters" aria-live="polite" hidden></div>
     <div id="secret-bulk-bar" class="bulk-toolbar" hidden>
@@ -160,15 +163,17 @@
     <div class="toolbar file-toolbar">
       <label class="search-field"><span class="sr-only">Search files</span><svg class="icon" aria-hidden="true"><use href="#icon-search"></use></svg><input id="file-search" type="search" placeholder="Search file names, folders, and types"></label>
       <button id="file-search-clear" class="button ghost compact search-clear" type="button" hidden>Clear search</button>
-      <button class="button secondary compact" type="button" disabled aria-disabled="true">Filters</button>
+      <button id="file-filters-toggle" class="button secondary compact" type="button">Filters <span id="file-filter-count" aria-live="polite" hidden></span></button>
       <button id="select-files" class="button secondary" type="button">Select</button>
       <button id="refresh-files" class="button secondary compact" type="button" aria-label="Refresh files">Refresh</button>
-      <button id="files-expand-all" class="button ghost compact" type="button">Expand all</button>
-      <button id="files-collapse-all" class="button ghost compact" type="button">Collapse all</button>
     </div>
-    <div id="file-filter-controls" class="filter-controls" role="group" aria-label="File filters">
+    <div id="file-filter-controls" class="filter-controls" role="group" aria-label="File filters" hidden>
       <label>Type<select id="file-filter-type"><option value="">All file types</option></select></label>
-      <button id="file-filters-clear" class="button ghost compact" type="button" hidden>Clear filters</button>
+      <div class="filter-panel-footer">
+        <button id="files-expand-all" class="button ghost compact" type="button">Expand all</button>
+        <button id="files-collapse-all" class="button ghost compact" type="button">Collapse all</button>
+        <button id="file-filters-clear" class="button ghost compact" type="button" hidden>Clear filters</button>
+      </div>
     </div>
     <div id="file-filter-chips" class="filter-chips" role="group" aria-label="Active file filters" aria-live="polite" hidden></div>
     <div id="file-bulk-bar" class="bulk-toolbar" hidden>

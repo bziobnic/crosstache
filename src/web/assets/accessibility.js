@@ -25,6 +25,28 @@ export function setBackgroundInert(document, active) {
   }
 }
 
+export function mountDisclosure(trigger, panel, {
+  initialOpen = false,
+  onChange = () => {},
+} = {}) {
+  let open = Boolean(initialOpen);
+  function setOpen(value) {
+    open = Boolean(value);
+    panel.hidden = !open;
+    trigger.setAttribute('aria-expanded', String(open));
+    trigger.setAttribute('aria-controls', panel.id);
+    onChange(open);
+  }
+  const toggle = () => setOpen(!open);
+  trigger.addEventListener('click', toggle);
+  setOpen(open);
+  return Object.freeze({
+    isOpen: () => open,
+    setOpen,
+    destroy() { trigger.removeEventListener('click', toggle); },
+  });
+}
+
 function availableItems(container, selector) {
   return [...(container?.querySelectorAll?.(selector) || [])].filter((item) => (
     !item.hidden

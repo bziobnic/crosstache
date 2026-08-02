@@ -96,6 +96,9 @@ test('the tree grid nests items under folders, drives them by keyboard, and rest
   await expect(page.getByRole('button', { name: 'Edit secret prod-secret' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Edit secret loose-0' })).toBeVisible();
   await expect(page.locator('#secret-list-summary')).toContainText('51 secrets across 3 folders');
+  await page.locator('#secret-filters-toggle').click();
+  await expect(page.locator('#secret-filters-toggle')).toHaveAttribute('aria-expanded', 'true');
+  await expect(page.locator('#secret-filter-controls')).toBeVisible();
   await expect(page.locator('#secrets-expand-all')).toBeVisible();
   await expect(page.locator('#secrets-collapse-all')).toBeVisible();
 
@@ -133,6 +136,9 @@ test('a flat vault of folders still expands and collapses from the row and the t
   await expect(prod).toHaveAttribute('aria-expanded', 'false');
   await expect(itemRow(page, 'Secret a')).toHaveCount(0);
 
+  await page.locator('#secret-filters-toggle').click();
+  await expect(page.locator('#secret-filters-toggle')).toHaveAttribute('aria-expanded', 'true');
+  await expect(page.locator('#secret-filter-controls')).toBeVisible();
   await page.locator('#secrets-expand-all').click();
   await expect(prod).toHaveAttribute('aria-expanded', 'true');
   await expect(itemRow(page, 'Secret a')).toBeVisible();
@@ -246,6 +252,8 @@ test('48rem layouts show full identifiers and ten-level trees keep increasing in
   await expect(primary).toHaveCSS('overflow', 'visible');
 
   await page.setViewportSize({ width: 1180, height: 900 });
+  await page.locator('#secret-filters-toggle').click();
+  await expect(page.locator('#secret-filter-controls')).toBeVisible();
   await page.locator('#secrets-expand-all').click();
   const deepest = folderRow(page, deepFolder);
   await expect(deepest).toHaveAttribute('aria-level', '10');

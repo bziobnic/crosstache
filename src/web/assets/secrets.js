@@ -4,6 +4,7 @@ import { downloadFileArchive, mountFilterControls, mountUploadQueue } from './fi
 import { renderTreeGrid } from './tree-grid.js';
 import { guardNavigation } from './dialogs.js';
 import {
+  mountDisclosure,
   setProtectedValueStatus,
   syncVisibleSelection,
 } from './accessibility.js';
@@ -713,6 +714,20 @@ const filterControls = {
     onChange: () => renderFiles(),
   }),
 };
+
+const filterDisclosures = {
+  secrets: mountDisclosure($('#secret-filters-toggle'), $('#secret-filter-controls')),
+  files: mountDisclosure($('#file-filters-toggle'), $('#file-filter-controls')),
+};
+
+function syncFilterDisclosure(kind) {
+  const count = XvUiModel.activeFilterChips(listFilters[kind]).length;
+  const surface = kind === 'secrets' ? 'secret' : 'file';
+  const countElement = $(`#${surface}-filter-count`);
+  countElement.textContent = count ? `${count} active` : '';
+  countElement.hidden = count === 0;
+  if (count) filterDisclosures[kind].setOpen(true);
+}
 
 function groupFilterOptions(items) {
   return items.flatMap((item) => (
@@ -2045,6 +2060,7 @@ function renderSecrets() {
     listFilters.secrets.type,
   ]);
   filterControls.secrets.render();
+  syncFilterDisclosure('secrets');
   $('#secret-search-clear').hidden = !query;
   setListSummary('secrets', visible.length, secrets.length, expandableIds.length);
   const rows = XvUiModel.contentRows('secrets', sorted);
@@ -3374,6 +3390,10 @@ $('#quick-recent').onclick = () => {
   switchTab('secrets');
   setSort('secrets', 'updated', 'desc');
 };
+$('#quick-expiring').onclick = () => {
+  switchTab('secrets');
+  filterControls.secrets.setValue('expiry', 'expiring');
+};
 let activeTab = 'secrets';
 async function switchTab(which) {
   if (authRecoveryActive || store.snapshot().contextSwitchPending) return;
@@ -3518,6 +3538,7 @@ function renderFiles() {
     listFilters.files.type,
   ]);
   filterControls.files.render();
+  syncFilterDisclosure('files');
   $('#file-search-clear').hidden = !query;
   const rows = XvUiModel.contentRows('files', sorted, { formatSize: fmtSize });
   const tree = XvUiModel.buildContentTree(rows);

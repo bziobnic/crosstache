@@ -331,6 +331,39 @@ test('navigation counts use authoritative loaded lists', async () => {
   }
 });
 
+test('quick expiring applies the normal filter path and keeps its disclosure open', async () => {
+  const context = routedContext('primary', 'one');
+  const ui = await mountRouteUi({
+    apiImpl: async (method, requestPath) => {
+      if (method === 'GET' && requestPath === '/api/context') return context;
+      if (requestPath === '/api/types') return { types: [] };
+      if (requestPath === '/api/vaults') return { vaults: [{ name: 'one' }] };
+      if (method === 'GET' && requestPath.startsWith('/api/secrets')) return [{
+        name: 'expiring-soon',
+        expires_on: '2999-01-01T00:00:00Z',
+      }];
+      return [];
+    },
+  });
+  try {
+    const panel = ui.elements.get('#secret-filter-controls');
+    panel.hidden = true;
+
+    ui.elements.get('#quick-expiring').onclick();
+
+    assert.equal(ui.elements.get('#secret-filter-expiry').value, 'expiring');
+    assert.equal(ui.elements.get('#secret-filter-chips').children.length, 1);
+    assert.equal(panel.hidden, false);
+    assert.equal(ui.elements.get('#secret-filters-toggle').getAttribute('aria-expanded'), 'true');
+
+    ui.elements.get('#secret-filter-chips').children[0].onclick();
+    assert.equal(panel.hidden, false, 'clearing the final chip does not close controls');
+    assert.equal(ui.elements.get('#secret-filters-toggle').getAttribute('aria-expanded'), 'true');
+  } finally {
+    ui.restore();
+  }
+});
+
 async function settleUntil(predicate) {
   for (let attempt = 0; attempt < 20 && !predicate(); attempt++) {
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -755,6 +788,9 @@ test('the toolbar expand and collapse controls act on a flat vault of folders', 
     // Regression: with only single-segment folders the old sidebar tree had no
     // expandable node at all, so both controls were silent no-ops.
     assert.deepEqual(labels(), ['Folder dev', 'Secret b', 'Folder prod', 'Secret a', 'Secret c']);
+    ui.elements.get('#secret-filters-toggle').dispatch('click');
+    assert.equal(ui.elements.get('#secret-filters-toggle').getAttribute('aria-expanded'), 'true');
+    assert.equal(ui.elements.get('#secret-filter-controls').hidden, false);
     ui.elements.get('#secrets-collapse-all').onclick();
     assert.deepEqual(labels(), ['Folder dev', 'Folder prod', 'Secret c']);
     ui.elements.get('#secrets-expand-all').onclick();
