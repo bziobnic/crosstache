@@ -109,6 +109,29 @@ for (const viewport of [
   { width: 768, height: 700 },
   { width: 390, height: 844 },
 ]) {
+  test(`short pages keep top chrome compact and leave main the viewport remainder at ${viewport.width}px`, async ({ page, baseURL }) => {
+    await page.route('**/api/secrets?*', async (route) => route.fulfill({ json: [] }));
+    await page.setViewportSize(viewport);
+    await page.goto(baseURL);
+    await expect(page.locator('#secret-list-summary')).toHaveText(/^0 secrets across 0 folders?\./);
+    await page.locator('main').evaluate((main) => main.replaceChildren());
+
+    const [railBox, headerBox, mainBox] = await Promise.all([
+      page.locator('#context-rail').boundingBox(),
+      page.locator('#app-header').boundingBox(),
+      page.locator('main').boundingBox(),
+    ]);
+    expect(railBox).not.toBeNull();
+    expect(headerBox).not.toBeNull();
+    expect(mainBox).not.toBeNull();
+
+    const topChromeHeight = railBox.height + headerBox.height;
+    expect(topChromeHeight).toBeLessThan(viewport.height * 0.3);
+    expect(mainBox.y).toBeCloseTo(topChromeHeight, 0);
+    expect(mainBox.height).toBeGreaterThanOrEqual(viewport.height - topChromeHeight - 1);
+    await expectNoHorizontalOverflow(page);
+  });
+
   test(`fixed tabs do not obscure final scrollable content at ${viewport.width}px`, async ({ page, baseURL }) => {
     await page.route('**/api/secrets?*', async (route) => route.fulfill({ json: [
       ...Array.from({ length: 24 }, (_, index) => ({ name: `scroll-item-${String(index).padStart(2, '0')}` })),
