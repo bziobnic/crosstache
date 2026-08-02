@@ -1,3 +1,27 @@
+import { CUSTOM_COLOR_KEYS, PALETTE_NAMES, PALETTES, isValidHex, validateCustomVariantContrast } from './theme.js';
+
+const FOREST_CUSTOM_THEME = Object.freeze({
+  light: Object.freeze({ ...PALETTES.forest.light }),
+  dark: Object.freeze({ ...PALETTES.forest.dark }),
+});
+
+const PALETTE_VALUES = new Set([...PALETTE_NAMES, 'custom']);
+
+function isValidCustomThemeVariant(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const keys = Object.keys(value);
+  if (keys.length !== CUSTOM_COLOR_KEYS.length) return false;
+  if (!CUSTOM_COLOR_KEYS.every((key) => isValidHex(value[key]))) return false;
+  return validateCustomVariantContrast(value).valid;
+}
+
+function isValidCustomTheme(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const keys = Object.keys(value);
+  if (keys.length !== 2 || !keys.includes('light') || !keys.includes('dark')) return false;
+  return isValidCustomThemeVariant(value.light) && isValidCustomThemeVariant(value.dark);
+}
+
 const LEGACY_WIDTH_SCHEMAS = {
   'xv.ui.columns.secrets.v1': (value) => Array.isArray(value)
     && value.length === 5
@@ -8,8 +32,10 @@ const LEGACY_WIDTH_SCHEMAS = {
 };
 
 const DEFAULTS = Object.freeze({
-  version: 1,
+  version: 2,
   theme: 'system',
+  palette: 'forest',
+  custom_theme: FOREST_CUSTOM_THEME,
   exposure_timeout_seconds: 30,
   density: 'comfortable',
   folder_expansion: true,
@@ -21,6 +47,8 @@ const DEFAULTS = Object.freeze({
 
 const FIELD_SCHEMAS = {
   theme: (value) => ['system', 'light', 'dark'].includes(value),
+  palette: (value) => PALETTE_VALUES.has(value),
+  custom_theme: (value) => isValidCustomTheme(value),
   exposure_timeout_seconds: (value) => Number.isSafeInteger(value) && value >= 0,
   density: (value) => ['comfortable', 'compact'].includes(value),
   folder_expansion: (value) => typeof value === 'boolean',
@@ -58,12 +86,21 @@ function immutable(value) {
 }
 
 function sanitize(input) {
-  const source = input !== null && typeof input === 'object' ? input : {};
+  const inputSource = input !== null && typeof input === 'object' ? input : {};
+  const version = Number.isSafeInteger(inputSource.version) && inputSource.version >= 0
+    ? inputSource.version
+    : 0;
+  if (version > DEFAULTS.version) return clone(DEFAULTS);
+
+  const source = version < 2
+    ? Object.fromEntries(Object.entries(inputSource)
+      .filter(([key]) => key !== 'palette' && key !== 'custom_theme'))
+    : inputSource;
   const clean = clone(DEFAULTS);
   for (const [key, isValid] of Object.entries(FIELD_SCHEMAS)) {
     if (isValid(source[key])) clean[key] = clone(source[key]);
   }
-  clean.version = 1;
+  clean.version = 2;
   return clean;
 }
 

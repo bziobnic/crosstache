@@ -11,7 +11,9 @@ use crate::error::{CrosstacheError, Result};
 use super::api::ApiError;
 use super::WebState;
 
-const UI_PREFERENCES_VERSION: u64 = 1;
+const UI_PREFERENCES_VERSION: u64 = 2;
+const CONTRAST_MIN: f64 = 4.5;
+const PALETTE_VALUES: [&str; 5] = ["forest", "nord", "solarized", "high-contrast", "custom"];
 
 fn current_version() -> u64 {
     UI_PREFERENCES_VERSION
@@ -19,6 +21,10 @@ fn current_version() -> u64 {
 
 fn default_theme() -> String {
     "system".to_string()
+}
+
+fn default_palette() -> String {
+    "forest".to_string()
 }
 
 fn default_exposure_timeout_seconds() -> u64 {
@@ -31,6 +37,116 @@ fn default_density() -> String {
 
 fn default_folder_expansion() -> bool {
     true
+}
+
+fn is_valid_hex_color(value: &str) -> bool {
+    value.len() == 7
+        && value.starts_with('#')
+        && value.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
+}
+
+fn hex_to_rgb(hex: &str) -> Option<(u8, u8, u8)> {
+    if !is_valid_hex_color(hex) {
+        return None;
+    }
+    let r = u8::from_str_radix(&hex[1..3], 16).ok()?;
+    let g = u8::from_str_radix(&hex[3..5], 16).ok()?;
+    let b = u8::from_str_radix(&hex[5..7], 16).ok()?;
+    Some((r, g, b))
+}
+
+fn srgb_channel_to_linear(channel: u8) -> f64 {
+    let value = f64::from(channel) / 255.0;
+    if value <= 0.03928 {
+        value / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn relative_luminance(hex: &str) -> Option<f64> {
+    let (r, g, b) = hex_to_rgb(hex)?;
+    Some(
+        0.2126 * srgb_channel_to_linear(r)
+            + 0.7152 * srgb_channel_to_linear(g)
+            + 0.0722 * srgb_channel_to_linear(b),
+    )
+}
+
+fn contrast_ratio(hex_a: &str, hex_b: &str) -> Option<f64> {
+    let lum_a = relative_luminance(hex_a)?;
+    let lum_b = relative_luminance(hex_b)?;
+    let lighter = lum_a.max(lum_b);
+    let darker = lum_a.min(lum_b);
+    Some((lighter + 0.05) / (darker + 0.05))
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CustomColorVariant {
+    pub(crate) canvas: String,
+    pub(crate) surface: String,
+    pub(crate) text: String,
+    pub(crate) accent: String,
+    pub(crate) danger: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CustomTheme {
+    pub(crate) light: CustomColorVariant,
+    pub(crate) dark: CustomColorVariant,
+}
+
+impl Default for CustomTheme {
+    fn default() -> Self {
+        Self {
+            light: CustomColorVariant {
+                canvas: "#f3f1eb".to_string(),
+                surface: "#ffffff".to_string(),
+                text: "#18221c".to_string(),
+                accent: "#216446".to_string(),
+                danger: "#9f332e".to_string(),
+            },
+            dark: CustomColorVariant {
+                canvas: "#121814".to_string(),
+                surface: "#19211c".to_string(),
+                text: "#dce5df".to_string(),
+                accent: "#65c68e".to_string(),
+                danger: "#f18e85".to_string(),
+            },
+        }
+    }
+}
+
+fn validate_custom_variant(name: &str, variant: &CustomColorVariant) -> Result<()> {
+    for (field, value) in [
+        ("canvas", &variant.canvas),
+        ("surface", &variant.surface),
+        ("text", &variant.text),
+        ("accent", &variant.accent),
+        ("danger", &variant.danger),
+    ] {
+        if !is_valid_hex_color(value) {
+            return Err(CrosstacheError::invalid_argument(format!(
+                "UI preference custom_theme.{name}.{field} must be a strict six-digit hex color"
+            )));
+        }
+    }
+    for (foreground, background, pair) in [
+        (&variant.text, &variant.canvas, "text-canvas"),
+        (&variant.text, &variant.surface, "text-surface"),
+        (&variant.accent, &variant.surface, "accent-surface"),
+        (&variant.danger, &variant.surface, "danger-surface"),
+    ] {
+        let ratio = contrast_ratio(foreground, background).unwrap_or(0.0);
+        if ratio < CONTRAST_MIN {
+            return Err(CrosstacheError::invalid_argument(format!(
+                "UI preference custom_theme.{name} fails contrast for {pair} ({ratio:.2} < {CONTRAST_MIN})"
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -56,6 +172,10 @@ pub(crate) struct UiPreferencesV1 {
     pub(crate) version: u64,
     #[serde(default = "default_theme")]
     pub(crate) theme: String,
+    #[serde(default = "default_palette")]
+    pub(crate) palette: String,
+    #[serde(default)]
+    pub(crate) custom_theme: CustomTheme,
     #[serde(default = "default_exposure_timeout_seconds")]
     pub(crate) exposure_timeout_seconds: u64,
     #[serde(default = "default_density")]
@@ -70,6 +190,8 @@ impl Default for UiPreferencesV1 {
         Self {
             version: UI_PREFERENCES_VERSION,
             theme: default_theme(),
+            palette: default_palette(),
+            custom_theme: CustomTheme::default(),
             exposure_timeout_seconds: default_exposure_timeout_seconds(),
             density: default_density(),
             folder_expansion: default_folder_expansion(),
@@ -79,7 +201,7 @@ impl Default for UiPreferencesV1 {
 }
 
 impl UiPreferencesV1 {
-    pub(crate) fn from_json(value: Value) -> Result<Self> {
+    pub(crate) fn from_json(mut value: Value) -> Result<Self> {
         reject_vault_data_keys(&value)?;
 
         let object = value.as_object().ok_or_else(|| {
@@ -90,6 +212,17 @@ impl UiPreferencesV1 {
             return Err(CrosstacheError::invalid_argument(format!(
                 "Unsupported UI preference version {version}"
             )));
+        }
+
+        // Palette and custom-theme fields did not exist before version 2.
+        // Treat same-named legacy extension data like any other unknown
+        // presentation field rather than reinterpreting it under a newer
+        // schema and rejecting an otherwise valid legacy preferences file.
+        if version < 2 {
+            if let Some(object) = value.as_object_mut() {
+                object.remove("palette");
+                object.remove("custom_theme");
+            }
         }
 
         let mut preferences: Self = serde_json::from_value(value)?;
@@ -109,6 +242,14 @@ impl UiPreferencesV1 {
                 "UI preference 'density' must be comfortable or compact",
             ));
         }
+        if !PALETTE_VALUES.contains(&self.palette.as_str()) {
+            return Err(CrosstacheError::invalid_argument(format!(
+                "UI preference 'palette' must be one of {}",
+                PALETTE_VALUES.join(", ")
+            )));
+        }
+        validate_custom_variant("light", &self.custom_theme.light)?;
+        validate_custom_variant("dark", &self.custom_theme.dark)?;
         validate_widths("secrets", &self.column_widths.secrets, 5)?;
         validate_widths("files", &self.column_widths.files, 4)?;
         Ok(())
@@ -303,7 +444,7 @@ mod tests {
     use crate::web::api::tests::get_json;
     use crate::web::testutil;
 
-    use super::{preference_path_for, PreferenceStore, UiPreferencesV1};
+    use super::{preference_path_for, CustomTheme, PreferenceStore, UiPreferencesV1};
 
     #[test]
     fn preferences_reject_vault_data_keys() {
@@ -352,7 +493,7 @@ mod tests {
         .unwrap();
 
         let canonical = serde_json::to_value(preferences).unwrap();
-        assert_eq!(canonical.as_object().unwrap().len(), 6);
+        assert_eq!(canonical.as_object().unwrap().len(), 8);
         assert!(canonical.get("design").is_none());
     }
 
@@ -378,8 +519,9 @@ mod tests {
     #[test]
     fn defaults_are_safe_and_versioned() {
         let preferences = UiPreferencesV1::default();
-        assert_eq!(preferences.version, 1);
+        assert_eq!(preferences.version, 2);
         assert_eq!(preferences.theme, "system");
+        assert_eq!(preferences.palette, "forest");
         assert_eq!(preferences.exposure_timeout_seconds, 30);
         assert_eq!(preferences.density, "comfortable");
         assert!(preferences.folder_expansion);
@@ -394,6 +536,22 @@ mod tests {
     }
 
     #[test]
+    fn custom_theme_defaults_match_forest_and_pass_validation() {
+        let preferences = UiPreferencesV1::default();
+        assert_eq!(preferences.custom_theme.light.canvas, "#f3f1eb");
+        assert_eq!(preferences.custom_theme.light.surface, "#ffffff");
+        assert_eq!(preferences.custom_theme.light.text, "#18221c");
+        assert_eq!(preferences.custom_theme.light.accent, "#216446");
+        assert_eq!(preferences.custom_theme.light.danger, "#9f332e");
+        assert_eq!(preferences.custom_theme.dark.canvas, "#121814");
+        assert_eq!(preferences.custom_theme.dark.surface, "#19211c");
+        assert_eq!(preferences.custom_theme.dark.text, "#dce5df");
+        assert_eq!(preferences.custom_theme.dark.accent, "#65c68e");
+        assert_eq!(preferences.custom_theme.dark.danger, "#f18e85");
+        assert!(preferences.validate().is_ok());
+    }
+
+    #[test]
     fn unversioned_preferences_migrate_and_unknown_presentation_fields_are_ignored() {
         let preferences = UiPreferencesV1::from_json(json!({
             "theme": "dark",
@@ -402,15 +560,112 @@ mod tests {
         }))
         .unwrap();
 
-        assert_eq!(preferences.version, 1);
+        assert_eq!(preferences.version, 2);
         assert_eq!(preferences.theme, "dark");
         assert_eq!(preferences.density, "compact");
         assert_eq!(preferences.exposure_timeout_seconds, 30);
+        assert_eq!(preferences.palette, "forest");
+        assert_eq!(preferences.custom_theme, CustomTheme::default());
+    }
+
+    #[test]
+    fn legacy_versions_ignore_fields_that_only_became_valid_in_version_two() {
+        let preferences = UiPreferencesV1::from_json(json!({
+            "version": 1,
+            "theme": "dark",
+            "palette": "legacy-extension-value",
+            "custom_theme": {"legacy": "unvalidated extension data"}
+        }))
+        .unwrap();
+
+        assert_eq!(preferences.version, 2);
+        assert_eq!(preferences.theme, "dark");
+        assert_eq!(preferences.palette, "forest");
+        assert_eq!(preferences.custom_theme, CustomTheme::default());
     }
 
     #[test]
     fn unsupported_versions_are_rejected_without_guessing_at_migration() {
-        assert!(UiPreferencesV1::from_json(json!({"version": 2})).is_err());
+        assert!(UiPreferencesV1::from_json(json!({"version": 3})).is_err());
+    }
+
+    #[test]
+    fn valid_custom_theme_roundtrips() {
+        let custom_theme = json!({
+            "light": {"canvas": "#ffffff", "surface": "#fafafa", "text": "#000000", "accent": "#003399", "danger": "#a30000"},
+            "dark": {"canvas": "#000000", "surface": "#0a0a0a", "text": "#ffffff", "accent": "#3399ff", "danger": "#ff5555"},
+        });
+        let preferences = UiPreferencesV1::from_json(json!({
+            "version": 2,
+            "palette": "custom",
+            "custom_theme": custom_theme,
+        }))
+        .unwrap();
+
+        assert_eq!(preferences.palette, "custom");
+        assert_eq!(preferences.custom_theme.light.accent, "#003399");
+        assert_eq!(preferences.custom_theme.dark.accent, "#3399ff");
+        let serialized = serde_json::to_value(&preferences).unwrap();
+        assert_eq!(serialized["custom_theme"]["light"]["accent"], "#003399");
+        assert_eq!(serialized["custom_theme"]["dark"]["accent"], "#3399ff");
+    }
+
+    #[test]
+    fn unknown_palette_values_are_rejected() {
+        assert!(
+            UiPreferencesV1::from_json(json!({"version": 2, "palette": "not-a-real-palette"}))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn malformed_custom_theme_hex_is_rejected() {
+        for accent in ["red", "#12345", "#1234567", "rgb(0,0,0)", "216446"] {
+            let value = json!({
+                "version": 2,
+                "custom_theme": {
+                    "light": {"canvas": "#ffffff", "surface": "#fafafa", "text": "#000000", "accent": accent, "danger": "#a30000"},
+                    "dark": {"canvas": "#000000", "surface": "#0a0a0a", "text": "#ffffff", "accent": "#3399ff", "danger": "#ff5555"},
+                }
+            });
+            assert!(
+                UiPreferencesV1::from_json(value).is_err(),
+                "accepted malformed hex {accent}"
+            );
+        }
+    }
+
+    #[test]
+    fn incomplete_or_extra_custom_theme_keys_are_rejected() {
+        let missing_danger = json!({
+            "version": 2,
+            "custom_theme": {
+                "light": {"canvas": "#ffffff", "surface": "#fafafa", "text": "#000000", "accent": "#003399"},
+                "dark": {"canvas": "#000000", "surface": "#0a0a0a", "text": "#ffffff", "accent": "#3399ff", "danger": "#ff5555"},
+            }
+        });
+        assert!(UiPreferencesV1::from_json(missing_danger).is_err());
+
+        let extra_key = json!({
+            "version": 2,
+            "custom_theme": {
+                "light": {"canvas": "#ffffff", "surface": "#fafafa", "text": "#000000", "accent": "#003399", "danger": "#a30000", "mystery": "#123456"},
+                "dark": {"canvas": "#000000", "surface": "#0a0a0a", "text": "#ffffff", "accent": "#3399ff", "danger": "#ff5555"},
+            }
+        });
+        assert!(UiPreferencesV1::from_json(extra_key).is_err());
+    }
+
+    #[test]
+    fn low_contrast_custom_colors_are_rejected() {
+        let value = json!({
+            "version": 2,
+            "custom_theme": {
+                "light": {"canvas": "#808080", "surface": "#888888", "text": "#7a7a7a", "accent": "#8a8a8a", "danger": "#8f8f8f"},
+                "dark": {"canvas": "#000000", "surface": "#0a0a0a", "text": "#ffffff", "accent": "#3399ff", "danger": "#ff5555"},
+            }
+        });
+        assert!(UiPreferencesV1::from_json(value).is_err());
     }
 
     #[tokio::test]
@@ -481,9 +736,10 @@ mod tests {
         .unwrap();
         let store = PreferenceStore::new(path.clone(), 20);
         let migrated = store.load().await.unwrap();
-        assert_eq!(migrated.version, 1);
+        assert_eq!(migrated.version, 2);
         assert_eq!(migrated.theme, "dark");
         assert_eq!(migrated.exposure_timeout_seconds, 20);
+        assert_eq!(migrated.palette, "forest");
 
         store
             .save_json(json!({
@@ -500,7 +756,7 @@ mod tests {
         assert_eq!(disk["theme"], "light");
         assert_eq!(disk["exposure_timeout_seconds"], 20);
         assert!(disk.get("future_presentation").is_none());
-        assert_eq!(disk.as_object().unwrap().len(), 6);
+        assert_eq!(disk.as_object().unwrap().len(), 8);
         assert!(std::fs::read_dir(temp.path()).unwrap().all(|entry| !entry
             .unwrap()
             .file_name()
@@ -533,8 +789,9 @@ mod tests {
 
         let (status, defaults) = get_json(app.clone(), "GET", "/api/preferences", None).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(defaults["version"], 1);
+        assert_eq!(defaults["version"], 2);
         assert_eq!(defaults["theme"], "system");
+        assert_eq!(defaults["palette"], "forest");
         assert_eq!(defaults["exposure_timeout_seconds"], 10);
 
         let (status, saved) = get_json(

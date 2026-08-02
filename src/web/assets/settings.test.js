@@ -9,6 +9,21 @@ import {
   mountHelp,
   mountSettings,
 } from './settings.js';
+import { PALETTES, resolveTokens } from './theme.js';
+
+class FakeStyle {
+  constructor() {
+    this.properties = new Map();
+  }
+
+  setProperty(name, value) {
+    this.properties.set(name, value);
+  }
+
+  getPropertyValue(name) {
+    return this.properties.get(name) ?? '';
+  }
+}
 
 class FakeElement {
   constructor(value = '') {
@@ -17,6 +32,8 @@ class FakeElement {
     this.dataset = {};
     this.disabled = false;
     this.hidden = false;
+    this.ariaInvalid = null;
+    this.style = new FakeStyle();
     this.listeners = new Map();
     this.children = [];
   }
@@ -48,6 +65,73 @@ function fakeDocument(ids, { createElements = false } = {}) {
     documentElement: new FakeElement(),
     getElementById: (id) => elements.get(id) ?? null,
     ...(createElements ? { createElement: () => new FakeElement() } : {}),
+  };
+}
+
+const FOREST_CUSTOM_THEME = { light: { ...PALETTES.forest.light }, dark: { ...PALETTES.forest.dark } };
+
+function fakeThemeSettingsDocument() {
+  const paletteSelect = new FakeElement('forest');
+  const customFieldset = new FakeElement();
+  const variantSelect = new FakeElement('light');
+  const colorInputs = {
+    canvas: new FakeElement(),
+    surface: new FakeElement(),
+    text: new FakeElement(),
+    accent: new FakeElement(),
+    danger: new FakeElement(),
+  };
+  const resetCustom = new FakeElement();
+  const settingsStatus = new FakeElement();
+  const customStatus = new FakeElement();
+  const layoutReset = new FakeElement();
+  const document = fakeDocument({
+    'palette-select': paletteSelect,
+    'custom-theme-fieldset': customFieldset,
+    'custom-variant-select': variantSelect,
+    'custom-color-canvas': colorInputs.canvas,
+    'custom-color-surface': colorInputs.surface,
+    'custom-color-text': colorInputs.text,
+    'custom-color-accent': colorInputs.accent,
+    'custom-color-danger': colorInputs.danger,
+    'custom-theme-reset': resetCustom,
+    'settings-live': settingsStatus,
+    'custom-theme-status': customStatus,
+    'layout-reset': layoutReset,
+  });
+  return {
+    document,
+    paletteSelect,
+    customFieldset,
+    variantSelect,
+    colorInputs,
+    resetCustom,
+    status: customStatus,
+    customStatus,
+    settingsStatus,
+    layoutReset,
+  };
+}
+
+function fakePreferences(initial = {}) {
+  const values = {
+    theme: 'system',
+    density: 'comfortable',
+    palette: 'forest',
+    custom_theme: { light: { ...FOREST_CUSTOM_THEME.light }, dark: { ...FOREST_CUSTOM_THEME.dark } },
+    ...initial,
+  };
+  const changes = [];
+  return {
+    values,
+    changes,
+    async load() { return { ...values }; },
+    get(key, fallback) { return values[key] ?? fallback; },
+    set(key, value) {
+      changes.push([key, value]);
+      values[key] = value;
+      return true;
+    },
   };
 }
 
@@ -321,4 +405,230 @@ test('mountHelp loads server preferences before copying the effective timeout', 
   copy.dispatch('click');
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.match(writes[0], /Effective protected-value timeout \(seconds\): 17/);
+});
+
+test('a built-in palette applies its resolved tokens as inline custom properties and sets data-palette', async () => {
+  const { document } = fakeThemeSettingsDocument();
+  const preferences = fakePreferences({ palette: 'nord' });
+  const mounted = mountSettings({ preferences, securityPolicy: 0, document, mediaQuery: { matches: false } });
+  await mounted.ready;
+
+  const root = document.documentElement;
+  assert.equal(root.dataset.palette, 'nord');
+  assert.equal(root.style.getPropertyValue('color-scheme'), 'light');
+  const tokens = resolveTokens('nord', 'light', preferences.get('custom_theme'));
+  assert.equal(root.style.getPropertyValue('--color-canvas'), tokens.canvas);
+  assert.equal(root.style.getPropertyValue('--color-accent'), tokens.accent);
+  assert.equal(root.style.getPropertyValue('--rail-bg'), tokens.railBg);
+});
+
+test('mode and palette stay independent: System mode follows prefers-color-scheme for a non-Forest palette', async () => {
+  const { document } = fakeThemeSettingsDocument();
+  const preferences = fakePreferences({ theme: 'system', palette: 'solarized' });
+  const listeners = new Map();
+  const mediaQuery = {
+    matches: false,
+    addEventListener(type, listener) { listeners.set(type, listener); },
+    removeEventListener(type) { listeners.delete(type); },
+  };
+  const mounted = mountSettings({ preferences, securityPolicy: 0, document, mediaQuery });
+  await mounted.ready;
+
+  const root = document.documentElement;
+  assert.equal(root.dataset.effectiveTheme, 'light');
+  assert.equal(root.style.getPropertyValue('--color-canvas'), resolveTokens('solarized', 'light', preferences.get('custom_theme')).canvas);
+
+  mediaQuery.matches = true;
+  listeners.get('change')?.();
+  assert.equal(root.dataset.effectiveTheme, 'dark');
+  assert.equal(root.style.getPropertyValue('color-scheme'), 'dark');
+  assert.equal(root.style.getPropertyValue('--color-canvas'), resolveTokens('solarized', 'dark', preferences.get('custom_theme')).canvas);
+  assert.equal(preferences.get('palette'), 'solarized', 'palette is untouched by mode changes');
+});
+
+test('the custom fieldset is only shown when palette is custom', async () => {
+  const forest = fakeThemeSettingsDocument();
+  const forestPreferences = fakePreferences({ palette: 'forest' });
+  await (await mountSettings({ preferences: forestPreferences, securityPolicy: 0, document: forest.document, mediaQuery: { matches: false } })).ready;
+  assert.equal(forest.customFieldset.hidden, true);
+
+  const custom = fakeThemeSettingsDocument();
+  const customPreferences = fakePreferences({ palette: 'custom' });
+  await (await mountSettings({ preferences: customPreferences, securityPolicy: 0, document: custom.document, mediaQuery: { matches: false } })).ready;
+  assert.equal(custom.customFieldset.hidden, false);
+});
+
+test('selecting a palette persists it, applies its tokens, and toggles the custom fieldset', async () => {
+  const { document, paletteSelect, customFieldset } = fakeThemeSettingsDocument();
+  const preferences = fakePreferences({ palette: 'forest' });
+  const mounted = mountSettings({ preferences, securityPolicy: 0, document, mediaQuery: { matches: false } });
+  await mounted.ready;
+
+  paletteSelect.value = 'custom';
+  paletteSelect.dispatch('change');
+  assert.equal(preferences.get('palette'), 'custom');
+  assert.equal(customFieldset.hidden, false);
+  assert.equal(document.documentElement.dataset.palette, 'custom');
+});
+
+test('valid custom color edits apply a live preview and persist through preferences', async () => {
+  const { document, paletteSelect, colorInputs } = fakeThemeSettingsDocument();
+  const preferences = fakePreferences({ palette: 'custom' });
+  const mounted = mountSettings({ preferences, securityPolicy: 0, document, mediaQuery: { matches: false } });
+  await mounted.ready;
+  paletteSelect.value = 'custom';
+  paletteSelect.dispatch('change');
+
+  colorInputs.accent.value = '#003399';
+  colorInputs.accent.dispatch('input');
+
+  assert.equal(preferences.get('custom_theme').light.accent, '#003399');
+  assert.equal(document.documentElement.style.getPropertyValue('--color-accent'), '#003399');
+  assert.equal(colorInputs.accent.ariaInvalid, 'false');
+});
+
+test('invalid custom colors show an actionable status and never replace the last valid applied theme', async () => {
+  const {
+    document, paletteSelect, colorInputs, customStatus, settingsStatus,
+  } = fakeThemeSettingsDocument();
+  const preferences = fakePreferences({ palette: 'custom' });
+  const mounted = mountSettings({ preferences, securityPolicy: 0, document, mediaQuery: { matches: false } });
+  await mounted.ready;
+  paletteSelect.value = 'custom';
+  paletteSelect.dispatch('change');
+
+  const beforeAccent = document.documentElement.style.getPropertyValue('--color-accent');
+  const setCallsBefore = preferences.changes.length;
+
+  colorInputs.accent.value = '#cccccc';
+  colorInputs.accent.dispatch('input');
+
+  assert.equal(document.documentElement.style.getPropertyValue('--color-accent'), beforeAccent);
+  assert.equal(preferences.get('custom_theme').light.accent, PALETTES.forest.light.accent);
+  assert.equal(preferences.changes.length, setCallsBefore, 'an invalid edit must not be persisted');
+  assert.equal(colorInputs.accent.ariaInvalid, 'true');
+  assert.match(customStatus.textContent, /accent vs surface is [0-9.]+:1, needs 4.5:1/);
+  assert.equal(settingsStatus.textContent, '', 'custom validation must not duplicate into the general Settings live region');
+
+  colorInputs.accent.value = 'not-a-hex';
+  colorInputs.accent.dispatch('input');
+  assert.equal(colorInputs.accent.ariaInvalid, 'true');
+});
+
+test('incomplete hex typing is retained without live-region spam or persistence', async () => {
+  const {
+    document, colorInputs, customStatus, settingsStatus,
+  } = fakeThemeSettingsDocument();
+  const preferences = fakePreferences({ palette: 'custom' });
+  const mounted = mountSettings({ preferences, securityPolicy: 0, document, mediaQuery: { matches: false } });
+  await mounted.ready;
+  const before = preferences.changes.length;
+
+  colorInputs.accent.value = '#12';
+  colorInputs.accent.dispatch('input');
+
+  assert.equal(colorInputs.accent.value, '#12');
+  assert.equal(colorInputs.accent.ariaInvalid, 'true');
+  assert.equal(customStatus.textContent, '');
+  assert.equal(settingsStatus.textContent, '');
+  assert.equal(preferences.changes.length, before);
+});
+
+test('per-variant drafts permit an invalid multi-field transition and persist only the completed valid variant', async () => {
+  const { document, variantSelect, colorInputs, customStatus } = fakeThemeSettingsDocument();
+  const initial = {
+    light: { canvas: '#ffffff', surface: '#ffffff', text: '#000000', accent: '#000000', danger: '#000000' },
+    dark: { canvas: '#000000', surface: '#000000', text: '#ffffff', accent: '#ffffff', danger: '#ffffff' },
+  };
+  const preferences = fakePreferences({ palette: 'custom', custom_theme: structuredClone(initial) });
+  const mounted = mountSettings({ preferences, securityPolicy: 0, document, mediaQuery: { matches: false } });
+  await mounted.ready;
+  const beforeCanvas = document.documentElement.style.getPropertyValue('--color-canvas');
+
+  for (const [key, value] of [
+    ['canvas', '#000000'],
+    ['surface', '#000000'],
+    ['text', '#ffffff'],
+    ['accent', '#ffffff'],
+  ]) {
+    colorInputs[key].value = value;
+    colorInputs[key].dispatch('input');
+    assert.equal(colorInputs[key].value, value, `${key} draft remains visible`);
+    assert.deepEqual(preferences.get('custom_theme').light, initial.light, `${key} invalid draft is not persisted`);
+    assert.equal(document.documentElement.style.getPropertyValue('--color-canvas'), beforeCanvas);
+  }
+
+  colorInputs.danger.value = '#ffffff';
+  colorInputs.danger.dispatch('input');
+  assert.deepEqual(preferences.get('custom_theme').light, {
+    canvas: '#000000', surface: '#000000', text: '#ffffff', accent: '#ffffff', danger: '#ffffff',
+  });
+  assert.deepEqual(preferences.get('custom_theme').dark, initial.dark);
+  assert.equal(document.documentElement.style.getPropertyValue('--color-canvas'), '#000000');
+  assert.match(customStatus.textContent, /preview updated/i);
+  assert.doesNotMatch(customStatus.textContent, /saved/i);
+
+  variantSelect.value = 'dark';
+  variantSelect.dispatch('change');
+  colorInputs.accent.value = '#12';
+  colorInputs.accent.dispatch('input');
+  variantSelect.value = 'light';
+  variantSelect.dispatch('change');
+  variantSelect.value = 'dark';
+  variantSelect.dispatch('change');
+  assert.equal(colorInputs.accent.value, '#12', 'invalid dark draft survives variant switches');
+  assert.deepEqual(preferences.get('custom_theme').dark, initial.dark);
+});
+
+test('the custom variant selector edits light and dark independently', async () => {
+  const { document, paletteSelect, variantSelect, colorInputs } = fakeThemeSettingsDocument();
+  const preferences = fakePreferences({ palette: 'custom' });
+  const mounted = mountSettings({ preferences, securityPolicy: 0, document, mediaQuery: { matches: false } });
+  await mounted.ready;
+  paletteSelect.value = 'custom';
+  paletteSelect.dispatch('change');
+
+  variantSelect.value = 'dark';
+  variantSelect.dispatch('change');
+  assert.equal(colorInputs.accent.value, PALETTES.forest.dark.accent);
+
+  colorInputs.accent.value = '#3399ff';
+  colorInputs.accent.dispatch('input');
+  assert.equal(preferences.get('custom_theme').dark.accent, '#3399ff');
+  assert.equal(preferences.get('custom_theme').light.accent, PALETTES.forest.light.accent);
+});
+
+test('reset restores both custom variants to Forest defaults and re-applies when active', async () => {
+  const { document, paletteSelect, colorInputs, resetCustom } = fakeThemeSettingsDocument();
+  const preferences = fakePreferences({ palette: 'custom' });
+  const mounted = mountSettings({ preferences, securityPolicy: 0, document, mediaQuery: { matches: false } });
+  await mounted.ready;
+  paletteSelect.value = 'custom';
+  paletteSelect.dispatch('change');
+
+  colorInputs.accent.value = '#003399';
+  colorInputs.accent.dispatch('input');
+  assert.notEqual(preferences.get('custom_theme').light.accent, PALETTES.forest.light.accent);
+
+  resetCustom.dispatch('click');
+  assert.deepEqual(preferences.get('custom_theme'), FOREST_CUSTOM_THEME);
+  assert.equal(document.documentElement.style.getPropertyValue('--color-accent'), PALETTES.forest.light.accent);
+});
+
+test('layout reset preserves theme, palette, and custom theme state', async () => {
+  const { document, paletteSelect, colorInputs, layoutReset } = fakeThemeSettingsDocument();
+  const preferences = fakePreferences({ palette: 'custom', theme: 'dark' });
+  const mounted = mountSettings({ preferences, securityPolicy: 0, document, mediaQuery: { matches: false } });
+  await mounted.ready;
+  paletteSelect.value = 'custom';
+  paletteSelect.dispatch('change');
+  colorInputs.accent.value = '#003399';
+  colorInputs.accent.dispatch('input');
+
+  const customBefore = preferences.get('custom_theme');
+  layoutReset.dispatch('click');
+
+  assert.equal(preferences.get('theme'), 'dark');
+  assert.equal(preferences.get('palette'), 'custom');
+  assert.deepEqual(preferences.get('custom_theme'), customBefore);
 });
