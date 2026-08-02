@@ -119,6 +119,18 @@ test('mountTabs reads its current orientation for every arrow key', () => {
   mounted.destroy();
 });
 
+test('mountTabs synchronizes aria-orientation as its responsive orientation changes', () => {
+  const { tablist } = tabFixture();
+  let orientation = 'vertical';
+  const mounted = mountTabs(tablist, { orientation: () => orientation });
+
+  assert.equal(tablist.getAttribute('aria-orientation'), 'vertical');
+  orientation = 'horizontal';
+  mounted.syncOrientation();
+  assert.equal(tablist.getAttribute('aria-orientation'), 'horizontal');
+  mounted.destroy();
+});
+
 test('mountTabs sync replaces a dynamically unavailable selected tab exactly once', async () => {
   const { document, tablist, tabs } = tabFixture();
   const mounted = mountTabs(tablist);

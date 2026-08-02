@@ -96,6 +96,12 @@ export function mountTabs(tablist, { orientation = 'horizontal' } = {}) {
   let activatingFallback = false;
   let current = null;
 
+  function syncOrientation() {
+    const value = resolvedOrientation(orientation);
+    tablist.setAttribute('aria-orientation', value);
+    return value;
+  }
+
   function activate(tab) {
     return tab.click?.();
   }
@@ -103,6 +109,7 @@ export function mountTabs(tablist, { orientation = 'horizontal' } = {}) {
   function sync() {
     if (syncing) return current;
     syncing = true;
+    syncOrientation();
     const allTabs = [...(tablist.querySelectorAll?.(selector) || [])];
     const tabs = availableItems(tablist, selector);
     const previous = allTabs.find((tab) => tab.getAttribute('aria-selected') === 'true') || null;
@@ -146,6 +153,7 @@ export function mountTabs(tablist, { orientation = 'horizontal' } = {}) {
 
   return Object.freeze({
     sync,
+    syncOrientation,
     destroy() {
       roving.destroy();
       tablist.removeEventListener('click', onClick);

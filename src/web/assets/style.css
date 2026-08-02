@@ -490,6 +490,8 @@ button:focus-visible, .tab:focus-visible, [role="button"]:focus-visible, .linkis
   .workflow-actions .button { flex:1 1 auto; }
   body { display:block; }
   .context-rail { position:relative; width:100%; height:auto; min-height:0; border-right:0; border-bottom:1px solid #365747; }
+  .tab-list { grid-template-columns:repeat(3, minmax(0, 1fr)); margin:.75rem 0; }
+  .tab { grid-template-columns:1fr; justify-items:center; padding:.45rem; text-align:center; }
   .context-actions { grid-template-columns:repeat(2, minmax(0, 1fr)); }
   .context-version { margin-top:0; }
   .app-header-inner { padding-inline:1rem; }

@@ -32,6 +32,16 @@ async function expectNoHorizontalOverflow(page) {
   }))).toEqual({ body: true, root: true });
 }
 
+async function tabLayout(page) {
+  return page.locator('#vault-tabs').evaluate((tablist) => {
+    const tabs = [...tablist.querySelectorAll('[role="tab"]')];
+    return {
+      columns: getComputedStyle(tablist).gridTemplateColumns.split(' ').filter(Boolean).length,
+      rows: new Set(tabs.map((tab) => tab.getBoundingClientRect().y)).size,
+    };
+  });
+}
+
 async function uploadDirect(page, {
   name = longFileLeaf,
   destination = nestedFolder,
@@ -102,6 +112,29 @@ for (const viewport of [
     await expectNoHorizontalOverflow(page);
   });
 }
+
+test('vault tabs keep layout, ARIA orientation, and arrow keys synchronized at 48rem', async ({ page, baseURL }) => {
+  await page.setViewportSize({ width: 769, height: 700 });
+  await page.goto(baseURL);
+  const tablist = page.locator('#vault-tabs');
+  const secrets = page.getByRole('tab', { name: 'Secrets' });
+  const files = page.getByRole('tab', { name: 'Files' });
+
+  await expect(tablist).toHaveAttribute('aria-orientation', 'vertical');
+  await expect.poll(() => tabLayout(page)).toEqual({ columns: 1, rows: 3 });
+  await secrets.focus();
+  await page.keyboard.press('ArrowDown');
+  await expect(files).toBeFocused();
+
+  await page.setViewportSize({ width: 768, height: 700 });
+  await expect.poll(() => tabLayout(page)).toEqual({ columns: 3, rows: 1 });
+  await expect(tablist).toHaveAttribute('aria-orientation', 'horizontal');
+  await secrets.focus();
+  await page.keyboard.press('ArrowDown');
+  await expect(secrets).toBeFocused();
+  await page.keyboard.press('ArrowRight');
+  await expect(files).toBeFocused();
+});
 
 test('stacked file rows preserve full paths and expose exactly one action in either mode', async ({ page, baseURL }) => {
   await page.setViewportSize({ width: 390, height: 844 });

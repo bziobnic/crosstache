@@ -42,11 +42,12 @@ const dialogs = createDialogManager(document);
 const preferences = createPreferenceClient(api);
 const themeSelect = document.getElementById('theme-select');
 const commandRegistry = createCommandRegistry();
+const tabMediaQuery = globalThis.matchMedia?.('(max-width: 48rem)');
 const tabs = mountTabs(document.getElementById('vault-tabs'), {
-  orientation: () => (
-    globalThis.matchMedia?.('(max-width: 48rem)').matches ? 'horizontal' : 'vertical'
-  ),
+  orientation: () => (tabMediaQuery?.matches ? 'horizontal' : 'vertical'),
 });
+if (tabMediaQuery?.addEventListener) tabMediaQuery.addEventListener('change', tabs.syncOrientation);
+else tabMediaQuery?.addListener?.(tabs.syncOrientation);
 document.getElementById('top-command-open').onclick = () => {
   document.getElementById('commands-open').click();
 };
