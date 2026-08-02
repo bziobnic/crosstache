@@ -72,6 +72,30 @@ test('guided cards create plain and typed secrets with only selected fields', as
   await expect(page.getByRole('button', { name: 'Edit secret guided-plain' })).toBeVisible();
 });
 
+test('typed property labels are capitalized and the note field is vertically resizable', async ({ page, baseURL }) => {
+  await page.goto(baseURL);
+  await putSecret(page, 'property-labels', {
+    value: JSON.stringify({ password: 'browser-password' }),
+    content_type: 'application/vnd.xv.record',
+    tags: {
+      'xv-type': 'login',
+      'f.username': 'alice',
+      'f.url': 'https://example.com',
+    },
+  });
+  await page.reload();
+  await page.getByRole('button', { name: 'Edit secret property-labels' }).click();
+
+  await expect(page.locator('#record-fields .field-label')).toHaveText([
+    'Username',
+    'Url',
+    'Password Protected',
+  ]);
+  const note = page.locator('#secret-form textarea[name="note"]');
+  await expect(note).toBeVisible();
+  await expect(note).toHaveCSS('resize', 'vertical');
+});
+
 test('chips suggestions folder autocomplete and expiry controls keep a durable draft', async ({ page, baseURL }) => {
   await page.goto(baseURL);
   await putSecret(page, 'suggestion-source', {

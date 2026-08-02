@@ -35,3 +35,7 @@ spikes/
 
 # Superpowers visual brainstorming sessions — transient, machine-specific
 .superpowers/
+
+# Clean-room integration-test state and credentials — machine-specific
+.cleanroom/
+.cleanroom/azure.env
