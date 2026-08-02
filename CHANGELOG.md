@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.33.0 — Custom web color themes (2026-08-02)
+
+### Added
+
+- **Customizable web color themes.** Display mode is now independent from the
+  selected palette, with built-in Forest, Nord, Solarized, and High Contrast
+  palettes plus guided light and dark custom color variants.
+- Custom palettes preview live, persist across reloads, support independent
+  light/dark editing and reset, and retain unfinished drafts without applying
+  or saving invalid combinations.
+
+### Security and accessibility
+
+- Custom presentation preferences accept only strict six-digit hex colors and
+  exact versioned fields; unknown, future, malformed, and low-contrast values
+  fail closed without retaining vault data or secret-bearing fields.
+- Semantic foreground, border, hover, danger, focus, rail, and accent-text
+  tokens are derived to preserve WCAG contrast, including before JavaScript
+  loads and for adversarial but otherwise valid custom palettes.
+
 ## v0.32.1 — Web editor field presentation (2026-08-01)
 
 ### Fixed
