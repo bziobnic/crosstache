@@ -183,6 +183,25 @@ test('phone command launches restore Settings and Help focus to the visible comm
   }
 });
 
+test('resized utility sheets restore Settings and Help focus to the visible command trigger', async ({ page, baseURL }) => {
+  await page.setViewportSize({ width: 1180, height: 760 });
+  await page.goto(baseURL);
+  const commandTrigger = page.locator('#top-command-open');
+
+  for (const [openId, dialogName] of [
+    ['settings-open', 'Settings'],
+    ['help-open', 'Help'],
+  ]) {
+    await page.locator(`#${openId}`).click();
+    await expect(page.getByRole('dialog', { name: dialogName })).toBeVisible();
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(page.locator(`#${openId}`)).toBeHidden();
+    await page.keyboard.press('Escape');
+    await expect(commandTrigger).toBeFocused();
+    await page.setViewportSize({ width: 1180, height: 760 });
+  }
+});
+
 test('failed preference read still enforces the live policy at Settings, reveal, and copy', async ({ page, baseURL }) => {
   await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
   let preferenceWrites = 0;

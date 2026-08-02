@@ -98,6 +98,7 @@ function bindApplicationDialog({ openId, dialogId, closeId, initialFocus, before
   const open = document.getElementById(openId);
   const dialog = document.getElementById(dialogId);
   const close = document.getElementById(closeId);
+  const commandTrigger = document.getElementById('top-command-open');
   const dismiss = () => dialogs.closeModal(dialog);
   open.onclick = () => {
     if (store.snapshot().contextSwitchPending) return;
@@ -106,8 +107,9 @@ function bindApplicationDialog({ openId, dialogId, closeId, initialFocus, before
       initialFocus: initialFocus(),
       invoker: resolveDialogInvoker(document, [
         open,
-        document.getElementById('top-command-open'),
+        commandTrigger,
       ]),
+      restoreFallbacks: [commandTrigger],
       onEscape: dismiss,
     });
   };

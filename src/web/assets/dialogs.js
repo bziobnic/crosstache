@@ -20,19 +20,36 @@ function focusableElements(element) {
     });
 }
 
+function hasInertAncestor(element) {
+  if (element.closest?.('[inert]')) return true;
+  for (let ancestor = element.parentElement; ancestor; ancestor = ancestor.parentElement) {
+    if (ancestor.inert || ancestor.getAttribute?.('inert') !== null) return true;
+  }
+  return false;
+}
+
 function isVisibleFocusTarget(element, document) {
   if (!element || element === document.body || element.hidden || element.disabled
+    || element.isConnected === false || element.inert || hasInertAncestor(element)
     || element.closest?.('[hidden]')) return false;
   const style = element.ownerDocument?.defaultView?.getComputedStyle?.(element) ?? element.style;
   if (style?.display === 'none' || style?.visibility === 'hidden' || style?.visibility === 'collapse') {
     return false;
   }
-  return typeof element.focus === 'function'
+  const focusable = typeof element.matches === 'function'
+    ? element.matches(focusableSelector)
+    : (typeof element.tabIndex !== 'number' || element.tabIndex >= 0);
+  return focusable && typeof element.focus === 'function'
     && (typeof element.getClientRects !== 'function' || element.getClientRects().length > 0);
 }
 
 export function resolveDialogInvoker(document, fallbacks = []) {
   return [document.activeElement, ...fallbacks]
+    .find((element) => isVisibleFocusTarget(element, document)) || null;
+}
+
+function resolveRestorationTarget(document, invoker, fallbacks) {
+  return [invoker, ...fallbacks]
     .find((element) => isVisibleFocusTarget(element, document)) || null;
 }
 
@@ -63,10 +80,10 @@ export function createDialogManager(document) {
     for (const modal of modals) setModalInert(modal.element, modal.element !== active);
   }
 
-  function openModal(element, { initialFocus, invoker, onEscape } = {}) {
+  function openModal(element, { initialFocus, invoker, restoreFallbacks = [], onEscape } = {}) {
     const existing = modals.findIndex((modal) => modal.element === element);
     if (existing !== -1) modals.splice(existing, 1);
-    modals.push({ element, invoker, onEscape });
+    modals.push({ element, invoker, restoreFallbacks, onEscape });
     element.hidden = false;
     updateModalLayers();
     setBackgroundInert(true);
@@ -76,11 +93,11 @@ export function createDialogManager(document) {
   function closeModal(element) {
     const index = modals.findIndex((modal) => modal.element === element);
     if (index === -1) return;
-    const [{ invoker }] = modals.splice(index, 1);
+    const [{ invoker, restoreFallbacks }] = modals.splice(index, 1);
     element.hidden = true;
     updateModalLayers();
     setBackgroundInert(modals.length > 0);
-    invoker?.focus?.();
+    resolveRestorationTarget(document, invoker, restoreFallbacks)?.focus?.();
   }
 
   document.addEventListener?.('keydown', (event) => {

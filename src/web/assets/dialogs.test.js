@@ -7,6 +7,10 @@ class DialogElement {
     this.document = document;
     this.hidden = true;
     this.disabled = false;
+    this.isConnected = true;
+    this.inert = false;
+    this.parentElement = null;
+    this.tabIndex = 0;
     this.attributes = new Map();
     this.focusables = [];
   }
@@ -15,7 +19,10 @@ class DialogElement {
   removeAttribute(name) { this.attributes.delete(name); }
   getAttribute(name) { return this.attributes.get(name) ?? null; }
   querySelectorAll() { return this.focusables; }
-  focus() { this.document.activeElement = this; }
+  focus() {
+    this.onFocus?.();
+    this.document.activeElement = this;
+  }
 }
 
 function modalDocument() {
@@ -81,6 +88,8 @@ test('modal manager keeps the page unavailable until the nested modal closes', (
   const keepEditing = new DialogElement(document);
   const sheet = new DialogElement(document);
   const confirmation = new DialogElement(document);
+  invoker.hidden = false;
+  keepEditing.hidden = false;
 
   manager.openModal(sheet, { initialFocus: keepEditing, invoker });
   assert.equal(manager.topModal(), sheet);
@@ -109,6 +118,41 @@ test('modal manager keeps the page unavailable until the nested modal closes', (
   assert.equal(document.vaultTabs.getAttribute('aria-hidden'), null);
   assert.equal(document.quickAccess.getAttribute('aria-hidden'), null);
   assert.equal(document.contextRailFooter.getAttribute('aria-hidden'), null);
+});
+
+test('modal manager validates a stored invoker at close after clearing modal inertness', () => {
+  const cases = [
+    ['hidden', (invoker) => { invoker.hidden = true; }],
+    ['inert', (invoker) => { invoker.inert = true; }],
+    ['inside an inert ancestor', (invoker) => {
+      invoker.parentElement = { inert: true, parentElement: null, getAttribute: () => null };
+    }],
+    ['disconnected', (invoker) => { invoker.isConnected = false; }],
+    ['disabled', (invoker) => { invoker.disabled = true; }],
+    ['not focusable', (invoker) => { invoker.tabIndex = -1; }],
+  ];
+
+  for (const [label, invalidate] of cases) {
+    const document = modalDocument();
+    const manager = createDialogManager(document);
+    const invoker = new DialogElement(document);
+    const fallback = new DialogElement(document);
+    const initialFocus = new DialogElement(document);
+    const sheet = new DialogElement(document);
+    for (const element of [invoker, fallback, initialFocus]) element.hidden = false;
+    fallback.onFocus = () => {
+      assert.equal(document.main.getAttribute('aria-hidden'), null, `${label} fallback focuses after inert cleanup`);
+    };
+
+    manager.openModal(sheet, {
+      initialFocus,
+      invoker,
+      restoreFallbacks: [fallback],
+    });
+    invalidate(invoker);
+    manager.closeModal(sheet);
+    assert.equal(document.activeElement, fallback, `${label} invoker restores the visible fallback`);
+  }
 });
 
 test('modal manager cycles Tab and delegates Escape to the top modal', () => {
