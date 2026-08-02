@@ -22,6 +22,7 @@ test('the command-center shell owns one tab set inside the context rail', () => 
 
 const VOID_ELEMENTS = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'source', 'track', 'wbr']);
 
+// This lightweight parser supports the balanced, quoted-attribute templates in index.html.
 function parseStaticHtml(html) {
   const root = { tag: '#document', attributes: new Map(), children: [] };
   const stack = [root];
@@ -68,6 +69,8 @@ function assertHeadingContract(view, { action, count, search }) {
   const headings = view.children.filter((node) => hasClass(node, 'view-heading'));
   assert.equal(headings.length, 1, `${view.attributes.get('id')} has one direct view heading`);
   const heading = headings[0];
+  assert.equal(findAll(view, (node) => node.attributes.get('id') === count).length, 1,
+    `${count} appears once in its view`);
   assert.equal(findAll(heading, (node) => node.attributes.get('id') === count).length, 1,
     `${count} stays in the view heading`);
   if (action) {
