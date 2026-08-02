@@ -16,6 +16,9 @@ test('secret sheet traps focus, guards Escape, and restores the invoker', async 
   const name = page.locator('#secret-form input[name="name"]');
   await expect(dialog).toBeVisible();
   await expect(page.locator('main')).toHaveAttribute('inert', '');
+  await expect(dialog.locator('#drawer-context.drawer-context-banner')).toBeVisible();
+  await expect(dialog.locator('[data-section="credentials"]')).toBeVisible();
+  await expect(dialog.locator('[data-section="organization"]')).toBeVisible();
   await expect(name).toBeFocused();
   await expectNoSeriousOrCriticalAxeViolations(page);
   await name.fill('draft');

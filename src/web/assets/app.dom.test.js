@@ -20,6 +20,17 @@ test('the command-center shell owns one tab set inside the context rail', () => 
   assert.match(html, /class="context-rail-footer"/);
 });
 
+test('the editor groups context, core fields, organization, attachments, and advanced workflows', () => {
+  const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
+  const drawer = html.slice(html.indexOf('<div id="drawer"'), html.indexOf('<div id="drawer-backdrop"'));
+  assert.match(drawer, /id="drawer-context"[^>]*class="drawer-context-banner"/);
+  assert.match(drawer, /class="drawer-section" data-section="credentials"/);
+  assert.match(drawer, /class="drawer-section" data-section="organization"/);
+  assert.match(drawer, /id="attachments-section"[^>]*data-section="attachments"/);
+  assert.match(drawer, /id="secret-workflows"[^>]*drawer-advanced/);
+  assert.ok(drawer.indexOf('data-section="credentials"') < drawer.indexOf('data-section="organization"'));
+});
+
 const VOID_ELEMENTS = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'source', 'track', 'wbr']);
 
 // This lightweight parser supports the balanced, quoted-attribute templates in index.html.

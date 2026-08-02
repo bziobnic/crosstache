@@ -36,6 +36,11 @@ test('failed refresh keeps the last snapshot stale and recoverable', async ({ pa
   await expect(page.getByRole('button', { name: 'Edit secret stale-snapshot' })).toBeVisible();
   await expect(page.locator('#secret-refresh-error')).toContainText('Stale');
   await expect(page.locator('#secret-refresh-error').getByRole('button', { name: 'Retry' })).toBeVisible();
+  const order = await page.evaluate(() => ({
+    error: [...document.querySelector('#secrets-view').children].indexOf(document.querySelector('#secret-refresh-error')),
+    workspace: [...document.querySelector('#secrets-view').children].indexOf(document.querySelector('#secrets-workspace')),
+  }));
+  expect(order.error).toBeLessThan(order.workspace);
   await expectNoSeriousOrCriticalAxeViolations(page);
 
   failRefresh = false;

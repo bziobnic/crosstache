@@ -72,6 +72,8 @@ test('desktop selection has one checkbox per row and a visible-scope mixed heade
   await createSecret(page, 'beta-visible');
 
   await page.getByRole('button', { name: 'Select', exact: true }).click();
+  const bulkBar = page.locator('#secret-bulk-bar');
+  await expect(bulkBar).toBeVisible();
   const table = page.locator('#secrets-table');
   const rows = table.locator('tbody tr');
   await expect(rows).toHaveCount(2);
@@ -91,6 +93,9 @@ test('desktop selection has one checkbox per row and a visible-scope mixed heade
   const scopedHeader = table.getByRole('checkbox', { name: 'Select all 1 visible secret' });
   await expect(scopedHeader).toHaveAttribute('aria-checked', 'true');
   await expectNoSeriousOrCriticalAxeViolations(page);
+  await page.locator('#cancel-secret-selection').click();
+  await expect(bulkBar).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Select', exact: true })).toBeVisible();
 });
 
 test('desktop file selection removes duplicate row activation and scopes its header', async ({ page, baseURL }) => {

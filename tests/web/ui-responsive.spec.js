@@ -304,7 +304,13 @@ test('stacked mode preserves loading, failed, and filtered states', async ({ pag
   await page.unroute('**/api/secrets?*');
   await createLongSecret(page);
   await page.getByLabel('Search secrets').fill('definitely-not-present');
-  await expect(page.locator('#secrets-stacked').getByText('No matching secrets')).toBeVisible();
+  const filteredStacked = page.locator('#secrets-stacked');
+  await expect(filteredStacked.getByText('No matching secrets')).toBeVisible();
+  const clearFilters = filteredStacked.getByRole('button', { name: 'Clear filters' });
+  await expect(clearFilters).toBeVisible();
+  await expect(filteredStacked.getByRole('button', { name: 'New secret' })).toHaveCount(0);
+  await clearFilters.click();
+  await expect(filteredStacked.getByText(longName)).toBeVisible();
   await expectNoHorizontalOverflow(page);
 
   await page.route('**/api/secrets?*', async (route) => {
@@ -419,6 +425,10 @@ test('sheets fill the viewport below 544px', async ({ page, baseURL }) => {
   await page.locator('#new-secret').click();
   const box = await page.getByRole('dialog', { name: 'New secret' }).boundingBox();
   expect(box).toEqual(expect.objectContaining({ x: 0, y: 0, width: 390, height: 844 }));
+  await expect(page.getByRole('button', { name: 'Cancel' })).toBeVisible();
+  await expect(page.locator('#save')).toBeVisible();
+  await expect(page.locator('.drawer-footer')).toHaveCSS('display', 'grid');
+  await expect(page.locator('#delete')).toHaveCSS('grid-column', '1 / -1');
   await expect(page.locator('.context-rail-top')).toHaveAttribute('inert', '');
   await expect(page.locator('#vault-tabs')).toHaveAttribute('inert', '');
   await page.getByRole('button', { name: 'Cancel' }).click();

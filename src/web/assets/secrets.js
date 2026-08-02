@@ -549,6 +549,14 @@ function emptyStateContent(kind, state) {
     else button.onclick = () => $('#file-input').click();
     container.appendChild(button);
   }
+  if (state === 'filtered') {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'button secondary';
+    button.textContent = 'Clear filters';
+    button.onclick = () => clearListNarrowing(kind);
+    container.appendChild(button);
+  }
   return container;
 }
 
@@ -714,6 +722,15 @@ const filterControls = {
     onChange: () => renderFiles(),
   }),
 };
+
+function clearListNarrowing(kind) {
+  const search = $(kind === 'secrets' ? '#search' : '#file-search');
+  search.value = '';
+  filterControls[kind].reset();
+  if (kind === 'secrets') renderSecrets();
+  else renderFiles();
+  search.focus();
+}
 
 const filterDisclosures = {
   secrets: mountDisclosure($('#secret-filters-toggle'), $('#secret-filter-controls')),
