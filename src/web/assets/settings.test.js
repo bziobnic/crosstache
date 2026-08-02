@@ -273,6 +273,8 @@ test('diagnostics do not invent unavailable security or preference values', () =
 
 test('Help states the exact local bearer-session boundary in plain language', async () => {
   const markup = await readFile(new URL('./index.html', import.meta.url), 'utf8');
+  assert.match(markup, /<kbd>Arrow keys<\/kbd><\/dt><dd>Move between tabs<\/dd>/);
+  assert.doesNotMatch(markup, /<kbd>←<\/kbd>\s*<kbd>→<\/kbd><\/dt><dd>Move between tabs<\/dd>/);
   assert.match(markup, /accepts connections only from this computer/i);
   assert.match(markup, /removed from the address bar and kept in this browser tab/i);
   assert.match(markup, /Any app or browser on this computer with that link can access this session while Crosstache is running\./);

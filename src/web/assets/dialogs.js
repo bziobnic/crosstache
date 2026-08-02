@@ -20,6 +20,22 @@ function focusableElements(element) {
     });
 }
 
+function isVisibleFocusTarget(element, document) {
+  if (!element || element === document.body || element.hidden || element.disabled
+    || element.closest?.('[hidden]')) return false;
+  const style = element.ownerDocument?.defaultView?.getComputedStyle?.(element) ?? element.style;
+  if (style?.display === 'none' || style?.visibility === 'hidden' || style?.visibility === 'collapse') {
+    return false;
+  }
+  return typeof element.focus === 'function'
+    && (typeof element.getClientRects !== 'function' || element.getClientRects().length > 0);
+}
+
+export function resolveDialogInvoker(document, fallbacks = []) {
+  return [document.activeElement, ...fallbacks]
+    .find((element) => isVisibleFocusTarget(element, document)) || null;
+}
+
 function setModalInert(element, active) {
   const supportsInert = typeof HTMLElement !== 'undefined' && 'inert' in HTMLElement.prototype;
   if (supportsInert) {

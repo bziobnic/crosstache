@@ -164,6 +164,25 @@ test('utility sheets become full-screen at 390px and disable motion when request
   });
 });
 
+test('phone command launches restore Settings and Help focus to the visible command trigger', async ({ page, baseURL }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(baseURL);
+  const commandTrigger = page.locator('#top-command-open');
+
+  for (const [command, dialogName] of [
+    ['Open Settings', 'Settings'],
+    ['Open Help', 'Help'],
+  ]) {
+    await commandTrigger.click();
+    const commands = page.getByRole('dialog', { name: 'Commands' });
+    await commands.getByRole('combobox', { name: 'Search commands and vault metadata' }).fill(command);
+    await commands.getByRole('option', { name: new RegExp(`^${command}`) }).click();
+    await expect(page.getByRole('dialog', { name: dialogName })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(commandTrigger).toBeFocused();
+  }
+});
+
 test('failed preference read still enforces the live policy at Settings, reveal, and copy', async ({ page, baseURL }) => {
   await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
   let preferenceWrites = 0;

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createDialogManager, guardNavigation } from './dialogs.js';
+import { createDialogManager, guardNavigation, resolveDialogInvoker } from './dialogs.js';
 
 class DialogElement {
   constructor(document) {
@@ -57,6 +57,21 @@ test('navigation guard proceeds without a draft or confirmation', async () => {
   assert.equal(await guardNavigation({ draft: null, savePending: false, confirmDiscard: async () => {
     throw new Error('confirmation should not be requested');
   } }), true);
+});
+
+test('dialog invoker resolution skips a CSS-hidden rail action for the visible command trigger', () => {
+  const document = modalDocument();
+  const hiddenRailAction = new DialogElement(document);
+  const commandTrigger = new DialogElement(document);
+  hiddenRailAction.hidden = false;
+  commandTrigger.hidden = false;
+  hiddenRailAction.style = { display: 'none' };
+  document.activeElement = hiddenRailAction;
+
+  assert.equal(resolveDialogInvoker(document, [hiddenRailAction, commandTrigger]), commandTrigger);
+
+  document.activeElement = commandTrigger;
+  assert.equal(resolveDialogInvoker(document, [hiddenRailAction, commandTrigger]), commandTrigger);
 });
 
 test('modal manager keeps the page unavailable until the nested modal closes', () => {

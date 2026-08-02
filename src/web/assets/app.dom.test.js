@@ -21,14 +21,26 @@ test('the command-center shell owns one tab set inside the context rail', () => 
 });
 
 test('the editor groups context, core fields, organization, attachments, and advanced workflows', () => {
-  const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
-  const drawer = html.slice(html.indexOf('<div id="drawer"'), html.indexOf('<div id="drawer-backdrop"'));
-  assert.match(drawer, /id="drawer-context"[^>]*class="drawer-context-banner"/);
-  assert.match(drawer, /class="drawer-section" data-section="credentials"/);
-  assert.match(drawer, /class="drawer-section" data-section="organization"/);
-  assert.match(drawer, /id="attachments-section"[^>]*data-section="attachments"/);
-  assert.match(drawer, /id="secret-workflows"[^>]*drawer-advanced/);
-  assert.ok(drawer.indexOf('data-section="credentials"') < drawer.indexOf('data-section="organization"'));
+  const document = parseStaticHtml(fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8'));
+  const drawer = byId(document, 'drawer');
+  assert.ok(drawer, 'the editor drawer is present');
+  assert.equal(findAll(drawer, (node) => hasClass(node, 'drawer-header')).length, 1);
+  assert.equal(findAll(drawer, (node) => hasClass(node, 'drawer-body')).length, 1);
+  assert.equal(findAll(drawer, (node) => hasClass(node, 'drawer-footer')).length, 1);
+
+  const context = byId(drawer, 'drawer-context');
+  assert.ok(context && hasClass(context, 'drawer-context-banner'));
+  assert.deepEqual(
+    findAll(drawer, (node) => hasClass(node, 'drawer-section'))
+      .map((node) => [node.attributes.get('id') || '', node.attributes.get('data-section') || '']),
+    [
+      ['', 'credentials'],
+      ['', 'organization'],
+      ['attachments-section', 'attachments'],
+    ],
+  );
+  const workflows = byId(drawer, 'secret-workflows');
+  assert.ok(workflows && hasClass(workflows, 'drawer-advanced'));
 });
 
 const VOID_ELEMENTS = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'source', 'track', 'wbr']);

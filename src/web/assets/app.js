@@ -1,6 +1,6 @@
 import { createApiClient } from './api-client.js';
 import { createStore, draftReducer } from './store.js';
-import { createDialogManager, guardNavigation } from './dialogs.js';
+import { createDialogManager, guardNavigation, resolveDialogInvoker } from './dialogs.js';
 import { announce, mountTabs } from './accessibility.js';
 import { mountSecrets } from './secrets.js';
 import { createPreferenceClient } from './preferences.js';
@@ -104,7 +104,10 @@ function bindApplicationDialog({ openId, dialogId, closeId, initialFocus, before
     beforeOpen();
     dialogs.openModal(dialog, {
       initialFocus: initialFocus(),
-      invoker: open,
+      invoker: resolveDialogInvoker(document, [
+        open,
+        document.getElementById('top-command-open'),
+      ]),
       onEscape: dismiss,
     });
   };

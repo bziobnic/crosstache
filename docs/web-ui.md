@@ -21,8 +21,8 @@ detach first, or keep the current name. See
 Both surfaces render a single hierarchical tree grid: folders and their
 contents live in one table, each row indented by depth, with a disclosure
 chevron on folder rows. Vaults with 50 or fewer items open fully expanded;
-larger ones start collapsed. **Expand all** / **Collapse all** sit in the
-toolbar, expansion is remembered per backend/vault/surface, and searching or
+larger ones start collapsed. **Expand all** / **Collapse all** open from the
+Filters disclosure, expansion is remembered per backend/vault/surface, and searching or
 filtering temporarily reveals matches inside collapsed folders without
 changing what you had open. Each surface keeps its own columns (secrets show
 folder, groups, note and updated; files show size, type and modified), and

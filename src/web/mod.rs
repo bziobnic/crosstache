@@ -1120,6 +1120,18 @@ mod tests {
         assert!(STYLE_CSS.contains(".tree-disclosure {"));
     }
 
+    fn css_rule<'a>(css: &'a str, selector: &str) -> &'a str {
+        let selector_start = css
+            .find(&format!("{selector} {{"))
+            .unwrap_or_else(|| panic!("missing {selector} rule"));
+        let declarations_start = selector_start + selector.len() + 2;
+        let declarations_end = css[declarations_start..]
+            .find('}')
+            .map(|offset| declarations_start + offset)
+            .expect("CSS rule is closed");
+        &css[declarations_start..declarations_end]
+    }
+
     #[test]
     fn ui_has_structured_drawer_and_button_hierarchy() {
         for marker in [
@@ -1141,8 +1153,10 @@ mod tests {
         assert!(!APP_JS.contains("label.append(input, protection, row)"));
         assert!(APP_JS
             .contains("$('#drawer-kicker').textContent = name ? 'Edit secret' : 'Create secret'"));
-        assert!(STYLE_CSS.contains(".drawer-footer {"));
-        assert!(STYLE_CSS.contains("position:sticky"));
+        let drawer_footer = css_rule(STYLE_CSS, ".drawer-footer");
+        assert!(drawer_footer.contains("position:relative"));
+        assert!(drawer_footer.contains("bottom:auto"));
+        assert!(drawer_footer.contains("display:flex"));
         assert!(!STYLE_CSS.contains("#drawer label {"));
         assert!(!STYLE_CSS.contains("#drawer input, #drawer textarea {"));
         assert!(STYLE_CSS.contains(".form-field { display:block;"));
