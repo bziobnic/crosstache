@@ -39,6 +39,19 @@ test('tabs use roving focus and activate with arrows and boundaries', async ({ p
   await expect(secrets).toBeFocused();
   await expect(secrets).toHaveAttribute('aria-selected', 'true');
   await expect(page.locator('#vault-tabs [role="tab"][tabindex="0"]')).toHaveCount(1);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await secrets.focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(files).toBeFocused();
+  await expect(files).toHaveAttribute('aria-selected', 'true');
+  await expect(page.locator('#vault-tabs [role="tab"][aria-selected="true"]')).toHaveCount(1);
+  await expect(page.locator('#vault-tabs [role="tab"][tabindex="0"]')).toHaveCount(1);
+  await page.keyboard.press('ArrowLeft');
+  await expect(secrets).toBeFocused();
+  await expect(secrets).toHaveAttribute('aria-selected', 'true');
+  await expect(page.locator('#vault-tabs [role="tab"][aria-selected="true"]')).toHaveCount(1);
+  await expect(page.locator('#vault-tabs [role="tab"][tabindex="0"]')).toHaveCount(1);
 });
 
 test('quick access sorts authoritative secret rows by newest update', async ({ page, baseURL }) => {

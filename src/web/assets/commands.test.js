@@ -179,6 +179,8 @@ test('command registry exposes required shortcuts and explicit result surface an
       ['search-local', '/'],
       ['new-secret', 'mod+n'],
       ['dismiss-topmost', 'escape'],
+      ['open-settings', undefined],
+      ['open-help', undefined],
     ],
   );
   assert.equal(registry.search('', {

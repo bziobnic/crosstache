@@ -29,7 +29,8 @@ test('context rail repeats scope and guards a dirty workspace switch', async ({ 
 
   await page.locator('#new-secret').click();
   await expect(page.locator('#drawer-context')).toHaveText(/local \/ playwright/);
-  await expect(page.locator('#context-rail')).toHaveAttribute('inert', '');
+  await expect(page.locator('.context-rail-top')).toHaveAttribute('inert', '');
+  await expect(page.locator('#vault-tabs')).toHaveAttribute('inert', '');
   await page.locator('#secret-form input[name="name"]').fill('preserved-draft');
 
   await page.locator('#workspace-select').selectOption('sandbox');
@@ -71,6 +72,28 @@ test('Commands, Help, and Settings are real keyboard-accessible surfaces', async
   await expectNoSeriousOrCriticalAxeViolations(page);
   await page.keyboard.press('Escape');
   await expect(page.locator('#settings-open')).toBeFocused();
+});
+
+test('Commands opens Settings and Help when narrow navigation hides application controls', async ({ page, baseURL }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(baseURL);
+  await expect(page.locator('#settings-open')).toBeHidden();
+  await expect(page.locator('#help-open')).toBeHidden();
+
+  await page.locator('#top-command-open').click();
+  const commands = page.getByRole('dialog', { name: 'Commands' });
+  const query = commands.getByRole('combobox', { name: 'Search commands and vault metadata' });
+  await query.fill('Open Settings');
+  await commands.getByRole('option', { name: /^Open Settings/ }).click();
+  await expect(page.getByRole('dialog', { name: 'Settings' })).toBeVisible();
+  await page.keyboard.press('Escape');
+
+  await page.locator('#top-command-open').click();
+  await query.fill('Open Help');
+  await commands.getByRole('option', { name: /^Open Help/ }).click();
+  await expect(page.getByRole('dialog', { name: 'Help' })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expectNoSeriousOrCriticalAxeViolations(page);
 });
 
 test('missing-token recovery keeps the brand but hides context controls', async ({ page, baseURL }) => {

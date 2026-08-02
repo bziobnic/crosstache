@@ -30,6 +30,18 @@ const DEFAULT_COMMANDS = Object.freeze([
     shortcut: 'escape',
     surface: 'current',
   }),
+  Object.freeze({
+    id: 'open-settings',
+    label: 'Open Settings',
+    surface: 'application',
+    target: 'settings-open',
+  }),
+  Object.freeze({
+    id: 'open-help',
+    label: 'Open Help',
+    surface: 'application',
+    target: 'help-open',
+  }),
 ]);
 
 function isEditableTarget(target) {
@@ -130,7 +142,7 @@ export function createCommandRegistry() {
     const scope = metadata.scope.backend ? metadata.scope : normalizedScope(context);
     const contextGeneration = metadata.contextGeneration || String(context?.version || '');
     const result = (values) => {
-      const target = Object.freeze({
+      const scopeTarget = Object.freeze({
         alias: values.scope.alias,
         backend: values.scope.backend,
         vault: values.scope.vault,
@@ -140,7 +152,7 @@ export function createCommandRegistry() {
       return Object.freeze({
         ...values,
         scope: values.scope,
-        target,
+        target: values.kind === 'command' ? values.target : scopeTarget,
         sourceScope: normalizedScope(context),
         operationGeneration,
         contextGeneration,
@@ -361,6 +373,11 @@ export function mountCommandPalette({
         if (!activationStillCurrent(result)) return false;
         byId('new-secret')?.click();
         return true;
+      }
+      if (result.target) {
+        const target = byId(result.target);
+        target?.click();
+        return Boolean(target);
       }
       return result.id === 'dismiss-topmost';
     }

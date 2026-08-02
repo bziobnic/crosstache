@@ -42,6 +42,21 @@ async function tabLayout(page) {
   });
 }
 
+test('the single tab set becomes bottom navigation at the content breakpoint', async ({ page, baseURL }) => {
+  await page.setViewportSize({ width: 769, height: 700 });
+  await page.goto(baseURL);
+  const tabs = page.locator('#vault-tabs');
+  await expect(page.locator('[role="tablist"]')).toHaveCount(1);
+  await expect(tabs).toHaveCSS('position', 'static');
+  await page.setViewportSize({ width: 768, height: 700 });
+  await expect(page.locator('[role="tablist"]')).toHaveCount(1);
+  await expect(tabs).toHaveCSS('position', 'sticky');
+  await expect(tabs).toHaveCSS('bottom', '0px');
+  expect(await page.locator('#context-rail').ariaSnapshot()).toContain('complementary "Effective context"');
+  await expectNoHorizontalOverflow(page);
+  await expectNoSeriousOrCriticalAxeViolations(page);
+});
+
 async function uploadDirect(page, {
   name = longFileLeaf,
   destination = nestedFolder,
@@ -337,8 +352,14 @@ test('sheets fill the viewport below 544px', async ({ page, baseURL }) => {
   await page.locator('#new-secret').click();
   const box = await page.getByRole('dialog', { name: 'New secret' }).boundingBox();
   expect(box).toEqual(expect.objectContaining({ x: 0, y: 0, width: 390, height: 844 }));
+  await expect(page.locator('.context-rail-top')).toHaveAttribute('inert', '');
+  await expect(page.locator('#vault-tabs')).toHaveAttribute('inert', '');
   await page.getByRole('button', { name: 'Cancel' }).click();
-  await page.locator('#settings-open').click();
+  await expect(page.locator('.context-rail-top')).not.toHaveAttribute('inert', '');
+  await expect(page.locator('#vault-tabs')).not.toHaveAttribute('inert', '');
+  await page.locator('#top-command-open').click();
+  await page.getByRole('combobox', { name: 'Search commands and vault metadata' }).fill('Open Settings');
+  await page.getByRole('option', { name: /^Open Settings/ }).click();
   const settingsBox = await page.getByRole('dialog', { name: 'Settings' }).boundingBox();
   expect(settingsBox?.width).toBe(390);
 });
