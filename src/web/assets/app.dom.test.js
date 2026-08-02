@@ -20,16 +20,82 @@ test('the command-center shell owns one tab set inside the context rail', () => 
   assert.match(html, /class="context-rail-footer"/);
 });
 
-test('each content view has one heading action and one dominant search control', () => {
-  const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
-  const secrets = html.slice(html.indexOf('<section id="secrets-view"'), html.indexOf('<section id="files-view"'));
-  const files = html.slice(html.indexOf('<section id="files-view"'), html.indexOf('<section id="trash-view"'));
-  const trash = html.slice(html.indexOf('<section id="trash-view"'), html.indexOf('</main>'));
-  assert.match(secrets, /class="view-heading"[\s\S]*id="new-secret"/);
-  assert.match(files, /class="view-heading"[\s\S]*id="browse-files-header"/);
-  assert.doesNotMatch(trash.match(/class="view-heading"[\s\S]*?<\/div>/)?.[0] || '', /button/);
-  assert.equal((secrets.match(/class="search-field"/g) || []).length, 1);
-  assert.equal((files.match(/class="search-field"/g) || []).length, 1);
+const VOID_ELEMENTS = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'source', 'track', 'wbr']);
+
+function parseStaticHtml(html) {
+  const root = { tag: '#document', attributes: new Map(), children: [] };
+  const stack = [root];
+  for (const token of html.match(/<\/?[^>]+>/g) || []) {
+    if (token.startsWith('</')) {
+      const name = token.slice(2, -1).trim().toLowerCase();
+      const index = stack.map((node) => node.tag).lastIndexOf(name);
+      if (index > 0) stack.length = index;
+      continue;
+    }
+    if (token.startsWith('<!')) continue;
+    const match = /^<\s*([\w-]+)([\s\S]*?)\/?\s*>$/.exec(token);
+    if (!match) continue;
+    const [, tag, source] = match;
+    const attributes = new Map();
+    for (const attribute of source.matchAll(/([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g)) {
+      attributes.set(attribute[1], attribute[2] ?? attribute[3] ?? attribute[4] ?? '');
+    }
+    const node = { tag: tag.toLowerCase(), attributes, children: [] };
+    stack.at(-1).children.push(node);
+    if (!VOID_ELEMENTS.has(node.tag) && !token.endsWith('/>')) stack.push(node);
+  }
+  return root;
+}
+
+function findAll(root, predicate) {
+  const matches = [];
+  for (const child of root.children) {
+    if (predicate(child)) matches.push(child);
+    matches.push(...findAll(child, predicate));
+  }
+  return matches;
+}
+
+function byId(root, id) {
+  return findAll(root, (node) => node.attributes.get('id') === id)[0] || null;
+}
+
+function hasClass(node, name) {
+  return (node.attributes.get('class') || '').split(/\s+/).includes(name);
+}
+
+function assertHeadingContract(view, { action, count, search }) {
+  const headings = view.children.filter((node) => hasClass(node, 'view-heading'));
+  assert.equal(headings.length, 1, `${view.attributes.get('id')} has one direct view heading`);
+  const heading = headings[0];
+  assert.equal(findAll(heading, (node) => node.attributes.get('id') === count).length, 1,
+    `${count} stays in the view heading`);
+  if (action) {
+    assert.equal(findAll(view, (node) => node.attributes.get('id') === action).length, 1,
+      `${action} appears once in its view`);
+    assert.equal(findAll(heading, (node) => node.attributes.get('id') === action).length, 1,
+      `${action} stays in the view heading`);
+  } else {
+    assert.equal(findAll(heading, (node) => node.tag === 'button').length, 0,
+      'Trash does not offer a heading action');
+  }
+  if (!search) return;
+  const fields = findAll(view, (node) => hasClass(node, 'search-field'));
+  assert.equal(fields.length, 1, `${view.attributes.get('id')} has one dominant search field`);
+  assert.equal(findAll(fields[0], (node) => (
+    node.tag === 'input' && node.attributes.get('id') === search && node.attributes.get('type') === 'search'
+  )).length, 1, `${search} is the dominant search control`);
+}
+
+test('content views keep heading actions, counts, and dominant searches in their semantic owners', () => {
+  const document = parseStaticHtml(fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8'));
+  const secrets = byId(document, 'secrets-view');
+  const files = byId(document, 'files-view');
+  const trash = byId(document, 'trash-view');
+  assert.ok(secrets && files && trash, 'content views are present');
+  assertHeadingContract(secrets, { action: 'new-secret', count: 'secret-item-count', search: 'search' });
+  assertHeadingContract(files, { action: 'browse-files-header', count: 'file-item-count', search: 'file-search' });
+  assertHeadingContract(trash, { count: 'trash-item-count' });
 });
 
 function loadProtectedRenderer() {
