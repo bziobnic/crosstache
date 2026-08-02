@@ -40,11 +40,16 @@ test -p xv-desktop` (24/24). The browser and visual tests mount a freshly built
 `xv ui` binary with a temporary Local vault. The desktop startup and crate
 tests are native-shell coverage; no packaged visual-rendering result is claimed.
 
-## Finalization status
+## Historical finalization status (superseded by Task 6)
 
-The matrix has fifteen populated evidence rows and the 29-task modernization
-backlog is complete. After the test-harness compatibility corrections in
-`c2bcc00`, `971cf67`, and `04a8cf8`, the exact host
+This historical finalization record predates the Task 6 refresh above. Its
+eight-snapshot and 106-test counts are retained as contemporaneous evidence,
+not as the current final gate. The current results are ten inspected snapshots
+and 120 passed Playwright tests with 6 project-gated skips.
+
+At that historical point, the matrix had fourteen populated evidence rows and
+the 29-task modernization backlog was complete. After the test-harness
+compatibility corrections in `c2bcc00`, `971cf67`, and `04a8cf8`, the exact host
 `cargo test --all-features` gate exited 0: library and binary targets each
 reported 1240 passed/1 ignored, AWS mocks passed 32/32, clipboard passed 9/9,
 workspace tests passed 91/91, gen bounds passed 2/2 with one live test ignored,
@@ -59,10 +64,10 @@ Fresh final repository checks also passed: `cargo fmt --check`,
 
 The corrected protected-value timer passed 20/20 on the host, all eight
 refreshed visual snapshots passed and were independently inspected, and the
-fresh full Playwright gate passed 106/106 in 2.8 minutes. The exact default
+historical full Playwright gate passed 106/106 in 2.8 minutes. The exact default
 package smoke also passed after building and launching the unsigned isolated
-Local bundle. Invalid Azure/AWS recovery has fresh mounted/renderer automated
-coverage, but no fresh packaged invalid-cloud launch is claimed. The fresh
-106-test Playwright gate supplies the final keyboard/responsive runtime
-coverage, while the inspected eight-snapshot gate supplies the four-viewport
-light/dark evidence.
+Local bundle. Invalid Azure/AWS recovery has historical mounted/renderer
+automated coverage, but no historical packaged invalid-cloud launch is claimed.
+The historical 106-test Playwright gate supplied the then-current
+keyboard/responsive runtime coverage, while the inspected eight-snapshot gate
+supplied the four-viewport light/dark evidence.
