@@ -492,7 +492,7 @@ button:focus-visible, .tab:focus-visible, [role="button"]:focus-visible, .linkis
   body {
     display:grid;
     grid-template-columns:minmax(0, 1fr);
-    grid-template-rows:auto auto minmax(0, 1fr);
+    grid-template-rows:auto auto auto;
     min-height:100vh;
   }
   .context-rail {
@@ -510,7 +510,7 @@ button:focus-visible, .tab:focus-visible, [role="button"]:focus-visible, .linkis
   .context-rail-top .context-status,
   .context-rail-top .context-details { display:none; }
   #app-header { grid-row:2; grid-column:1; }
-  main { grid-row:3; grid-column:1; padding-bottom:calc(4rem + env(safe-area-inset-bottom)); }
+  main { grid-row:3; grid-column:1; padding-bottom:calc(5rem + env(safe-area-inset-bottom)); }
   #vault-tabs {
     position:fixed; z-index:12; right:0; bottom:0; left:0;
     display:grid; grid-template-columns:repeat(3, minmax(0, 1fr));
@@ -529,7 +529,7 @@ button:focus-visible, .tab:focus-visible, [role="button"]:focus-visible, .linkis
   .context-version { margin-top:0; }
   .app-header-inner { padding-inline:1rem; }
   .brand-name, .backend-badge { display:none; }
-  main { padding:1.5rem 1rem 2rem; }
+  main { padding:1.5rem 1rem calc(5rem + env(safe-area-inset-bottom)); }
   .view-heading { align-items:flex-start; }
   .toolbar { flex-wrap:wrap; }
   .toolbar > .search-field { min-width:min(100%, 18rem); }

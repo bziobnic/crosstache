@@ -109,6 +109,27 @@ for (const viewport of [
   { width: 768, height: 700 },
   { width: 390, height: 844 },
 ]) {
+  test(`fixed tabs do not obscure final scrollable content at ${viewport.width}px`, async ({ page, baseURL }) => {
+    await page.route('**/api/secrets?*', async (route) => route.fulfill({ json: [
+      ...Array.from({ length: 24 }, (_, index) => ({ name: `scroll-item-${String(index).padStart(2, '0')}` })),
+      { name: 'zz-scroll-marker' },
+    ] }));
+    await page.setViewportSize(viewport);
+    await page.goto(baseURL);
+
+    const marker = page.locator('#secret-list-summary');
+    await expect(page.getByRole('button', { name: 'Edit secret zz-scroll-marker' })).toBeVisible();
+    await page.evaluate(() => window.scrollTo(0, Number.MAX_SAFE_INTEGER));
+    await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+    const [markerBox, tabsBox] = await Promise.all([marker.boundingBox(), page.locator('#vault-tabs').boundingBox()]);
+    expect(markerBox).not.toBeNull();
+    expect(tabsBox).not.toBeNull();
+    expect(await page.locator('main').evaluate((main) => Number.parseFloat(getComputedStyle(main).paddingBottom)))
+      .toBeGreaterThanOrEqual(tabsBox.height);
+    expect(markerBox.y + markerBox.height).toBeLessThanOrEqual(tabsBox.y);
+    await expectNoHorizontalOverflow(page);
+  });
+
   test(`stacked rows preserve full identifiers without overflow at ${viewport.width}px`, async ({ page, baseURL }) => {
     await page.setViewportSize(viewport);
     await page.goto(baseURL);
