@@ -304,6 +304,33 @@ function routedContext(alias, vault) {
   };
 }
 
+test('navigation counts use authoritative loaded lists', async () => {
+  const context = {
+    ...routedContext('primary', 'one'),
+    capabilities: { ...routedContext('primary', 'one').capabilities, files: true },
+  };
+  const ui = await mountRouteUi({
+    withContextRail: true,
+    apiImpl: async (method, requestPath) => {
+      if (method === 'GET' && requestPath === '/api/context') return context;
+      if (requestPath === '/api/types') return { types: [] };
+      if (requestPath === '/api/vaults') return { vaults: [{ name: 'one' }] };
+      if (requestPath.startsWith('/api/secrets?')) return [
+        { name: 'older', updated_on: '2026-01-01T00:00:00Z' },
+        { name: 'newer', updated_on: '2026-07-31T00:00:00Z' },
+      ];
+      if (requestPath.startsWith('/api/files?')) return [{ name: 'notes.txt', size: 4 }];
+      return [];
+    },
+  });
+  try {
+    assert.equal(ui.elements.get('#tab-secret-count').textContent, '2');
+    assert.equal(ui.elements.get('#tab-file-count').textContent, '1');
+  } finally {
+    ui.restore();
+  }
+});
+
 async function settleUntil(predicate) {
   for (let attempt = 0; attempt < 20 && !predicate(); attempt++) {
     await new Promise((resolve) => setTimeout(resolve, 0));

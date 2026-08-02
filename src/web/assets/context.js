@@ -36,6 +36,15 @@ function named(value) {
   return value?.name || '';
 }
 
+export function contextSummary(context) {
+  return Object.freeze({
+    workspace: context?.workspace?.alias || 'Default',
+    destination: named(context?.project) || named(context?.vault) || 'No vault',
+    backend: named(context?.backend) || 'Unknown backend',
+    connection: context?.connection?.state || 'unknown',
+  });
+}
+
 function titleCase(value) {
   return String(value || '')
     .split(/[-_]/)
@@ -170,8 +179,14 @@ export function mountContextRail({
     const context = snapshot.context;
     if (!context) return;
     const details = contextDetails(context);
+    const summary = contextSummary(context);
     const line = formatContextLine(context);
     if (byId('context-line')) byId('context-line').textContent = line;
+    if (byId('context-workspace-name')) byId('context-workspace-name').textContent = summary.workspace;
+    if (byId('context-destination')) byId('context-destination').textContent = summary.destination;
+    if (byId('top-context-workspace')) byId('top-context-workspace').textContent = summary.workspace;
+    if (byId('top-context-destination')) byId('top-context-destination').textContent = summary.destination;
+    if (byId('top-context-backend')) byId('top-context-backend').textContent = summary.backend;
     if (byId('context-backend-kind')) byId('context-backend-kind').textContent = titleCase(named(context.backend_kind));
     if (byId('context-connection')) {
       byId('context-connection').textContent = details.connection;

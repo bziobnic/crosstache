@@ -18,7 +18,9 @@
     </div>
     <section class="context-primary" aria-labelledby="context-heading">
       <span id="context-heading" class="context-kicker">Effective context</span>
-      <strong id="context-line"></strong>
+      <strong id="context-workspace-name"></strong>
+      <span id="context-destination"></span>
+      <span id="context-line" class="sr-only"></span>
       <span id="context-backend-kind" class="context-kind"></span>
     </section>
     <div id="vault-context" class="vault-context">
@@ -45,6 +47,10 @@
     <button id="tab-files" class="tab" type="button" role="tab" aria-selected="false" aria-controls="files-view" tabindex="-1">Files <span id="tab-file-count" class="rail-count"></span></button>
     <button id="tab-trash" class="tab" type="button" role="tab" aria-selected="false" aria-controls="trash-view" tabindex="-1">Trash <span id="tab-trash-count" class="rail-count"></span></button>
   </nav>
+  <nav class="quick-access context-actions" aria-label="Quick access">
+    <span class="context-kicker">Quick access</span>
+    <button id="quick-recent" type="button">Recent secrets</button>
+  </nav>
   <div class="context-rail-footer">
     <nav class="context-actions" aria-label="Application">
       <button id="commands-open" type="button">Commands <kbd>⌘K</kbd></button>
@@ -56,7 +62,12 @@
 </aside>
 <header id="app-header" class="app-header" data-context-scoped>
   <div class="app-header-inner">
-    <span id="top-context-line" class="top-context-line" data-context-copy></span>
+    <div class="top-context-line" role="group" aria-label="Effective context">
+      <span id="top-context-workspace"></span>
+      <span aria-hidden="true">›</span>
+      <strong id="top-context-destination"></strong>
+      <span id="top-context-backend" class="backend-badge"></span>
+    </div>
     <button id="top-command-open" class="command-trigger" type="button" aria-label="Open Commands">Search or run a command <kbd>⌘K</kbd></button>
   </div>
 </header>
@@ -76,17 +87,21 @@
       <div>
         <span class="eyebrow">Current vault</span>
         <h1>Secrets</h1>
+        <p class="view-description">Browse and manage the secrets available in this vault.</p>
       </div>
-      <span id="secret-item-count" class="item-count" aria-live="polite">0 secrets</span>
+      <div>
+        <button id="new-secret" class="button primary" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-plus"></use></svg>New secret</button>
+        <span id="secret-item-count" class="item-count" aria-live="polite">0 secrets</span>
+      </div>
     </div>
     <div class="toolbar">
       <label class="search-field"><span class="sr-only">Search secrets</span><svg class="icon" aria-hidden="true"><use href="#icon-search"></use></svg><input id="search" type="search" placeholder="Search names, folders, groups, and record types"></label>
       <button id="secret-search-clear" class="button ghost compact search-clear" type="button" hidden>Clear search</button>
+      <button class="button secondary compact" type="button" disabled aria-disabled="true">Filters</button>
+      <button id="select-secrets" class="button secondary" type="button">Select</button>
+      <button id="refresh-secrets" class="button secondary compact" type="button" aria-label="Refresh secrets">Refresh</button>
       <button id="secrets-expand-all" class="button ghost compact" type="button">Expand all</button>
       <button id="secrets-collapse-all" class="button ghost compact" type="button">Collapse all</button>
-      <button id="refresh-secrets" class="button secondary" type="button" aria-label="Refresh secrets">Refresh</button>
-      <button id="select-secrets" class="button secondary" type="button">Select</button>
-      <button id="new-secret" class="button primary" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-plus"></use></svg>New secret</button>
     </div>
     <div id="secret-filter-controls" class="filter-controls" role="group" aria-label="Secret filters">
       <label>Group<select id="secret-filter-group"><option value="">All groups</option></select></label>
@@ -135,16 +150,21 @@
       <div>
         <span class="eyebrow">Current vault</span>
         <h1>Files</h1>
+        <p class="view-description">Upload, organize, and retrieve encrypted files from this vault.</p>
       </div>
-      <span id="file-item-count" class="item-count" aria-live="polite">0 files</span>
+      <div>
+        <button id="browse-files-header" class="button primary" type="button">Upload files</button>
+        <span id="file-item-count" class="item-count" aria-live="polite">0 files</span>
+      </div>
     </div>
     <div class="toolbar file-toolbar">
       <label class="search-field"><span class="sr-only">Search files</span><svg class="icon" aria-hidden="true"><use href="#icon-search"></use></svg><input id="file-search" type="search" placeholder="Search file names, folders, and types"></label>
       <button id="file-search-clear" class="button ghost compact search-clear" type="button" hidden>Clear search</button>
+      <button class="button secondary compact" type="button" disabled aria-disabled="true">Filters</button>
+      <button id="select-files" class="button secondary" type="button">Select</button>
+      <button id="refresh-files" class="button secondary compact" type="button" aria-label="Refresh files">Refresh</button>
       <button id="files-expand-all" class="button ghost compact" type="button">Expand all</button>
       <button id="files-collapse-all" class="button ghost compact" type="button">Collapse all</button>
-      <button id="refresh-files" class="button secondary" type="button" aria-label="Refresh files">Refresh</button>
-      <button id="select-files" class="button secondary" type="button">Select</button>
     </div>
     <div id="file-filter-controls" class="filter-controls" role="group" aria-label="File filters">
       <label>Type<select id="file-filter-type"><option value="">All file types</option></select></label>
@@ -222,6 +242,7 @@
       <div>
         <span class="eyebrow">Recoverable deletion</span>
         <h1>Trash</h1>
+        <p class="view-description">Restore recoverable secrets or permanently purge them when ready.</p>
       </div>
       <span id="trash-item-count" class="item-count" aria-live="polite">0 deleted secrets</span>
     </div>

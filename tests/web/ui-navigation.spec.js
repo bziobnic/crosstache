@@ -13,17 +13,24 @@ async function createSecret(page, name) {
 }
 
 test('tabs use roving focus and activate with arrows and boundaries', async ({ page, baseURL }) => {
+  await page.setViewportSize({ width: 900, height: 760 });
   await page.goto(baseURL);
   const secrets = page.getByRole('tab', { name: 'Secrets' });
   const files = page.getByRole('tab', { name: 'Files' });
   const trash = page.getByRole('tab', { name: 'Trash' });
 
   await secrets.focus();
-  await page.keyboard.press('ArrowRight');
+  await page.keyboard.press('ArrowDown');
   await expect(files).toBeFocused();
   await expect(files).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByRole('tabpanel', { name: 'Files' })).toBeVisible();
   await expect(page.getByRole('tabpanel', { name: 'Secrets' })).toBeHidden();
+
+  await page.keyboard.press('ArrowUp');
+  await expect(secrets).toBeFocused();
+  await expect(secrets).toHaveAttribute('aria-selected', 'true');
+  await page.keyboard.press('ArrowDown');
+  await expect(files).toBeFocused();
 
   await page.keyboard.press('End');
   await expect(trash).toBeFocused();
@@ -32,6 +39,17 @@ test('tabs use roving focus and activate with arrows and boundaries', async ({ p
   await expect(secrets).toBeFocused();
   await expect(secrets).toHaveAttribute('aria-selected', 'true');
   await expect(page.locator('#vault-tabs [role="tab"][tabindex="0"]')).toHaveCount(1);
+});
+
+test('quick access sorts authoritative secret rows by newest update', async ({ page, baseURL }) => {
+  await page.route('**/api/secrets?*', async (route) => route.fulfill({ json: [
+    { name: 'alpha', updated_on: '2026-01-01T00:00:00Z' },
+    { name: 'zulu', updated_on: '2026-07-31T00:00:00Z' },
+  ] }));
+  await page.goto(baseURL);
+  await page.locator('#quick-recent').click();
+  await expect(page.locator('#secrets-table tbody tr.tree-row-item .item-name-content strong'))
+    .toHaveText(['zulu', 'alpha']);
 });
 
 test('desktop selection has one checkbox per row and a visible-scope mixed header', async ({ page, baseURL }) => {

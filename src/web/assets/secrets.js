@@ -133,6 +133,15 @@ function setListSummary(kind, visibleCount, totalCount, folderCount) {
   const folders = `${folderCount} ${folderCount === 1 ? 'folder' : 'folders'}`;
   const safety = kind === 'secrets' ? 'Values remain hidden until revealed.' : 'Files remain encrypted in this vault.';
   $(`#${singular}-list-summary`).textContent = `${visibility} across ${folders}. ${safety}`;
+  setNavigationCount(kind, totalCount);
+}
+
+function setNavigationCount(kind, count, state = 'ready') {
+  const ids = { secrets: '#tab-secret-count', files: '#tab-file-count', trash: '#tab-trash-count' };
+  const target = $(ids[kind]);
+  if (!target) return;
+  target.textContent = state === 'ready' ? String(count) : '';
+  target.dataset.state = state;
 }
 
 function setListLoadStatus(kind, state) {
@@ -150,6 +159,7 @@ function setListLoadStatus(kind, state) {
   const [count, summary] = copy[kind][state];
   $(`#${singular}-item-count`).textContent = count;
   $(`#${singular}-list-summary`).textContent = summary;
+  setNavigationCount(kind, 0, state);
 }
 
 function toast(msg) {
@@ -833,10 +843,17 @@ function syncSortHeaders(kind) {
     header.querySelector('.sort-indicator').textContent = active ? (state.direction === 'asc' ? '▲' : '▼') : '';
   }
 }
-function setSort(kind, key) {
+function setSort(kind, key, direction = null) {
   const state = tableSort[kind];
-  if (state.key === key) state.direction = state.direction === 'asc' ? 'desc' : 'asc';
-  else { state.key = key; state.direction = 'asc'; }
+  if (direction === 'asc' || direction === 'desc') {
+    state.key = key;
+    state.direction = direction;
+  } else if (state.key === key) {
+    state.direction = state.direction === 'asc' ? 'desc' : 'asc';
+  } else {
+    state.key = key;
+    state.direction = 'asc';
+  }
   syncSortHeaders(kind);
   renderSelectionKind(kind);
 }
@@ -1826,6 +1843,7 @@ function clearUnavailableFilesState() {
   treeFocus.files = '';
   $('#file-item-count').textContent = 'Files unavailable';
   $('#file-list-summary').textContent = 'File storage is unavailable in this context.';
+  setNavigationCount('files', 0, 'unavailable');
   uploadManager?.updateDestinations();
 }
 
@@ -1839,6 +1857,7 @@ function clearUnavailableTrashState() {
   $('#trash-table tbody').replaceChildren();
   $('#trash-item-count').textContent = 'Trash unavailable';
   $('#trash-list-summary').textContent = 'Trash is unavailable in this context.';
+  setNavigationCount('trash', 0, 'unavailable');
 }
 
 function applyContextCapabilities() {
@@ -2339,6 +2358,7 @@ async function loadDeleted(vault, scope = captureOperationScope()) {
   trashState = 'loading';
   deletedSecrets = [];
   $('#trash-item-count').textContent = 'Loading Trash…';
+  setNavigationCount('trash', 0, 'loading');
   showTrashPlaceholder('Loading Trash…', 'Loading recoverable secrets from the current vault…');
   try {
     const loaded = await api('GET', `/api/secrets/deleted${vaultQS(vault, scope)}`);
@@ -2347,6 +2367,7 @@ async function loadDeleted(vault, scope = captureOperationScope()) {
   } catch (error) {
     if (generation !== trashLoadGeneration || isAborted(error)) return false;
     trashState = 'failed';
+    setNavigationCount('trash', 0, 'failed');
     showTrashPlaceholder('Couldn’t load Trash', 'The current vault Trash could not be read.');
     showError('#trash-error', error, () => loadDeleted(currentVault));
     return false;
@@ -2365,6 +2386,7 @@ function renderTrash() {
     (a.original_name || a.name).localeCompare(b.original_name || b.name)
   ));
   $('#trash-item-count').textContent = `${sorted.length} deleted ${sorted.length === 1 ? 'secret' : 'secrets'}`;
+  setNavigationCount('trash', sorted.length);
   $('#trash-list-summary').textContent = sorted.length
     ? `${sorted.length} recoverable ${sorted.length === 1 ? 'secret' : 'secrets'}. Purge is permanent.`
     : 'Trash is empty.';
@@ -3348,6 +3370,10 @@ $('#delete').onclick = async () => {
 $('#tab-secrets').onclick = () => switchTab('secrets');
 $('#tab-files').onclick = () => switchTab('files');
 $('#tab-trash').onclick = () => switchTab('trash');
+$('#quick-recent').onclick = () => {
+  switchTab('secrets');
+  setSort('secrets', 'updated', 'desc');
+};
 let activeTab = 'secrets';
 async function switchTab(which) {
   if (authRecoveryActive || store.snapshot().contextSwitchPending) return;
@@ -3893,6 +3919,7 @@ $('#browse-files').onclick = () => {
   if (!canStartScopedAction()) return;
   $('#file-input').click();
 };
+$('#browse-files-header').onclick = () => $('#browse-files').click();
 $('#file-input').onchange = (e) => {
   const selected = [...e.target.files];
   e.target.value = '';

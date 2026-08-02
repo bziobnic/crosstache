@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import { createStore } from './store.js';
 import {
+  contextSummary,
   contextDetails,
   contextQuery,
   formatContextLine,
@@ -49,6 +50,15 @@ const stage = Object.freeze({
   environment: { name: 'stage' },
   connection: { state: 'unavailable', message: 'The selected backend is unavailable.' },
   capabilities: { files: true, soft_delete: false, purge: false },
+});
+
+test('context summary separates workspace, destination, backend, and connection', () => {
+  assert.deepEqual(contextSummary(primary), {
+    workspace: 'work',
+    destination: 'checkout',
+    backend: 'az-prod',
+    connection: 'connected',
+  });
 });
 
 test('context line keeps backend and vault unambiguous', () => {
@@ -115,6 +125,11 @@ function fakeDocument() {
   const scoped = [new FakeElement(), new FakeElement()];
   const elements = new Map([
     ['context-line', new FakeElement()],
+    ['context-workspace-name', new FakeElement()],
+    ['context-destination', new FakeElement()],
+    ['top-context-workspace', new FakeElement()],
+    ['top-context-destination', new FakeElement()],
+    ['top-context-backend', new FakeElement()],
     ['context-backend-kind', new FakeElement()],
     ['context-connection', new FakeElement()],
     ['context-capabilities', new FakeElement()],
@@ -210,6 +225,18 @@ test('mounted switch commits context and list together after the guard', async (
   assert.deepEqual(fixture.store.snapshot().initialSecrets, [{ name: 'stage-only' }]);
   assert.equal(fixture.document.getElementById('context-line').textContent,
     'local-stage / sandbox · checkout · stage');
+});
+
+test('mounted context rail renders compact context alongside the full description', async () => {
+  const fixture = await mounted();
+
+  assert.equal(fixture.document.getElementById('context-workspace-name').textContent, 'work');
+  assert.equal(fixture.document.getElementById('context-destination').textContent, 'checkout');
+  assert.equal(fixture.document.getElementById('top-context-workspace').textContent, 'work');
+  assert.equal(fixture.document.getElementById('top-context-destination').textContent, 'checkout');
+  assert.equal(fixture.document.getElementById('top-context-backend').textContent, 'az-prod');
+  assert.equal(fixture.document.getElementById('context-line').textContent,
+    'az-prod / payments · checkout · prod');
 });
 
 test('an already guarded palette activation does not run the navigation guard twice', async () => {

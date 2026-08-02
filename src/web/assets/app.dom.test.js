@@ -20,6 +20,18 @@ test('the command-center shell owns one tab set inside the context rail', () => 
   assert.match(html, /class="context-rail-footer"/);
 });
 
+test('each content view has one heading action and one dominant search control', () => {
+  const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
+  const secrets = html.slice(html.indexOf('<section id="secrets-view"'), html.indexOf('<section id="files-view"'));
+  const files = html.slice(html.indexOf('<section id="files-view"'), html.indexOf('<section id="trash-view"'));
+  const trash = html.slice(html.indexOf('<section id="trash-view"'), html.indexOf('</main>'));
+  assert.match(secrets, /class="view-heading"[\s\S]*id="new-secret"/);
+  assert.match(files, /class="view-heading"[\s\S]*id="browse-files-header"/);
+  assert.doesNotMatch(trash.match(/class="view-heading"[\s\S]*?<\/div>/)?.[0] || '', /button/);
+  assert.equal((secrets.match(/class="search-field"/g) || []).length, 1);
+  assert.equal((files.match(/class="search-field"/g) || []).length, 1);
+});
+
 function loadProtectedRenderer() {
   const appPath = path.join(__dirname, 'secrets.js');
   const appSource = fs.readFileSync(appPath, 'utf8');

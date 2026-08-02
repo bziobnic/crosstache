@@ -19,6 +19,11 @@ test('context rail repeats scope and guards a dirty workspace switch', async ({ 
   await page.goto(baseURL);
   const scope = page.locator('#context-line');
   await expect(scope).toContainText('local / playwright');
+  await expect(page.locator('#context-workspace-name')).toHaveText('playwright');
+  await expect(page.locator('#context-destination')).toHaveText(/xv-playwright-/);
+  await expect(page.locator('#top-context-workspace')).toHaveText('playwright');
+  await expect(page.locator('#top-context-destination')).toHaveText(/xv-playwright-/);
+  await expect(page.locator('#top-context-backend')).toHaveText('local');
   await expect(page.locator('#context-rail')).toBeVisible();
   await expect(page.locator('#context-version')).not.toBeEmpty();
 
