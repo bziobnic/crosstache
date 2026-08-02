@@ -1669,12 +1669,12 @@ function fieldRow(name, kind, value, required, primary = false) {
   label.className = 'field-label';
   label.htmlFor = inputId;
   const heading = document.createElement('span');
-  heading.append(name);
+  heading.append(XvUiModel.propertyLabel(name));
   if (required || kind === 'secret') {
     const hint = document.createElement('span');
     hint.className = 'field-hint';
     hint.textContent = required ? 'Required' : 'Protected';
-    heading.appendChild(hint);
+    heading.append(' ', hint);
   }
   label.appendChild(heading);
   const input = document.createElement('input');

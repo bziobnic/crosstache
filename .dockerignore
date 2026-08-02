@@ -1,0 +1,7 @@
+# Keep the build context small & the room clean.
+target/
+.git/
+.github/
+tests/
+crosstache-wt/
+*.log

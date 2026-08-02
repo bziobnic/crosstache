@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.32.1 — Web editor field presentation (2026-08-01)
+
+### Fixed
+
+- Typed-secret property labels now begin with a capital letter and preserve a
+  readable space before the `Required` or `Protected` hint.
+- The secret Note field is now a vertically resizable multiline control, matching
+  the Value field.
+
 ## v0.32.0 — Bulk file downloads (2026-08-01)
 
 ### Added

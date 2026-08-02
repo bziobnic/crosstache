@@ -10,6 +10,10 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
   function expirationDate(value) {
     return typeof value === 'string' && value.length >= 10 ? value.slice(0, 10) : '';
   }
+  function propertyLabel(name) {
+    const value = String(name || '');
+    return value ? value[0].toUpperCase() + value.slice(1) : '';
+  }
   function typeCards(types = []) {
     return types.map((type) => {
       const fields = (type.fields || []).map((field) => ({ ...field }));
@@ -710,7 +714,7 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
     });
   }
 
-export { PROTECTED_MASK, formatDate, expirationDate, createProtectedState,
+export { PROTECTED_MASK, formatDate, expirationDate, propertyLabel, createProtectedState,
   typeCards, buildTypedDraft, groupSuggestions, conversionSummary,
   protectedDisplay, revealProtected, editProtected, hideProtected, loadProtected,
   sortedCopy, normalizeWidths, resizeAdjacentWidths, contentMode, contentRows,

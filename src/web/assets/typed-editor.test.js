@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import * as model from './ui-model.js';
 import {
   buildTypedDraft,
   conversionSummary,
@@ -16,6 +18,17 @@ const login = {
     { name: 'password', kind: 'secret', required: true, primary: true },
   ],
 };
+
+test('property labels begin with a capital letter', () => {
+  assert.equal(model.propertyLabel?.('username'), 'Username');
+  assert.equal(model.propertyLabel?.('url'), 'Url');
+  assert.equal(model.propertyLabel?.('password'), 'Password');
+});
+
+test('production markup uses the same resizable control for Note as Value', async () => {
+  const html = await readFile(new URL('./index.html', import.meta.url), 'utf8');
+  assert.match(html, /<textarea[^>]*name="note"[^>]*><\/textarea>/);
+});
 
 test('type cards expose required protected and primary fields', () => {
   const card = typeCards([login])[0];
