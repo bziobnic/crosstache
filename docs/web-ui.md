@@ -55,6 +55,15 @@ like `xv gen` or `xv find --all-vaults`, the UI uses the context/config
 default vault, not the workspace seam. Workspace-aware switching is tracked
 as a follow-up.
 
+The desktop interface uses a persistent context rail containing the native
+workspace switcher, effective context, Secrets/Files/Trash navigation, quick
+access, Commands, Settings, and Help. Search stays in the active view;
+secondary filters and Expand all/Collapse all open from Filters.
+
+At 768px and below, content changes to stacked rows, context moves to a compact
+top bar, and the same tab set becomes sticky bottom navigation. Secret editing
+becomes a full-screen sheet at phone widths.
+
 Security model: loopback bind only; per-session bearer token (the `?token=`
 in the URL, held in per-tab session storage); Host/Origin validation; secret
 values only in POST bodies; `Cache-Control: no-store`. There is no TLS and no

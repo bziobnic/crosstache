@@ -101,9 +101,9 @@ test('tab keyboard navigation skips unavailable tabs and preserves guarded draft
   await expect(page.getByRole('tab', { name: 'Trash' })).toHaveAttribute('aria-selected', 'true');
   await page.keyboard.press('Home');
   await expect(secretsTab).toBeFocused();
-  await page.keyboard.press('ArrowRight');
+  await page.keyboard.press('ArrowDown');
   await expect(page.getByRole('tab', { name: 'Files' })).toBeFocused();
-  await page.keyboard.press('ArrowLeft');
+  await page.keyboard.press('ArrowUp');
   await expect(secretsTab).toBeFocused();
 
   await page.locator('#new-secret').click();
@@ -127,7 +127,9 @@ test('workspace, file, folder, and trash results use truthful exact targets', as
     mimeType: 'text/plain',
     buffer: Buffer.from('palette file'),
   });
+  await expect(page.locator('#upload-summary')).not.toHaveAttribute('hidden', '');
   await page.getByRole('tab', { name: 'Files' }).click();
+  await page.getByRole('button', { name: 'Dismiss summary' }).click();
   await expect(page.getByRole('link', { name: 'palette-file.txt' })).toBeVisible();
 
   await page.keyboard.press(process.platform === 'darwin' ? 'Meta+K' : 'Control+K');
@@ -168,13 +170,16 @@ test('palette focus restores and narrow layouts keep one combobox focus owner', 
   await page.setViewportSize({ width: 360, height: 720 });
   await page.goto(baseURL);
   await expect(page.locator('#context-line')).toContainText('local / playwright');
-  await page.locator('#help-open').focus();
+  await expect(page.locator('#help-open')).toBeHidden();
+  const commandTrigger = page.locator('#top-command-open');
+  await expect(commandTrigger).toBeVisible();
+  await commandTrigger.focus();
   await page.keyboard.press(process.platform === 'darwin' ? 'Meta+K' : 'Control+K');
   const query = page.locator('#commands-query');
   await expect(query).toBeFocused();
   await expectNoSeriousOrCriticalAxeViolations(page);
   await page.keyboard.press('Escape');
-  await expect(page.locator('#help-open')).toBeFocused();
+  await expect(commandTrigger).toBeFocused();
   await expect(query).toHaveAttribute('aria-expanded', 'false');
   await expect(query).not.toHaveAttribute('aria-activedescendant', /.+/);
 });

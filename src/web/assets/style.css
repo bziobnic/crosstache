@@ -232,7 +232,8 @@ tbody tr.selected-row { background:var(--color-accent-quiet); }
 .row-action:hover { border-color:transparent; }
 .row-action:focus-visible { outline:2px solid var(--color-accent); outline-offset:2px; }
 .tag { display:inline-flex; padding:.15rem .45rem; border-radius:999px;
-  color:var(--color-text-muted); background:color-mix(in srgb, var(--color-text) 6%, transparent); font-size:.7rem; }
+  color:color-mix(in srgb, var(--color-text-muted) 70%, var(--color-text));
+  background:color-mix(in srgb, var(--color-text) 6%, transparent); font-size:.7rem; }
 .list-summary { display:flex; justify-content:flex-end; margin-top:.75rem; color:var(--color-text-muted); font-size:.72rem; }
 .skeleton-row td { height:2.75rem; padding:0 1rem; }
 .skeleton-content { display:grid; grid-template-columns:1.4fr .8fr .6fr; gap:1.5rem; align-items:center; }

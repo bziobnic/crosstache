@@ -145,3 +145,43 @@ for (const theme of ['light', 'dark']) {
     });
   });
 }
+
+test('light desktop secret editor', async ({ page, baseURL }, testInfo) => {
+  test.skip(testInfo.project.name !== 'visual-1180x760');
+  await page.emulateMedia({ colorScheme: 'light', reducedMotion: 'reduce' });
+  await stabilizeVisualSurface(page);
+  await page.goto(baseURL);
+  await expect(page.locator('#context-line')).toHaveText(
+    'local / playwright · visual-project · browser',
+  );
+  await seedLongNames(page);
+  await page.reload();
+  await page.getByRole('button', {
+    name: `Edit secret ${visualSecrets[0].name}`,
+  }).click();
+  await expectNoHorizontalOverflow(page);
+  await expectNoSeriousOrCriticalAxeViolations(page);
+  await expect(page).toHaveScreenshot('light-secret-editor.png', {
+    animations: 'disabled',
+  });
+});
+
+test('dark phone secret editor', async ({ page, baseURL }, testInfo) => {
+  test.skip(testInfo.project.name !== 'visual-390x844');
+  await page.emulateMedia({ colorScheme: 'dark', reducedMotion: 'reduce' });
+  await stabilizeVisualSurface(page);
+  await page.goto(baseURL);
+  await expect(page.locator('#context-line')).toHaveText(
+    'local / playwright · visual-project · browser',
+  );
+  await seedLongNames(page);
+  await page.reload();
+  await page.getByRole('button', {
+    name: `Edit secret ${visualSecrets[0].name}`,
+  }).click();
+  await expectNoHorizontalOverflow(page);
+  await expectNoSeriousOrCriticalAxeViolations(page);
+  await expect(page).toHaveScreenshot('dark-secret-editor.png', {
+    animations: 'disabled',
+  });
+});

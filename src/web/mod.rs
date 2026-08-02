@@ -1254,7 +1254,7 @@ mod tests {
 
     #[test]
     fn ui_compact_controls_keep_minimum_interaction_height() {
-        assert!(STYLE_CSS.contains(".tab { min-height:2.25rem;"));
+        assert!(STYLE_CSS.contains(".tab { width:100%; min-height:2.35rem;"));
         assert!(STYLE_CSS.contains(".button.compact { min-height:2.25rem;"));
         assert!(STYLE_CSS.contains(".linkish { min-height:2.25rem;"));
     }

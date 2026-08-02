@@ -21,10 +21,28 @@ explicitly labelled. The final automated repository and host gates pass.
 | 12 | `src/web/assets/ui-model.js`, `secrets.js`, `files.js`, `style.css`, `desktop/src-tauri/src/main.rs` (`e7479fc..21794f6`; evidence refresh `567d918`) | `ui-model.test.js: content mode changes at the approved breakpoint` was RED before `contentMode(768)` and stacked rows. | `node --test src/web/assets/*.test.js` — 179 passed; refreshed visual gate — 8/8 passed on the host. | All eight refreshed light/dark screenshots were independently inspected at 1180×760, 820×560, 768×700, and 390×844. | `tests/web/ui-responsive.spec.js` preserves full identifiers; visual gate found no serious/critical axe issue or horizontal overflow. |
 | 13 | `src/web/assets/accessibility.js`, `secrets.js`, `files.js`, `index.html`, `style.css` (`b3af71c..e763538`) | `accessibility.test.js: mountTabs activates focused tabs with arrows and Home/End` was RED before the helper. | `node --test src/web/assets/*.test.js` — 179 passed; `npx playwright test` — 93 passed. | `tests/web/ui-navigation.spec.js` exercised tab/panel/tree/Escape, selection, capability-loss cleanup, and responsive focus; the fresh aggregate Playwright gate passed. | Helpers enforce one-control rows and responsive focus mapping; historical browser run includes responsive accessibility. |
 | 14 | `src/web/assets/settings.js`, `preferences.js`, `context.js`, `style.css` (`20362f9..03483e2`) | `settings.test.js` was RED with `ERR_MODULE_NOT_FOUND`; unsafe diagnostics and timeout labels also had recorded RED regressions. | `npm run test:unit` — 194 passed; Settings/Help Playwright/axe — 4 passed; functional Playwright — 98 passed. | Production-mounted Settings/Help checks covered theme, persisted density/timeout/reset, redacted diagnostics, responsive sheet, and Close hit-testing; the fresh aggregate Playwright gate passed. | The focused 4-test browser run covered axe, focus restoration, 390px geometry, and reduced motion. |
+| 15 | `src/web/assets/style.css`, `tests/web/ui-visual.spec.js`, refreshed visual baselines (Task 6) | The new desktop editor visual case was RED before its baseline existed and surfaced a serious axe contrast failure: muted tag text was 4.31:1 after the editor backdrop dimmed its surface. | The updated visual matrix passed 10 active cases (6 project-gated skips); the complete final matrix is recorded with exact results below. | Browser/mounted evidence: each visual case launches the built `xv ui` binary against a temporary local-vault fixture. Packaged/native evidence: desktop startup smoke is a separate native-shell check; no packaged visual rendering is claimed. | Ten screenshots were independently inspected: light/dark workspaces at 1180×760, 820×560, 768×700, and 390×844 plus the intended light desktop and dark phone editor sheets. The editor title preserves the full long identifier, no page overflow or serious/critical axe violations remain, and the responsive test suite verifies final scrollable content stays above the fixed bottom tabs. |
+
+## Task 6 refreshed verification (2026-08-02)
+
+The visual RED run (`npx playwright test tests/web/ui-visual.spec.js`) failed as
+expected against the pre-refresh baselines: eight workspace baselines changed,
+the new phone-editor baseline was absent, and the new desktop editor case
+exposed the tag contrast defect before its snapshot was written. After the
+contrast correction, `npx playwright test tests/web/ui-visual.spec.js
+--update-snapshots` passed 10 active cases with 6 project-gated skips; the
+ordinary visual gate repeated that result.
+
+Fresh final checks passed: `npm run test:unit` (220/220), `npx playwright
+test` (120 passed, 6 project-gated skips), `cargo test --features ui web::
+--lib` (186/186), `node tests/desktop/startup-smoke.js` (13/13), and `cargo
+test -p xv-desktop` (24/24). The browser and visual tests mount a freshly built
+`xv ui` binary with a temporary Local vault. The desktop startup and crate
+tests are native-shell coverage; no packaged visual-rendering result is claimed.
 
 ## Finalization status
 
-The matrix has fourteen populated evidence rows and the 29-task modernization
+The matrix has fifteen populated evidence rows and the 29-task modernization
 backlog is complete. After the test-harness compatibility corrections in
 `c2bcc00`, `971cf67`, and `04a8cf8`, the exact host
 `cargo test --all-features` gate exited 0: library and binary targets each

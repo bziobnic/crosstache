@@ -142,7 +142,12 @@ test('utility sheets become full-screen at 390px and disable motion when request
   await page.setViewportSize({ width: 390, height: 844 });
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await page.goto(baseURL);
-  await page.locator('#help-open').click();
+  await expect(page.locator('#help-open')).toBeHidden();
+  await page.locator('#top-command-open').click();
+  const commands = page.getByRole('dialog', { name: 'Commands' });
+  const query = commands.getByRole('combobox', { name: 'Search commands and vault metadata' });
+  await query.fill('Open Help');
+  await commands.getByRole('option', { name: /^Open Help/ }).click();
   const sheet = page.getByRole('dialog', { name: 'Help' });
   await expect(sheet.getByRole('button', { name: 'Close Help' })).toBeFocused();
   expect(await sheet.locator('.utility-sheet-body').evaluate((body) => body.scrollTop)).toBe(0);
