@@ -64,12 +64,18 @@ Not every Keeper record is a login, and none of these are dropped silently:
 | `password`, no `login`       | plain secret; the password is the value             |
 | `notes` only (a secure note) | plain secret; the notes are the value, with a warning |
 | neither                      | refused, and reported as a failure                  |
+| a `$oneTimeCode`, but not both `login` and `password` | refused, and reported as a failure |
 
 A record with no `login` cannot become a typed `login` record, because that
-type requires a username. It degrades to a plain secret instead — and if it
-also carries a `$oneTimeCode`, it is refused rather than written, since a plain
-secret has one value slot (already holding the password) and the seed would
-otherwise have to go into a plaintext tag.
+type requires a username. It degrades to a plain secret instead.
+
+A `$oneTimeCode` is the exception to that degrading. A TOTP seed can only be
+kept as encrypted secret material, and the only shape with room for it is a
+typed `login` record — which needs *both* a `login` and a `password`. Every
+other shape is a plain secret whose single value slot is already taken, so the
+seed could only go into a plaintext tag. Rather than downgrade a second
+authentication factor or drop it quietly, such a record is refused with its
+reason. Add the missing field in Keeper, or import that record separately.
 
 ## What does not carry over
 

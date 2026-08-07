@@ -23,6 +23,12 @@
 //! `username` field, so they degrade to a plain (untyped) secret rather than
 //! being dropped — see [`plan_import`].
 //!
+//! The one exception is a `$oneTimeCode`: a TOTP seed can only live in a
+//! record envelope, which requires the typed shape (both a `login` and a
+//! `password`). A record carrying a seed in any other shape is refused, since
+//! the alternatives are dropping a second authentication factor or writing it
+//! into a listable tag.
+//!
 //! # Deliberate gaps
 //!
 //! Keeper's `shared_folders` carry per-user and per-team permissions
@@ -278,6 +284,25 @@ fn plan_record(
     let password = record.password.as_ref().and_then(|s| non_empty(s));
     let username = record.login.as_ref().and_then(|s| non_empty(s));
 
+    // A TOTP seed can only be stored as secret material, and the only shape
+    // with room for it is a typed `login` record — which needs BOTH a password
+    // (the primary field) and a username (required by the type). Any other
+    // shape is a plain secret whose single value slot is already spoken for,
+    // so the seed could only land in a plaintext tag.
+    //
+    // This guard covers every such shape at once, deliberately: it previously
+    // lived inside the password-without-login arm alone, which let a
+    // password-less secure note carrying a `$oneTimeCode` through and dropped
+    // the seed silently.
+    if one_time_code.is_some() && !(password.is_some() && username.is_some()) {
+        return Err(format!(
+            "has a {KEEPER_ONE_TIME_CODE} TOTP seed, but without both a 'login' and a \
+             'password' it cannot be stored as a typed '{LOGIN_TYPE}' record, and a plain \
+             secret has nowhere to keep the seed except a plaintext tag; add the missing \
+             field in Keeper, or import this record separately"
+        ));
+    }
+
     let (content_type, value, field_tags) = match (&password, &username) {
         // Full login record: typed, with the password in the envelope.
         (Some(password), Some(username)) => {
@@ -322,16 +347,7 @@ fn plan_record(
             if let Some(url) = record.login_url.as_ref().and_then(|s| non_empty(s)) {
                 extra.insert("url".to_string(), url);
             }
-            if one_time_code.is_some() {
-                // Nowhere safe to put a TOTP seed on an untyped secret: a
-                // plain secret has one value slot, already used by the
-                // password. Refuse rather than write the seed to a tag.
-                return Err(format!(
-                    "has a {KEEPER_ONE_TIME_CODE} TOTP seed but no 'login', so it cannot be \
-                     stored as a typed '{LOGIN_TYPE}' record; add a login to the record, or \
-                     import it separately"
-                ));
-            }
+            // A `$oneTimeCode` here was already refused by the guard above.
             let reserved = predicted_reserved_tag_count(
                 backend_kind,
                 false,
@@ -943,6 +959,87 @@ mod tests {
         assert_eq!(plan.rejected.len(), 1);
         assert_eq!(plan.rejected[0].0, "Empty");
         assert!(plan.rejected[0].1.contains("nothing to store"));
+    }
+
+    /// Regression (PR #396 review): a password-less secure note carrying a
+    /// `$oneTimeCode` used to import successfully with the seed silently
+    /// dropped — the guard lived in the password-without-login arm only, and
+    /// this shape returns from a different arm.
+    #[test]
+    fn refuses_a_passwordless_note_carrying_a_totp_seed() {
+        let json = r#"{"records":[{"title":"Note","notes":"recovery info",
+          "custom_fields":{"$oneTimeCode":"otpauth://totp/x?secret=JBSWY3DPEHPK3PXP"}}]}"#;
+        let plan = plan_for(json, local_caps(), BackendKind::Local);
+
+        assert!(
+            plan.requests.is_empty(),
+            "must not import while dropping the seed: {:?}",
+            plan.requests
+        );
+        assert_eq!(plan.rejected.len(), 1);
+        assert!(
+            plan.rejected[0].1.contains("TOTP seed"),
+            "{:?}",
+            plan.rejected
+        );
+    }
+
+    /// The seed must not be lost to the "nothing to store" path either: with
+    /// no password and no notes, the accurate reason is the seed, not
+    /// emptiness.
+    #[test]
+    fn a_record_carrying_only_a_totp_seed_is_refused_for_the_right_reason() {
+        let json = r#"{"records":[{"title":"OnlyOtp",
+          "custom_fields":{"$oneTimeCode":"otpauth://totp/x?secret=ABC"}}]}"#;
+        let plan = plan_for(json, local_caps(), BackendKind::Local);
+
+        assert!(plan.requests.is_empty());
+        assert_eq!(plan.rejected.len(), 1);
+        assert!(
+            plan.rejected[0].1.contains("TOTP seed"),
+            "expected the seed to be named as the reason, got: {:?}",
+            plan.rejected
+        );
+    }
+
+    /// No TOTP seed involved, so a secure note still imports normally — the
+    /// guard must not over-reach.
+    #[test]
+    fn a_passwordless_note_without_a_seed_still_imports() {
+        let json = r#"{"records":[{"title":"Plain Note","notes":"just text",
+          "custom_fields":{"Category":"personal"}}]}"#;
+        let plan = plan_for(json, local_caps(), BackendKind::Local);
+        assert_eq!(plan.requests.len(), 1, "{:?}", plan.rejected);
+        assert_eq!(plan.requests[0].value.as_str(), "just text");
+    }
+
+    /// Whatever the shape, a seed is never written into a tag.
+    #[test]
+    fn no_import_shape_ever_puts_a_seed_in_a_tag() {
+        let seed = "JBSWY3DPEHPK3PXP";
+        let shapes = [
+            r#"{"title":"A","login":"u","password":"p","custom_fields":{"$oneTimeCode":"otpauth://totp/x?secret=JBSWY3DPEHPK3PXP"}}"#,
+            r#"{"title":"B","password":"p","custom_fields":{"$oneTimeCode":"otpauth://totp/x?secret=JBSWY3DPEHPK3PXP"}}"#,
+            r#"{"title":"C","notes":"n","custom_fields":{"$oneTimeCode":"otpauth://totp/x?secret=JBSWY3DPEHPK3PXP"}}"#,
+            r#"{"title":"D","custom_fields":{"$oneTimeCode":"otpauth://totp/x?secret=JBSWY3DPEHPK3PXP"}}"#,
+        ];
+        for shape in shapes {
+            let json = format!(r#"{{"records":[{shape}]}}"#);
+            let plan = plan_for(&json, local_caps(), BackendKind::Local);
+            for req in &plan.requests {
+                for (key, value) in req.tags.as_ref().unwrap() {
+                    assert!(
+                        !value.contains(seed),
+                        "seed leaked into tag '{key}' for shape {shape}"
+                    );
+                }
+                assert!(
+                    !req.value.as_str().contains(seed)
+                        || req.content_type.as_deref() == Some(RECORD_CONTENT_TYPE),
+                    "seed stored outside a record envelope for shape {shape}"
+                );
+            }
+        }
     }
 
     #[test]
