@@ -7,6 +7,7 @@
 
 pub mod conversion;
 pub mod envelope;
+pub mod keeper;
 pub mod types;
 
 // Re-exports consumed by CLI wiring added later in Phase A (Tasks 4/6/7);

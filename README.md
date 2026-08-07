@@ -2050,6 +2050,7 @@ minisign-signed binaries for all four platforms.
 - [`docs/exit-codes.md`](docs/exit-codes.md) — exit-code table and JSON error envelope
 - [`docs/env-profiles.md`](docs/env-profiles.md) — `.xv.toml` walk-up reference
 - [`docs/find.md`](docs/find.md) — `xv find` ranked search
+- [`docs/keeper.md`](docs/keeper.md) — Keeper Security JSON import/export
 - [`docs/scan.md`](docs/scan.md) — pre-commit leak scanner
 - [`docs/tui.md`](docs/tui.md) — terminal UI keymap
 - [`docs/web-ui.md`](docs/web-ui.md) — embedded web UI reference

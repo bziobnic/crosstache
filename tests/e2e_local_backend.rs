@@ -2222,3 +2222,257 @@ fn move_preserves_group_folder_and_note_metadata() {
 
     env.xv_ok(&["context", "use", "default", "--global"]);
 }
+
+// ---------------------------------------------------------------------------
+// Keeper JSON import/export
+// ---------------------------------------------------------------------------
+
+/// The Keeper import format's documented example, trimmed to the record
+/// shapes that matter here: a plain login, a nested `\`-separated folder
+/// path, a TOTP seed, a shared folder, a password-less secure note, and a
+/// record with nothing storable in it.
+const KEEPER_FIXTURE: &str = r#"{
+  "shared_folders": [
+    { "path": "My Shared Folder 1", "manage_users": true, "can_edit": true,
+      "permissions": [ { "uid": "kVM96KGEoGxhskZoSTd_jw", "manage_users": true },
+                       { "name": "myusername@company.com", "manage_users": true } ] }
+  ],
+  "records": [
+    { "title": "Dev Server 1", "login": "root", "password": "123123123",
+      "login_url": "https://myserver.com", "notes": "These are some notes.",
+      "custom_fields": { "Security Group": "Private" },
+      "folders": [ { "folder": "Private Folder 1" } ] },
+    { "title": "Google", "login": "testing", "password": "1234567890",
+      "login_url": "https://google.com",
+      "folders": [ { "folder": "My Websites\\Online" } ] },
+    { "title": "Facebook", "$type": "login", "login": "me@gmail.com",
+      "password": "123123123123", "login_url": "https://facebook.com",
+      "custom_fields": { "$oneTimeCode": "otpauth://totp/A:me@c.com?secret=JBSWY3DPEHPK3PXP" },
+      "folders": [ { "shared_folder": "My Shared Folder 1" } ] },
+    { "title": "Recovery Steps", "notes": "call the bank first" }
+  ]
+}"#;
+
+/// Writes the Keeper fixture into the env's temp dir and returns its path.
+fn write_keeper_fixture(env: &TestEnv, body: &str) -> PathBuf {
+    let path = env.config_dir.join("keeper.json");
+    std::fs::write(&path, body).expect("write keeper fixture");
+    path
+}
+
+#[test]
+fn keeper_import_maps_records_onto_typed_login_secrets() {
+    let env = TestEnv::new();
+    let fixture = write_keeper_fixture(&env, KEEPER_FIXTURE);
+
+    env.xv_ok(&[
+        "vault",
+        "import",
+        "default",
+        "--fmt",
+        "keeper",
+        "-i",
+        fixture.to_str().unwrap(),
+    ]);
+
+    // Typed `login` records, with metadata in fields and folders translated
+    // from Keeper's `\` nesting to xv's `/`.
+    let json = env.xv_ok(&["ls", "--format", "json"]);
+    assert!(json.contains("\"record_type\": \"login\""), "{json}");
+    assert!(json.contains("\"username\": \"root\""), "{json}");
+    assert!(
+        json.contains("\"folder\": \"My Websites/Online\""),
+        "Keeper's backslash nesting must become '/':\n{json}"
+    );
+    assert!(
+        json.contains("\"note\": \"These are some notes.\""),
+        "{json}"
+    );
+
+    // The password landed in the record envelope, reachable by field name.
+    let record = env.xv_ok(&["get", "Dev Server 1", "--record"]);
+    assert!(record.contains("\"password\": \"123123123\""), "{record}");
+
+    // A password-less Keeper secure note kept its notes as the value rather
+    // than being dropped.
+    assert_eq!(env.get_raw("Recovery Steps"), "call the bank first");
+}
+
+#[test]
+fn keeper_import_keeps_the_totp_seed_out_of_listable_metadata() {
+    let env = TestEnv::new();
+    let fixture = write_keeper_fixture(&env, KEEPER_FIXTURE);
+    env.xv_ok(&[
+        "vault",
+        "import",
+        "default",
+        "--fmt",
+        "keeper",
+        "-i",
+        fixture.to_str().unwrap(),
+    ]);
+
+    // A TOTP seed is a second factor: it must be encrypted secret material,
+    // never a tag that plain listing exposes.
+    let json = env.xv_ok(&["ls", "--format", "json"]);
+    assert!(
+        !json.contains("JBSWY3DPEHPK3PXP"),
+        "TOTP seed leaked into listable metadata:\n{json}"
+    );
+
+    let record = env.xv_ok(&["get", "Facebook", "--record"]);
+    assert!(
+        record.contains("JBSWY3DPEHPK3PXP"),
+        "TOTP seed must survive in the record envelope:\n{record}"
+    );
+}
+
+#[test]
+fn keeper_import_reports_unapplied_shared_folder_permissions() {
+    let env = TestEnv::new();
+    let fixture = write_keeper_fixture(&env, KEEPER_FIXTURE);
+    let output = env
+        .xv()
+        .args([
+            "vault",
+            "import",
+            "default",
+            "--fmt",
+            "keeper",
+            "-i",
+            fixture.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run xv vault import");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // xv has no per-folder ACL, so the grants Keeper carried must be called
+    // out by name rather than silently dropped.
+    assert!(combined.contains("NOT applied"), "{combined}");
+    assert!(combined.contains("myusername@company.com"), "{combined}");
+    assert!(
+        combined.contains("kVM96KGEoGxhskZoSTd_jw"),
+        "team grants must be reported too:\n{combined}"
+    );
+}
+
+#[test]
+fn keeper_import_rejects_unstorable_and_colliding_records_nonzero() {
+    let env = TestEnv::new();
+    // "Nothing Here" has no password and no notes; "A/B" and "A B" both
+    // sanitize to the same secret name, so the second must not clobber.
+    let body = r#"{"records":[
+      {"title":"Keeper Good","login":"u","password":"p"},
+      {"title":"Nothing Here"},
+      {"title":"A B","login":"u","password":"1"},
+      {"title":"A/B","login":"u","password":"2"}
+    ]}"#;
+    let fixture = write_keeper_fixture(&env, body);
+
+    let (stdout, stderr) = env.xv_fail(&[
+        "vault",
+        "import",
+        "default",
+        "--fmt",
+        "keeper",
+        "-i",
+        fixture.to_str().unwrap(),
+    ]);
+    let combined = format!("{stdout}{stderr}");
+    assert!(combined.contains("nothing to store"), "{combined}");
+    assert!(combined.contains("collides"), "{combined}");
+
+    // The importable records still landed; only the refused ones didn't.
+    assert_eq!(env.get_raw("Keeper Good"), "p");
+    assert_eq!(env.get_raw("A B"), "1");
+}
+
+#[test]
+fn keeper_export_requires_include_values() {
+    let env = TestEnv::new();
+    env.set_secret("some-secret", "v");
+
+    // A Keeper file without passwords imports as a set of empty records,
+    // which looks like a successful migration. It must be refused.
+    let (_stdout, stderr) = env.xv_fail(&["vault", "export", "default", "--fmt", "keeper"]);
+    assert!(stderr.contains("--include-values"), "{stderr}");
+}
+
+#[test]
+fn keeper_export_round_trips_an_imported_file() {
+    let env = TestEnv::new();
+    let fixture = write_keeper_fixture(&env, KEEPER_FIXTURE);
+    env.xv_ok(&[
+        "vault",
+        "import",
+        "default",
+        "--fmt",
+        "keeper",
+        "-i",
+        fixture.to_str().unwrap(),
+    ]);
+
+    let exported = env.xv_ok(&[
+        "vault",
+        "export",
+        "default",
+        "--fmt",
+        "keeper",
+        "--include-values",
+    ]);
+
+    // Re-parse as JSON so this asserts on structure, not formatting.
+    let parsed: serde_json::Value = serde_json::from_str(&exported)
+        .unwrap_or_else(|e| panic!("export is not JSON: {e}\n{exported}"));
+    let records = parsed["records"].as_array().expect("records array");
+
+    let dev = records
+        .iter()
+        .find(|r| r["title"] == "Dev Server 1")
+        .expect("Dev Server 1 in export");
+    assert_eq!(dev["login"], "root");
+    assert_eq!(dev["password"], "123123123");
+    assert_eq!(dev["login_url"], "https://myserver.com");
+    assert_eq!(dev["notes"], "These are some notes.");
+    assert_eq!(dev["custom_fields"]["Security Group"], "Private");
+    assert_eq!(dev["folders"][0]["folder"], "Private Folder 1");
+
+    // Folder nesting goes back out in Keeper's backslash form.
+    let google = records
+        .iter()
+        .find(|r| r["title"] == "Google")
+        .expect("Google in export");
+    assert_eq!(google["folders"][0]["folder"], "My Websites\\Online");
+
+    // And the TOTP seed returns to Keeper's own custom field.
+    let fb = records
+        .iter()
+        .find(|r| r["title"] == "Facebook")
+        .expect("Facebook in export");
+    assert_eq!(
+        fb["custom_fields"]["$oneTimeCode"],
+        "otpauth://totp/A:me@c.com?secret=JBSWY3DPEHPK3PXP"
+    );
+
+    // The exported file is itself importable: feed it into a second vault.
+    let round_trip = env.config_dir.join("round-trip.json");
+    std::fs::write(&round_trip, &exported).expect("write round-trip file");
+    env.xv_ok(&["vault", "create", "second"]);
+    env.xv_ok(&[
+        "vault",
+        "import",
+        "second",
+        "--fmt",
+        "keeper",
+        "-i",
+        round_trip.to_str().unwrap(),
+    ]);
+    env.xv_ok(&["context", "use", "second", "--global"]);
+    let record = env.xv_ok(&["get", "Dev Server 1", "--record"]);
+    assert!(record.contains("\"password\": \"123123123\""), "{record}");
+    env.xv_ok(&["context", "use", "default", "--global"]);
+}
