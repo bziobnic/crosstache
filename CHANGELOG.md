@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Keeper Security JSON import/export**: `xv vault import --fmt keeper` and
+  `xv vault export --fmt keeper --include-values` read and write the
+  [documented Keeper import format][keeper-fmt]. A Keeper record with a `login`
+  and `password` becomes a typed `login` record — username/URL as `f.*`
+  metadata, password in the encrypted envelope — and `$oneTimeCode` is stored
+  as secret material (`one-time-code`) rather than a listable tag, so a TOTP
+  seed never shows up in `xv ls`. Folder nesting translates between Keeper's
+  `\` and xv's `/`. Guide: `docs/keeper.md`.
+
+  Nothing is dropped silently. A record with no `login` degrades to a plain
+  secret; a password-less secure note keeps its notes as the value; anything
+  unstorable (no password *and* no notes, a title colliding with an earlier
+  record, an unusable folder path, or more `custom_fields` than the backend's
+  tag cap allows) is refused per-record with its reason, and the command exits
+  non-zero. Azure's 15-tag cap is checked *before* any write. Keeper's
+  shared-folder permissions have no xv equivalent — they are imported as plain
+  folders and the dropped grants are reported by name for `xv share grant`.
+
+  `--dry-run` now also exits non-zero when a record is unimportable, so it can
+  be used as a gate ahead of the real import.
+
+[keeper-fmt]: https://docs.keeper.io/user-guides/import-records-1/import-json
+
+### Fixed
+
+- `xv vault export` / `xv vault import` now work on the local and AWS backends
+  instead of failing with "does not support this vault command yet". Both verbs
+  only need `SecretBackend`, never vault CRUD, so they no longer go through the
+  vault-trait shim that refused them. This applies to the existing `json`/`env`/
+  `txt` formats as well as `keeper`.
+
 ## v0.33.0 — Custom web color themes (2026-08-02)
 
 ### Added

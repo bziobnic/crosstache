@@ -95,7 +95,18 @@ pub(crate) async fn execute_vault_command(
     // through `VaultBackend`; the section below covers Azure plus the verbs
     // this branch doesn't implement (restore/purge/export/import/update/share,
     // resource-group filtering) — also through the trait.
-    if use_vault_trait_path(registry) {
+    // `export`/`import` need only `SecretBackend`, never vault CRUD, and the
+    // generic implementations below already run entirely through
+    // `backend.secrets()`. Routing them past this shim is what makes them work
+    // on every backend rather than erroring out on local/AWS — which the
+    // Keeper format in particular depends on, since migrating off Keeper into
+    // the local backend is a primary use of it.
+    let secrets_only_verb = matches!(
+        command,
+        VaultCommands::Export { .. } | VaultCommands::Import { .. }
+    );
+
+    if !secrets_only_verb && use_vault_trait_path(registry) {
         let reg = registry.expect("use_trait_path guarantees Some");
 
         // Capability check: `vault share` needs RBAC, not vault CRUD, so it
@@ -191,8 +202,10 @@ pub(crate) async fn execute_vault_command(
             }
             _other => {
                 // Commands not yet supported on non-Azure backends
-                // (Restore, Purge, Export, Import, Update; Share is answered
-                // by the RBAC capability check above)
+                // (Restore, Purge, Update; Share is answered by the RBAC
+                // capability check above. Export/Import never reach this
+                // match — `secrets_only_verb` routes them to the generic
+                // trait path below, which works on every backend.)
                 return Err(CrosstacheError::InvalidArgument(format!(
                     "The {} backend does not support this vault command yet.",
                     reg.active().name(),
@@ -331,11 +344,11 @@ pub(crate) async fn execute_vault_command(
             )
             .await?;
             // Invalidate the secrets list for the target vault (secrets were
-            // written). Import is an Azure-legacy-only path (see
-            // `use_vault_trait_path`'s doc comment above), so
-            // `effective_backend_name()` is guaranteed "azure" here — used
-            // rather than a hardcoded literal to keep every
-            // `CacheKey::SecretsList` producer on one convention.
+            // written). Import runs on every backend (see `secrets_only_verb`
+            // above), so the key must be built from
+            // `effective_backend_name()` rather than a hardcoded "azure" —
+            // which also keeps every `CacheKey::SecretsList` producer on one
+            // convention.
             vault_cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
                 backend: config.effective_backend_name().to_string(),
                 vault_name: name,
@@ -986,9 +999,58 @@ async fn execute_vault_export(
 
             txt_lines.join("\n")
         }
+        "keeper" => {
+            // A Keeper file whose records have no `password` imports as a set
+            // of empty records, which is worse than useless — it looks like a
+            // successful migration. Refuse rather than emit one.
+            if !include_values {
+                return Err(CrosstacheError::invalid_argument(
+                    "--fmt keeper requires --include-values (a Keeper import file without \
+                     passwords cannot be imported)",
+                ));
+            }
+
+            let types = config.resolve_record_types().await?;
+            let mut keeper_file = crate::records::keeper::KeeperFile::default();
+
+            for secret in &secrets {
+                match secrets_backend
+                    .get_secret(name, &secret.original_name, true)
+                    .await
+                {
+                    Ok(props) => {
+                        let Some(value) = props.value else {
+                            eprintln!(
+                                "Warning: Skipping secret '{}' — backend returned no value",
+                                secret.original_name
+                            );
+                            continue;
+                        };
+                        let record = crate::records::keeper::build_keeper_record(
+                            &crate::records::keeper::ExportedSecret {
+                                name: &secret.original_name,
+                                value: value.as_str(),
+                                content_type: &props.content_type,
+                                tags: &props.tags,
+                            },
+                            &types,
+                        )?;
+                        keeper_file.records.push(record);
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "Warning: Failed to get value for secret '{}': {}",
+                            secret.original_name, e
+                        );
+                    }
+                }
+            }
+
+            crate::records::keeper::serialize_keeper_file(&keeper_file)?
+        }
         _ => {
             return Err(CrosstacheError::invalid_argument(format!(
-                "Unsupported export format: {format}"
+                "Unsupported export format: '{format}'. Supported formats: json, env, txt, keeper"
             )));
         }
     };
@@ -1046,6 +1108,12 @@ async fn execute_vault_import(
             buffer
         }
     };
+
+    // Fidelity loss and per-record refusals collected while parsing. Only the
+    // Keeper format populates these today; both are reported before any write
+    // so `--dry-run` shows exactly what a real run would do.
+    let mut import_warnings: Vec<String> = Vec::new();
+    let mut rejected: Vec<(String, String)> = Vec::new();
 
     // Parse import data based on format
     let secrets_to_import = match format.to_lowercase().as_str() {
@@ -1178,12 +1246,32 @@ async fn execute_vault_import(
 
             secrets
         }
+        "keeper" => {
+            let keeper_file = crate::records::keeper::parse_keeper_file(&import_data)?;
+            let types = config.resolve_record_types().await?;
+            let plan = crate::records::keeper::plan_import(
+                &keeper_file,
+                &types,
+                &backend.capabilities(),
+                backend.kind(),
+            )?;
+            import_warnings = plan.warnings;
+            rejected = plan.rejected;
+            plan.requests
+        }
         _ => {
             return Err(CrosstacheError::invalid_argument(format!(
-                "Unsupported import format: '{format}'. Supported formats: json, env, txt"
+                "Unsupported import format: '{format}'. Supported formats: json, env, txt, keeper"
             )));
         }
     };
+
+    for warning in &import_warnings {
+        output::warn(warning);
+    }
+    for (title, reason) in &rejected {
+        output::error(&format!("Skipping record '{title}': {reason}"));
+    }
 
     if dry_run {
         output::info(&format!(
@@ -1194,6 +1282,15 @@ async fn execute_vault_import(
         for secret in &secrets_to_import {
             println!("  - {}", secret.name);
         }
+        // A dry run that found unimportable records must fail the same way the
+        // real run will, or `--dry-run` can't be used as a gate: the check
+        // would pass and the import that follows it would exit non-zero.
+        if !rejected.is_empty() {
+            return Err(CrosstacheError::unknown(format!(
+                "vault import: {} record(s) cannot be imported into vault '{name}'",
+                rejected.len()
+            )));
+        }
         return Ok(());
     }
 
@@ -1202,7 +1299,9 @@ async fn execute_vault_import(
 
     let mut imported_count = 0;
     let mut skipped_count = 0;
-    let mut failed_count = 0;
+    // Records refused during parsing already count as failures: they will not
+    // be written, so the summary and exit code must reflect them.
+    let mut failed_count = rejected.len();
 
     for secret_request in secrets_to_import {
         let secret_name = secret_request.name.clone();
@@ -1259,11 +1358,11 @@ async fn execute_vault_import(
         output::success(&summary);
     }
 
-    // Invalidate the secrets list cache for the target vault. Import is an
-    // Azure-legacy-only path (see `use_vault_trait_path`'s doc comment at
-    // the top of this file), so `effective_backend_name()` is guaranteed
-    // "azure" here — used rather than a hardcoded literal to keep every
-    // `CacheKey::SecretsList` producer on one convention.
+    // Invalidate the secrets list cache for the target vault. Import runs on
+    // every backend (see `secrets_only_verb` at the top of this file), so the
+    // key must be built from `effective_backend_name()` rather than a
+    // hardcoded "azure" — which also keeps every `CacheKey::SecretsList`
+    // producer on one convention.
     if imported_count > 0 {
         let cache_manager = crate::cache::CacheManager::from_config(config);
         cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {

@@ -1308,7 +1308,8 @@ pub enum VaultCommands {
         /// Output file path (default: stdout)
         #[arg(short, long)]
         output: Option<String>,
-        /// Export format (json, env, txt)
+        /// Export format (json, env, txt, keeper). `keeper` writes Keeper
+        /// Security import JSON and requires --include-values.
         #[arg(
             short = 'f',
             long = "fmt",
@@ -1333,7 +1334,8 @@ pub enum VaultCommands {
         /// Input file path (default: stdin)
         #[arg(short, long)]
         input: Option<String>,
-        /// Import format (json, env, txt)
+        /// Import format (json, env, txt, keeper). `keeper` reads Keeper
+        /// Security export JSON.
         #[arg(
             short = 'f',
             long = "fmt",
