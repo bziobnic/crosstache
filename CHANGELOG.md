@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.34.0 — Keeper Security import/export (2026-08-06)
 
 ### Added
 
