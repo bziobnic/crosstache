@@ -1,5 +1,69 @@
 # Changelog
 
+## v0.35.0 — Keeper import fidelity (2026-08-07)
+
+Diagnosed from a real 434-record Keeper export that v0.34.0 imported with 332
+successes and 102 failures. The same file now imports 427 and refuses 7.
+
+### Added
+
+- **Three built-in record types**, usable from `xv set --type` independently of
+  any import: `ssh-key` (primary `private-key`, plus `public-key` and
+  `passphrase`), `payment-card` (primary `card-number`; security code and
+  expiry also secret, only the cardholder name listable), and `secure-note`
+  (primary `content`). They exist because a record must have exactly one
+  primary field and most credentials have no password — in the source export,
+  none of the 27 SSH keypairs had a login and only 5 had a password, so there
+  was nowhere legal to put them.
+
+### Fixed
+
+- **Keeper object custom fields were dropped, discarding secret material.**
+  `$keyPair` holds `privateKey`/`publicKey`, `$paymentCard` holds `cardNumber`
+  and `cardSecurityCode`, `$passkey` holds a `privateKey`. Only scalar fields
+  were handled, so every SSH private key and card number in an export was
+  silently discarded — and the stripped record was then usually refused as
+  empty. Each sub-key now flattens into the encrypted envelope. A tag was never
+  an option for these: tags are unencrypted metadata capped at 256 characters.
+
+- **`$note` fields were discarded as reserved-tag collisions.** `$note` is
+  Keeper's note *field type*, not a user field named "note", and it was the
+  only content of 33 records in the source export. It now merges into the
+  record's note. Reserved-name collisions generally now rename to
+  `keeper-<name>` rather than dropping the value.
+
+- **Oversized values failed at the Azure API** with an opaque
+  `BadParameter` 400. Every such failure was a note longer than Azure's
+  256-character tag limit; the pre-check validated `f.*` and user tags but
+  never `note`, so these bypassed fail-before-write entirely. An oversized note
+  or URL now moves into the encrypted envelope instead — and only where the
+  backend actually requires it, so the local backend keeps such values
+  listable.
+
+- **Keeper's `$<type>:<label>:<n>` key encoding is now parsed**, so a typed
+  scalar is matched on its base type rather than the user-chosen label
+  (`$host:Server:1` and `$host:Host:1` both reach `f.host`).
+
+### Changed
+
+- **Colliding titles are renamed rather than refused**, which previously lost
+  21 records. Keeper allows duplicate titles; xv has one flat namespace per
+  vault. Duplicates are now qualified by their folder where that distinguishes
+  them, else given a numeric suffix. The original title is always preserved in
+  the `original_name` tag.
+
+- **A record with a password but no login becomes a `secure-note` record**
+  rather than a plain secret, so its other secret fields have somewhere
+  encrypted to live. Re-importing a file imported under v0.34.0 will therefore
+  produce different record shapes.
+
+### Known limitation
+
+- A Keeper record whose content is a **file attachment** exports with no fields
+  at all — Keeper's JSON export omits attachments — so it cannot be imported by
+  any means. These are refused with a message saying so; retrieve the
+  attachment from Keeper and add it with `xv attach`.
+
 ## v0.34.0 — Keeper Security import/export (2026-08-06)
 
 ### Added
