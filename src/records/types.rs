@@ -148,7 +148,15 @@ fn field(name: &str, kind: FieldKind, required: bool, primary: bool) -> FieldDef
     }
 }
 
-/// The built-in record types: `login`, `api-key`, `database`.
+/// The built-in record types: `login`, `api-key`, `database`, `ssh-key`,
+/// `payment-card`, `secure-note`.
+///
+/// The last three exist because not every credential has a password. An SSH
+/// keypair, a card, or a free-form secret note has no username/password pair
+/// to hang a `login` record on, and a record must have exactly one primary
+/// field — so without these there is nowhere to put such material except a
+/// plaintext tag, which is not an option for a private key. They are ordinary
+/// types, usable from `xv set --type` independently of any import.
 pub fn builtin_types() -> Vec<RecordType> {
     vec![
         RecordType {
@@ -179,6 +187,43 @@ pub fn builtin_types() -> Vec<RecordType> {
                 field("username", FieldKind::Metadata, false, false),
                 field("password", FieldKind::Secret, true, true),
                 field("connection-string", FieldKind::Secret, false, false),
+            ],
+        },
+        // An SSH keypair. The public key is declared `secret` rather than
+        // metadata not because it needs hiding, but because it routinely
+        // exceeds the 256-character tag-value cap Azure imposes on metadata —
+        // as a tag it would simply fail to write.
+        RecordType {
+            name: "ssh-key".to_string(),
+            source: TypeSource::Builtin,
+            fields: vec![
+                field("host", FieldKind::Metadata, false, false),
+                field("username", FieldKind::Metadata, false, false),
+                field("private-key", FieldKind::Secret, true, true),
+                field("public-key", FieldKind::Secret, false, false),
+                field("passphrase", FieldKind::Secret, false, false),
+            ],
+        },
+        // Every element of a card that can authorize a charge is `secret`;
+        // only the cardholder name is listable metadata.
+        RecordType {
+            name: "payment-card".to_string(),
+            source: TypeSource::Builtin,
+            fields: vec![
+                field("cardholder-name", FieldKind::Metadata, false, false),
+                field("card-number", FieldKind::Secret, true, true),
+                field("card-security-code", FieldKind::Secret, false, false),
+                field("card-expiration-date", FieldKind::Secret, false, false),
+            ],
+        },
+        // The catch-all for secret material with no more specific shape.
+        RecordType {
+            name: "secure-note".to_string(),
+            source: TypeSource::Builtin,
+            fields: vec![
+                field("url", FieldKind::Metadata, false, false),
+                field("username", FieldKind::Metadata, false, false),
+                field("content", FieldKind::Secret, true, true),
             ],
         },
     ]
@@ -321,10 +366,47 @@ mod tests {
     #[test]
     fn builtin_types_are_valid() {
         let types = builtin_types();
-        assert_eq!(types.len(), 3);
+        assert_eq!(types.len(), 6);
         for t in &types {
             t.validate().unwrap_or_else(|e| panic!("{}: {e}", t.name));
         }
+
+        // Names are stable API: `xv set --type <name>` and stored `xv-type`
+        // tags reference them, so a rename silently orphans existing records.
+        let mut names: Vec<&str> = types.iter().map(|t| t.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            vec![
+                "api-key",
+                "database",
+                "login",
+                "payment-card",
+                "secure-note",
+                "ssh-key"
+            ]
+        );
+
+        // The password-less types exist to give records without a
+        // username/password pair a legal primary field.
+        let ssh = types.iter().find(|t| t.name == "ssh-key").unwrap();
+        assert_eq!(ssh.primary().name, "private-key");
+        // A public key regularly exceeds Azure's 256-char tag cap, so it must
+        // be envelope material, not a metadata tag.
+        assert_eq!(ssh.field("public-key").unwrap().kind, FieldKind::Secret);
+
+        let card = types.iter().find(|t| t.name == "payment-card").unwrap();
+        assert_eq!(card.primary().name, "card-number");
+        for f in ["card-security-code", "card-expiration-date"] {
+            assert_eq!(
+                card.field(f).unwrap().kind,
+                FieldKind::Secret,
+                "{f} must not be listable metadata"
+            );
+        }
+
+        let note = types.iter().find(|t| t.name == "secure-note").unwrap();
+        assert_eq!(note.primary().name, "content");
 
         let login = types.iter().find(|t| t.name == "login").unwrap();
         assert_eq!(login.primary().name, "password");

@@ -2361,10 +2361,11 @@ fn keeper_import_reports_unapplied_shared_folder_permissions() {
 }
 
 #[test]
-fn keeper_import_rejects_unstorable_and_colliding_records_nonzero() {
+fn keeper_import_rejects_only_genuinely_empty_records_and_exits_nonzero() {
     let env = TestEnv::new();
-    // "Nothing Here" has no password and no notes; "A/B" and "A B" both
-    // sanitize to the same secret name, so the second must not clobber.
+    // "Nothing Here" is empty (in a real export, a file-attachment record).
+    // "A B" and "A/B" both sanitize to "A-B": neither may be lost, and the
+    // second must not clobber the first.
     let body = r#"{"records":[
       {"title":"Keeper Good","login":"u","password":"p"},
       {"title":"Nothing Here"},
@@ -2383,12 +2384,30 @@ fn keeper_import_rejects_unstorable_and_colliding_records_nonzero() {
         fixture.to_str().unwrap(),
     ]);
     let combined = format!("{stdout}{stderr}");
+    // The empty record is refused, and the reason names the likely cause.
     assert!(combined.contains("nothing to store"), "{combined}");
-    assert!(combined.contains("collides"), "{combined}");
+    assert!(combined.contains("attachment"), "{combined}");
 
-    // The importable records still landed; only the refused ones didn't.
+    // Colliding titles are renamed rather than dropped.
+    assert!(combined.contains("already used"), "{combined}");
     assert_eq!(env.get_raw("Keeper Good"), "p");
     assert_eq!(env.get_raw("A B"), "1");
+
+    // Both colliding records survive under distinct names, so no value was
+    // overwritten by its duplicate.
+    let json = env.xv_ok(&["ls", "--format", "json"]);
+    let listed: serde_json::Value = serde_json::from_str(&json).expect("ls json");
+    let names: Vec<&str> = listed
+        .as_array()
+        .expect("array")
+        .iter()
+        .filter_map(|s| s["original_name"].as_str())
+        .collect();
+    assert_eq!(
+        names.iter().filter(|n| n.starts_with("A")).count(),
+        2,
+        "both colliding records should exist: {names:?}"
+    );
 }
 
 #[test]
@@ -2475,4 +2494,73 @@ fn keeper_export_round_trips_an_imported_file() {
     let record = env.xv_ok(&["get", "Dev Server 1", "--record"]);
     assert!(record.contains("\"password\": \"123123123\""), "{record}");
     env.xv_ok(&["context", "use", "default", "--global"]);
+}
+
+/// End-to-end proof of the fix that mattered most: Keeper keeps SSH private
+/// keys inside a `$keyPair` object with no login and usually no password, so
+/// the object was dropped and the record then discarded as empty. Drives the
+/// real binary to confirm the key survives and stays out of listable metadata.
+#[test]
+fn keeper_import_stores_a_keypair_as_an_ssh_key_record() {
+    let env = TestEnv::new();
+    let body = r#"{"records":[
+      {"title":"BMO SFTP key",
+       "custom_fields":{
+         "$keyPair::1":{
+           "privateKey":"-----BEGIN OPENSSH PRIVATE KEY-----\nSECRETKEYBODY\n-----END OPENSSH PRIVATE KEY-----",
+           "publicKey":"ssh-rsa AAAAB3NzaC1yc2EPUBLIC"},
+         "$host:Host:1":"sftp.example.com"}}
+    ]}"#;
+    let fixture = write_keeper_fixture(&env, body);
+    env.xv_ok(&[
+        "vault",
+        "import",
+        "default",
+        "--fmt",
+        "keeper",
+        "-i",
+        fixture.to_str().unwrap(),
+    ]);
+
+    // Typed as ssh-key, with the private key as the primary value.
+    let json = env.xv_ok(&["ls", "--format", "json"]);
+    assert!(json.contains("\"record_type\": \"ssh-key\""), "{json}");
+    assert_eq!(
+        env.get_raw("BMO SFTP key"),
+        "-----BEGIN OPENSSH PRIVATE KEY-----\nSECRETKEYBODY\n-----END OPENSSH PRIVATE KEY-----"
+    );
+
+    // Both halves of the pair are reachable as named fields.
+    let record = env.xv_ok(&["get", "BMO SFTP key", "--record"]);
+    assert!(record.contains("SECRETKEYBODY"), "{record}");
+    assert!(record.contains("ssh-rsa AAAAB3NzaC1yc2EPUBLIC"), "{record}");
+
+    // The private key must never reach listable metadata.
+    assert!(
+        !json.contains("SECRETKEYBODY") && !json.contains("BEGIN OPENSSH"),
+        "private key leaked into listable metadata:\n{json}"
+    );
+    // The host is ordinary metadata and stays listable.
+    assert!(json.contains("sftp.example.com"), "{json}");
+}
+
+/// A Keeper `$note` field is frequently a record's only content. Treating it
+/// as a reserved-tag collision discarded 33 records in a real export.
+#[test]
+fn keeper_import_keeps_a_note_only_record() {
+    let env = TestEnv::new();
+    let body = r#"{"records":[
+      {"title":"Adaxes License","custom_fields":{"$note::1":"license key ABC-123"}}
+    ]}"#;
+    let fixture = write_keeper_fixture(&env, body);
+    env.xv_ok(&[
+        "vault",
+        "import",
+        "default",
+        "--fmt",
+        "keeper",
+        "-i",
+        fixture.to_str().unwrap(),
+    ]);
+    assert_eq!(env.get_raw("Adaxes License"), "license key ABC-123");
 }

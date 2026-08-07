@@ -38,9 +38,10 @@ and its password is encrypted secret material.
 | `login`                      | `f.username` tag                      |
 | `password`                   | record envelope, primary field         |
 | `login_url`                  | `f.url` tag                           |
-| `notes`                      | `note` tag                            |
+| `notes` + `$note` fields     | `note` tag (merged)                   |
 | `folders[].folder`           | `folder` tag, `\` rewritten to `/`    |
-| `custom_fields`              | ordinary tags                         |
+| scalar `custom_fields`       | ordinary tags                         |
+| object `custom_fields`       | record envelope, one field per sub-key |
 | `custom_fields.$oneTimeCode` | record envelope, `one-time-code` field |
 
 A TOTP seed is a second authentication factor, so `$oneTimeCode` is stored as
@@ -54,28 +55,56 @@ Titles pass through `xv`'s usual name sanitization — `Dev Server 1` is stored
 under the secret name `Dev-Server-1` with the original title preserved in the
 `original_name` tag, so it still displays and round-trips as `Dev Server 1`.
 
-### Records without a login or password
+### Object fields hold the real secrets
 
-Not every Keeper record is a login, and none of these are dropped silently:
+Keeper stores its most sensitive values inside *object-valued* custom fields:
 
-| Keeper record has            | Result                                              |
-|------------------------------|-----------------------------------------------------|
-| `login` + `password`         | typed `login` record                                |
-| `password`, no `login`       | plain secret; the password is the value             |
-| `notes` only (a secure note) | plain secret; the notes are the value, with a warning |
-| neither                      | refused, and reported as a failure                  |
-| a `$oneTimeCode`, but not both `login` and `password` | refused, and reported as a failure |
+| Keeper field    | Contains                                        |
+|-----------------|-------------------------------------------------|
+| `$keyPair`      | `privateKey`, `publicKey`                       |
+| `$paymentCard`  | `cardNumber`, `cardSecurityCode`, expiry        |
+| `$passkey`      | `privateKey`, `credentialId`, …                 |
+| `$pamSettings`  | connection and port-forward settings            |
 
-A record with no `login` cannot become a typed `login` record, because that
-type requires a username. It degrades to a plain secret instead.
+Every sub-key is flattened into the **encrypted envelope**, never a tag —
+tags are unencrypted metadata capped at 256 characters, so a private key
+there would be both exposed and rejected by the backend:
 
-A `$oneTimeCode` is the exception to that degrading. A TOTP seed can only be
-kept as encrypted secret material, and the only shape with room for it is a
-typed `login` record — which needs *both* a `login` and a `password`. Every
-other shape is a plain secret whose single value slot is already taken, so the
-seed could only go into a plaintext tag. Rather than downgrade a second
-authentication factor or drop it quietly, such a record is refused with its
-reason. Add the missing field in Keeper, or import that record separately.
+```bash
+xv get "BMO SFTP key" --field private-key
+xv get "BMO SFTP key" --record        # every field as JSON
+```
+
+### Record types
+
+A record must have exactly one primary field, and most Keeper credentials
+have no password — so imports pick a type to suit:
+
+| Keeper record has        | xv type       | Primary field |
+|--------------------------|---------------|---------------|
+| a `$keyPair` private key | `ssh-key`     | `private-key` |
+| a `$paymentCard` number  | `payment-card`| `card-number` |
+| `login` + `password`     | `login`       | `password`    |
+| anything else storable   | `secure-note` | `content`     |
+
+For `secure-note` the primary is taken from the password, else the first
+secret field, else the notes. These are ordinary built-in types — usable from
+`xv set --type` independently of any import.
+
+### The only records that are refused
+
+A record is refused only when it is genuinely empty. In practice that means
+its content was a Keeper **file attachment**, which Keeper's JSON export does
+not include:
+
+```
+[error] Skipping record 'salesforce-private-key': has no password, notes, or
+        custom fields, so there is nothing to store (a Keeper record whose
+        content is a file attachment exports empty — download the attachment
+        from Keeper and add it with 'xv attach')
+```
+
+Download those from Keeper and attach them with `xv attach`.
 
 ## What does not carry over
 
@@ -97,25 +126,36 @@ principals are always named so you can reconstruct them.
 **Multiple folders per record.** A Keeper record can live in several folders at
 once; an `xv` secret has one. The first is used and the rest are reported.
 
-**Duplicate titles.** Legal in Keeper, where folders disambiguate. Two titles
-that resolve to the same secret name are refused rather than silently
-overwriting each other — rename one in Keeper and re-import.
+**Duplicate titles are renamed, not refused.** Legal in Keeper, where folders
+disambiguate. xv has one flat namespace per vault, so the second and later
+records are qualified by their folder where that distinguishes them, and
+otherwise get a numeric suffix. The original title is always preserved in the
+`original_name` tag.
 
-## Records that get refused
+```
+Finance/American Express -> Finance American Express
+same folder, 2x github   -> github.com, github.com 2
+```
 
-Refusals are per-record: everything else in the file still imports, the reason
-is printed, and the command exits non-zero so a scripted migration cannot
-silently lose secrets.
+## Oversized values
 
-- **Nothing storable** — no password and no notes.
-- **A name collision** with an earlier record in the same file.
-- **An unusable folder path** — `xv` caps folder names at 50 characters and
-  nesting at 10 levels.
-- **Too many tags for the backend.** Azure Key Vault allows 15 tags per secret,
-  and `xv`'s own bookkeeping uses some of them, so a record with many
-  `custom_fields` can exceed the cap. This is checked *before* any write, so it
-  fails cleanly instead of half-writing. The same file imports without
-  complaint into the local backend, which has no tag limit.
+Azure caps a tag value at 256 characters. A `note` or URL over that limit is
+stored as an **encrypted envelope field** instead of a tag, rather than failing
+the record:
+
+```
+[warn] Sendgrid BQM Data Jobs: note is 1495 characters, over the backend's
+       256-character tag limit; stored as an encrypted 'note' field instead
+       of listable metadata.
+```
+
+Nothing is lost or truncated; the value simply stops being listable in
+`xv ls`. This only happens where the backend actually requires it — the local
+backend has no tag cap, so the same file keeps its notes listable there.
+
+A record whose tag *count* would exceed the backend's limit (15 on Azure) is
+still refused, and that check runs **before** any write, so it fails cleanly
+rather than part-way through.
 
 ## Export notes
 

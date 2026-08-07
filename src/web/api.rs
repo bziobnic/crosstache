@@ -1444,8 +1444,15 @@ pub(crate) mod tests {
         assert_eq!(login["fields"][2]["name"], "password");
         assert_eq!(login["fields"][2]["kind"], "secret");
         assert_eq!(login["fields"][2]["primary"], true);
-        // all three builtins present
-        for name in ["login", "api-key", "database"] {
+        // every builtin present
+        for name in [
+            "login",
+            "api-key",
+            "database",
+            "ssh-key",
+            "payment-card",
+            "secure-note",
+        ] {
             assert!(types.iter().any(|t| t["name"] == name), "{name} missing");
         }
     }
