@@ -1,12 +1,16 @@
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 use toml_edit::{DocumentMut, TableLike};
 
 use crate::{
-    config::{BlobConfig, Config},
+    config::{apply_environment_overrides, BlobConfig, Config},
     error::{CrosstacheError, Result},
-    utils::helpers::read_file_no_follow,
+    utils::helpers::{
+        atomic_write_file_no_follow_async, read_file_no_follow,
+        write_private_file_no_follow_create_new,
+    },
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -339,7 +343,43 @@ fn json_schema_diagnostic(
     )
 }
 
+fn backup_path(path: &Path, now: DateTime<Utc>) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .expect("configuration path must name a file")
+        .to_string_lossy();
+    path.with_file_name(format!(
+        "{file_name}.backup-{}",
+        now.format("%Y%m%dT%H%M%SZ")
+    ))
+}
+
+async fn persist_repair(
+    path: &Path,
+    original: &[u8],
+    repaired: &[u8],
+    now: DateTime<Utc>,
+) -> Result<PathBuf> {
+    let backup = backup_path(path, now);
+    let backup_file = write_private_file_no_follow_create_new(&backup, original)?;
+    backup_file.sync_all().map_err(|error| {
+        CrosstacheError::config(format!(
+            "Failed to flush config backup '{}': {error}",
+            backup.display()
+        ))
+    })?;
+    atomic_write_file_no_follow_async(path, repaired, true).await?;
+    Ok(backup)
+}
+
 pub async fn diagnose_and_repair(path: &Path) -> Result<DoctorReport> {
+    diagnose_and_repair_with(path, apply_environment_overrides).await
+}
+
+async fn diagnose_and_repair_with(
+    path: &Path,
+    apply_overrides: impl FnOnce(&mut Config),
+) -> Result<DoctorReport> {
     let report = DoctorReport::new(path);
     let original = match std::fs::symlink_metadata(path) {
         Ok(_) => read_file_no_follow(path)?,
@@ -381,14 +421,14 @@ pub async fn diagnose_and_repair(path: &Path) -> Result<DoctorReport> {
         },
     };
 
-    let (repairs, schema_error) = match parsed {
+    let (repairs, candidate, schema_error) = match parsed {
         ParsedConfig::Toml(mut document) => {
             let repairs = repair_toml(&mut document);
             let candidate = document.to_string();
             let error = toml::from_str::<Config>(&candidate)
                 .err()
                 .map(|error| toml_schema_diagnostic(&candidate, &error));
-            (repairs, error)
+            (repairs, candidate, error)
         }
         ParsedConfig::Json(mut value) => {
             let repairs = repair_json(&mut value);
@@ -401,27 +441,139 @@ pub async fn diagnose_and_repair(path: &Path) -> Result<DoctorReport> {
             let error = serde_json::from_str::<Config>(&candidate)
                 .err()
                 .map(|error| json_schema_diagnostic(&candidate, &error, preserve_source_location));
-            (repairs, error)
+            (repairs, candidate, error)
         }
     };
     let mut report = report;
     report.repairs = repairs;
 
     match schema_error {
-        None => Ok(report.with_check(
-            DoctorCheckStatus::Ok,
-            format!("Configuration file '{}' is valid.", path.display()),
-        )),
+        None => {
+            if !report.repairs.is_empty() {
+                let backup =
+                    persist_repair(path, &original, candidate.as_bytes(), Utc::now()).await?;
+                let written = read_file_no_follow(path)?;
+                let written = std::str::from_utf8(&written).map_err(|error| {
+                    CrosstacheError::config(format!(
+                        "Repaired configuration file '{}' is not UTF-8: {error}",
+                        path.display()
+                    ))
+                })?;
+                deserialize_verified_config(path, written)?;
+                report.backup_path = Some(backup);
+                for repair in &report.repairs {
+                    report.checks.push(DoctorCheck {
+                        status: DoctorCheckStatus::Fixed,
+                        message: format!("Restored missing configuration field '{repair}'."),
+                    });
+                }
+            }
+            let persisted = read_file_no_follow(path)?;
+            let persisted = std::str::from_utf8(&persisted).map_err(|error| {
+                CrosstacheError::config(format!(
+                    "Configuration file '{}' is not UTF-8 after repair: {error}",
+                    path.display()
+                ))
+            })?;
+            let mut effective = deserialize_verified_config(path, persisted)?;
+            apply_overrides(&mut effective);
+            if effective.validate().is_err() {
+                add_semantic_unresolved(&mut report, &effective);
+            }
+
+            let status = if report.is_healthy() {
+                DoctorCheckStatus::Ok
+            } else {
+                DoctorCheckStatus::Error
+            };
+            let message = if report.is_healthy() {
+                format!("Configuration file '{}' is valid.", path.display())
+            } else {
+                format!(
+                    "Configuration file '{}' requires manual configuration.",
+                    path.display()
+                )
+            };
+            Ok(report.with_check(status, message))
+        }
         Some(error) => Ok(report.with_unresolved(error)),
+    }
+}
+
+fn deserialize_verified_config(path: &Path, text: &str) -> Result<Config> {
+    toml::from_str::<Config>(text)
+        .or_else(|_| serde_json::from_str::<Config>(text))
+        .map_err(|_| {
+            CrosstacheError::config(format!(
+                "Configuration file '{}' could not be verified after repair",
+                path.display()
+            ))
+        })
+}
+
+fn add_semantic_unresolved(report: &mut DoctorReport, config: &Config) {
+    match config.effective_backend_name() {
+        "azure" => {
+            if config.subscription_id.is_empty() {
+                let message =
+                    "Azure subscription_id is required. Run `xv config set subscription_id <id>`.";
+                report.checks.push(DoctorCheck {
+                    status: DoctorCheckStatus::Error,
+                    message: message.to_string(),
+                });
+                report.unresolved.push(message.to_string());
+            }
+            if config.tenant_id.is_empty() {
+                let message = "Azure tenant_id is required. Run `xv config set tenant_id <id>`.";
+                report.checks.push(DoctorCheck {
+                    status: DoctorCheckStatus::Error,
+                    message: message.to_string(),
+                });
+                report.unresolved.push(message.to_string());
+            }
+        }
+        "aws" => match &config.aws {
+            None => {
+                let message = "AWS backend requires an [aws] block. Add [aws] settings and run `xv config doctor` again.";
+                report.checks.push(DoctorCheck {
+                    status: DoctorCheckStatus::Error,
+                    message: message.to_string(),
+                });
+                report.unresolved.push(message.to_string());
+            }
+            Some(aws) if aws.region.is_none() => {
+                let message = "AWS region is required. Set `[aws].region` or `AWS_REGION`, then run `xv config doctor` again.";
+                report.checks.push(DoctorCheck {
+                    status: DoctorCheckStatus::Error,
+                    message: message.to_string(),
+                });
+                report.unresolved.push(message.to_string());
+            }
+            Some(_) => {}
+        },
+        _ => {
+            let message = "Configuration validation failed. Review the selected backend settings and run `xv config doctor` again.";
+            report.checks.push(DoctorCheck {
+                status: DoctorCheckStatus::Error,
+                message: message.to_string(),
+            });
+            report.unresolved.push(message.to_string());
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::config::Config;
+    use std::collections::HashMap;
+
+    use crate::config::{settings::apply_environment_overrides_with, Config};
+    use chrono::{TimeZone, Utc};
     use serde_json::json;
 
-    use super::{diagnose_and_repair, repair_json, repair_toml, DoctorReport};
+    use super::{
+        backup_path, diagnose_and_repair, diagnose_and_repair_with, persist_repair, repair_json,
+        repair_toml, DoctorReport,
+    };
 
     const SPARSE_LOCAL: &str = r#"# keep this comment
 backend = "local"
@@ -458,6 +610,153 @@ default_vault = "default"
                 "diagnostic disclosed sensitive value: {message}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn sparse_toml_is_backed_up_and_atomically_repaired() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("xv.conf");
+        let original_bytes = SPARSE_LOCAL.as_bytes();
+        std::fs::write(&path, original_bytes).unwrap();
+
+        let report = diagnose_and_repair(&path).await.unwrap();
+
+        let backup = report.backup_path.as_ref().unwrap();
+        assert_eq!(std::fs::read(backup).unwrap(), original_bytes);
+        assert!(backup
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("xv.conf.backup-"));
+        let repaired = std::fs::read_to_string(&path).unwrap();
+        toml::from_str::<Config>(&repaired).unwrap();
+        assert!(report.is_healthy());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            assert_eq!(
+                std::fs::metadata(backup).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn existing_fixed_timestamp_backup_is_not_overwritten_or_followed_by_config_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("xv.conf");
+        let original = b"original config bytes";
+        let repaired = b"repaired config bytes";
+        let now = Utc.with_ymd_and_hms(2026, 8, 7, 21, 15, 30).unwrap();
+        let backup = backup_path(&path, now);
+        assert_eq!(backup, dir.path().join("xv.conf.backup-20260807T211530Z"));
+        std::fs::write(&path, original).unwrap();
+        std::fs::write(&backup, b"existing backup").unwrap();
+
+        let error = persist_repair(&path, original, repaired, now)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("backup"));
+        assert_eq!(std::fs::read(&backup).unwrap(), b"existing backup");
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn semantic_azure_missing_ids_reports_manual_actions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("xv.conf");
+        let original = toml::to_string_pretty(&Config::default()).unwrap();
+        std::fs::write(&path, &original).unwrap();
+
+        let report = diagnose_and_repair_with(&path, |_| {}).await.unwrap();
+        let unresolved = report.unresolved.join("\n");
+
+        assert!(!report.is_healthy());
+        assert!(unresolved.contains("subscription_id"));
+        assert!(unresolved.contains("xv config set subscription_id <id>"));
+        assert!(unresolved.contains("tenant_id"));
+        assert!(unresolved.contains("xv config set tenant_id <id>"));
+        assert!(report.backup_path.is_none());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn semantic_environment_ids_validate_without_being_persisted() {
+        const SUBSCRIPTION: &str = "doctor-environment-subscription";
+        const TENANT: &str = "doctor-environment-tenant";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("xv.conf");
+        let original = toml::to_string_pretty(&Config::default()).unwrap();
+        std::fs::write(&path, &original).unwrap();
+        let values = HashMap::from([
+            (
+                "AZURE_SUBSCRIPTION_ID".to_string(),
+                SUBSCRIPTION.to_string(),
+            ),
+            ("AZURE_TENANT_ID".to_string(), TENANT.to_string()),
+        ]);
+
+        let report = diagnose_and_repair_with(&path, |effective| {
+            apply_environment_overrides_with(effective, |name| values.get(name).cloned());
+        })
+        .await
+        .unwrap();
+        let persisted = std::fs::read_to_string(&path).unwrap();
+
+        assert!(report.is_healthy());
+        assert!(report.backup_path.is_none());
+        assert_eq!(persisted, original);
+        assert!(!persisted.contains(SUBSCRIPTION));
+        assert!(!persisted.contains(TENANT));
+    }
+
+    #[tokio::test]
+    async fn semantic_aws_without_block_is_unresolved_and_not_guessed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("xv.conf");
+        let config = Config {
+            backend: Some("aws".into()),
+            ..Config::default()
+        };
+        let original = toml::to_string_pretty(&config).unwrap();
+        std::fs::write(&path, &original).unwrap();
+
+        let report = diagnose_and_repair_with(&path, |_| {}).await.unwrap();
+        let persisted = std::fs::read_to_string(&path).unwrap();
+
+        assert!(!report.is_healthy());
+        assert!(report.unresolved.join("\n").contains("[aws]"));
+        assert!(report.backup_path.is_none());
+        assert_eq!(persisted, original);
+        assert!(!persisted.contains("[aws]"));
+    }
+
+    #[tokio::test]
+    async fn semantic_deterministic_repairs_persist_despite_missing_azure_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("xv.conf");
+        let original = b"# sparse Azure config\n";
+        std::fs::write(&path, original).unwrap();
+
+        let report = diagnose_and_repair_with(&path, |_| {}).await.unwrap();
+        let persisted = std::fs::read_to_string(&path).unwrap();
+
+        assert!(!report.is_healthy());
+        assert!(!report.repairs.is_empty());
+        assert!(report.backup_path.is_some());
+        assert_eq!(
+            std::fs::read(report.backup_path.as_ref().unwrap()).unwrap(),
+            original
+        );
+        toml::from_str::<Config>(&persisted).unwrap();
+        assert!(report.unresolved.join("\n").contains("subscription_id"));
     }
 
     #[test]

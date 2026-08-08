@@ -741,7 +741,7 @@ pub async fn load_config_no_validation() -> Result<Config> {
     }
 
     // Override with environment variables
-    load_from_env(&mut config);
+    apply_environment_overrides(&mut config);
 
     Ok(config)
 }
@@ -768,48 +768,55 @@ async fn load_from_file(path: &PathBuf) -> Result<Config> {
     })
 }
 
-fn load_from_env(config: &mut Config) {
+pub(crate) fn apply_environment_overrides(config: &mut Config) {
+    apply_environment_overrides_with(config, |name| std::env::var(name).ok());
+}
+
+pub(super) fn apply_environment_overrides_with(
+    config: &mut Config,
+    mut read: impl FnMut(&str) -> Option<String>,
+) {
     // Backend override from environment variable
-    if let Ok(value) = std::env::var("XV_BACKEND") {
+    if let Some(value) = read("XV_BACKEND") {
         config.backend = Some(value);
     }
 
-    if let Ok(value) = std::env::var("DEBUG") {
+    if let Some(value) = read("DEBUG") {
         config.debug = value.to_lowercase() == "true" || value == "1";
     }
 
-    if std::env::var("NO_COLOR").is_ok() {
+    if read("NO_COLOR").is_some() {
         config.no_color = true;
     }
 
-    if let Ok(value) = std::env::var("AZURE_SUBSCRIPTION_ID") {
+    if let Some(value) = read("AZURE_SUBSCRIPTION_ID") {
         config.subscription_id = value;
     }
 
-    if let Ok(value) = std::env::var("DEFAULT_VAULT") {
+    if let Some(value) = read("DEFAULT_VAULT") {
         config.default_vault = value;
     }
 
-    if let Ok(value) = std::env::var("DEFAULT_RESOURCE_GROUP") {
+    if let Some(value) = read("DEFAULT_RESOURCE_GROUP") {
         config.default_resource_group = value;
     }
 
-    if let Ok(value) = std::env::var("AZURE_TENANT_ID") {
+    if let Some(value) = read("AZURE_TENANT_ID") {
         config.tenant_id = value;
     }
 
-    if let Ok(value) = std::env::var("CACHE_ENABLED") {
+    if let Some(value) = read("CACHE_ENABLED") {
         config.cache_enabled = value.to_lowercase() == "true" || value == "1";
     }
 
-    if let Ok(value) = std::env::var("CACHE_TTL") {
+    if let Some(value) = read("CACHE_TTL") {
         if let Ok(seconds) = value.parse::<u64>() {
             config.cache_ttl_secs = seconds;
         }
     }
 
     // Load Azure credential priority from environment variable
-    if let Ok(value) = std::env::var("AZURE_CREDENTIAL_PRIORITY") {
+    if let Some(value) = read("AZURE_CREDENTIAL_PRIORITY") {
         if let Ok(cred_type) = value.parse::<AzureCredentialType>() {
             config.azure_credential_priority = cred_type;
         }
@@ -822,36 +829,36 @@ fn load_from_env(config: &mut Config) {
     // Check if we have existing config from file
     let had_existing_config = config.blob_config.is_some();
 
-    if let Ok(value) = std::env::var("AZURE_STORAGE_ACCOUNT") {
+    if let Some(value) = read("AZURE_STORAGE_ACCOUNT") {
         blob_config.storage_account = value;
         blob_config_updated = true;
     }
 
-    if let Ok(value) = std::env::var("AZURE_STORAGE_CONTAINER") {
+    if let Some(value) = read("AZURE_STORAGE_CONTAINER") {
         blob_config.container_name = value;
         blob_config_updated = true;
     }
 
-    if let Ok(value) = std::env::var("AZURE_STORAGE_ENDPOINT") {
+    if let Some(value) = read("AZURE_STORAGE_ENDPOINT") {
         blob_config.endpoint = Some(value);
         blob_config_updated = true;
     }
 
-    if let Ok(value) = std::env::var("BLOB_CHUNK_SIZE_MB") {
+    if let Some(value) = read("BLOB_CHUNK_SIZE_MB") {
         if let Ok(chunk_size) = value.parse::<usize>() {
             blob_config.chunk_size_mb = chunk_size;
             blob_config_updated = true;
         }
     }
 
-    if let Ok(value) = std::env::var("BLOB_MAX_CONCURRENT_UPLOADS") {
+    if let Some(value) = read("BLOB_MAX_CONCURRENT_UPLOADS") {
         if let Ok(max_uploads) = value.parse::<usize>() {
             blob_config.max_concurrent_uploads = max_uploads;
             blob_config_updated = true;
         }
     }
 
-    if let Ok(value) = std::env::var("PROGRESS_THRESHOLD_MB") {
+    if let Some(value) = read("PROGRESS_THRESHOLD_MB") {
         if let Ok(threshold) = value.parse::<usize>() {
             blob_config.progress_threshold_mb = threshold;
             blob_config_updated = true;
