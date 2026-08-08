@@ -5,6 +5,7 @@
 //! configuration files, and default values.
 
 pub mod context;
+pub mod doctor;
 pub mod init;
 pub mod project;
 pub mod settings;
