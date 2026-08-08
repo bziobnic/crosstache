@@ -121,6 +121,66 @@ pub fn write_file_no_follow(path: &Path, content: &[u8], overwrite: bool) -> Res
     write_file_no_follow_with_mode(path, content, behavior, 0o666, 0o777)
 }
 
+/// Read a file without following its final symlink.
+pub fn read_file_no_follow(path: &Path) -> Result<Vec<u8>> {
+    use std::io::Read;
+
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+            .map_err(|error| {
+                CrosstacheError::config(format!(
+                    "Failed to safely open config file '{}': {error}",
+                    path.display()
+                ))
+            })?
+    };
+
+    #[cfg(not(unix))]
+    let mut file = {
+        let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+            CrosstacheError::config(format!(
+                "Failed to inspect config file '{}': {error}",
+                path.display()
+            ))
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(CrosstacheError::config(format!(
+                "Refusing symlinked config file '{}'",
+                path.display()
+            )));
+        }
+        std::fs::File::open(path).map_err(|error| {
+            CrosstacheError::config(format!(
+                "Failed to safely open config file '{}': {error}",
+                path.display()
+            ))
+        })?
+    };
+
+    let mut content = Vec::new();
+    file.read_to_end(&mut content).map_err(|error| {
+        CrosstacheError::config(format!(
+            "Failed to read config file '{}': {error}",
+            path.display()
+        ))
+    })?;
+    Ok(content)
+}
+
+/// Create a new private file without following symlinks.
+pub fn write_private_file_no_follow_create_new(
+    path: &Path,
+    content: &[u8],
+) -> Result<std::fs::File> {
+    write_file_no_follow_with_mode(path, content, FileOpenBehavior::Exclusive, 0o600, 0o700)
+}
+
 /// Open or create an empty private lock file without following symlinks.
 ///
 /// Missing parent directories are created owner-only (0700 on Unix), and the
@@ -1369,6 +1429,50 @@ pub fn glob_matches_either_name(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_file_no_follow_reads_regular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("xv.conf");
+        std::fs::write(&path, b"debug = false\n").unwrap();
+        assert_eq!(read_file_no_follow(&path).unwrap(), b"debug = false\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_file_no_follow_rejects_final_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        let link = dir.path().join("xv.conf");
+        std::fs::write(&target, b"secret").unwrap();
+        symlink(&target, &link).unwrap();
+        assert!(read_file_no_follow(&link).is_err());
+    }
+
+    #[test]
+    fn private_create_new_never_overwrites() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("xv.conf.backup-fixed");
+        write_private_file_no_follow_create_new(&path, b"original").unwrap();
+        assert!(write_private_file_no_follow_create_new(&path, b"replacement").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"original");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_create_new_uses_mode_0600() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("backup");
+        write_private_file_no_follow_create_new(&path, b"original").unwrap();
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
 
     #[cfg(unix)]
     fn atomic_parent_swap_hooks(
