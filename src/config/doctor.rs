@@ -530,7 +530,7 @@ fn add_semantic_unresolved(report: &mut DoctorReport, config: &Config) {
         }
         "aws" => match &config.aws {
             None => {
-                let message = "AWS backend requires an [aws] block. Add [aws] settings and run `xv config doctor` again.";
+                let message = "AWS backend requires an [aws] block. Add [aws] settings and run `xv doctor` again.";
                 report.checks.push(DoctorCheck {
                     status: DoctorCheckStatus::Error,
                     message: message.to_string(),
@@ -538,7 +538,7 @@ fn add_semantic_unresolved(report: &mut DoctorReport, config: &Config) {
                 report.unresolved.push(message.to_string());
             }
             Some(aws) if aws.region.is_none() => {
-                let message = "AWS region is required. Set `[aws].region` or `AWS_REGION`, then run `xv config doctor` again.";
+                let message = "AWS region is required. Set `[aws].region` or `AWS_REGION`, then run `xv doctor` again.";
                 report.checks.push(DoctorCheck {
                     status: DoctorCheckStatus::Error,
                     message: message.to_string(),
@@ -548,7 +548,7 @@ fn add_semantic_unresolved(report: &mut DoctorReport, config: &Config) {
             Some(_) => {}
         },
         _ => {
-            let message = "Configuration validation failed. Review the selected backend settings and run `xv config doctor` again.";
+            let message = "Configuration validation failed. Review the selected backend settings and run `xv doctor` again.";
             report.checks.push(DoctorCheck {
                 status: DoctorCheckStatus::Error,
                 message: message.to_string(),
@@ -732,6 +732,50 @@ default_vault = "default"
         assert!(report.backup_path.is_none());
         assert_eq!(persisted, original);
         assert!(!persisted.contains("[aws]"));
+    }
+
+    #[tokio::test]
+    async fn aws_remediation_names_top_level_doctor_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing_block_path = dir.path().join("missing-block.conf");
+        let missing_block = Config {
+            backend: Some("aws".into()),
+            ..Config::default()
+        };
+        std::fs::write(
+            &missing_block_path,
+            toml::to_string_pretty(&missing_block).unwrap(),
+        )
+        .unwrap();
+
+        let missing_block_report = diagnose_and_repair_with(&missing_block_path, |_| {})
+            .await
+            .unwrap();
+
+        let missing_region_path = dir.path().join("missing-region.conf");
+        let missing_region = Config {
+            backend: Some("aws".into()),
+            aws: Some(crate::config::settings::AwsConfig::default()),
+            ..Config::default()
+        };
+        std::fs::write(
+            &missing_region_path,
+            toml::to_string_pretty(&missing_region).unwrap(),
+        )
+        .unwrap();
+
+        let missing_region_report = diagnose_and_repair_with(&missing_region_path, |_| {})
+            .await
+            .unwrap();
+
+        for report in [missing_block_report, missing_region_report] {
+            let guidance = report.unresolved.join("\n");
+            assert!(guidance.contains("xv doctor"), "guidance: {guidance}");
+            assert!(
+                !guidance.contains("xv config doctor"),
+                "guidance: {guidance}"
+            );
+        }
     }
 
     #[tokio::test]
