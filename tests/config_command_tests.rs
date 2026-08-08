@@ -22,6 +22,53 @@ fn doctor_runs_before_normal_config_loading() {
 }
 
 #[test]
+fn doctor_rejects_json_format_with_one_valid_error_envelope() {
+    let (mut cmd, temp) = common::xv_isolated();
+    let path = temp.path().join(".config/xv/xv.conf");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "debug = [\n").unwrap();
+
+    let out = cmd
+        .args(["--format", "json", "doctor"])
+        .output()
+        .expect("spawn");
+
+    assert_ne!(out.status.code(), Some(0));
+    let body = common::parse_json_envelope(&out.stdout);
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("does not support --format json"));
+    let stdout = common::stdout_str(&out);
+    assert!(!stdout.contains("Configuration:"), "mixed stdout: {stdout}");
+    assert!(!stdout.contains(path.to_string_lossy().as_ref()));
+}
+
+#[test]
+fn doctor_rejects_yaml_format_with_one_valid_error_envelope() {
+    let (mut cmd, temp) = common::xv_isolated();
+    let path = temp.path().join(".config/xv/xv.conf");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "debug = [\n").unwrap();
+
+    let out = cmd
+        .args(["--format", "yaml", "doctor"])
+        .output()
+        .expect("spawn");
+
+    assert_ne!(out.status.code(), Some(0));
+    let body: serde_yaml::Value =
+        serde_yaml::from_slice(&out.stdout).expect("stdout must be one valid YAML value");
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("does not support --format yaml"));
+    let stdout = common::stdout_str(&out);
+    assert!(!stdout.contains("Configuration:"), "mixed stdout: {stdout}");
+    assert!(!stdout.contains(path.to_string_lossy().as_ref()));
+}
+
+#[test]
 fn doctor_missing_config_uses_defaults_without_creating_files() {
     let (mut cmd, temp) = common::xv_isolated();
     let path = temp.path().join(".config/xv/xv.conf");
@@ -95,6 +142,10 @@ fn doctor_repairs_sparse_local_config_and_preserves_exact_backup() {
         )));
     }
     assert!(stdout.contains("Backup:"));
+    assert!(
+        stdout.find("fixed:").unwrap() < stdout.find("Backup:").unwrap(),
+        "doctor checks must be rendered before the backup path: {stdout}"
+    );
     let backup = std::fs::read_dir(path.parent().unwrap())
         .unwrap()
         .map(|entry| entry.unwrap().path())

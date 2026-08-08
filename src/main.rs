@@ -90,7 +90,19 @@ async fn run(cli: Cli) -> Result<()> {
     info!("Starting crosstache");
 
     if matches!(&cli.command, crate::cli::Commands::Doctor) {
-        return crate::cli::doctor_ops::execute_doctor_command().await;
+        match cli.format {
+            OutputFormat::Json => {
+                return Err(CrosstacheError::invalid_argument(
+                    "xv doctor does not support --format json; use --format plain",
+                ));
+            }
+            OutputFormat::Yaml => {
+                return Err(CrosstacheError::invalid_argument(
+                    "xv doctor does not support --format yaml; use --format plain",
+                ));
+            }
+            _ => return crate::cli::doctor_ops::execute_doctor_command().await,
+        }
     }
 
     // Load configuration WITHOUT validation for every command. Validation is

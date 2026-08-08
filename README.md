@@ -1831,6 +1831,9 @@ xv doctor
 Doctor repairs deterministic schema omissions automatically. Before changing
 `xv.conf`, it writes an exact timestamped backup beside the file. Problems that
 cannot be safely inferred are reported with manual next steps and exit code 3.
+Doctor output is human-readable; explicit `--format json` or `--format yaml`
+requests are rejected before diagnosis so machine-readable error output remains
+a single valid document.
 
 ### Key environment variables
 
@@ -1861,7 +1864,8 @@ cannot be safely inferred are reported with manual next steps and exit code 3.
 
 ### Global CLI flags
 
-These work with any command:
+These options are available globally. Individual commands may reject formats
+that they cannot represent without losing command-specific diagnostics.
 
 | Flag | Purpose |
 |------|---------|

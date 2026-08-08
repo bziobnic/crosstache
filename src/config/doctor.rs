@@ -5,7 +5,8 @@ use serde_json::Value;
 use toml_edit::{DocumentMut, TableLike};
 
 use crate::{
-    config::{apply_environment_overrides, BlobConfig, Config},
+    backend::BackendKind,
+    config::{apply_environment_overrides, BlobConfig, Config, NamedBackendEntry},
     error::{CrosstacheError, Result},
     utils::helpers::{atomic_replace_with_private_backup_no_follow_async, read_file_no_follow},
 };
@@ -266,6 +267,64 @@ fn toml_schema_diagnostic(text: &str, error: &toml::de::Error) -> String {
     )
 }
 
+fn toml_line_column(text: &str, byte_offset: usize) -> Option<(usize, usize)> {
+    let byte_offset = byte_offset.min(text.len());
+    if !text.is_char_boundary(byte_offset) {
+        return None;
+    }
+    let prefix = &text[..byte_offset];
+    let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
+    let line_start = prefix
+        .rfind('\n')
+        .map(|index| index + 1)
+        .unwrap_or_default();
+    let column = text[line_start..byte_offset].chars().count() + 1;
+    Some((line, column))
+}
+
+fn toml_syntax_reason(message: &str) -> &'static str {
+    let message = message.to_ascii_lowercase();
+    if message.contains("duplicate key") {
+        "duplicate key"
+    } else if message.contains("array") && message.contains("table") {
+        "invalid array-table syntax"
+    } else if message.contains("inline table") {
+        "invalid inline-table syntax"
+    } else if message.contains("array") {
+        "invalid array syntax"
+    } else if message.contains("string") || message.contains("quote") {
+        "invalid string syntax"
+    } else if message.contains("date") || message.contains("time") {
+        "invalid date/time syntax"
+    } else if message.contains("number")
+        || message.contains("integer")
+        || message.contains("float")
+        || message.contains("digit")
+    {
+        "invalid numeric syntax"
+    } else if message.contains("key") {
+        "invalid key syntax"
+    } else if message.contains("value") {
+        "invalid value syntax"
+    } else {
+        "invalid TOML structure"
+    }
+}
+
+fn toml_syntax_diagnostic(path: &Path, text: &str, error: &toml_edit::TomlError) -> String {
+    let location = error
+        .span()
+        .and_then(|span| toml_line_column(text, span.start))
+        .map(|(line, column)| format!(" at line {line} column {column}"))
+        .unwrap_or_default();
+    let reason = toml_syntax_reason(error.message());
+    format!(
+        "TOML syntax error in '{}'{}: {reason}.",
+        path.display(),
+        location
+    )
+}
+
 fn json_byte_offset(text: &str, line: usize, column: usize) -> Option<usize> {
     if line == 0 || column == 0 {
         return None;
@@ -405,15 +464,7 @@ async fn diagnose_and_repair_with(
         Err(toml_error) => match serde_json::from_str::<Value>(text) {
             Ok(value) => ParsedConfig::Json(value),
             Err(_) => {
-                let location = toml_error
-                    .span()
-                    .map(|span| format!(" at byte {}", span.start))
-                    .unwrap_or_default();
-                return Ok(report.with_unresolved(format!(
-                    "TOML syntax error in '{}'{}.",
-                    path.display(),
-                    location
-                )));
+                return Ok(report.with_unresolved(toml_syntax_diagnostic(path, text, &toml_error)))
             }
         },
     };
@@ -477,6 +528,8 @@ async fn diagnose_and_repair_with(
             apply_overrides(&mut effective);
             if effective.validate().is_err() {
                 add_semantic_unresolved(&mut report, &effective);
+            } else if !effective_backend_is_available(&effective) {
+                add_backend_unresolved(&mut report);
             }
 
             let status = if report.is_healthy() {
@@ -496,6 +549,31 @@ async fn diagnose_and_repair_with(
         }
         Some(error) => Ok(report.with_unresolved(error)),
     }
+}
+
+fn effective_backend_is_available(config: &Config) -> bool {
+    let name = config.effective_backend_name();
+    if let Some(entry) = config.named_backends.get(name) {
+        return match entry {
+            NamedBackendEntry::Local(_) => true,
+            NamedBackendEntry::Aws(_) => cfg!(feature = "aws"),
+        };
+    }
+
+    match name.parse::<BackendKind>() {
+        Ok(BackendKind::Azure | BackendKind::Local) => true,
+        Ok(BackendKind::Aws) => cfg!(feature = "aws"),
+        Err(_) => false,
+    }
+}
+
+fn add_backend_unresolved(report: &mut DoctorReport) {
+    let message = "The selected backend is unavailable. Set `backend` to a compiled built-in backend or an exact key under `[named_backends]`, then run `xv doctor` again.";
+    report.checks.push(DoctorCheck {
+        status: DoctorCheckStatus::Error,
+        message: message.to_string(),
+    });
+    report.unresolved.push(message.to_string());
 }
 
 fn deserialize_verified_config(path: &Path, text: &str) -> Result<Config> {
@@ -564,7 +642,10 @@ fn add_semantic_unresolved(report: &mut DoctorReport, config: &Config) {
 mod tests {
     use std::collections::HashMap;
 
-    use crate::config::{settings::apply_environment_overrides_with, Config};
+    use crate::config::{
+        settings::apply_environment_overrides_with, AwsConfig, Config, LocalConfig,
+        NamedBackendEntry,
+    };
     use chrono::{TimeZone, Utc};
     use serde_json::json;
 
@@ -1053,7 +1134,12 @@ future_setting = "{FUTURE_SENTINEL}"
 
         let report = diagnose_and_repair(&path).await.unwrap();
 
+        let diagnostics = report.unresolved.join("\n");
+
         assert!(!report.is_healthy());
+        assert!(diagnostics.contains("array syntax"), "{diagnostics}");
+        assert!(diagnostics.contains("line "), "{diagnostics}");
+        assert!(diagnostics.contains("column "), "{diagnostics}");
         assert_diagnostics_exclude(&report, SENTINEL);
     }
 
@@ -1097,5 +1183,170 @@ future_setting = "{FUTURE_SENTINEL}"
         assert!(report.is_healthy());
         assert!(report.backup_path.is_none());
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+
+    #[tokio::test]
+    async fn unknown_effective_backend_is_unresolved_without_disclosing_its_value() {
+        const BACKEND_SENTINEL: &str = "doctor-private-unknown-backend";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("xv.conf");
+        let config = Config {
+            backend: Some(BACKEND_SENTINEL.into()),
+            ..Config::default()
+        };
+        let original = toml::to_string_pretty(&config).unwrap();
+        std::fs::write(&path, &original).unwrap();
+
+        let report = diagnose_and_repair_with(&path, |_| {}).await.unwrap();
+
+        assert!(!report.is_healthy());
+        assert!(report.unresolved.join("\n").contains("backend"));
+        assert_diagnostics_exclude(&report, BACKEND_SENTINEL);
+        assert!(report.backup_path.is_none());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn backend_kind_alias_is_accepted_without_constructing_a_client() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("xv.conf");
+        let config = Config {
+            backend: Some("file".into()),
+            ..Config::default()
+        };
+        let original = toml::to_string_pretty(&config).unwrap();
+        std::fs::write(&path, &original).unwrap();
+
+        let report = diagnose_and_repair_with(&path, |_| {}).await.unwrap();
+
+        assert!(report.is_healthy(), "{:?}", report.unresolved);
+        assert!(report.backup_path.is_none());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn exact_named_local_backend_is_accepted_without_constructing_a_client() {
+        const BACKEND_NAME: &str = "doctor-named-local";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("xv.conf");
+        let config = Config {
+            backend: Some(BACKEND_NAME.into()),
+            named_backends: HashMap::from([(
+                BACKEND_NAME.to_string(),
+                NamedBackendEntry::Local(LocalConfig::default()),
+            )]),
+            ..Config::default()
+        };
+        let original = toml::to_string_pretty(&config).unwrap();
+        std::fs::write(&path, &original).unwrap();
+
+        let report = diagnose_and_repair_with(&path, |_| {}).await.unwrap();
+
+        assert!(report.is_healthy(), "{:?}", report.unresolved);
+        assert!(report.backup_path.is_none());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[cfg(not(feature = "aws"))]
+    #[tokio::test]
+    async fn named_aws_backend_is_unresolved_when_aws_is_not_compiled() {
+        const BACKEND_SENTINEL: &str = "doctor-private-named-aws";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("xv.conf");
+        let config = Config {
+            backend: Some(BACKEND_SENTINEL.into()),
+            named_backends: HashMap::from([(
+                BACKEND_SENTINEL.to_string(),
+                NamedBackendEntry::Aws(AwsConfig {
+                    region: Some("us-east-1".into()),
+                    ..AwsConfig::default()
+                }),
+            )]),
+            ..Config::default()
+        };
+        let original = toml::to_string_pretty(&config).unwrap();
+        std::fs::write(&path, &original).unwrap();
+
+        let report = diagnose_and_repair_with(&path, |_| {}).await.unwrap();
+
+        assert!(!report.is_healthy());
+        assert!(report.unresolved.join("\n").contains("backend"));
+        assert_diagnostics_exclude(&report, BACKEND_SENTINEL);
+        assert!(report.backup_path.is_none());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[cfg(not(feature = "aws"))]
+    #[tokio::test]
+    async fn exact_named_backend_key_precedes_a_builtin_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("xv.conf");
+        let config = Config {
+            backend: Some("file".into()),
+            named_backends: HashMap::from([(
+                "file".to_string(),
+                NamedBackendEntry::Aws(AwsConfig {
+                    region: Some("us-east-1".into()),
+                    ..AwsConfig::default()
+                }),
+            )]),
+            ..Config::default()
+        };
+        let original = toml::to_string_pretty(&config).unwrap();
+        std::fs::write(&path, &original).unwrap();
+
+        let report = diagnose_and_repair_with(&path, |_| {}).await.unwrap();
+
+        assert!(!report.is_healthy());
+        assert!(report.unresolved.join("\n").contains("backend"));
+        assert!(report.backup_path.is_none());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[cfg(not(feature = "aws"))]
+    #[tokio::test]
+    async fn builtin_aws_backend_is_unresolved_when_aws_is_not_compiled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("xv.conf");
+        let config = Config {
+            backend: Some("aws".into()),
+            aws: Some(AwsConfig {
+                region: Some("us-east-1".into()),
+                ..AwsConfig::default()
+            }),
+            ..Config::default()
+        };
+        let original = toml::to_string_pretty(&config).unwrap();
+        std::fs::write(&path, &original).unwrap();
+
+        let report = diagnose_and_repair_with(&path, |_| {}).await.unwrap();
+
+        assert!(!report.is_healthy());
+        assert!(report.unresolved.join("\n").contains("backend"));
+        assert!(report.backup_path.is_none());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[cfg(feature = "aws")]
+    #[tokio::test]
+    async fn builtin_aws_backend_is_accepted_without_constructing_a_client() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("xv.conf");
+        let config = Config {
+            backend: Some("aws".into()),
+            aws: Some(AwsConfig {
+                region: Some("us-east-1".into()),
+                ..AwsConfig::default()
+            }),
+            ..Config::default()
+        };
+        let original = toml::to_string_pretty(&config).unwrap();
+        std::fs::write(&path, &original).unwrap();
+
+        let report = diagnose_and_repair_with(&path, |_| {}).await.unwrap();
+
+        assert!(report.is_healthy(), "{:?}", report.unresolved);
+        assert!(report.backup_path.is_none());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
     }
 }
