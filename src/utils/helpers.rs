@@ -936,25 +936,27 @@ fn atomic_replace_with_private_backup_no_follow_unix(
         )));
     }
 
+    let mut backup_metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
     let backup_probe = unsafe {
-        libc::openat(
+        libc::fstatat(
             parent.directory.as_raw_fd(),
             backup_name.as_ptr(),
-            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            backup_metadata.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
         )
     };
-    if backup_probe >= 0 {
-        unsafe { libc::close(backup_probe) };
+    if backup_probe == 0 {
         return Err(CrosstacheError::config(format!(
             "Refusing to overwrite existing config backup for '{}'",
             parent.absolute.display()
         )));
     }
-    if std::io::Error::last_os_error().kind() != std::io::ErrorKind::NotFound {
+    let backup_probe_error = std::io::Error::last_os_error();
+    if backup_probe_error.kind() != std::io::ErrorKind::NotFound {
         return Err(CrosstacheError::config(format!(
             "Failed to verify exclusive config backup path for '{}': {}",
             parent.absolute.display(),
-            std::io::Error::last_os_error()
+            backup_probe_error
         )));
     }
 
@@ -2692,6 +2694,71 @@ mod tests {
             .find(|entry| entry != &path)
             .unwrap();
         assert_eq!(std::fs::read(preserved).unwrap(), b"repaired");
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn anchored_backup_replace_rejects_fifo_backup_collision_without_blocking() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("xv.conf");
+        let backup_name = std::ffi::OsStr::new("xv.conf.backup-fixed");
+        let backup_path = root.path().join(backup_name);
+        std::fs::write(&path, b"diagnosed").unwrap();
+        let fifo_path = std::ffi::CString::new(backup_path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
+        let fifo_before = std::fs::symlink_metadata(&backup_path).unwrap();
+
+        let worker_path = path.clone();
+        let worker_backup_name = backup_name.to_os_string();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            sender
+                .send(atomic_replace_with_private_backup_no_follow(
+                    &worker_path,
+                    &worker_backup_name,
+                    b"diagnosed",
+                    b"repaired",
+                ))
+                .unwrap();
+        });
+
+        let result = match receiver.recv_timeout(std::time::Duration::from_secs(1)) {
+            Ok(result) => result,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                let _unblock = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(&backup_path)
+                    .unwrap();
+                let delayed = receiver
+                    .recv_timeout(std::time::Duration::from_secs(1))
+                    .expect("blocked repair probe did not finish after FIFO was opened");
+                worker.join().unwrap();
+                panic!("backup collision probe blocked on FIFO: {delayed:?}");
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("backup collision probe worker disconnected")
+            }
+        };
+        worker.join().unwrap();
+
+        let error = result.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Refusing to overwrite existing config backup"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"diagnosed");
+        let fifo_after = std::fs::symlink_metadata(&backup_path).unwrap();
+        assert!(fifo_after.file_type().is_fifo());
+        assert_eq!(fifo_after.dev(), fifo_before.dev());
+        assert_eq!(fifo_after.ino(), fifo_before.ino());
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 2);
     }
 
