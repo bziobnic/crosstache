@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use toml_edit::{DocumentMut, Table};
+use toml_edit::{DocumentMut, TableLike};
 
 use crate::{
     config::{BlobConfig, Config},
@@ -116,7 +116,7 @@ fn default_to_toml_value(default: &Value) -> toml_edit::Item {
 }
 
 fn repair_toml_fields(
-    table: &mut Table,
+    table: &mut dyn TableLike,
     defaults: &serde_json::Map<String, Value>,
     fields: &[&str],
     prefix: &str,
@@ -147,7 +147,7 @@ fn repair_toml(document: &mut DocumentMut) -> Vec<String> {
     );
     if let Some(table) = document
         .get_mut("blob_config")
-        .and_then(toml_edit::Item::as_table_mut)
+        .and_then(toml_edit::Item::as_table_like_mut)
     {
         repair_toml_fields(
             table,
@@ -265,9 +265,76 @@ fn toml_schema_diagnostic(text: &str, error: &toml::de::Error) -> String {
     )
 }
 
-fn json_schema_diagnostic(error: &serde_json::Error) -> String {
+fn json_byte_offset(text: &str, line: usize, column: usize) -> Option<usize> {
+    if line == 0 || column == 0 {
+        return None;
+    }
+
+    let line_start = if line == 1 {
+        0
+    } else {
+        text.match_indices('\n').nth(line - 2)?.0 + 1
+    };
+    let line_end = text[line_start..]
+        .find('\n')
+        .map(|index| line_start + index)
+        .unwrap_or(text.len());
+    let line = &text[line_start..line_end];
+    let column_offset = line
+        .char_indices()
+        .nth(column - 1)
+        .map(|(index, _)| index)
+        .unwrap_or(line.len());
+    Some(line_start + column_offset)
+}
+
+fn json_field_at(text: &str, byte_offset: usize) -> Option<&str> {
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut last_structural_colon = None;
+
+    for (index, character) in text.char_indices() {
+        if index >= byte_offset {
+            break;
+        }
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+        } else if character == '"' {
+            in_string = true;
+        } else if character == ':' {
+            last_structural_colon = Some(index);
+        }
+    }
+
+    let prefix = text[..last_structural_colon?].trim_end();
+    let key_without_closing_quote = prefix.strip_suffix('"')?;
+    let key_start = key_without_closing_quote.rfind('"')?;
+    let key = &key_without_closing_quote[key_start + 1..];
+    (key.chars()
+        .all(|character| character.is_ascii_alphanumeric() || character == '_' || character == '-'))
+    .then_some(key)
+}
+
+fn json_schema_diagnostic(
+    text: &str,
+    error: &serde_json::Error,
+    preserve_source_location: bool,
+) -> String {
+    let byte_offset = json_byte_offset(text, error.line(), error.column());
+    let location = (preserve_source_location && byte_offset.is_some())
+        .then(|| format!(" at line {} column {}", error.line(), error.column()))
+        .unwrap_or_default();
+    let field = byte_offset
+        .and_then(|byte_offset| json_field_at(text, byte_offset))
+        .unwrap_or("configuration field");
     format!(
-        "JSON schema error: expected {}.",
+        "JSON schema error for '{field}'{location}: expected {}.",
         expected_type(&error.to_string())
     )
 }
@@ -325,9 +392,15 @@ pub async fn diagnose_and_repair(path: &Path) -> Result<DoctorReport> {
         }
         ParsedConfig::Json(mut value) => {
             let repairs = repair_json(&mut value);
-            let error = serde_json::from_value::<Config>(value)
+            let preserve_source_location = repairs.is_empty();
+            let candidate = if preserve_source_location {
+                text.to_string()
+            } else {
+                serde_json::to_string(&value).expect("repaired JSON configuration must serialize")
+            };
+            let error = serde_json::from_str::<Config>(&candidate)
                 .err()
-                .map(|error| json_schema_diagnostic(&error));
+                .map(|error| json_schema_diagnostic(&candidate, &error, preserve_source_location));
             (repairs, error)
         }
     };
@@ -455,6 +528,47 @@ progress_threshold_mb = 7
     }
 
     #[test]
+    fn repairs_missing_inline_blob_defaults_without_replacing_existing_values() {
+        let mut document = r#"backend = "local"
+debug = false
+subscription_id = ""
+default_vault = ""
+default_resource_group = "Vaults"
+default_location = "eastus"
+tenant_id = ""
+output_json = false
+no_color = false
+blob_config = { endpoint = "https://existing.example", progress_threshold_mb = 7 }
+"#
+        .parse()
+        .unwrap();
+
+        let repairs = repair_toml(&mut document);
+        let repaired = document.to_string();
+        let config: Config = toml::from_str(&repaired).unwrap();
+        let blob = config.blob_config.unwrap();
+
+        assert_eq!(
+            repairs,
+            repair_names(&[
+                "blob_config.storage_account",
+                "blob_config.container_name",
+                "blob_config.enable_large_file_support",
+                "blob_config.chunk_size_mb",
+                "blob_config.max_concurrent_uploads",
+            ])
+        );
+        assert!(document["blob_config"].is_inline_table());
+        assert_eq!(blob.endpoint.as_deref(), Some("https://existing.example"));
+        assert_eq!(blob.progress_threshold_mb, 7);
+        assert_eq!(blob.storage_account, "");
+        assert_eq!(blob.container_name, "crosstache-files");
+        assert!(blob.enable_large_file_support);
+        assert_eq!(blob.chunk_size_mb, 4);
+        assert_eq!(blob.max_concurrent_uploads, 3);
+    }
+
+    #[test]
     fn repairs_sparse_json_without_replacing_unknown_or_local_values() {
         let mut value = json!({
             "backend": "local",
@@ -507,6 +621,44 @@ future_setting = "{FUTURE_SENTINEL}"
         assert!(report.backup_path.is_none());
         assert!(report.unresolved.join("\n").contains("debug"));
         assert!(report.unresolved.join("\n").contains("boolean"));
+        assert_diagnostics_exclude(&report, FUTURE_SENTINEL);
+        assert_diagnostics_exclude(&report, CREDENTIAL_SENTINEL);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn invalid_json_occupied_value_identifies_field_without_disclosing_values() {
+        const DEBUG_SENTINEL: &str = "doctor-private-json-debug-value";
+        const FUTURE_SENTINEL: &str = "doctor-private-json-future-setting";
+        const CREDENTIAL_SENTINEL: &str = "doctor-private-json-subscription-id";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("xv.conf");
+        let original = format!(
+            r#"{{
+  "backend": "local",
+  "debug": "{DEBUG_SENTINEL}",
+  "subscription_id": "{CREDENTIAL_SENTINEL}",
+  "default_vault": "",
+  "default_resource_group": "Vaults",
+  "default_location": "eastus",
+  "tenant_id": "tenant-id",
+  "output_json": false,
+  "no_color": false,
+  "future_setting": "{FUTURE_SENTINEL}"
+}}"#
+        );
+        std::fs::write(&path, &original).unwrap();
+
+        let report = diagnose_and_repair(&path).await.unwrap();
+        let diagnostics = report.unresolved.join("\n");
+
+        assert!(!report.is_healthy());
+        assert!(report.repairs.is_empty());
+        assert!(report.backup_path.is_none());
+        assert!(diagnostics.contains("debug"));
+        assert!(diagnostics.contains("boolean"));
+        assert!(diagnostics.contains("line 3 column"));
+        assert_diagnostics_exclude(&report, DEBUG_SENTINEL);
         assert_diagnostics_exclude(&report, FUTURE_SENTINEL);
         assert_diagnostics_exclude(&report, CREDENTIAL_SENTINEL);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
