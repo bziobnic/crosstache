@@ -174,6 +174,7 @@ pub fn read_file_no_follow(path: &Path) -> Result<Vec<u8>> {
 }
 
 /// Create a new private file without following symlinks.
+#[cfg(test)]
 pub fn write_private_file_no_follow_create_new(
     path: &Path,
     content: &[u8],
@@ -2237,17 +2238,15 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn anchored_repair_observers() -> &'static std::sync::Mutex<
-        std::collections::HashMap<PathBuf, std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>>>,
-    > {
-        static HOOKS: std::sync::OnceLock<
-            std::sync::Mutex<
-                std::collections::HashMap<
-                    PathBuf,
-                    std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>>,
-                >,
-            >,
-        > = std::sync::OnceLock::new();
+    type AnchoredRepairObserver = std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>>;
+
+    #[cfg(unix)]
+    type AnchoredRepairObservers =
+        std::sync::Mutex<std::collections::HashMap<PathBuf, AnchoredRepairObserver>>;
+
+    #[cfg(unix)]
+    fn anchored_repair_observers() -> &'static AnchoredRepairObservers {
+        static HOOKS: std::sync::OnceLock<AnchoredRepairObservers> = std::sync::OnceLock::new();
         HOOKS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
     }
 

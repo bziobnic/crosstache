@@ -328,9 +328,11 @@ fn json_schema_diagnostic(
     preserve_source_location: bool,
 ) -> String {
     let byte_offset = json_byte_offset(text, error.line(), error.column());
-    let location = (preserve_source_location && byte_offset.is_some())
-        .then(|| format!(" at line {} column {}", error.line(), error.column()))
-        .unwrap_or_default();
+    let location = if preserve_source_location && byte_offset.is_some() {
+        format!(" at line {} column {}", error.line(), error.column())
+    } else {
+        String::new()
+    };
     let field = byte_offset
         .and_then(|byte_offset| json_field_at(text, byte_offset))
         .unwrap_or("configuration field");
