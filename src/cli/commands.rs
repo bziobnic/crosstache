@@ -1018,6 +1018,8 @@ pub enum Commands {
         #[command(subcommand)]
         command: ConfigCommands,
     },
+    /// Diagnose and automatically repair the global configuration file
+    Doctor,
     /// Vault context and multi-vault workspace management (alias: cx)
     #[command(visible_alias = "cx")]
     Context {
@@ -2339,6 +2341,7 @@ impl Cli {
             Commands::Config { command } => {
                 crate::cli::config_ops::execute_config_command(command, config).await
             }
+            Commands::Doctor => crate::cli::doctor_ops::execute_doctor_command().await,
             Commands::Context { command } => {
                 crate::cli::config_ops::execute_context_command(command, config).await
             }

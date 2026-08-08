@@ -89,6 +89,10 @@ async fn run_complete_folders() -> Result<()> {
 async fn run(cli: Cli) -> Result<()> {
     info!("Starting crosstache");
 
+    if matches!(&cli.command, crate::cli::Commands::Doctor) {
+        return crate::cli::doctor_ops::execute_doctor_command().await;
+    }
+
     // Load configuration WITHOUT validation for every command. Validation is
     // deferred until after the `.xv.toml` env-profile backend has been
     // resolved and folded into `config.backend` below (and only performed
