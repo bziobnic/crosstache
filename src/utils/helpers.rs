@@ -1634,6 +1634,21 @@ fn open_windows_atomic_parent(
     })
 }
 
+/// Byte size to allocate and report for a `FILE_RENAME_INFO` carrying a name
+/// of `name_bytes` bytes.
+///
+/// `sizeof(FILE_RENAME_INFO) + FileNameLength` is the size the API documents.
+/// Because the struct's trailing `FileName: [u16; 1]` and its padding are
+/// already counted by `size_of`, the result always leaves at least one zero
+/// `u16` past the copied name, which supplies the terminator for free given a
+/// zeroed buffer.
+#[cfg(windows)]
+fn windows_rename_info_size(name_bytes: usize) -> usize {
+    use windows_sys::Win32::Storage::FileSystem::FILE_RENAME_INFO;
+
+    std::mem::size_of::<FILE_RENAME_INFO>() + name_bytes
+}
+
 #[cfg(windows)]
 fn windows_rename_into_parent(
     file: &std::fs::File,
@@ -1646,10 +1661,17 @@ fn windows_rename_into_parent(
         FileRenameInfo, SetFileInformationByHandle, FILE_RENAME_INFO, FILE_RENAME_INFO_0,
     };
 
+    // Buffer sizing follows the documented contract for FileRenameInfo:
+    // `sizeof(FILE_RENAME_INFO) + FileNameLength`, with `FileNameLength`
+    // counting the name only (no terminator) while the buffer itself leaves
+    // room for one. Sizing from `offset_of(FileName)` instead understates the
+    // buffer by the trailing FileName[1] element plus its padding — 4 bytes on
+    // 64-bit — and SetFileInformationByHandle rejects the short buffer with
+    // ERROR_INVALID_PARAMETER (os error 87) rather than a size-specific error.
     let name: Vec<u16> = destination.encode_wide().collect();
     let name_bytes = name.len() * std::mem::size_of::<u16>();
     let name_offset = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
-    let byte_length = name_offset + name_bytes;
+    let byte_length = windows_rename_info_size(name_bytes);
     let word_length = byte_length.div_ceil(std::mem::size_of::<usize>());
     let mut buffer = vec![0usize; word_length];
     let information = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
@@ -2439,6 +2461,37 @@ pub fn glob_matches_either_name(
     original_name: &str,
 ) -> bool {
     matcher.is_match(name) || (!original_name.is_empty() && matcher.is_match(original_name))
+}
+
+#[cfg(all(test, windows))]
+mod windows_rename_tests {
+    use super::*;
+    use windows_sys::Win32::Storage::FileSystem::FILE_RENAME_INFO;
+
+    /// Regression: the buffer was sized from `offset_of(FileName)` rather than
+    /// `size_of::<FILE_RENAME_INFO>()`, understating it by the trailing
+    /// `FileName[1]` element and its padding (4 bytes on 64-bit).
+    /// `SetFileInformationByHandle` rejected the short buffer with
+    /// ERROR_INVALID_PARAMETER (os error 87), so every private atomic replace
+    /// failed on Windows: `xv context use`, config writes, and the web UI's
+    /// `ui.json` (which is why no appearance change ever persisted).
+    #[test]
+    fn rename_info_buffer_has_room_for_the_name_and_a_terminator() {
+        let offset = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
+        for name_bytes in [2usize, 14, 24, 512] {
+            let size = windows_rename_info_size(name_bytes);
+            assert_eq!(
+                size,
+                std::mem::size_of::<FILE_RENAME_INFO>() + name_bytes,
+                "must match the documented sizeof + FileNameLength contract"
+            );
+            assert!(
+                size >= offset + name_bytes + std::mem::size_of::<u16>(),
+                "buffer of {size} leaves no terminator after a {name_bytes}-byte name \
+                 at offset {offset}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
