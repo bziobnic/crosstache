@@ -526,7 +526,7 @@ async fn diagnose_and_repair_with(
             })?;
             let mut effective = deserialize_verified_config(path, persisted)?;
             apply_overrides(&mut effective);
-            if effective.validate().is_err() {
+            if doctor_backend_has_semantic_errors(&effective) {
                 add_semantic_unresolved(&mut report, &effective);
             } else if !effective_backend_is_available(&effective) {
                 add_backend_unresolved(&mut report);
@@ -552,18 +552,50 @@ async fn diagnose_and_repair_with(
 }
 
 fn effective_backend_is_available(config: &Config) -> bool {
-    let name = config.effective_backend_name();
-    if let Some(entry) = config.named_backends.get(name) {
-        return match entry {
-            NamedBackendEntry::Local(_) => true,
-            NamedBackendEntry::Aws(_) => cfg!(feature = "aws"),
-        };
-    }
-
-    match name.parse::<BackendKind>() {
+    match selected_backend_kind(config) {
         Ok(BackendKind::Azure | BackendKind::Local) => true,
         Ok(BackendKind::Aws) => cfg!(feature = "aws"),
         Err(_) => false,
+    }
+}
+
+/// Resolves the selected backend without constructing a client. Named backends
+/// deliberately take precedence over built-in aliases, matching runtime
+/// backend selection.
+fn selected_backend_kind(config: &Config) -> std::result::Result<BackendKind, ()> {
+    let name = config.effective_backend_name();
+    if let Some(entry) = config.named_backends.get(name) {
+        return Ok(match entry {
+            NamedBackendEntry::Local(_) => BackendKind::Local,
+            NamedBackendEntry::Aws(_) => BackendKind::Aws,
+        });
+    }
+
+    name.parse::<BackendKind>().map_err(|_| ())
+}
+
+fn selected_aws_config(config: &Config) -> Option<&crate::config::AwsConfig> {
+    let name = config.effective_backend_name();
+    match config.named_backends.get(name) {
+        Some(NamedBackendEntry::Aws(aws)) => Some(aws),
+        Some(NamedBackendEntry::Local(_)) => None,
+        None => config.aws.as_ref(),
+    }
+}
+
+fn aws_region_is_configured(aws: &crate::config::AwsConfig) -> bool {
+    aws.region.is_some()
+        || std::env::var("AWS_REGION").is_ok()
+        || std::env::var("AWS_DEFAULT_REGION").is_ok()
+}
+
+fn doctor_backend_has_semantic_errors(config: &Config) -> bool {
+    match selected_backend_kind(config) {
+        Ok(BackendKind::Azure) => config.subscription_id.is_empty() || config.tenant_id.is_empty(),
+        Ok(BackendKind::Aws) => {
+            selected_aws_config(config).is_none_or(|aws| !aws_region_is_configured(aws))
+        }
+        Ok(BackendKind::Local) | Err(()) => false,
     }
 }
 
@@ -588,8 +620,8 @@ fn deserialize_verified_config(path: &Path, text: &str) -> Result<Config> {
 }
 
 fn add_semantic_unresolved(report: &mut DoctorReport, config: &Config) {
-    match config.effective_backend_name() {
-        "azure" => {
+    match selected_backend_kind(config) {
+        Ok(BackendKind::Azure) => {
             if config.subscription_id.is_empty() {
                 let message =
                     "Azure subscription_id is required. Run `xv config set subscription_id <id>`.";
@@ -608,7 +640,7 @@ fn add_semantic_unresolved(report: &mut DoctorReport, config: &Config) {
                 report.unresolved.push(message.to_string());
             }
         }
-        "aws" => match &config.aws {
+        Ok(BackendKind::Aws) => match selected_aws_config(config) {
             None => {
                 let message = "AWS backend requires an [aws] block. Add [aws] settings and run `xv doctor` again.";
                 report.checks.push(DoctorCheck {
@@ -617,7 +649,7 @@ fn add_semantic_unresolved(report: &mut DoctorReport, config: &Config) {
                 });
                 report.unresolved.push(message.to_string());
             }
-            Some(aws) if aws.region.is_none() => {
+            Some(aws) if !aws_region_is_configured(aws) => {
                 let message = "AWS region is required. Set `[aws].region` or `AWS_REGION`, then run `xv doctor` again.";
                 report.checks.push(DoctorCheck {
                     status: DoctorCheckStatus::Error,
@@ -627,7 +659,7 @@ fn add_semantic_unresolved(report: &mut DoctorReport, config: &Config) {
             }
             Some(_) => {}
         },
-        _ => {
+        Ok(BackendKind::Local) | Err(()) => {
             let message = "Configuration validation failed. Review the selected backend settings and run `xv doctor` again.";
             report.checks.push(DoctorCheck {
                 status: DoctorCheckStatus::Error,
@@ -1225,8 +1257,48 @@ future_setting = "{FUTURE_SENTINEL}"
     }
 
     #[tokio::test]
+    async fn azure_alias_without_ids_reports_azure_remediation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("xv.conf");
+        let config = Config {
+            backend: Some("az".into()),
+            ..Config::default()
+        };
+        let original = toml::to_string_pretty(&config).unwrap();
+        std::fs::write(&path, &original).unwrap();
+
+        let report = diagnose_and_repair_with(&path, |_| {}).await.unwrap();
+
+        assert!(!report.is_healthy());
+        assert!(report.unresolved.join("\n").contains("subscription_id"));
+        assert!(report.unresolved.join("\n").contains("tenant_id"));
+        assert!(report.backup_path.is_none());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn azure_alias_with_ids_is_healthy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("xv.conf");
+        let config = Config {
+            backend: Some("keyvault".into()),
+            subscription_id: "subscription".into(),
+            tenant_id: "tenant".into(),
+            ..Config::default()
+        };
+        let original = toml::to_string_pretty(&config).unwrap();
+        std::fs::write(&path, &original).unwrap();
+
+        let report = diagnose_and_repair_with(&path, |_| {}).await.unwrap();
+
+        assert!(report.is_healthy(), "{:?}", report.unresolved);
+        assert!(report.backup_path.is_none());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[tokio::test]
     async fn exact_named_local_backend_is_accepted_without_constructing_a_client() {
-        const BACKEND_NAME: &str = "doctor-named-local";
+        const BACKEND_NAME: &str = "az";
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("xv.conf");
         let config = Config {
@@ -1234,6 +1306,98 @@ future_setting = "{FUTURE_SENTINEL}"
             named_backends: HashMap::from([(
                 BACKEND_NAME.to_string(),
                 NamedBackendEntry::Local(LocalConfig::default()),
+            )]),
+            ..Config::default()
+        };
+        let original = toml::to_string_pretty(&config).unwrap();
+        std::fs::write(&path, &original).unwrap();
+
+        let report = diagnose_and_repair_with(&path, |_| {}).await.unwrap();
+
+        assert!(report.is_healthy(), "{:?}", report.unresolved);
+        assert!(report.backup_path.is_none());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn exact_named_local_backend_overrides_builtin_name_semantics() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("xv.conf");
+        let config = Config {
+            backend: Some("aws".into()),
+            named_backends: HashMap::from([(
+                "aws".to_string(),
+                NamedBackendEntry::Local(LocalConfig::default()),
+            )]),
+            ..Config::default()
+        };
+        let original = toml::to_string_pretty(&config).unwrap();
+        std::fs::write(&path, &original).unwrap();
+
+        let report = diagnose_and_repair_with(&path, |_| {}).await.unwrap();
+
+        assert!(report.is_healthy(), "{:?}", report.unresolved);
+        assert!(report.backup_path.is_none());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[cfg(feature = "aws")]
+    #[tokio::test]
+    async fn aws_alias_without_block_reports_aws_remediation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("xv.conf");
+        let config = Config {
+            backend: Some("asm".into()),
+            ..Config::default()
+        };
+        let original = toml::to_string_pretty(&config).unwrap();
+        std::fs::write(&path, &original).unwrap();
+
+        let report = diagnose_and_repair_with(&path, |_| {}).await.unwrap();
+
+        assert!(!report.is_healthy());
+        assert!(report.unresolved.join("\n").contains("[aws]"));
+        assert!(report.backup_path.is_none());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[cfg(feature = "aws")]
+    #[tokio::test]
+    async fn aws_alias_with_region_is_healthy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("xv.conf");
+        let config = Config {
+            backend: Some("secretsmanager".into()),
+            aws: Some(AwsConfig {
+                region: Some("us-east-1".into()),
+                ..AwsConfig::default()
+            }),
+            ..Config::default()
+        };
+        let original = toml::to_string_pretty(&config).unwrap();
+        std::fs::write(&path, &original).unwrap();
+
+        let report = diagnose_and_repair_with(&path, |_| {}).await.unwrap();
+
+        assert!(report.is_healthy(), "{:?}", report.unresolved);
+        assert!(report.backup_path.is_none());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[cfg(feature = "aws")]
+    #[tokio::test]
+    async fn named_aws_backend_uses_its_own_region() {
+        const BACKEND_NAME: &str = "doctor-named-aws";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("xv.conf");
+        let config = Config {
+            backend: Some(BACKEND_NAME.into()),
+            named_backends: HashMap::from([(
+                BACKEND_NAME.to_string(),
+                NamedBackendEntry::Aws(AwsConfig {
+                    region: Some("us-east-1".into()),
+                    ..AwsConfig::default()
+                }),
             )]),
             ..Config::default()
         };
