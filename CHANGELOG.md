@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **`xv doctor` provides bootstrap-safe configuration recovery.** It diagnoses
+  invalid application configuration before normal config loading, automatically
+  repairs deterministic schema omissions, writes an exact timestamped backup
+  before changing `xv.conf`, and exits with status 3 when unresolved problems
+  require manual next steps.
+
 ## v0.35.0 — Keeper import fidelity (2026-08-07)
 
 Diagnosed from a real 434-record Keeper export that v0.34.0 imported with 332
