@@ -718,6 +718,272 @@ fn atomic_write_file_no_follow_unix(path: &Path, content: &[u8], private: bool) 
     }
 }
 
+/// Replace an existing private file while retaining one destination-parent
+/// handle for the precondition check, exclusive backup, rename, and
+/// verification. The returned bytes were read from the anchored destination
+/// after the commit.
+pub(crate) fn atomic_replace_with_private_backup_no_follow(
+    path: &Path,
+    backup_name: &std::ffi::OsStr,
+    expected: &[u8],
+    replacement: &[u8],
+) -> Result<Vec<u8>> {
+    #[cfg(unix)]
+    {
+        atomic_replace_with_private_backup_no_follow_unix(path, backup_name, expected, replacement)
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = (path, backup_name, expected, replacement);
+        Err(CrosstacheError::config(
+            "Anchored config backup and replacement is unavailable on this platform",
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn atomic_replace_with_private_backup_no_follow_unix(
+    path: &Path,
+    backup_name: &std::ffi::OsStr,
+    expected: &[u8],
+    replacement: &[u8],
+) -> Result<Vec<u8>> {
+    use std::ffi::CString;
+    use std::io::{Read, Write};
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
+
+    let mut backup_components = Path::new(backup_name).components();
+    if !matches!(
+        backup_components.next(),
+        Some(std::path::Component::Normal(_))
+    ) || backup_components.next().is_some()
+    {
+        return Err(CrosstacheError::invalid_argument(
+            "Config backup must be a single file name",
+        ));
+    }
+    let backup_name = CString::new(backup_name.as_bytes())
+        .map_err(|_| CrosstacheError::invalid_argument("Config backup name contains a NUL byte"))?;
+    let parent = open_unix_atomic_parent(path, 0o700)?;
+    let temp_name = CString::new(format!(".xv-repair-{}.tmp", Uuid::new_v4()))
+        .expect("UUID temporary name contains no NUL");
+
+    let open_destination = || -> Result<std::fs::File> {
+        let fd = unsafe {
+            libc::openat(
+                parent.directory.as_raw_fd(),
+                parent.destination.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(CrosstacheError::config(format!(
+                "Failed to open anchored config destination '{}': {}",
+                parent.absolute.display(),
+                std::io::Error::last_os_error()
+            )));
+        }
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        let metadata = file.metadata().map_err(|error| {
+            CrosstacheError::config(format!(
+                "Failed to inspect anchored config destination '{}': {error}",
+                parent.absolute.display()
+            ))
+        })?;
+        if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+            return Err(CrosstacheError::config(format!(
+                "Refusing non-regular config destination '{}'",
+                parent.absolute.display()
+            )));
+        }
+        Ok(file)
+    };
+    let read_file = |mut file: std::fs::File| -> Result<(Vec<u8>, (u64, u64))> {
+        let metadata = file.metadata().map_err(|error| {
+            CrosstacheError::config(format!(
+                "Failed to inspect anchored config destination '{}': {error}",
+                parent.absolute.display()
+            ))
+        })?;
+        let identity = (metadata.dev(), metadata.ino());
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).map_err(|error| {
+            CrosstacheError::config(format!(
+                "Failed to read anchored config destination '{}': {error}",
+                parent.absolute.display()
+            ))
+        })?;
+        Ok((bytes, identity))
+    };
+
+    let (initial_bytes, initial_identity) = read_file(open_destination()?)?;
+    if initial_bytes != expected {
+        return Err(CrosstacheError::config(format!(
+            "Configuration file '{}' changed after diagnosis; refusing repair",
+            parent.absolute.display()
+        )));
+    }
+
+    let mut backup_exists = false;
+    let mut temp_exists = false;
+    let mut committed = false;
+    let operation = (|| {
+        let backup_fd = unsafe {
+            libc::openat(
+                parent.directory.as_raw_fd(),
+                backup_name.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        if backup_fd < 0 {
+            return Err(CrosstacheError::config(format!(
+                "Failed to create exclusive config backup for '{}': {}",
+                parent.absolute.display(),
+                std::io::Error::last_os_error()
+            )));
+        }
+        backup_exists = true;
+        let mut backup = unsafe { std::fs::File::from_raw_fd(backup_fd) };
+        backup.write_all(expected).map_err(|error| {
+            CrosstacheError::config(format!(
+                "Failed to write config backup for '{}': {error}",
+                parent.absolute.display()
+            ))
+        })?;
+        backup.sync_all().map_err(|error| {
+            CrosstacheError::config(format!(
+                "Failed to flush config backup for '{}': {error}",
+                parent.absolute.display()
+            ))
+        })?;
+        parent.directory.sync_all().map_err(|error| {
+            CrosstacheError::config(format!(
+                "Failed to sync config backup directory for '{}': {error}",
+                parent.absolute.display()
+            ))
+        })?;
+
+        let temp_fd = unsafe {
+            libc::openat(
+                parent.directory.as_raw_fd(),
+                temp_name.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        if temp_fd < 0 {
+            return Err(CrosstacheError::config(format!(
+                "Failed to create repair temporary file for '{}': {}",
+                parent.absolute.display(),
+                std::io::Error::last_os_error()
+            )));
+        }
+        temp_exists = true;
+        let mut temporary = unsafe { std::fs::File::from_raw_fd(temp_fd) };
+        temporary.write_all(replacement).map_err(|error| {
+            CrosstacheError::config(format!(
+                "Failed to write repair temporary file for '{}': {error}",
+                parent.absolute.display()
+            ))
+        })?;
+        temporary.sync_all().map_err(|error| {
+            CrosstacheError::config(format!(
+                "Failed to flush repair temporary file for '{}': {error}",
+                parent.absolute.display()
+            ))
+        })?;
+
+        #[cfg(test)]
+        tests::run_anchored_repair_content_hook(path)?;
+        #[cfg(test)]
+        tests::run_atomic_parent_swap_hook(path)?;
+
+        let (current_bytes, current_identity) = read_file(open_destination()?)?;
+        if current_identity != initial_identity || current_bytes != expected {
+            return Err(CrosstacheError::config(format!(
+                "Configuration file '{}' changed after diagnosis; refusing repair",
+                parent.absolute.display()
+            )));
+        }
+
+        let renamed = unsafe {
+            libc::renameat(
+                parent.directory.as_raw_fd(),
+                temp_name.as_ptr(),
+                parent.directory.as_raw_fd(),
+                parent.destination.as_ptr(),
+            )
+        };
+        if renamed < 0 {
+            return Err(CrosstacheError::config(format!(
+                "Failed to atomically replace repaired config '{}': {}",
+                parent.absolute.display(),
+                std::io::Error::last_os_error()
+            )));
+        }
+        temp_exists = false;
+        committed = true;
+        let _ = parent.directory.sync_all();
+
+        let (verified, _) = read_file(open_destination()?)?;
+        if verified != replacement {
+            return Err(CrosstacheError::config(format!(
+                "Repaired configuration file '{}' changed before verification",
+                parent.absolute.display()
+            )));
+        }
+        Ok(verified)
+    })();
+
+    if let Err(operation_error) = operation {
+        if !committed {
+            for (exists, name) in [
+                (&mut temp_exists, temp_name.as_c_str()),
+                (&mut backup_exists, backup_name.as_c_str()),
+            ] {
+                if *exists {
+                    let removed =
+                        unsafe { libc::unlinkat(parent.directory.as_raw_fd(), name.as_ptr(), 0) };
+                    if removed < 0
+                        && std::io::Error::last_os_error().kind() != std::io::ErrorKind::NotFound
+                    {
+                        return Err(CrosstacheError::config(format!(
+                            "{operation_error}; additionally failed to clean anchored repair artifact for '{}': {}",
+                            parent.absolute.display(),
+                            std::io::Error::last_os_error()
+                        )));
+                    }
+                    *exists = false;
+                }
+            }
+            let _ = parent.directory.sync_all();
+        }
+        return Err(operation_error);
+    }
+    operation
+}
+
+pub(crate) async fn atomic_replace_with_private_backup_no_follow_async(
+    path: &Path,
+    backup_name: &std::ffi::OsStr,
+    expected: &[u8],
+    replacement: &[u8],
+) -> Result<Vec<u8>> {
+    let path = path.to_path_buf();
+    let backup_name = backup_name.to_os_string();
+    let expected = expected.to_vec();
+    let replacement = replacement.to_vec();
+    tokio::task::spawn_blocking(move || {
+        atomic_replace_with_private_backup_no_follow(&path, &backup_name, &expected, &replacement)
+    })
+    .await
+    .map_err(|error| CrosstacheError::config(format!("Anchored repair task failed: {error}")))?
+}
+
 #[cfg(windows)]
 struct WindowsSecurityDescriptor(windows_sys::Win32::Security::PSECURITY_DESCRIPTOR);
 
@@ -1492,6 +1758,33 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn anchored_repair_content_hooks(
+    ) -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, Vec<u8>>> {
+        static HOOKS: std::sync::OnceLock<
+            std::sync::Mutex<std::collections::HashMap<PathBuf, Vec<u8>>>,
+        > = std::sync::OnceLock::new();
+        HOOKS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+    }
+
+    #[cfg(unix)]
+    fn install_anchored_repair_content_change(path: &Path, content: &[u8]) {
+        anchored_repair_content_hooks()
+            .lock()
+            .unwrap()
+            .insert(path.to_path_buf(), content.to_vec());
+    }
+
+    #[cfg(unix)]
+    pub(super) fn run_anchored_repair_content_hook(path: &Path) -> Result<()> {
+        let Some(content) = anchored_repair_content_hooks().lock().unwrap().remove(path) else {
+            return Ok(());
+        };
+        std::fs::write(path, content).map_err(|error| {
+            CrosstacheError::config(format!("test mutate repair destination: {error}"))
+        })
+    }
+
+    #[cfg(unix)]
     fn atomic_post_rename_sync_failures(
     ) -> &'static std::sync::Mutex<std::collections::HashSet<PathBuf>> {
         static FAILURES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
@@ -1758,6 +2051,59 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"new");
         assert!(!atomic_post_rename_sync_failure_pending(&path));
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn anchored_backup_replace_rejects_concurrent_destination_change() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("xv.conf");
+        let backup_name = std::ffi::OsStr::new("xv.conf.backup-fixed");
+        std::fs::write(&path, b"diagnosed").unwrap();
+        install_anchored_repair_content_change(&path, b"concurrent");
+
+        let error = atomic_replace_with_private_backup_no_follow(
+            &path,
+            backup_name,
+            b"diagnosed",
+            b"repaired",
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("changed"), "{error}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"concurrent");
+        assert!(!root.path().join(backup_name).exists());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn anchored_backup_replace_keeps_backup_write_and_verification_in_retained_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("live");
+        let parked = root.path().join("parked");
+        std::fs::create_dir(&parent).unwrap();
+        let path = parent.join("xv.conf");
+        let backup_name = std::ffi::OsStr::new("xv.conf.backup-fixed");
+        std::fs::write(&path, b"diagnosed").unwrap();
+        install_atomic_parent_swap(&path, &parked);
+
+        let verified = atomic_replace_with_private_backup_no_follow(
+            &path,
+            backup_name,
+            b"diagnosed",
+            b"repaired",
+        )
+        .unwrap();
+
+        assert_eq!(verified, b"repaired");
+        assert_eq!(std::fs::read(parked.join("xv.conf")).unwrap(), b"repaired");
+        assert_eq!(
+            std::fs::read(parked.join(backup_name)).unwrap(),
+            b"diagnosed"
+        );
+        assert!(std::fs::read_dir(&parent).unwrap().next().is_none());
+        assert_eq!(std::fs::read_dir(&parked).unwrap().count(), 2);
     }
 
     #[test]

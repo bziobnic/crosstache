@@ -7,10 +7,7 @@ use toml_edit::{DocumentMut, TableLike};
 use crate::{
     config::{apply_environment_overrides, BlobConfig, Config},
     error::{CrosstacheError, Result},
-    utils::helpers::{
-        atomic_write_file_no_follow_async, read_file_no_follow,
-        write_private_file_no_follow_create_new,
-    },
+    utils::helpers::{atomic_replace_with_private_backup_no_follow_async, read_file_no_follow},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -359,17 +356,15 @@ async fn persist_repair(
     original: &[u8],
     repaired: &[u8],
     now: DateTime<Utc>,
-) -> Result<PathBuf> {
+) -> Result<(PathBuf, Vec<u8>)> {
     let backup = backup_path(path, now);
-    let backup_file = write_private_file_no_follow_create_new(&backup, original)?;
-    backup_file.sync_all().map_err(|error| {
-        CrosstacheError::config(format!(
-            "Failed to flush config backup '{}': {error}",
-            backup.display()
-        ))
+    let backup_name = backup.file_name().ok_or_else(|| {
+        CrosstacheError::invalid_argument("Configuration backup path must name a file")
     })?;
-    atomic_write_file_no_follow_async(path, repaired, true).await?;
-    Ok(backup)
+    let verified =
+        atomic_replace_with_private_backup_no_follow_async(path, backup_name, original, repaired)
+            .await?;
+    Ok((backup, verified))
 }
 
 pub async fn diagnose_and_repair(path: &Path) -> Result<DoctorReport> {
@@ -449,10 +444,9 @@ async fn diagnose_and_repair_with(
 
     match schema_error {
         None => {
-            if !report.repairs.is_empty() {
-                let backup =
+            let persisted = if !report.repairs.is_empty() {
+                let (backup, written) =
                     persist_repair(path, &original, candidate.as_bytes(), Utc::now()).await?;
-                let written = read_file_no_follow(path)?;
                 let written = std::str::from_utf8(&written).map_err(|error| {
                     CrosstacheError::config(format!(
                         "Repaired configuration file '{}' is not UTF-8: {error}",
@@ -467,8 +461,10 @@ async fn diagnose_and_repair_with(
                         message: format!("Restored missing configuration field '{repair}'."),
                     });
                 }
-            }
-            let persisted = read_file_no_follow(path)?;
+                written.as_bytes().to_vec()
+            } else {
+                original
+            };
             let persisted = std::str::from_utf8(&persisted).map_err(|error| {
                 CrosstacheError::config(format!(
                     "Configuration file '{}' is not UTF-8 after repair: {error}",
