@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## v0.36.0 — Bootstrap-safe config recovery (2026-08-08)
+
+### Added
 
 - **`xv doctor` provides bootstrap-safe configuration recovery.** It diagnoses
   invalid application configuration before normal config loading, automatically
