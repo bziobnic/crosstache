@@ -92,6 +92,18 @@ pub enum BackendError {
     #[error("decryption failed: {0}")]
     Decryption(String),
 
+    /// The named backend does not exist: it is neither a `named_backends` key
+    /// nor a built-in kind.
+    ///
+    /// Distinct from [`Internal`](Self::Internal) for the same reason
+    /// [`Decryption`](Self::Decryption) is: callers need to tell "this can
+    /// never work, the configuration is wrong" apart from "something went
+    /// wrong inside a backend that does exist". The workspace layer relies on
+    /// that distinction to name the actual remedy for a stale entry rather
+    /// than emitting a generic parse error about backend *kinds*.
+    #[error("backend '{name}' is not configured")]
+    UnknownBackend { name: String },
+
     /// An internal error inside the backend implementation.
     #[error("backend internal error: {0}")]
     Internal(String),
@@ -134,6 +146,14 @@ impl From<BackendError> for CrosstacheError {
                 CrosstacheError::RateLimited(detail)
             }
             BackendError::Network(msg) => CrosstacheError::NetworkError(msg),
+            // Not a config *parse* problem, so not ConfigError: the file is
+            // valid, it just names a backend that no longer exists. Callers with
+            // more context (the workspace layer) build a richer message naming
+            // the remedy; this is the fallback for everyone else.
+            BackendError::UnknownBackend { name } => CrosstacheError::BackendUnavailable {
+                reason: format!("no backend named '{name}' is configured"),
+                backend: name,
+            },
             BackendError::RenameIncomplete {
                 source,
                 destination,

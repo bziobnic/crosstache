@@ -269,12 +269,9 @@ pub(crate) async fn resolve_vault_ref_with_workspace(
 ) -> Result<(Arc<dyn Backend>, String, String)> {
     if let (Some(ws), Some(ws_registry)) = (ws, ws_registry) {
         if let Some(entry) = ws.entry(raw) {
-            let backend = ws_registry.materialize(&entry.backend).map_err(|e| {
-                CrosstacheError::config(format!(
-                    "workspace vault '{}' (backend '{}') is unavailable: {e}",
-                    entry.alias, entry.backend
-                ))
-            })?;
+            let backend = ws_registry
+                .materialize(&entry.backend)
+                .map_err(|e| crate::workspace::resolve::entry_unavailable_error(entry, e))?;
             return Ok((backend, entry.backend.clone(), entry.vault.clone()));
         }
     }

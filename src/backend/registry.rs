@@ -269,9 +269,16 @@ impl BackendRegistry {
             };
         }
 
+        // Neither a `named_backends` key (checked above) nor a built-in kind:
+        // the name does not exist at all. Report that as its own variant --
+        // "unknown backend kind: X. Valid options: azure, local, aws" reads as
+        // advice to correct a *kind*, when the caller most likely referenced a
+        // named backend that has since been removed from the config.
         let kind: BackendKind = name
             .parse()
-            .map_err(|e: String| BackendError::Internal(e))?;
+            .map_err(|_: String| BackendError::UnknownBackend {
+                name: name.to_string(),
+            })?;
 
         match kind {
             BackendKind::Azure => {

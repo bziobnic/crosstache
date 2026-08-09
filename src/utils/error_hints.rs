@@ -20,6 +20,9 @@ pub fn hint_for(code: &str) -> Option<&'static str> {
             "Check TLS configuration and any corporate proxy with TLS interception."
         }
         "xv-config-invalid" => "Run 'xv config show' to inspect, or 'xv init' to reinitialize.",
+        "xv-backend-unavailable" => {
+            "Run 'xv cx ls' to see attached workspace vaults and the backend each one uses."
+        }
         "xv-env-not-defined" => "Run 'xv env list' to see defined environments.",
         "xv-azure-api" => "Check Azure service status and your subscription quotas.",
         "xv-scan-leak-detected" => "Findings printed to stderr; review and remove the leak before committing. Use 'xv scan --hook' for CI integration.",
@@ -40,6 +43,7 @@ mod tests {
         assert!(hint_for("xv-config-invalid").is_some());
         assert!(hint_for("xv-env-not-defined").is_some());
         assert!(hint_for("xv-scan-leak-detected").is_some());
+        assert!(hint_for("xv-backend-unavailable").is_some());
     }
 
     #[test]
@@ -58,6 +62,7 @@ mod tests {
             "xv-config-invalid",
             "xv-env-not-defined",
             "xv-scan-leak-detected",
+            "xv-backend-unavailable",
         ] {
             let hint = hint_for(code).unwrap();
             assert!(
