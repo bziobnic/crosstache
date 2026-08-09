@@ -498,8 +498,15 @@ fn write_meta(path: &Path, meta: &SecretMeta, crypto_opts: MetaCrypto) -> Result
 }
 
 fn sync_file(path: &Path) -> Result<(), BackendError> {
-    fs::OpenOptions::new()
-        .read(true)
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    // Windows `FlushFileBuffers` requires write access on the handle — a
+    // read-only open fails with ERROR_ACCESS_DENIED (os error 5). Unix `fsync`
+    // is content with a read-only descriptor, so only widen it where the
+    // platform demands it.
+    #[cfg(windows)]
+    options.write(true);
+    options
         .open(path)
         .and_then(|file| file.sync_all())
         .map_err(|e| BackendError::Internal(format!("sync file {}: {e}", path.display())))
