@@ -16,6 +16,23 @@ pub fn xv() -> Command {
     Command::new(env!("CARGO_BIN_EXE_xv"))
 }
 
+/// Render a filesystem path for interpolation into a **double-quoted** TOML
+/// string.
+///
+/// TOML basic strings process backslash escapes, so a Windows path dropped in
+/// verbatim is not merely ugly — it fails to parse. `C:\Users\...` makes the
+/// parser read `\U` as a unicode escape and reject the file with "invalid
+/// unicode 8-digit hex code", which is how every generated `xv.conf` in these
+/// harnesses became unloadable on Windows. Escaping the separators keeps one
+/// template correct on every platform.
+pub fn toml_path(path: impl AsRef<Path>) -> String {
+    path.as_ref()
+        .display()
+        .to_string()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+}
+
 /// Apply isolation env vars to a `Command`. Caller passes a tempdir;
 /// this routes XDG_CONFIG_HOME, HOME, and XV_NO_PARENT_CONFIG so
 /// config and walk-up resolution start clean.
@@ -89,8 +106,8 @@ store_path = "{store}"
 key_file = "{key}"
 default_vault = "default"
 "#,
-        store = store_dir.display(),
-        key = key_file.display(),
+        store = toml_path(&store_dir),
+        key = toml_path(&key_file),
     );
     std::fs::write(xv_dir.join("xv.conf"), config_content).expect("write config");
 
@@ -141,8 +158,8 @@ default_vault = "default"
 audit = {audit}
 git = {git}
 "#,
-        store = store_dir.display(),
-        key = key_file.display(),
+        store = toml_path(&store_dir),
+        key = toml_path(&key_file),
     );
     std::fs::write(xv_dir.join("xv.conf"), config_content).expect("write config");
 
@@ -201,8 +218,8 @@ store_path = "{store}"
 key_file = "{key}"
 default_vault = "default"
 "#,
-        store = store_dir.display(),
-        key = key_file.display(),
+        store = toml_path(&store_dir),
+        key = toml_path(&key_file),
     );
     std::fs::write(xv_dir.join("xv.conf"), config_content).expect("write config");
     std::fs::write(project_dir.join(".xv.toml"), xv_toml).expect("write .xv.toml");

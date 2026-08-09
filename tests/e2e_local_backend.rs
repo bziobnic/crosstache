@@ -18,6 +18,20 @@ use tempfile::TempDir;
 // Test harness
 // ---------------------------------------------------------------------------
 
+/// Render a path for interpolation into a **double-quoted** TOML string.
+///
+/// TOML basic strings process backslash escapes, so an unescaped Windows path
+/// does not just look wrong — it fails to parse: `C:\Users\...` makes the
+/// parser read `\U` as a unicode escape and reject the config with "invalid
+/// unicode 8-digit hex code".
+fn toml_path(path: impl AsRef<std::path::Path>) -> String {
+    path.as_ref()
+        .display()
+        .to_string()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+}
+
 struct TestEnv {
     _tmp: TempDir,
     config_dir: PathBuf,
@@ -56,8 +70,8 @@ store_path = "{store}"
 key_file = "{key}"
 default_vault = "default"
 "#,
-            store = store_dir.display(),
-            key = key_file.display(),
+            store = toml_path(&store_dir),
+            key = toml_path(&key_file),
         );
         std::fs::write(xv_dir.join("xv.conf"), config_content).expect("write config");
 

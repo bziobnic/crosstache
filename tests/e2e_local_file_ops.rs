@@ -103,8 +103,8 @@ store_path = "{store}"
 key_file = "{key}"
 default_vault = "default"
 "#,
-        store = root.join("store").display(),
-        key = root.join("key.txt").display(),
+        store = common::toml_path(root.join("store")),
+        key = common::toml_path(root.join("key.txt")),
     )
 }
 

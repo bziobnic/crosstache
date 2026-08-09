@@ -25,6 +25,20 @@ use std::path::PathBuf;
 use std::process::Command;
 use tempfile::TempDir;
 
+/// Render a path for interpolation into a **double-quoted** TOML string.
+///
+/// TOML basic strings process backslash escapes, so an unescaped Windows path
+/// does not just look wrong — it fails to parse: `C:\Users\...` makes the
+/// parser read `\U` as a unicode escape and reject the config with "invalid
+/// unicode 8-digit hex code".
+fn toml_path(path: impl AsRef<std::path::Path>) -> String {
+    path.as_ref()
+        .display()
+        .to_string()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+}
+
 /// A test environment with a global `xv.conf` (azure backend, no/empty
 /// credentials, valid `[local]` block) and an isolated project directory
 /// that may contain a `.xv.toml` env profile.
@@ -68,8 +82,8 @@ store_path = "{store}"
 key_file = "{key}"
 default_vault = "default"
 "#,
-            store = store_dir.display(),
-            key = key_file.display(),
+            store = toml_path(&store_dir),
+            key = toml_path(&key_file),
         );
         std::fs::write(xv_dir.join("xv.conf"), config_content).expect("write config");
 
@@ -248,7 +262,16 @@ fn backend_token_after_separator_is_not_mistaken_for_cli_flag() {
     let env = BackendResolutionEnv::new();
     env.write_local_profile();
 
-    let output = env.run(&mut env.xv(), &["run", "--", "echo", "--backend", "prod"]);
+    // `echo` is a shell builtin on Windows rather than an executable, so the
+    // child has to go through the platform shell there. What this test is
+    // actually about — a literal `--backend` token sitting after `--` — is
+    // unchanged either way.
+    #[cfg(windows)]
+    let child: &[&str] = &["run", "--", "cmd", "/c", "echo", "--backend", "prod"];
+    #[cfg(not(windows))]
+    let child: &[&str] = &["run", "--", "echo", "--backend", "prod"];
+
+    let output = env.run(&mut env.xv(), child);
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
