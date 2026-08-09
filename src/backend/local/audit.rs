@@ -160,6 +160,11 @@ pub fn failure_status(err: &BackendError) -> &'static str {
         BackendError::Conflict(_) => "Conflict",
         BackendError::RateLimited { .. } => "RateLimited",
         BackendError::Network(_) => "NetworkError",
+        // A misconfiguration, not a fault of any backend that ran: the name
+        // resolves to nothing. Shares the InvalidArgument token rather than
+        // widening the closed vocabulary for a case the audit trail cannot
+        // meaningfully distinguish.
+        BackendError::UnknownBackend { .. } => "InvalidArgument",
         BackendError::RenameIncomplete { .. } => "RenameIncomplete",
         // Conditional-write guards: the caller's snapshot went stale, or the
         // rename destination already exists. Rejections, not faults.

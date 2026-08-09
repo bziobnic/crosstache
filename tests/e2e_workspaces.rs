@@ -16,6 +16,30 @@ use std::path::PathBuf;
 use std::process::Command;
 use tempfile::TempDir;
 
+/// Remove a whole `[named_backends.<name>]` block from a config, leaving any
+/// workspace entry that pointed at it dangling — which is exactly how a real
+/// stale entry comes about.
+fn strip_named_backend(config: &str, name: &str) -> String {
+    let header = format!("[named_backends.{name}]");
+    let mut out = String::new();
+    let mut skipping = false;
+    for line in config.lines() {
+        if line.trim() == header {
+            skipping = true;
+            continue;
+        }
+        // Any following section header ends the block.
+        if skipping && line.trim_start().starts_with('[') {
+            skipping = false;
+        }
+        if !skipping {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
 /// Render a path for interpolation into a **double-quoted** TOML string.
 ///
 /// TOML basic strings process backslash escapes, so an unescaped Windows path
@@ -3657,6 +3681,78 @@ fn uri_alias_precedence_over_raw_vault_of_same_name() {
         rendered.contains("qualified: raw-active-value"),
         "{rendered}"
     );
+}
+
+/// A workspace entry goes stale when the named backend it points at is removed
+/// from the config: the entry survives in the context file, referencing
+/// nothing. Unqualified reads and the union `ls` fan out across every attached
+/// vault, so one stale entry blocks all of them — correctly, since skipping it
+/// could hand back a wrong or incomplete answer. What it must not do is leave
+/// the user without a way out.
+///
+/// Regression: this used to surface as `xv-config-invalid` carrying the
+/// registry's `unknown backend kind: local-b. Valid options: azure, local,
+/// aws` — advice to correct a backend *kind*, when the entry simply points at
+/// one that is gone. `xv-config-invalid`'s TTY hint compounded it by
+/// recommending `xv init`, which would rebuild the entire configuration to fix
+/// a single stale line.
+#[test]
+fn stale_workspace_entry_names_its_remedy_and_cx_rm_recovers() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+    env.ok(&["set", "work:TOKEN", "--value", "v"]);
+    env.ok(&["list"]);
+
+    // Make `stage` stale by deleting the backend it points at.
+    let config_path = env.config_dir.join("xv").join("xv.conf");
+    let config = std::fs::read_to_string(&config_path).expect("read config");
+    let pruned = strip_named_backend(&config, "local-b");
+    assert!(
+        !pruned.contains("[named_backends.local-b]"),
+        "the block must actually be gone, or this test proves nothing"
+    );
+    assert!(
+        pruned.contains("[named_backends.local-a]"),
+        "only local-b should have been removed"
+    );
+    std::fs::write(&config_path, pruned).expect("write config");
+
+    let out = env.err(&["list"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("xv-backend-unavailable"),
+        "a stale entry is not a config-parse failure: {stderr}"
+    );
+    assert!(
+        stderr.contains("xv cx rm stage"),
+        "the error must name the command that fixes it: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Valid options"),
+        "must not read as advice to correct a backend kind: {stderr}"
+    );
+
+    // The remedy the message names has to actually work.
+    env.ok(&["cx", "rm", "stage"]);
+    env.ok(&["list"]);
+    env.ok(&["get", "work:TOKEN"]);
 }
 
 // ===========================================================================

@@ -378,12 +378,7 @@ pub(crate) async fn execute_mv(
         let default_entry = ws.default_entry()?.clone();
         let backend = ws_registry
             .materialize(&default_entry.backend)
-            .map_err(|e| {
-                CrosstacheError::config(format!(
-                    "workspace vault '{}' (backend '{}') is unavailable: {e}",
-                    default_entry.alias, default_entry.backend
-                ))
-            })?;
+            .map_err(|e| crate::workspace::resolve::entry_unavailable_error(&default_entry, e))?;
         (default_entry.vault, default_entry.backend, backend)
     } else {
         let vault_name = resolve_vault_for_trait(&config, registry).await?;
@@ -498,18 +493,12 @@ async fn execute_cross_vault_alias_mv(
         }
     };
 
-    let src_backend = ws_registry.materialize(&src_entry.backend).map_err(|e| {
-        CrosstacheError::config(format!(
-            "workspace vault '{}' (backend '{}') is unavailable: {e}",
-            src_entry.alias, src_entry.backend
-        ))
-    })?;
-    let dst_backend = ws_registry.materialize(&dst_entry.backend).map_err(|e| {
-        CrosstacheError::config(format!(
-            "workspace vault '{}' (backend '{}') is unavailable: {e}",
-            dst_entry.alias, dst_entry.backend
-        ))
-    })?;
+    let src_backend = ws_registry
+        .materialize(&src_entry.backend)
+        .map_err(|e| crate::workspace::resolve::entry_unavailable_error(src_entry, e))?;
+    let dst_backend = ws_registry
+        .materialize(&dst_entry.backend)
+        .map_err(|e| crate::workspace::resolve::entry_unavailable_error(dst_entry, e))?;
 
     // Find the source secret by its qualified (folder, display-name) path —
     // same lookup `execute_secret_mv` uses for the same-vault case.

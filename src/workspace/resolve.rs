@@ -135,13 +135,49 @@ pub async fn resolve_secret_target(
     }
 }
 
-fn materialize(registry: &BackendRegistry, entry: &WorkspaceEntry) -> Result<Arc<dyn Backend>> {
-    registry.materialize(&entry.backend).map_err(|e| {
-        CrosstacheError::config(format!(
-            "workspace vault '{}' (backend '{}') is unavailable: {e}",
+/// Turn a failed materialization of a workspace entry into a user-facing error.
+///
+/// A *stale* entry — one whose backend is not configured at all — is not an
+/// outage. It can never resolve, and because unqualified reads and the union
+/// `ls` fan out across every attached vault, one stale entry blocks all of
+/// them until it is removed. It therefore needs to name its own remedy.
+///
+/// What used to surface instead was the registry's generic
+/// `unknown backend kind: X. Valid options: azure, local, aws`, wrapped as
+/// `xv-config-invalid`. That was wrong twice over: the backend *kind* is not
+/// what is broken, and `xv-config-invalid`'s hint recommends `xv init`, which
+/// would rebuild the user's entire configuration to fix one stale line.
+///
+/// Genuine failures of a backend that *does* exist (auth, network, a bad
+/// `[named_backends.x]` block) keep their original shape — the caller cannot
+/// tell whether the secret is there, so those must still fail loud.
+pub(crate) fn entry_unavailable_error(
+    entry: &WorkspaceEntry,
+    error: crate::backend::error::BackendError,
+) -> CrosstacheError {
+    match error {
+        crate::backend::error::BackendError::UnknownBackend { name } => {
+            CrosstacheError::BackendUnavailable {
+                reason: format!(
+                    "workspace alias '{}' points at it, but no backend by that name is \
+                     configured. Remove the stale entry with `xv cx rm {}`, or restore the \
+                     backend by adding a [named_backends.{}] section to your config.",
+                    entry.alias, entry.alias, name
+                ),
+                backend: name,
+            }
+        }
+        other => CrosstacheError::config(format!(
+            "workspace vault '{}' (backend '{}') is unavailable: {other}",
             entry.alias, entry.backend
-        ))
-    })
+        )),
+    }
+}
+
+fn materialize(registry: &BackendRegistry, entry: &WorkspaceEntry) -> Result<Arc<dyn Backend>> {
+    registry
+        .materialize(&entry.backend)
+        .map_err(|e| entry_unavailable_error(entry, e))
 }
 
 /// Materialize the workspace's effective default entry without probing any
@@ -204,6 +240,79 @@ async fn search_all(
         }
     }
     Ok(found)
+}
+
+#[cfg(test)]
+mod stale_entry_tests {
+    use super::*;
+    use crate::backend::error::BackendError;
+
+    fn entry(alias: &str, backend: &str) -> WorkspaceEntry {
+        WorkspaceEntry {
+            alias: alias.to_string(),
+            backend: backend.to_string(),
+            vault: "default".to_string(),
+            default: false,
+        }
+    }
+
+    /// A workspace entry pointing at a backend that no longer exists blocks
+    /// every unqualified read and the union `ls`. The error therefore has to
+    /// name the way out.
+    ///
+    /// It must NOT arrive as `xv-config-invalid`: that code's hint recommends
+    /// `xv init`, which would rebuild the user's whole configuration to fix a
+    /// single stale line. Nor should it repeat the registry's
+    /// "Valid options: azure, local, aws", which points at correcting a
+    /// backend *kind* — not what is wrong here.
+    #[test]
+    fn stale_entry_names_the_remedy() {
+        let error = entry_unavailable_error(
+            &entry("stale", "ghost-backend"),
+            BackendError::UnknownBackend {
+                name: "ghost-backend".to_string(),
+            },
+        );
+
+        assert_eq!(error.code(), "xv-backend-unavailable");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("xv cx rm stale"),
+            "must name the removal command: {rendered}"
+        );
+        assert!(
+            rendered.contains("[named_backends.ghost-backend]"),
+            "must name the restore path: {rendered}"
+        );
+        assert!(
+            !rendered.contains("Valid options"),
+            "must not suggest correcting a backend kind: {rendered}"
+        );
+    }
+
+    /// The stale case is carved out of, not substituted for, fail-loud
+    /// behaviour. A backend that genuinely exists but failed — auth, network, a
+    /// malformed `[named_backends.x]` block — still aborts the operation with
+    /// its original shape, because the caller cannot tell whether the secret is
+    /// in there and must not be handed a partial answer.
+    #[test]
+    fn a_real_failure_of_an_existing_backend_is_unchanged() {
+        let error = entry_unavailable_error(
+            &entry("work", "local-a"),
+            BackendError::Network("connection timed out".to_string()),
+        );
+
+        assert_eq!(error.code(), "xv-config-invalid");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("workspace vault 'work' (backend 'local-a') is unavailable"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("xv cx rm"),
+            "removing the entry is not the fix for a transient failure: {rendered}"
+        );
+    }
 }
 
 #[cfg(test)]

@@ -333,6 +333,18 @@ pub(crate) fn backend_error(error: BackendError) -> (StatusCode, ApiErrorBody) {
             "The secret could not be decrypted.",
             "The configured age identity may not match this store, or the data may be damaged.",
         ),
+        // A workspace entry naming a backend that is not configured. Not
+        // transient, so deliberately not 503 "try again later" — it will never
+        // succeed until the config or the workspace changes. Carries the same
+        // code as the CLI so both surfaces name one failure, and the same
+        // remedy, since the UI is loopback-only and driven by the very user who
+        // can run `xv cx rm`.
+        UnknownBackend { .. } => generic(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "xv-backend-unavailable",
+            "A vault in this workspace points at a backend that is not configured.",
+            "Remove the stale entry with 'xv cx rm <alias>', or restore the backend in your config.",
+        ),
         Internal(_) | Other(_) => generic(
             StatusCode::INTERNAL_SERVER_ERROR,
             "xv-backend-internal",

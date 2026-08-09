@@ -2258,12 +2258,9 @@ async fn execute_deleted_secret_list_workspace(
     let show_vault = ws.entries.len() >= 2;
     let mut items: Vec<crate::secret::manager::DeletedSecretSummary> = Vec::new();
     for entry in &ws.entries {
-        let backend = ws_registry.materialize(&entry.backend).map_err(|e| {
-            CrosstacheError::config(format!(
-                "workspace vault '{}' (backend '{}') is unavailable: {e}",
-                entry.alias, entry.backend
-            ))
-        })?;
+        let backend = ws_registry
+            .materialize(&entry.backend)
+            .map_err(|e| crate::workspace::resolve::entry_unavailable_error(entry, e))?;
 
         if !backend.capabilities().has_soft_delete {
             eprintln!(
@@ -2381,12 +2378,9 @@ async fn execute_secret_list_workspace(
 
     let mut merged: Vec<crate::secret::manager::SecretSummary> = Vec::new();
     for entry in &ws.entries {
-        let backend = ws_registry.materialize(&entry.backend).map_err(|e| {
-            CrosstacheError::config(format!(
-                "workspace vault '{}' (backend '{}') is unavailable: {e}",
-                entry.alias, entry.backend
-            ))
-        })?;
+        let backend = ws_registry
+            .materialize(&entry.backend)
+            .map_err(|e| crate::workspace::resolve::entry_unavailable_error(entry, e))?;
 
         let cache_key = crate::cache::CacheKey::SecretsList {
             backend: entry.backend.clone(),
@@ -5287,12 +5281,9 @@ pub(crate) async fn execute_secret_find_direct(
             // `--all-vaults` vault-prefix style.
             let mut items: Vec<CandidateItem> = Vec::new();
             for entry in &ws.entries {
-                let backend = ws_registry.materialize(&entry.backend).map_err(|e| {
-                    CrosstacheError::config(format!(
-                        "workspace vault '{}' (backend '{}') is unavailable: {e}",
-                        entry.alias, entry.backend
-                    ))
-                })?;
+                let backend = ws_registry
+                    .materialize(&entry.backend)
+                    .map_err(|e| crate::workspace::resolve::entry_unavailable_error(entry, e))?;
                 let secrets = backend
                     .secrets()
                     .list_secrets(&entry.vault, None)
@@ -6079,12 +6070,9 @@ async fn resolve_uri_secret_workspace_aware(
     if backend_ref.backend.is_none() {
         if let (Some(ws), Some(ws_registry)) = (ws, ws_registry) {
             if let Some(entry) = ws.entry(&backend_ref.vault) {
-                let backend = ws_registry.materialize(&entry.backend).map_err(|e| {
-                    CrosstacheError::config(format!(
-                        "workspace vault '{}' (backend '{}') is unavailable: {e}",
-                        entry.alias, entry.backend
-                    ))
-                })?;
+                let backend = ws_registry
+                    .materialize(&entry.backend)
+                    .map_err(|e| crate::workspace::resolve::entry_unavailable_error(entry, e))?;
                 return backend
                     .secrets()
                     .get_secret(&entry.vault, secret_name, true)
