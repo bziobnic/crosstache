@@ -1467,7 +1467,7 @@ function syncDraftControls() {
   const snapshot = store.snapshot();
   const pending = Boolean(snapshot.savePending || snapshot.contextSwitchPending);
   for (const selector of [
-    '#close-drawer', '#new-secret', '#tab-secrets', '#tab-files', '#tab-trash',
+    '#close-drawer', '#dismiss-drawer', '#new-secret', '#tab-secrets', '#tab-files', '#tab-trash',
     '#save', '#delete', '#conversion-toggle', '#rename-toggle',
     '#conversion-preview', '#conversion-confirm', '#rename-submit',
   ]) {
@@ -3097,6 +3097,7 @@ async function openRecord(name, meta, tags, generation, scope) {
 }
 
 $('#close-drawer').onclick = () => requestDrawerClose();
+$('#dismiss-drawer').onclick = () => requestDrawerClose();
 $('#group-add').onclick = addGroup;
 $('#group-entry').onkeydown = (event) => {
   if (event.key !== 'Enter' && event.key !== ',') return;

@@ -4,7 +4,7 @@
   --color-surface: #ffffff;
   --color-surface-subtle: #f9f8f5;
   --color-text: #18221c;
-  --color-text-muted: #686f6b;
+  --color-text-muted: #5d6460;
   --color-border: #878c89;
   --color-accent: #216446;
   --color-accent-hover: #1b5239;
@@ -338,7 +338,13 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline:0; b
 .shortcut-list dt { font-weight:700; }
 .shortcut-list dd { margin:0; color:var(--color-text-muted); }
 .shortcut-list kbd { font-family:ui-monospace, "SFMono-Regular", Consolas, monospace; }
-.drawer-header { padding:1.4rem 1.5rem 1.1rem; border-bottom:1px solid var(--color-border); }
+.drawer-header { position:relative; padding:1.4rem 1.5rem 1.1rem; padding-right:3.5rem; border-bottom:1px solid var(--color-border); }
+.drawer-dismiss { position:absolute; top:.9rem; right:.9rem; display:grid; place-items:center;
+  width:2rem; height:2rem; padding:0; border:1px solid transparent; border-radius:.5rem;
+  background:none; color:var(--color-text-muted); cursor:pointer; }
+.drawer-dismiss:hover:not(:disabled) { border-color:var(--color-border); background:var(--color-surface-subtle); color:var(--color-text); }
+.drawer-dismiss:disabled { cursor:not-allowed; opacity:.55; }
+.drawer-dismiss .icon { margin:0; }
 .drawer-header h2 { margin:.25rem 0 .15rem; font-size:1.35rem; letter-spacing:-.035em; }
 .drawer-header p { margin:0; color:var(--color-text-muted); font-size:.78rem; }
 .drawer-header small { display:block; margin-top:.25rem; color:var(--color-text-muted); }
@@ -442,7 +448,7 @@ tr.selected-row { background:color-mix(in srgb, var(--color-accent) 11%, transpa
     --color-surface:#19211c;
     --color-surface-subtle:#161d18;
     --color-text:#dce5df;
-    --color-text-muted:#878f8a;
+    --color-text-muted:#9fa8a2;
     --color-border:#646c67;
     --color-accent:#65c68e;
     --color-accent-hover:#81d0a2;

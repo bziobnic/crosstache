@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
-import { PALETTES, contrastRatio, deriveTokens } from './theme.js';
+import { PALETTES, contrastRatio, deriveTokens, mix } from './theme.js';
 
 const html = await readFile(new URL('./index.html', import.meta.url), 'utf8');
 const css = await readFile(new URL('./style.css', import.meta.url), 'utf8');
@@ -101,6 +101,14 @@ test('pre-JS Forest light and dark fallbacks match accessible runtime tokens', (
     }
     assert.ok(contrastRatio(readToken(block, '--color-text'), readToken(block, '--color-canvas')) >= 4.5);
     assert.ok(contrastRatio(readToken(block, '--color-text-muted'), readToken(block, '--color-surface-subtle')) >= 4.5);
+    // Muted text also lands on the tinted composites style.css paints: the
+    // accent wash on selected rows, the text wash on .tag, and both stacked.
+    const surface = readToken(block, '--color-surface');
+    const selectedRow = mix(surface, readToken(block, '--color-accent'), 0.12);
+    const tag = mix(surface, readToken(block, '--color-text'), 0.06);
+    for (const bg of [selectedRow, tag, mix(selectedRow, readToken(block, '--color-text'), 0.06)]) {
+      assert.ok(contrastRatio(readToken(block, '--color-text-muted'), bg) >= 4.5, `${variant} muted on ${bg}`);
+    }
     assert.ok(contrastRatio(readToken(block, '--color-primary-foreground'), readToken(block, '--color-accent')) >= 4.5);
     assert.ok(contrastRatio(readToken(block, '--rail-fg'), readToken(block, '--rail-bg')) >= 4.5);
     assert.ok(contrastRatio(readToken(block, '--rail-fg-muted'), readToken(block, '--rail-bg')) >= 4.5);

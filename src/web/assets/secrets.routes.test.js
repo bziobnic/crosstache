@@ -1374,6 +1374,10 @@ test('drawer routes guard cancel, Escape, backdrop, tabs, vault changes, and com
     assert.equal(ui.document.activeElement, ui.elements.get('#new-secret'));
 
     await ui.openDirty();
+    await ui.elements.get('#dismiss-drawer').onclick();
+    assert.equal(ui.elements.get('#drawer').hidden, true);
+
+    await ui.openDirty();
     await ui.document.dispatch('keydown', { key: 'Escape' });
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.equal(ui.elements.get('#drawer').hidden, true);
@@ -1394,7 +1398,7 @@ test('drawer routes guard cancel, Escape, backdrop, tabs, vault changes, and com
     await ui.openDirty();
     await ui.elements.get('#new-secret').onclick({ currentTarget: ui.elements.get('#new-secret') });
     assert.equal(ui.elements.get('#drawer').hidden, false);
-    assert.equal(ui.confirmations.length, 6);
+    assert.equal(ui.confirmations.length, 7);
   } finally {
     ui.restore();
   }

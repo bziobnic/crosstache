@@ -8,7 +8,7 @@ test('Settings applies live presentation preferences through the server owner', 
   await page.locator('#settings-open').click();
   const settings = page.getByRole('dialog', { name: 'Settings' });
   await expect(settings.getByRole('heading', { name: 'Settings' })).toBeVisible();
-  await expect(settings.getByLabel('Theme')).toBeFocused();
+  await expect(settings.getByLabel('Mode')).toBeFocused();
   await expect(settings.getByLabel('Protected value timeout')).toHaveValue('30');
   await expect(settings.locator('#timeout-policy-copy')).toHaveText(
     'No application maximum is configured. A saved 0-second timeout hides protected values immediately.',
@@ -17,12 +17,12 @@ test('Settings applies live presentation preferences through the server owner', 
   const darkSaved = page.waitForResponse((response) => (
     response.url().endsWith('/api/preferences') && response.request().method() === 'PUT'
   ));
-  await settings.getByLabel('Theme').selectOption('dark');
+  await settings.getByLabel('Mode').selectOption('dark');
   await darkSaved;
   const themeSaved = page.waitForResponse((response) => (
     response.url().endsWith('/api/preferences') && response.request().method() === 'PUT'
   ));
-  await settings.getByLabel('Theme').selectOption('system');
+  await settings.getByLabel('Mode').selectOption('system');
   await themeSaved;
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'system');
   await expect(page.locator('html')).toHaveAttribute('data-effective-theme', 'dark');
