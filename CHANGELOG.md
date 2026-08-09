@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.36.1 — Windows reliability and install portability (2026-08-09)
+
+### Fixed
+
+- **Windows builds now run reliably.** Shipped binaries reserve enough stack,
+  private atomic writes and local-backend filesystem operations use correct
+  Windows semantics, isolated config paths work in tests, Azure CLI discovery
+  recognizes `az.cmd`, and the full Windows test suite now runs in CI.
+- **The generic installers no longer require or install the Azure CLI.** Local
+  and AWS users can install `xv` without Azure tooling; `az` remains optional
+  for CLI-based Azure authentication and interactive Azure provisioning.
+- **Stale workspace entries now explain the actual repair.** Reads report the
+  missing named backend and direct users to remove the stale alias or restore
+  its configuration instead of suggesting an unrelated full reinitialization.
+
 ## v0.36.0 — Bootstrap-safe config recovery (2026-08-08)
 
 ### Added
