@@ -63,3 +63,35 @@ jobs:
 
       - name: Check all features on Windows
         run: cargo check --all-features
+
+  # The suite had only ever been *compiled* on Windows, never run. Every
+  # Windows-specific defect it covers — directory handles needing
+  # FILE_FLAG_BACKUP_SEMANTICS, FileRenameInfo rejecting a non-NULL
+  # RootDirectory, config/context paths ignoring the environment so tests wrote
+  # to the real %APPDATA% — sat undetected behind `cargo check`. This job is
+  # what keeps them fixed.
+  #
+  # Deliberately no clippy step here: Windows currently reports pre-existing
+  # dead-code lints for helpers gated behind #[cfg(unix)], which would fail
+  # `-D warnings` on arrival. The ubuntu job above owns lint enforcement.
+  windows-test:
+    name: Windows Test Suite
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: windows-test
+
+      # 19 tests drive a child process through `sh` (`xv run`, output masking,
+      # clipboard). Git for Windows is preinstalled on this runner and ships
+      # `sh.exe` in its bin directory; put it on PATH explicitly rather than
+      # relying on the image's default PATH, which is not part of any contract.
+      - name: Ensure a POSIX shell is on PATH
+        run: echo "C:\Program Files\Git\bin" >> $env:GITHUB_PATH
+
+      - name: Run tests
+        run: cargo test --verbose
