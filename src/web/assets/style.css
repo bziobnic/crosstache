@@ -4,7 +4,7 @@
   --color-surface: #ffffff;
   --color-surface-subtle: #f9f8f5;
   --color-text: #18221c;
-  --color-text-muted: #686f6b;
+  --color-text-muted: #5d6460;
   --color-border: #878c89;
   --color-accent: #216446;
   --color-accent-hover: #1b5239;
@@ -448,7 +448,7 @@ tr.selected-row { background:color-mix(in srgb, var(--color-accent) 11%, transpa
     --color-surface:#19211c;
     --color-surface-subtle:#161d18;
     --color-text:#dce5df;
-    --color-text-muted:#878f8a;
+    --color-text-muted:#9fa8a2;
     --color-border:#646c67;
     --color-accent:#65c68e;
     --color-accent-hover:#81d0a2;

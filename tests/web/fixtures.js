@@ -75,6 +75,14 @@ vaults = [
   },
   baseURL: async ({ appContext }, use) => use(appContext.baseURL),
   vault: async ({ appContext }, use) => use(appContext.vault),
+  // `use.reducedMotion` in playwright.config.js does not reach the page in
+  // Playwright 1.61, so entry animations kept running and axe sampled elements
+  // mid-fade (a sheet at 76% opacity reads as a contrast failure). Apply the
+  // emulation explicitly; specs that need motion opt back in with emulateMedia.
+  page: async ({ page }, use) => {
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await use(page);
+  },
 });
 
 export async function expectNoSeriousOrCriticalAxeViolations(page) {

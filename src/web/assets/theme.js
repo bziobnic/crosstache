@@ -198,10 +198,20 @@ export function deriveTokens(core, variant) {
   // (surface 92% over canvas, then text 4% over that) so muted text stays
   // readable on that rendered background too, not just the flat tokens.
   const tabListBg = mix(mix(core.canvas, core.surface, 0.92), core.text, 0.04);
+  // Muted text also renders on tinted composites: selected rows carry an accent
+  // wash (the 12% in style.css is the heaviest; accent-quiet and the 11%/6%
+  // variants are lighter and subsumed by it) and .tag carries a text wash. A tag
+  // inside a selected row stacks both, so that is the true worst case.
+  const selectedRowBg = mix(core.surface, core.accent, 0.12);
+  const tagBg = mix(core.surface, core.text, 0.06);
+  const tagOnSelectedRowBg = mix(selectedRowBg, core.text, 0.06);
   const textMuted = findMutedTone(
     core.text,
     core.surface,
-    [core.canvas, core.surface, surfaceSubtle, tabListBg],
+    [
+      core.canvas, core.surface, surfaceSubtle, tabListBg,
+      selectedRowBg, tagBg, tagOnSelectedRowBg,
+    ],
   );
   const border = findAccessibleTone(
     core.surface,
