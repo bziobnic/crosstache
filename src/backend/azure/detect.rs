@@ -3,6 +3,7 @@
 //! This module provides utilities for detecting Azure CLI installation,
 //! available subscriptions, and environment configuration.
 
+use super::az_program;
 use crate::error::{CrosstacheError, Result};
 use serde_json::Value;
 use std::process::Command;
@@ -100,7 +101,7 @@ impl AzureDetector {
 
     /// Check if Azure CLI is available
     fn check_cli_available() -> bool {
-        Command::new("az")
+        Command::new(az_program())
             .arg("--version")
             .output()
             .map(|output| output.status.success())
@@ -109,7 +110,7 @@ impl AzureDetector {
 
     /// Get Azure CLI version
     fn get_cli_version() -> Option<String> {
-        let output = Command::new("az").arg("--version").output().ok()?;
+        let output = Command::new(az_program()).arg("--version").output().ok()?;
 
         if !output.status.success() {
             return None;
@@ -125,7 +126,7 @@ impl AzureDetector {
 
     /// Check if user is logged into Azure CLI
     fn check_cli_logged_in() -> bool {
-        Command::new("az")
+        Command::new(az_program())
             .args(["account", "show"])
             .output()
             .map(|output| output.status.success())
@@ -134,7 +135,7 @@ impl AzureDetector {
 
     /// Get available Azure subscriptions
     async fn get_subscriptions() -> Result<Vec<AzureSubscription>> {
-        let output = Command::new("az")
+        let output = Command::new(az_program())
             .args(["account", "list", "--output", "json"])
             .output()
             .map_err(|e| CrosstacheError::config(format!("Failed to execute Azure CLI: {e}")))?;
@@ -187,7 +188,7 @@ impl AzureDetector {
 
     /// Get current tenant information
     async fn get_tenant_info() -> Result<Option<AzureTenant>> {
-        let output = Command::new("az")
+        let output = Command::new(az_program())
             .args(["account", "show", "--output", "json"])
             .output()
             .map_err(|e| CrosstacheError::config(format!("Failed to execute Azure CLI: {e}")))?;
@@ -230,7 +231,7 @@ impl AzureDetector {
             );
             return None;
         }
-        let output = Command::new("az")
+        let output = Command::new(az_program())
             .args([
                 "rest",
                 "--method",
@@ -282,7 +283,7 @@ impl AzureDetector {
 
     /// Get available resource groups for a subscription
     pub async fn get_resource_groups(subscription_id: &str) -> Result<Vec<String>> {
-        let output = Command::new("az")
+        let output = Command::new(az_program())
             .args([
                 "group",
                 "list",
@@ -322,15 +323,38 @@ impl AzureDetector {
     }
 
     /// Get available locations for a subscription
+    ///
+    /// Goes through the ARM REST endpoint rather than `az account
+    /// list-locations`. The latter is a local-profile command — its help reads
+    /// "List supported regions for the *current* subscription" — and it rejects
+    /// `--subscription` outright with `ERROR: unrecognized arguments`, which
+    /// failed step 4/6 of `xv init` for every user. (`--subscription` is a
+    /// global argument for ARM-backed commands like `az group list`, which is
+    /// why the other calls in this module are fine.) The REST URL carries the
+    /// subscription in its path, so it answers for the subscription the user
+    /// actually chose in step 2 rather than whatever the CLI last defaulted to.
     pub async fn get_locations(subscription_id: &str) -> Result<Vec<String>> {
-        let output = Command::new("az")
+        // Validate before interpolating into the URL — the same guard
+        // `get_tenant_details` applies, so a malformed or hostile value can't
+        // reshape the request path.
+        if !is_valid_uuid(subscription_id) {
+            return Err(CrosstacheError::config(format!(
+                "Invalid subscription id {subscription_id:?}: expected a UUID"
+            )));
+        }
+
+        let output = Command::new(az_program())
             .args([
-                "account",
-                "list-locations",
-                "--subscription",
-                subscription_id,
+                "rest",
+                "--method",
+                "GET",
+                "--url",
+                &format!(
+                    "https://management.azure.com/subscriptions/{subscription_id}\
+                     /locations?api-version=2022-12-01"
+                ),
                 "--query",
-                "[].name",
+                "value[].name",
                 "--output",
                 "json",
             ])
@@ -367,7 +391,7 @@ impl AzureDetector {
         subscription_id: &str,
         resource_group: &str,
     ) -> Result<bool> {
-        let output = Command::new("az")
+        let output = Command::new(az_program())
             .args([
                 "group",
                 "exists",
@@ -394,7 +418,7 @@ impl AzureDetector {
         resource_group: &str,
         location: &str,
     ) -> Result<()> {
-        let output = Command::new("az")
+        let output = Command::new(az_program())
             .args([
                 "group",
                 "create",
@@ -423,7 +447,7 @@ impl AzureDetector {
         subscription_id: &str,
         resource_group: &str,
     ) -> Result<Vec<String>> {
-        let output = Command::new("az")
+        let output = Command::new(az_program())
             .args([
                 "storage",
                 "account",
@@ -471,7 +495,7 @@ impl AzureDetector {
         subscription_id: &str,
         storage_account: &str,
     ) -> Result<bool> {
-        let output = Command::new("az")
+        let output = Command::new(az_program())
             .args([
                 "storage",
                 "account",
@@ -497,7 +521,7 @@ impl AzureDetector {
         storage_account: &str,
         container_name: &str,
     ) -> Result<bool> {
-        let output = Command::new("az")
+        let output = Command::new(az_program())
             .args([
                 "storage",
                 "container",
@@ -601,6 +625,20 @@ mod tests {
 
         // At minimum, we should be able to detect CLI availability
         assert!(env.cli_available == AzureDetector::check_cli_available());
+    }
+
+    /// `get_locations` interpolates the subscription id straight into an ARM
+    /// URL path, so a non-UUID must be rejected before the request is built.
+    /// Runs offline — the guard fires before any `az` invocation.
+    #[tokio::test]
+    async fn get_locations_rejects_non_uuid_subscription() {
+        let err = AzureDetector::get_locations("../../evil?api-version=1")
+            .await
+            .expect_err("a non-UUID subscription id must be refused");
+        assert!(
+            err.to_string().contains("expected a UUID"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
