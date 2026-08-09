@@ -276,6 +276,12 @@ curl -sSL https://raw.githubusercontent.com/bziobnic/crosstache/main/scripts/ins
 iwr -useb https://raw.githubusercontent.com/bziobnic/crosstache/main/scripts/install.ps1 | iex
 ```
 
+Azure CLI is not an installation or general runtime requirement. Local and AWS
+backends need no Azure tooling, and Azure supports environment credentials,
+managed identity, and OIDC directly. Install Azure CLI only if you want to use
+`--credential-type cli` or the Azure discovery and provisioning steps in the
+interactive `xv init` flow.
+
 ### Pre-built binaries
 
 [Releases page](https://github.com/bziobnic/crosstache/releases) — choose the right archive:
