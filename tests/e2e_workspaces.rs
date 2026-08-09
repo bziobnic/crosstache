@@ -16,6 +16,20 @@ use std::path::PathBuf;
 use std::process::Command;
 use tempfile::TempDir;
 
+/// Render a path for interpolation into a **double-quoted** TOML string.
+///
+/// TOML basic strings process backslash escapes, so an unescaped Windows path
+/// does not just look wrong — it fails to parse: `C:\Users\...` makes the
+/// parser read `\U` as a unicode escape and reject the config with "invalid
+/// unicode 8-digit hex code".
+fn toml_path(path: impl AsRef<std::path::Path>) -> String {
+    path.as_ref()
+        .display()
+        .to_string()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+}
+
 /// A hermetic environment with two independent local-backend stores
 /// registered as named backends `local-a` and `local-b`, plus a private
 /// global context directory. Neither backend is the top-level active
@@ -113,12 +127,12 @@ region = "us-east-1"
 endpoint_url = "http://127.0.0.1:1"
 default_vault = "default"
 "#,
-            store_default = store_default.display(),
-            key_default = key_default.display(),
-            store_a = store_a.display(),
-            key_a = key_a.display(),
-            store_b = store_b.display(),
-            key_b = key_b.display(),
+            store_default = toml_path(&store_default),
+            key_default = toml_path(&key_default),
+            store_a = toml_path(&store_a),
+            key_a = toml_path(&key_a),
+            store_b = toml_path(&store_b),
+            key_b = toml_path(&key_b),
         );
         std::fs::write(xv_dir.join("xv.conf"), config_content).expect("write config");
 
@@ -508,10 +522,10 @@ store_path = "{store_a}"
 key_file = "{key_a}"
 default_vault = "default"
 "#,
-        store_default = store_default.display(),
-        key_default = key_default.display(),
-        store_a = store_a.display(),
-        key_a = key_a.display(),
+        store_default = toml_path(&store_default),
+        key_default = toml_path(&key_default),
+        store_a = toml_path(&store_a),
+        key_a = toml_path(&key_a),
     );
     std::fs::write(xv_dir.join("xv.conf"), config_content).expect("write config");
 
@@ -622,10 +636,10 @@ store_path = "{store_a}"
 key_file = "{key_a}"
 default_vault = "default"
 "#,
-        store_default = store_default.display(),
-        key_default = key_default.display(),
-        store_a = store_a.display(),
-        key_a = key_a.display(),
+        store_default = toml_path(&store_default),
+        key_default = toml_path(&key_default),
+        store_a = toml_path(&store_a),
+        key_a = toml_path(&key_a),
     );
     std::fs::write(xv_dir.join("xv.conf"), config_content).expect("write config");
 
@@ -762,10 +776,10 @@ store_path = "{store_a}"
 key_file = "{key_a}"
 default_vault = "default"
 "#,
-        store_default = store_default.display(),
-        key_default = key_default.display(),
-        store_a = store_a.display(),
-        key_a = key_a.display(),
+        store_default = toml_path(&store_default),
+        key_default = toml_path(&key_default),
+        store_a = toml_path(&store_a),
+        key_a = toml_path(&key_a),
     );
     std::fs::write(xv_dir.join("xv.conf"), config_content).expect("write config");
 
@@ -3168,17 +3182,33 @@ fn run_env_alias_uri_resolves() {
     ]);
     env.ok(&["set", "work:TOKEN", "--value", "work-value"]);
 
+    // `printenv` does not exist on Windows; `cmd /c echo %MY_REF%` reads the
+    // same inherited variable out of the child's environment, which is what
+    // this test is checking `xv run` resolved.
+    #[cfg(windows)]
+    let child: &[&str] = &[
+        "run",
+        "--inherit-env",
+        "--no-masking",
+        "--",
+        "cmd",
+        "/c",
+        "echo %MY_REF%",
+    ];
+    #[cfg(not(windows))]
+    let child: &[&str] = &[
+        "run",
+        "--inherit-env",
+        "--no-masking",
+        "--",
+        "printenv",
+        "MY_REF",
+    ];
+
     let out = env
         .xv()
         .env("MY_REF", "xv://work/TOKEN")
-        .args([
-            "run",
-            "--inherit-env",
-            "--no-masking",
-            "--",
-            "printenv",
-            "MY_REF",
-        ])
+        .args(child)
         .output()
         .expect("execute xv run");
     assert!(

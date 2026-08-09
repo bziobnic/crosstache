@@ -34,6 +34,46 @@ use crate::error::CrosstacheError;
 use crate::secret::manager::AzureSecretOperations;
 use crate::vault::operations::AzureVaultOperations;
 
+/// The Azure CLI executable name to hand to `Command::new`.
+///
+/// On Windows the Azure CLI ships as `az.cmd` — a batch shim around the Python
+/// entry point. There is no `az.exe`. A shell resolves the bare name `az`
+/// against `PATHEXT`, but `std::process::Command` does not: it only appends
+/// `.exe` to an extension-less program name. So `Command::new("az")` fails with
+/// `NotFound` on every Windows box, even when `az account show` works fine in
+/// the very same terminal — which reads to the user as "Azure CLI is not
+/// installed" when it plainly is.
+///
+/// Probe `PATH` for the batch names first and fall back to the bare `az`, which
+/// is correct everywhere else (and keeps the "not installed" diagnostic honest
+/// when the CLI genuinely isn't there).
+#[cfg(windows)]
+pub fn az_program() -> &'static str {
+    use std::sync::OnceLock;
+
+    static PROGRAM: OnceLock<&'static str> = OnceLock::new();
+    PROGRAM.get_or_init(|| {
+        // `.exe` is included for completeness — no shipping Azure CLI provides
+        // one today, but a third-party repackaging might, and it costs nothing.
+        ["az.cmd", "az.bat", "az.exe"]
+            .into_iter()
+            .find(|candidate| {
+                std::env::var_os("PATH").is_some_and(|paths| {
+                    std::env::split_paths(&paths).any(|dir| dir.join(candidate).is_file())
+                })
+            })
+            .unwrap_or("az")
+    })
+}
+
+/// The Azure CLI executable name to hand to `Command::new`.
+///
+/// Everywhere but Windows the CLI is a plain `az` on `PATH`.
+#[cfg(not(windows))]
+pub fn az_program() -> &'static str {
+    "az"
+}
+
 /// Map [`CrosstacheError`] → [`BackendError`].
 ///
 /// This is a best-effort mapping; variants without a direct BackendError
@@ -241,6 +281,52 @@ impl Backend for AzureBackend {
             .await
             .map_err(|e| BackendError::AuthenticationFailed(e.to_string()))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod az_program_tests {
+    use super::az_program;
+
+    #[test]
+    fn resolves_to_a_known_candidate() {
+        let program = az_program();
+        if cfg!(windows) {
+            assert!(
+                matches!(program, "az.cmd" | "az.bat" | "az.exe" | "az"),
+                "unexpected Azure CLI program name: {program}"
+            );
+        } else {
+            assert_eq!(program, "az");
+        }
+    }
+
+    /// Guards the bug this helper exists for: on Windows the Azure CLI is
+    /// `az.cmd`, and `Command::new("az")` fails with `NotFound` because
+    /// `Command` appends only `.exe` and never consults `PATHEXT`. Detection
+    /// then reports "Azure CLI is not installed" on a machine where `az` runs
+    /// fine in the shell. Whenever a batch shim IS on `PATH`, we must pick it
+    /// over the bare name.
+    ///
+    /// Self-skipping rather than environment-dependent: when no shim is on
+    /// `PATH` the CLI genuinely is not installed and there is nothing to
+    /// assert, so this stays green on CI runners without the Azure CLI.
+    #[cfg(windows)]
+    #[test]
+    fn prefers_the_batch_shim_over_the_bare_name() {
+        let shim_on_path = std::env::var_os("PATH").is_some_and(|paths| {
+            std::env::split_paths(&paths)
+                .any(|dir| dir.join("az.cmd").is_file() || dir.join("az.bat").is_file())
+        });
+        if !shim_on_path {
+            return;
+        }
+        assert_ne!(
+            az_program(),
+            "az",
+            "a batch shim is on PATH but az_program() fell back to the bare name, \
+             which Command::new cannot resolve"
+        );
     }
 }
 

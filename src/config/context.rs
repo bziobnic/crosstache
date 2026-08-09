@@ -394,6 +394,20 @@ impl ContextManager {
 
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
+            // Honour `XDG_CONFIG_HOME` here too, for the same reason
+            // `Config::get_config_path` does: `dirs::config_dir()` goes through
+            // the Win32 known-folder API and ignores the environment, so on
+            // Windows every test suite shared the one real
+            // `%APPDATA%\xv\context` file. Workspaces registered by one suite
+            // then leaked into the next ("unknown backend kind: local-a"),
+            // which is a contamination bug in its own right and not merely a
+            // test-isolation inconvenience.
+            if let Some(config_home) =
+                std::env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty())
+            {
+                return Ok(PathBuf::from(config_home).join("xv").join("context"));
+            }
+
             // Use platform-appropriate config directory for other platforms
             let config_dir = dirs::config_dir()
                 .ok_or_else(|| CrosstacheError::config("Could not determine config directory"))?;

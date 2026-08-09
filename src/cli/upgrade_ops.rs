@@ -555,15 +555,29 @@ fn version_output_matches(output: &str, expected: &semver::Version) -> bool {
 mod tests {
     use super::*;
 
+    /// Releases publish exactly four archives (see
+    /// `.github/workflows/release.yml`), so a host outside that set — Windows
+    /// on ARM64, for one — has no asset to download. Refusing with a clear
+    /// "Unsupported platform" message is the correct outcome there; inventing a
+    /// name would only turn into a 404 at download time. Assert the contract
+    /// rather than assuming every build host is a release target.
     #[test]
     fn test_get_asset_name_returns_valid_name() {
-        let name = get_asset_name();
-        assert!(name.is_ok(), "Should detect current platform");
-        let name = name.unwrap();
-        assert!(
-            name.ends_with(".tar.gz") || name.ends_with(".zip"),
-            "Asset should be tar.gz or zip, got: {name}"
-        );
+        match get_asset_name() {
+            Ok(name) => assert!(
+                name.ends_with(".tar.gz") || name.ends_with(".zip"),
+                "Asset should be tar.gz or zip, got: {name}"
+            ),
+            Err(error) => {
+                let message = error.to_string();
+                assert!(
+                    message.contains("Unsupported platform"),
+                    "unexpected error for {}/{}: {message}",
+                    std::env::consts::OS,
+                    std::env::consts::ARCH
+                );
+            }
+        }
     }
 
     #[test]

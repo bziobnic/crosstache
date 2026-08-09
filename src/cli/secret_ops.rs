@@ -8306,8 +8306,23 @@ mod tests {
         let stdout_path = dir.path().join("stdout.txt");
         let stderr_path = dir.path().join("stderr.txt");
 
-        let child = Command::new("echo")
-            .arg("hello SUPERSECRET world")
+        // `echo` is a shell builtin on Windows rather than an executable, so
+        // spawning it directly there fails with NotFound. Go through the
+        // platform's own shell instead of assuming a Unix `echo` binary exists.
+        #[cfg(windows)]
+        let mut command = {
+            let mut command = Command::new("cmd");
+            command.arg("/c").arg("echo hello SUPERSECRET world");
+            command
+        };
+        #[cfg(not(windows))]
+        let mut command = {
+            let mut command = Command::new("echo");
+            command.arg("hello SUPERSECRET world");
+            command
+        };
+
+        let child = command
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()

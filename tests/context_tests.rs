@@ -36,8 +36,8 @@ store_path = "{store}"
 key_file = "{key}"
 default_vault = "default"
 "#,
-        store = store.display(),
-        key = key.display(),
+        store = common::toml_path(&store),
+        key = common::toml_path(&key),
     );
     std::fs::write(xv_dir.join("xv.conf"), content).expect("write xv.conf");
 }

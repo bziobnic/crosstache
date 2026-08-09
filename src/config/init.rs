@@ -620,7 +620,7 @@ impl ConfigInitializer {
         // Create storage account using Azure CLI with timeout
         let create_storage_cmd = tokio::time::timeout(
             std::time::Duration::from_secs(180), // 3 minute timeout for storage account creation
-            tokio::process::Command::new("az")
+            tokio::process::Command::new(crate::backend::azure::az_program())
                 .args([
                     "storage",
                     "account",
@@ -686,7 +686,7 @@ impl ConfigInitializer {
         // Create blob container with timeout to prevent hanging
         let create_container_cmd = tokio::time::timeout(
             std::time::Duration::from_secs(120), // 2 minute timeout
-            tokio::process::Command::new("az")
+            tokio::process::Command::new(crate::backend::azure::az_program())
                 .args([
                     "storage",
                     "container",
@@ -795,7 +795,7 @@ impl ConfigInitializer {
         // Create blob container with timeout
         let create_container_cmd = tokio::time::timeout(
             std::time::Duration::from_secs(120), // 2 minute timeout
-            tokio::process::Command::new("az")
+            tokio::process::Command::new(crate::backend::azure::az_program())
                 .args([
                     "storage",
                     "container",

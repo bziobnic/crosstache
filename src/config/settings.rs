@@ -433,6 +433,21 @@ impl Config {
 
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
+            // Honour `XDG_CONFIG_HOME` here as well. It is not a Windows
+            // convention and real users will not have it set, so this changes
+            // nothing for them — but `dirs::config_dir()` resolves through the
+            // Win32 known-folder API and ignores the environment entirely.
+            // That silently defeated the integration harness's
+            // `HOME`/`XDG_CONFIG_HOME` isolation (`tests/common/mod.rs`), whose
+            // stated invariant is that tests never touch the user's real
+            // config: on Windows `cargo test` read and OVERWROTE the real
+            // `%APPDATA%\xv\xv.conf` instead of its tempdir copy.
+            if let Some(config_home) =
+                std::env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty())
+            {
+                return Ok(PathBuf::from(config_home).join("xv").join("xv.conf"));
+            }
+
             // Use platform-appropriate config directory for other platforms
             let config_dir = dirs::config_dir()
                 .ok_or_else(|| CrosstacheError::config("Unable to determine config directory"))?;

@@ -10,6 +10,7 @@
 //!    handles secret material, so masking, multi-line values, and delimiter
 //!    injection are all exercised for real rather than reviewed by eye.
 
+#[cfg(unix)]
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -208,12 +209,23 @@ fn oidc_auth_requires_the_id_token_permission_and_ids() {
 ///
 /// `responses` maps a secret name to the value the stub prints. A name absent
 /// from the map makes the stub exit non-zero, standing in for a fetch failure.
+///
+/// Unix-only. Not because the action is — it supports Windows runners, where
+/// GitHub provides bash — but because this *harness* is: it writes an
+/// extensionless `#!/usr/bin/env bash` stub made executable via `chmod`, joins
+/// `PATH` with `:`, and spawns `bash` by bare name. None of that holds on a
+/// Windows developer machine, where the tests failed with "program not found"
+/// rather than telling us anything about `action.yml`. CI runs `cargo test` on
+/// ubuntu-latest (`.github/workflows/build.yml`), so this gate costs no
+/// coverage.
+#[cfg(unix)]
 struct FetchRun {
     status: std::process::ExitStatus,
     stdout: String,
     github_env: String,
 }
 
+#[cfg(unix)]
 fn run_fetch(secrets_input: &str, responses: &[(&str, &str)]) -> FetchRun {
     let tmp = tempfile::tempdir().unwrap();
     let bin_dir = tmp.path().join("bin");
@@ -274,6 +286,7 @@ fn run_fetch(secrets_input: &str, responses: &[(&str, &str)]) -> FetchRun {
     }
 }
 
+#[cfg(unix)]
 fn shell_case_pattern(name: &str) -> String {
     // Test names are plain, but quote anyway so a pattern char cannot alter the
     // stub's control flow.
@@ -281,6 +294,7 @@ fn shell_case_pattern(name: &str) -> String {
 }
 
 /// Extract `NAME=value` pairs from a GITHUB_ENV file written in heredoc form.
+#[cfg(unix)]
 fn parse_github_env(body: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut lines = body.lines().peekable();
@@ -299,6 +313,7 @@ fn parse_github_env(body: &str) -> Vec<(String, String)> {
     out
 }
 
+#[cfg(unix)]
 #[test]
 fn fetch_exports_and_masks_each_secret() {
     let run = run_fetch(
@@ -322,6 +337,7 @@ fn fetch_exports_and_masks_each_secret() {
     assert!(run.stdout.contains("Fetched 2 secret(s)"), "{}", run.stdout);
 }
 
+#[cfg(unix)]
 #[test]
 fn fetch_handles_multiline_values_and_masks_every_line() {
     // A PEM key is the canonical multi-line secret. The runner matches masks
@@ -348,6 +364,7 @@ fn fetch_handles_multiline_values_and_masks_every_line() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn fetch_uses_a_random_delimiter_per_value() {
     let run = run_fetch("A=sa\nB=sb\n", &[("sa", "value-a"), ("sb", "value-b")]);
@@ -366,6 +383,7 @@ fn fetch_uses_a_random_delimiter_per_value() {
     assert!(delims.iter().all(|d| d.starts_with("XV_EOF_")));
 }
 
+#[cfg(unix)]
 #[test]
 fn fetch_rejects_a_value_containing_its_delimiter() {
     // Defence against env injection: a value that could close the heredoc early
@@ -387,6 +405,7 @@ fn fetch_rejects_a_value_containing_its_delimiter() {
     assert!(vars[0].1.contains("A=INJECTED"));
 }
 
+#[cfg(unix)]
 #[test]
 fn fetch_rejects_invalid_environment_variable_names() {
     for bad in ["1BAD=x", "has-dash=x", "has space=x", "=x"] {
@@ -405,6 +424,7 @@ fn fetch_rejects_invalid_environment_variable_names() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn fetch_rejects_malformed_entries() {
     let run = run_fetch("NO_EQUALS_SIGN\n", &[]);
@@ -420,6 +440,7 @@ fn fetch_rejects_malformed_entries() {
     assert!(run.stdout.contains("No secret name"), "{}", run.stdout);
 }
 
+#[cfg(unix)]
 #[test]
 fn fetch_fails_the_step_when_a_secret_is_missing() {
     // A missing secret must fail loudly; exporting an empty value would let a
@@ -433,6 +454,7 @@ fn fetch_fails_the_step_when_a_secret_is_missing() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn fetch_skips_blanks_and_comments_and_tolerates_crlf() {
     let run = run_fetch(
@@ -444,6 +466,7 @@ fn fetch_skips_blanks_and_comments_and_tolerates_crlf() {
     assert_eq!(vars, vec![("DB".to_string(), "hunter2".to_string())]);
 }
 
+#[cfg(unix)]
 #[test]
 fn fetch_preserves_values_with_shell_metacharacters() {
     // Values are data, never code: a value that looks like a command

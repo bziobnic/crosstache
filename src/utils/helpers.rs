@@ -55,24 +55,55 @@ pub fn write_private(
         file.write_all(bytes.as_ref())?;
         Ok(())
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        // If the file already exists it may be read-only from a previous
-        // sensitive write; clear the read-only attribute first so the
-        // overwrite does not fail with a permission error (e.g. a second
-        // context `save` after `set_context` on Windows).
-        if let Ok(meta) = std::fs::metadata(path.as_ref()) {
-            let mut perms = meta.permissions();
-            if perms.readonly() {
-                perms.set_readonly(false);
-                std::fs::set_permissions(path.as_ref(), perms)?;
+        use std::io::Write;
+        use windows_sys::Win32::Storage::FileSystem::{
+            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_WRITE,
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+
+        // This used to emulate 0600 with FILE_ATTRIBUTE_READONLY. That grants
+        // no confidentiality whatsoever on Windows — every other user can still
+        // read the file — while blocking precisely the operations the local
+        // backend depends on: `fs::rename` cannot replace a read-only
+        // destination, and `FlushFileBuffers` cannot run against one. Both fail
+        // with ERROR_ACCESS_DENIED (os error 5), which is how secret
+        // activation and file syncing broke on Windows.
+        //
+        // Clear the attribute off files left behind by those builds, then
+        // create with the protected owner+SYSTEM DACL that
+        // `atomic_write_file_no_follow` already uses — the actual 0600
+        // equivalent, and one that still permits the owner to delete and
+        // replace (FILE_ALL_ACCESS), as renaming over the file requires.
+        if let Ok(metadata) = std::fs::metadata(path.as_ref()) {
+            let mut permissions = metadata.permissions();
+            if permissions.readonly() {
+                permissions.set_readonly(false);
+                std::fs::set_permissions(path.as_ref(), permissions)?;
             }
         }
-        std::fs::write(path.as_ref(), bytes.as_ref())?;
-        let mut perms = std::fs::metadata(path.as_ref())?.permissions();
-        perms.set_readonly(true);
-        std::fs::set_permissions(path.as_ref(), perms)?;
+
+        let descriptor = windows_private_security_descriptor()
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let attributes = windows_security_attributes(Some(&descriptor));
+        // FILE_FLAG_OPEN_REPARSE_POINT is the counterpart to the Unix branch's
+        // `O_NOFOLLOW`: a symlink at `path` is replaced rather than written
+        // through to whatever it points at.
+        let mut file = windows_create_file(
+            path.as_ref(),
+            FILE_GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            CREATE_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+            &attributes,
+        )?;
+        file.write_all(bytes.as_ref())?;
         Ok(())
+    }
+    #[cfg(all(not(unix), not(windows)))]
+    {
+        std::fs::write(path.as_ref(), bytes.as_ref())
     }
 }
 
@@ -1499,9 +1530,13 @@ struct WindowsAtomicParent {
     // an ancestor from becoming a reparse point or being renamed/replaced
     // after validation.
     _chain: Vec<std::fs::File>,
-    directory: std::fs::File,
+    // Retention-only, like `_chain`: pins the immediate parent for the lifetime
+    // of the write so the validated directory cannot be swapped out from under
+    // the rename. Never read — the rename addresses its target by full path
+    // because Win32 has no handle-relative rename (see
+    // `windows_rename_into_parent`).
+    _directory: std::fs::File,
     absolute: PathBuf,
-    destination: std::ffi::OsString,
 }
 
 #[cfg(windows)]
@@ -1513,7 +1548,8 @@ fn open_windows_atomic_parent(
     use windows_sys::Win32::Storage::FileSystem::{
         CreateDirectoryW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
         FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY,
-        FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_TRAVERSE, OPEN_EXISTING,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
+        OPEN_EXISTING,
     };
 
     let absolute = if path.is_absolute() {
@@ -1525,10 +1561,11 @@ fn open_windows_atomic_parent(
             })?
             .join(path)
     };
-    let destination = absolute
+    // Validated for its own sake — the rename uses the full path, but a
+    // destination that names no file is still a caller error.
+    absolute
         .file_name()
-        .ok_or_else(|| CrosstacheError::invalid_argument("Atomic destination must name a file"))?
-        .to_os_string();
+        .ok_or_else(|| CrosstacheError::invalid_argument("Atomic destination must name a file"))?;
     let parent_path = absolute.parent().ok_or_else(|| {
         CrosstacheError::invalid_argument("Atomic destination must have a parent directory")
     })?;
@@ -1541,7 +1578,24 @@ fn open_windows_atomic_parent(
     let mut current = PathBuf::new();
     let mut chain = Vec::new();
 
-    for component in parent_path.components() {
+    // The immediate parent needs write/delete sharing; every ancestor above it
+    // stays locked down. Replacing an entry inside a directory makes the kernel
+    // open that directory for write, so a `FILE_SHARE_READ`-only handle on it
+    // makes our *own* rename fail with ERROR_SHARING_VIOLATION (os error 32) —
+    // confirmed against both `SetFileInformationByHandle` and the NT-level
+    // `NtSetInformationFile` (STATUS_SHARING_VIOLATION, 0xC0000043), so it is
+    // inherent to the operation rather than an artifact of either entry point.
+    // Ancestors are unaffected: renaming this directory would require opening
+    // *it* for delete, which its own retained parent still refuses.
+    let components: Vec<Component> = parent_path.components().collect();
+    let last_component = components.len().saturating_sub(1);
+
+    for (index, component) in components.into_iter().enumerate() {
+        let share = if index == last_component {
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+        } else {
+            FILE_SHARE_READ
+        };
         match component {
             Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
                 current.push(component.as_os_str());
@@ -1562,7 +1616,7 @@ fn open_windows_atomic_parent(
         let file = match windows_create_file(
             &current,
             access,
-            FILE_SHARE_READ,
+            share,
             OPEN_EXISTING,
             flags,
             std::ptr::null(),
@@ -1583,7 +1637,7 @@ fn open_windows_atomic_parent(
                 windows_create_file(
                     &current,
                     access,
-                    FILE_SHARE_READ,
+                    share,
                     OPEN_EXISTING,
                     flags,
                     std::ptr::null(),
@@ -1628,9 +1682,8 @@ fn open_windows_atomic_parent(
     })?;
     Ok(WindowsAtomicParent {
         _chain: chain,
-        directory,
+        _directory: directory,
         absolute,
-        destination,
     })
 }
 
@@ -1649,25 +1702,35 @@ fn windows_rename_info_size(name_bytes: usize) -> usize {
     std::mem::size_of::<FILE_RENAME_INFO>() + name_bytes
 }
 
+/// Atomically replace `destination` with `file`.
+///
+/// `destination` must be the **full** path. `RootDirectory` is deliberately
+/// left NULL: Win32's `SetFileInformationByHandle` does not implement the
+/// handle-relative form of `FileRenameInfo`, and rejects every non-NULL
+/// `RootDirectory` with ERROR_INVALID_PARAMETER (os error 87) — independent of
+/// buffer sizing, of the share mode the directory handle was opened with, and
+/// of whether the destination already exists. Only the NT-level
+/// `NtSetInformationFile` honours that field. This is why the config write,
+/// `xv context use`, and the web UI's `ui.json` all failed on Windows.
+///
+/// The retained parent handle in [`WindowsAtomicParent`] still pins the
+/// directory for the lifetime of the operation, so re-resolving the path here
+/// does not reopen a window an attacker can swap the parent out of.
 #[cfg(windows)]
 fn windows_rename_into_parent(
     file: &std::fs::File,
-    parent: &std::fs::File,
     destination: &std::ffi::OsStr,
 ) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{
-        FileRenameInfo, SetFileInformationByHandle, FILE_RENAME_INFO, FILE_RENAME_INFO_0,
+        FileRenameInfo, SetFileInformationByHandle, FILE_RENAME_INFO,
     };
 
     // Buffer sizing follows the documented contract for FileRenameInfo:
     // `sizeof(FILE_RENAME_INFO) + FileNameLength`, with `FileNameLength`
     // counting the name only (no terminator) while the buffer itself leaves
-    // room for one. Sizing from `offset_of(FileName)` instead understates the
-    // buffer by the trailing FileName[1] element plus its padding — 4 bytes on
-    // 64-bit — and SetFileInformationByHandle rejects the short buffer with
-    // ERROR_INVALID_PARAMETER (os error 87) rather than a size-specific error.
+    // room for one.
     let name: Vec<u16> = destination.encode_wide().collect();
     let name_bytes = name.len() * std::mem::size_of::<u16>();
     let name_offset = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
@@ -1676,10 +1739,12 @@ fn windows_rename_into_parent(
     let mut buffer = vec![0usize; word_length];
     let information = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
     unsafe {
-        (*information).Anonymous = FILE_RENAME_INFO_0 {
-            ReplaceIfExists: true,
-        };
-        (*information).RootDirectory = parent.as_raw_handle().cast();
+        // Write only the 1-byte `ReplaceIfExists` arm of the union rather than
+        // assigning the whole `FILE_RENAME_INFO_0`: constructing that union
+        // from a single `bool` field leaves its other three bytes
+        // uninitialized, and assigning it copies all four into the buffer.
+        (*information).Anonymous.ReplaceIfExists = true;
+        (*information).RootDirectory = std::ptr::null_mut();
         (*information).FileNameLength = name_bytes as u32;
         std::ptr::copy_nonoverlapping(
             name.as_ptr(),
@@ -1818,14 +1883,12 @@ fn atomic_write_file_no_follow_windows(path: &Path, content: &[u8], private: boo
 
         // Caller-visible Windows commit point. No fallible operation is
         // performed after the handle-relative rename succeeds.
-        windows_rename_into_parent(&temporary, &parent.directory, &parent.destination).map_err(
-            |error| {
-                CrosstacheError::config(format!(
-                    "Failed to atomically replace Windows destination '{}': {error}",
-                    parent.absolute.display()
-                ))
-            },
-        )
+        windows_rename_into_parent(&temporary, parent.absolute.as_os_str()).map_err(|error| {
+            CrosstacheError::config(format!(
+                "Failed to atomically replace Windows destination '{}': {error}",
+                parent.absolute.display()
+            ))
+        })
     })();
 
     if let Err(operation_error) = operation {
@@ -2468,13 +2531,16 @@ mod windows_rename_tests {
     use super::*;
     use windows_sys::Win32::Storage::FileSystem::FILE_RENAME_INFO;
 
-    /// Regression: the buffer was sized from `offset_of(FileName)` rather than
-    /// `size_of::<FILE_RENAME_INFO>()`, understating it by the trailing
-    /// `FileName[1]` element and its padding (4 bytes on 64-bit).
-    /// `SetFileInformationByHandle` rejected the short buffer with
-    /// ERROR_INVALID_PARAMETER (os error 87), so every private atomic replace
-    /// failed on Windows: `xv context use`, config writes, and the web UI's
-    /// `ui.json` (which is why no appearance change ever persisted).
+    /// Keeps the buffer at the documented `sizeof(FILE_RENAME_INFO) +
+    /// FileNameLength`, which always leaves room for a terminator past the
+    /// copied name.
+    ///
+    /// Note this sizing was NOT what broke atomic replace on Windows, despite
+    /// what an earlier fix concluded: `SetFileInformationByHandle` returns
+    /// ERROR_INVALID_PARAMETER (os error 87) for a non-NULL `RootDirectory`
+    /// whatever the buffer length, and succeeds at either length once
+    /// `RootDirectory` is NULL. Sizing from `offset_of(FileName)` is merely
+    /// off-contract, not the fault. See `windows_rename_into_parent`.
     #[test]
     fn rename_info_buffer_has_room_for_the_name_and_a_terminator() {
         let offset = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
@@ -3727,6 +3793,19 @@ mod tests {
         assert_private_windows_dacl(&path);
     }
 
+    /// Creating a symlink needs `SeCreateSymbolicLinkPrivilege`, which an
+    /// elevated process or one running under Developer Mode holds and an
+    /// ordinary user shell does not. Windows reports the lack of it as
+    /// ERROR_PRIVILEGE_NOT_HELD (1314), which Rust does *not* map to
+    /// `ErrorKind::PermissionDenied` — so the kind-only check these tests
+    /// originally used never matched and they panicked instead of skipping.
+    #[cfg(windows)]
+    fn windows_symlink_unavailable(error: &std::io::Error) -> bool {
+        const ERROR_PRIVILEGE_NOT_HELD: i32 = 1314;
+        error.kind() == std::io::ErrorKind::PermissionDenied
+            || error.raw_os_error() == Some(ERROR_PRIVILEGE_NOT_HELD)
+    }
+
     #[test]
     #[cfg(windows)]
     fn atomic_write_refuses_windows_reparse_parent() {
@@ -3737,7 +3816,8 @@ mod tests {
         let linked = root.path().join("linked");
         std::fs::create_dir(&external).unwrap();
         if let Err(error) = symlink_dir(&external, &linked) {
-            if error.kind() == std::io::ErrorKind::PermissionDenied {
+            if windows_symlink_unavailable(&error) {
+                eprintln!("skipping: cannot create symlinks without privilege ({error})");
                 return;
             }
             panic!("create directory reparse point: {error}");
@@ -3757,7 +3837,8 @@ mod tests {
         let linked = root.path().join("linked.conf");
         std::fs::write(&target, b"old").unwrap();
         if let Err(error) = symlink_file(&target, &linked) {
-            if error.kind() == std::io::ErrorKind::PermissionDenied {
+            if windows_symlink_unavailable(&error) {
+                eprintln!("skipping: cannot create symlinks without privilege ({error})");
                 return;
             }
             panic!("create file reparse point: {error}");

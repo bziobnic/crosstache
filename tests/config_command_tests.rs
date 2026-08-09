@@ -11,7 +11,7 @@ fn doctor_appears_in_top_level_help() {
 #[test]
 fn doctor_runs_before_normal_config_loading() {
     let (mut cmd, temp) = common::xv_isolated();
-    let path = temp.path().join(".config/xv/xv.conf");
+    let path = temp.path().join(".config").join("xv").join("xv.conf");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, "debug = [\n").unwrap();
     let out = cmd.arg("doctor").output().expect("spawn");
@@ -24,7 +24,7 @@ fn doctor_runs_before_normal_config_loading() {
 #[test]
 fn doctor_rejects_json_format_with_one_valid_error_envelope() {
     let (mut cmd, temp) = common::xv_isolated();
-    let path = temp.path().join(".config/xv/xv.conf");
+    let path = temp.path().join(".config").join("xv").join("xv.conf");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, "debug = [\n").unwrap();
 
@@ -47,7 +47,7 @@ fn doctor_rejects_json_format_with_one_valid_error_envelope() {
 #[test]
 fn doctor_rejects_yaml_format_with_one_valid_error_envelope() {
     let (mut cmd, temp) = common::xv_isolated();
-    let path = temp.path().join(".config/xv/xv.conf");
+    let path = temp.path().join(".config").join("xv").join("xv.conf");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, "debug = [\n").unwrap();
 
@@ -71,7 +71,7 @@ fn doctor_rejects_yaml_format_with_one_valid_error_envelope() {
 #[test]
 fn doctor_missing_config_uses_defaults_without_creating_files() {
     let (mut cmd, temp) = common::xv_isolated();
-    let path = temp.path().join(".config/xv/xv.conf");
+    let path = temp.path().join(".config").join("xv").join("xv.conf");
 
     let out = cmd.arg("doctor").output().expect("spawn");
 
@@ -80,13 +80,13 @@ fn doctor_missing_config_uses_defaults_without_creating_files() {
     assert!(output.contains("does not exist"));
     assert!(output.contains("defaults are usable"));
     assert!(!path.exists());
-    assert!(!temp.path().join(".config/xv").exists());
+    assert!(!temp.path().join(".config").join("xv").exists());
 }
 
 #[test]
 fn doctor_complete_config_is_healthy_and_unchanged() {
     let (mut cmd, temp) = common::xv_isolated();
-    let path = temp.path().join(".config/xv/xv.conf");
+    let path = temp.path().join(".config").join("xv").join("xv.conf");
     let original = br#"backend = "local"
 debug = false
 subscription_id = ""
@@ -117,7 +117,7 @@ default_vault = "default"
 #[test]
 fn doctor_repairs_sparse_local_config_and_preserves_exact_backup() {
     let (mut cmd, temp) = common::xv_isolated();
-    let path = temp.path().join(".config/xv/xv.conf");
+    let path = temp.path().join(".config").join("xv").join("xv.conf");
     let original =
         b"# sparse local config\nbackend = \"local\"\n\n[local]\ndefault_vault = \"default\"\n";
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -175,7 +175,7 @@ fn doctor_repairs_sparse_local_config_and_preserves_exact_backup() {
 fn doctor_invalid_occupied_type_requires_manual_edit_without_disclosing_value() {
     const BAD_VALUE: &str = "doctor-private-debug-value";
     let (mut cmd, temp) = common::xv_isolated();
-    let path = temp.path().join(".config/xv/xv.conf");
+    let path = temp.path().join(".config").join("xv").join("xv.conf");
     let original = format!(
         r#"backend = "local"
 debug = "{BAD_VALUE}"
@@ -204,7 +204,7 @@ no_color = true
 #[test]
 fn doctor_persists_repairs_before_reporting_semantic_error() {
     let (mut cmd, temp) = common::xv_isolated();
-    let path = temp.path().join(".config/xv/xv.conf");
+    let path = temp.path().join(".config").join("xv").join("xv.conf");
     let original = b"# sparse AWS config\nbackend = \"aws\"\n";
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, original).unwrap();

@@ -77,6 +77,12 @@ fn file_meta_path(store_path: &Path, vault: &str, name: &str) -> Result<PathBuf,
 
 #[cfg(test)]
 fn sync_directory(path: &Path) -> Result<(), BackendError> {
+    // Directory fsync is a Unix durability primitive with no Windows analogue —
+    // and `File::open` on a directory fails outright there without
+    // FILE_FLAG_BACKUP_SEMANTICS. Skip the sync off Unix but still record the
+    // event, so the ordering assertions in these tests stay meaningful on every
+    // platform. Mirrors `sync_directory` in `super::secrets`.
+    #[cfg(unix)]
     fs::File::open(path)
         .and_then(|directory| directory.sync_all())
         .map_err(|e| BackendError::Internal(format!("sync directory {}: {e}", path.display())))?;
@@ -128,6 +134,14 @@ struct LocalFileChain {
 }
 
 struct AnchoredDir {
+    /// The retained directory handle.
+    ///
+    /// Read on Unix, where every operation is performed relative to it via
+    /// `openat`. Windows has no `openat`, so the operations there address
+    /// their targets by path — but the handle is still held for the lifetime
+    /// of the chain, so the directory validated on the way in cannot be
+    /// swapped out from under them.
+    #[cfg_attr(not(unix), allow(dead_code))]
     file: fs::File,
     display: PathBuf,
 }
@@ -174,7 +188,66 @@ impl AnchoredDir {
                 display: path.to_path_buf(),
             })
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+                FILE_FLAG_OPEN_REPARSE_POINT,
+            };
+
+            // Windows refuses to open a directory at all without
+            // FILE_FLAG_BACKUP_SEMANTICS — a plain `File::open` on one always
+            // fails with ERROR_ACCESS_DENIED (os error 5), which took the whole
+            // local file backend down on Windows.
+            //
+            // FILE_FLAG_OPEN_REPARSE_POINT stands in for the Unix branch's
+            // `O_NOFOLLOW`: it opens a reparse point itself instead of
+            // redirecting to its target, so the attribute checks below can
+            // refuse it rather than silently anchoring somewhere else.
+            let file = fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(path)
+                .map_err(|error| {
+                    BackendError::Internal(format!(
+                        "open anchored directory {}: {error}",
+                        path.display()
+                    ))
+                })?;
+
+            // Windows has no open flag equivalent to `O_DIRECTORY`/`O_NOFOLLOW`
+            // that fails the open outright, so enforce both after the fact from
+            // the handle — not from the path, which would reintroduce the
+            // race the anchored handle exists to close.
+            let attributes = file
+                .metadata()
+                .map_err(|error| {
+                    BackendError::Internal(format!(
+                        "inspect anchored directory {}: {error}",
+                        path.display()
+                    ))
+                })?
+                .file_attributes();
+            if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return Err(BackendError::Internal(format!(
+                    "refusing reparse-point anchored directory {}",
+                    path.display()
+                )));
+            }
+            if attributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+                return Err(BackendError::Internal(format!(
+                    "anchored path {} is not a directory",
+                    path.display()
+                )));
+            }
+
+            Ok(Self {
+                file,
+                display: path.to_path_buf(),
+            })
+        }
+        #[cfg(all(not(unix), not(windows)))]
         {
             let file = fs::File::open(path).map_err(|error| {
                 BackendError::Internal(format!(
@@ -485,11 +558,37 @@ impl AnchoredDir {
         #[cfg(not(unix))]
         {
             let mut options = fs::OpenOptions::new();
-            options.read(flags & libc::O_RDONLY == libc::O_RDONLY);
-            options.write(flags & libc::O_WRONLY != 0);
+
+            // The access mode is an enum packed into the low bits, not a set of
+            // independent flags: `O_RDONLY` is 0 (so `flags & O_RDONLY ==
+            // O_RDONLY` is vacuously true for every input) and `O_RDWR` (2)
+            // shares no bit with `O_WRONLY` (1). Testing them as bitmasks
+            // therefore left `write` unset for `O_RDWR`, and `OpenOptions`
+            // rejected the accompanying `create` with "creating or truncating a
+            // file requires write or append access" — which is exactly how the
+            // vault lock (`O_RDWR | O_CREAT`) failed on Windows. Decode the
+            // mode instead.
+            const ACCESS_MODE: libc::c_int = libc::O_RDONLY | libc::O_WRONLY | libc::O_RDWR;
+            let access = flags & ACCESS_MODE;
+            options.read(access == libc::O_RDONLY || access == libc::O_RDWR);
+            options.write(access == libc::O_WRONLY || access == libc::O_RDWR);
             options.create(flags & libc::O_CREAT != 0);
             options.truncate(flags & libc::O_TRUNC != 0);
             let _ = mode;
+
+            // Counterpart to the Unix branch's `O_NOFOLLOW`. Without it Windows
+            // silently follows a symlink placed at `name`, anchoring the
+            // operation outside the directory this handle exists to pin. With
+            // it the open yields the reparse point itself, whose `is_file()` is
+            // false, so the match below rejects it as a non-file entry.
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                options.custom_flags(
+                    windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT,
+                );
+            }
+
             match options.open(self.display.join(name)) {
                 Ok(file) if file.metadata().is_ok_and(|metadata| metadata.is_file()) => {
                     Ok(Some(file))
@@ -660,6 +759,15 @@ impl AnchoredDir {
     }
 
     fn sync(&self) -> Result<(), BackendError> {
+        // Directory fsync is a Unix durability primitive. Windows has no
+        // analogue: `FlushFileBuffers` on a directory handle fails with
+        // ERROR_ACCESS_DENIED (os error 5) — and the handle is opened read-only
+        // by design, so there is nothing to flush. Metadata durability there
+        // comes from the filesystem's own ordering, not an explicit call.
+        // Skip the sync off Unix but keep recording the event so the ordering
+        // assertions in the tests stay meaningful on every platform. Mirrors
+        // `sync_directory` in `super::secrets`.
+        #[cfg(unix)]
         self.file
             .sync_all()
             .map_err(|error| BackendError::Internal(format!("sync anchored directory: {error}")))?;

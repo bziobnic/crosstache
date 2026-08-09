@@ -158,8 +158,10 @@ debug = true
 # libtest runs each #[test] on a 2MB thread — unit tests that call
 # `Cli::try_parse_from` overflow once the subcommand tree grows a few more
 # variants. opt-level 1 makes rustc reuse stack slots, collapsing that usage.
-# The shipped binary is unaffected either way: `main` parses on the 8MB main
-# thread, and release builds optimize fully.
+# The shipped binary is unaffected: `main` parses on the 8MB main thread, and
+# release builds optimize fully. On Windows that 8MB is not a given — the main
+# thread gets whatever the PE header reserves (1MB by default), so `build.rs`
+# links the binaries with an explicit 8MB reserve.
 [profile.test]
 opt-level = 1
 

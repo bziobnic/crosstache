@@ -132,7 +132,7 @@ fn az_output(args: &[&str]) -> Option<String> {
     use std::io::Read;
     use std::process::{Command, Stdio};
 
-    let mut child = Command::new("az")
+    let mut child = Command::new(super::az_program())
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
