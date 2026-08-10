@@ -1,5 +1,8 @@
 # `xv doctor` Configuration Repair Design
 
+> **Status:** ✅ Shipped in v0.36.0. Operator guide:
+> [`docs/doctor.md`](../../doctor.md).
+
 ## Goal
 
 Add a recovery command for global `xv.conf` failures that can prevent `xv ui`

@@ -1611,9 +1611,12 @@ secret that still has attachments is refused. See
 The workspace shows the resolved backend/vault context and includes protected
 value timing, Trash with Undo/restore, typed secret editing, command palette
 (`Cmd/Ctrl+K`), file search and upload queue, responsive stacked rows below
-768px, plus context-led Settings and Help. Use Settings for theme, density,
-and the policy-bounded protected-value timeout; Help contains session scope,
-capabilities, shortcuts, and redacted diagnostics.
+768px, plus context-led Settings and Help. Use Settings for display mode,
+color palette (including custom themes), density, and the policy-bounded
+protected-value timeout; Help contains session scope, capabilities, shortcuts,
+and redacted diagnostics. On the Files tab, selected files can download as one
+ZIP (`crosstache-files.zip`) through the same decrypt path as single-file
+downloads — see [`docs/web-ui.md`](docs/web-ui.md).
 
 ## Desktop app
 
@@ -1839,7 +1842,7 @@ Doctor repairs deterministic schema omissions automatically. Before changing
 cannot be safely inferred are reported with manual next steps and exit code 3.
 Doctor output is human-readable; explicit `--format json` or `--format yaml`
 requests are rejected before diagnosis so machine-readable error output remains
-a single valid document.
+a single valid document. Full operator guide: [`docs/doctor.md`](docs/doctor.md).
 
 ### Key environment variables
 
@@ -1994,6 +1997,21 @@ restoring the original `xv-attachment-key` secret. Sync deliberately skips
 encrypted attachment blobs — use `xv attach` / `xv attachments --get` instead.
 See [`docs/attachments.md`](docs/attachments.md).
 
+### `error[xv-backend-unavailable]` — stale workspace entry
+
+A workspace alias still points at a named backend that is no longer configured
+(for example after removing `[named_backends.…]` from `xv.conf`). One stale
+entry blocks unqualified reads and union `ls` until it is fixed:
+
+```bash
+xv cx ls                                 # find the alias
+xv cx rm <alias>                         # drop the stale entry
+# or restore [named_backends.<name>] in xv.conf, then retry
+```
+
+Do not run `xv init` for this — that rebuilds global config for a single bad
+workspace line. The error names the alias and the missing backend.
+
 ### Debug logging
 
 ```bash
@@ -2072,10 +2090,11 @@ minisign-signed binaries for all four platforms.
 - [`docs/exit-codes.md`](docs/exit-codes.md) — exit-code table and JSON error envelope
 - [`docs/env-profiles.md`](docs/env-profiles.md) — `.xv.toml` walk-up reference
 - [`docs/find.md`](docs/find.md) — `xv find` ranked search
+- [`docs/doctor.md`](docs/doctor.md) — bootstrap-safe `xv doctor` config recovery
 - [`docs/keeper.md`](docs/keeper.md) — Keeper Security JSON import/export
 - [`docs/scan.md`](docs/scan.md) — pre-commit leak scanner
 - [`docs/tui.md`](docs/tui.md) — terminal UI keymap
-- [`docs/web-ui.md`](docs/web-ui.md) — embedded web UI reference
+- [`docs/web-ui.md`](docs/web-ui.md) — embedded web UI reference (themes, ZIP download)
 - [`docs/GROUPS.md`](docs/GROUPS.md) — group-based organization
 
 ---
