@@ -384,6 +384,7 @@ See [migration.md](migration.md) for the full guide.
 | `xv config set <key> <value>` | Set a config value |
 | `xv config path` | Show config file location |
 | `xv config edit` | Open the config file in `$VISUAL`/`$EDITOR` (or a platform default) |
+| `xv doctor` | Bootstrap-safe diagnose/repair of global `xv.conf` (missing schema fields, timestamped backup, exit `3` when manual steps remain). See [doctor.md](doctor.md) |
 
 ### Hierarchy
 

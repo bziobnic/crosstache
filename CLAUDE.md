@@ -218,7 +218,8 @@ As of `v0.14.0` plus current `main`:
 - **Local Backend Hardening**: `[local].encrypt_metadata` encrypts metadata content with `xv local encrypt-metadata`; `[local].opaque_filenames` stores active secrets, versions, and trash under keyed-hash stems with `xv local migrate`.
 - **v0.14 Hardening**: context files use private 0600 writes, `xv run` masking is bounded streaming, Azure `az` auth subprocesses are bounded and JWT claim shapes validated, scanner reads are bounded/fail-loud, cache locks use atomic create, and secret-list detail fetches use bounded concurrency.
 - **TUI**: Read-only browser (`xv tui`), shipped v0.7.0-rc.2.
-- **Web UI**: Embedded localhost browser UI (`xv ui`, `--features ui`) — secret CRUD, folder/group metadata, rename/move, file upload/download, vault switching; loopback-only with a per-session bearer token. See `docs/web-ui.md`.
+- **Web UI**: Embedded localhost browser UI (`xv ui`, `--features ui`) — secret CRUD, folder/group metadata, rename/move, file upload/download (including Files-tab ZIP bulk download), customizable color themes/palettes, vault switching; loopback-only with a per-session bearer token. See `docs/web-ui.md`.
+- **Config recovery**: `xv doctor` diagnoses/repairs global `xv.conf` before normal config load (timestamped backup, exit 3 when manual steps remain). See `docs/doctor.md`.
 - **Leak Scanner**: `xv scan` pre-commit scanner, shipped v0.7.0-rc.1.
 - **Self-update**: `xv upgrade`, shipped v0.5.1.
 - **Secret File Attachments**: `xv attach`/`xv attachments`/`xv detach` plus `xv file upload --encrypt` — client-side age encryption with per-vault key custody in the vault's secret store (`xv-attachment-key`); see `docs/superpowers/specs/2026-07-21-secret-file-attachments-design.md`.
