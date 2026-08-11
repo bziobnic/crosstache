@@ -147,11 +147,34 @@ fn assert_looks_like_store(store: &std::path::Path) -> Result<()> {
     )))
 }
 
-/// Delete the local store and age key. Destroys every secret in the store.
+/// A key file is only purgeable when it actually looks like an age identity.
+/// `store_path` and `key_file` are independent config values — a
+/// misconfigured (or stale) `key_file` can point anywhere, including at a
+/// file that has nothing to do with xv (an SSH key, a document). Missing is
+/// fine (there is nothing to guard against unlinking); present-but-not-an-
+/// age-identity is refused outright rather than silently skipped, since the
+/// caller believes `--purge` deletes "the key" and a silent skip would leave
+/// them with a false sense of what happened.
+fn assert_looks_like_key(key_file: &std::path::Path) -> Result<()> {
+    if !key_file.exists() {
+        return Ok(());
+    }
+    crate::backend::local::crypto::load_identity(key_file).map_err(|e| {
+        CrosstacheError::invalid_argument(format!(
+            "refusing to purge {}: it does not look like an age identity ({e}). \
+             Check [local].key_file in your config.",
+            key_file.display()
+        ))
+    })?;
+    Ok(())
+}
+
+/// Delete the local store, age key, and recipients file. Destroys every
+/// secret in the store. Callers must run `assert_looks_like_store` and
+/// `assert_looks_like_key` first — this function does not re-check.
 fn purge_local_store(config: &Config) -> Result<()> {
     let resolved =
         crate::backend::local::config::ResolvedLocalConfig::from_raw(config.local.as_ref());
-    assert_looks_like_store(&resolved.store_path)?;
 
     if resolved.store_path.exists() {
         std::fs::remove_dir_all(&resolved.store_path).map_err(|e| {
@@ -166,6 +189,14 @@ fn purge_local_store(config: &Config) -> Result<()> {
             CrosstacheError::config(format!(
                 "failed to delete key file {}: {e}",
                 resolved.key_file.display()
+            ))
+        })?;
+    }
+    if resolved.recipients_file.exists() {
+        std::fs::remove_file(&resolved.recipients_file).map_err(|e| {
+            CrosstacheError::config(format!(
+                "failed to delete recipients file {}: {e}",
+                resolved.recipients_file.display()
             ))
         })?;
     }
@@ -254,6 +285,12 @@ pub(crate) async fn execute_backend_rm(
     if purge {
         let resolved =
             crate::backend::local::config::ResolvedLocalConfig::from_raw(base.local.as_ref());
+        // Both shape guards run BEFORE the confirmation prompt: the user must
+        // never be asked to authorize destroying a path the tool is then
+        // going to refuse to touch. A purge that reaches the prompt below is
+        // guaranteed to actually proceed if confirmed.
+        assert_looks_like_store(&resolved.store_path)?;
+        assert_looks_like_key(&resolved.key_file)?;
         let prompt = format!(
             "PERMANENTLY DELETE every secret in {} and the age key at {}? \
              This cannot be undone — the key is deleted too, so the data is unrecoverable.",

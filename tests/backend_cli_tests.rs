@@ -1,6 +1,9 @@
 //! `xv backend` CLI surface. Uses an isolated config dir so the developer's
 //! real ~/.config/xv is never read (see the e2e host-isolation convention).
 
+use crosstache::backend::local::crypto;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
 fn xv(args: &[&str], home: &std::path::Path) -> std::process::Output {
@@ -404,13 +407,18 @@ fn backend_rm_rejects_purge_for_non_local_backends() {
     );
 }
 
-/// A store directory that looks like a real xv store, so the safety check
-/// accepts it.
+/// A store directory that looks like a real xv store, with a real age
+/// identity (and recipients file) beside it, so both safety checks accept
+/// it. Using `crypto::generate_keypair` — rather than a placeholder string —
+/// is what actually exercises `assert_looks_like_key`'s `load_identity`
+/// parse on the happy path, and gets 0600 permissions for free (matching
+/// every real key file xv ever writes).
 fn make_store(root: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
     let store = root.join("store");
     std::fs::create_dir_all(store.join("vaults")).unwrap();
     let key = root.join("key.txt");
-    std::fs::write(&key, "AGE-SECRET-KEY-TEST\n").unwrap();
+    let recipients = root.join("recipients.txt");
+    crypto::generate_keypair(&key, &recipients).unwrap();
     (store, key)
 }
 
@@ -449,6 +457,7 @@ default_vault = "default"
 fn backend_rm_purge_deletes_the_store_and_key() {
     let home = tempfile::tempdir().unwrap();
     let (store, key) = make_store(home.path());
+    let recipients = home.path().join("recipients.txt");
     write_local_only_config(home.path(), &store, &key);
 
     // `local` is the sole configured backend here, with empty Azure fields —
@@ -463,6 +472,10 @@ fn backend_rm_purge_deletes_the_store_and_key() {
     );
     assert!(!store.exists(), "store directory should be deleted");
     assert!(!key.exists(), "age key should be deleted");
+    assert!(
+        !recipients.exists(),
+        "recipients file should be deleted too, not left as litter"
+    );
 
     let saved = std::fs::read_to_string(home.path().join("xv/xv.conf")).unwrap();
     assert!(
@@ -472,6 +485,91 @@ fn backend_rm_purge_deletes_the_store_and_key() {
     assert!(
         !saved.contains("backend ="),
         "config must be left backend-less, not defaulted to azure: {saved}"
+    );
+}
+
+/// Reproduces the reviewer's finding: `assert_looks_like_store` only ever
+/// gated `store_path`. When the store is missing entirely, that guard
+/// returns `Ok` (nothing to check), and the old code went straight on to
+/// `remove_file` on whatever `key_file` pointed at — with zero validation
+/// that it was actually an age identity. `key_file` can point anywhere,
+/// independent of `store_path`; a misconfigured (or hand-edited) config
+/// could name a real, unrelated file — an SSH key, in the reviewer's repro.
+/// `assert_looks_like_key` must refuse before anything is touched.
+#[test]
+fn backend_rm_purge_refuses_a_decoy_key_file_when_the_store_is_missing() {
+    let home = tempfile::tempdir().unwrap();
+    let store = home.path().join("store-does-not-exist");
+    let decoy = home.path().join("id_ed25519");
+    std::fs::write(&decoy, "-----BEGIN OPENSSH PRIVATE KEY-----\nnot an age identity\n-----END OPENSSH PRIVATE KEY-----\n").unwrap();
+    #[cfg(unix)]
+    std::fs::set_permissions(&decoy, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    write_local_only_config(home.path(), &store, &decoy);
+    let conf_before = std::fs::read_to_string(home.path().join("xv/xv.conf")).unwrap();
+
+    let out = xv(&["backend", "rm", "local", "--purge", "--yes"], home.path());
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !out.status.success(),
+        "must refuse a decoy key file: {text}"
+    );
+    assert!(
+        std::fs::read_to_string(&decoy).unwrap().contains("OPENSSH"),
+        "the decoy file must survive completely untouched"
+    );
+    assert!(
+        !store.exists(),
+        "the missing store must stay missing, not get created"
+    );
+    assert_eq!(
+        std::fs::read_to_string(home.path().join("xv/xv.conf")).unwrap(),
+        conf_before,
+        "config must be untouched on refusal"
+    );
+}
+
+/// Same reproduction, but with an empty store directory instead of a missing
+/// one — `assert_looks_like_store` treats an empty directory as acceptable
+/// too (that's the "moved/wiped store" case the guard is meant to tolerate),
+/// so this exercises the second branch that used to reach the key unlink
+/// with zero validation.
+#[test]
+fn backend_rm_purge_refuses_a_decoy_key_file_when_the_store_is_empty() {
+    let home = tempfile::tempdir().unwrap();
+    let store = home.path().join("store");
+    std::fs::create_dir_all(&store).unwrap();
+    let decoy = home.path().join("id_ed25519");
+    std::fs::write(&decoy, "-----BEGIN OPENSSH PRIVATE KEY-----\nnot an age identity\n-----END OPENSSH PRIVATE KEY-----\n").unwrap();
+    #[cfg(unix)]
+    std::fs::set_permissions(&decoy, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    write_local_only_config(home.path(), &store, &decoy);
+    let conf_before = std::fs::read_to_string(home.path().join("xv/xv.conf")).unwrap();
+
+    let out = xv(&["backend", "rm", "local", "--purge", "--yes"], home.path());
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !out.status.success(),
+        "must refuse a decoy key file: {text}"
+    );
+    assert!(
+        std::fs::read_to_string(&decoy).unwrap().contains("OPENSSH"),
+        "the decoy file must survive completely untouched"
+    );
+    assert!(store.exists(), "the empty store must survive too");
+    assert_eq!(
+        std::fs::read_to_string(home.path().join("xv/xv.conf")).unwrap(),
+        conf_before,
+        "config must be untouched on refusal"
     );
 }
 
