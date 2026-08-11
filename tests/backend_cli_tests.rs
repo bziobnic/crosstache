@@ -136,3 +136,10 @@ default_vault = "default"
     assert!(!out.status.success(), "reconfigure needs confirmation");
     assert!(text.contains("--yes"), "should name the skip flag: {text}");
 }
+
+// The CRITICAL regression (main.rs's unconditional dispatch-config resolution
+// leaking into a saved config) is covered by a Rust-level test in
+// src/cli/backend_ops.rs (`execute_backend_add_inner_ignores_the_dispatch_configs_backend`)
+// rather than here: reaching the success path through this binary requires a
+// real terminal (dialoguer's `Input` refuses to run without one), which a
+// piped subprocess test cannot provide.
