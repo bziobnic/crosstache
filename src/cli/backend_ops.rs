@@ -5,7 +5,7 @@ use crate::cli::helpers::confirm_proceed;
 use crate::config::backend_ops::{add_backend, configured_backends, BackendType};
 use crate::config::settings::{load_config_file_only, Config};
 use crate::config::setup::atomic_save_config;
-use crate::error::Result;
+use crate::error::{CrosstacheError, Result};
 use crate::utils::output;
 
 /// Where a backend's secrets live, for the `ls` listing.
@@ -126,6 +126,52 @@ async fn execute_backend_add_inner(
     Ok(())
 }
 
+/// A directory is only purgeable when it looks like an xv store: it must
+/// contain a `vaults/` child (or be empty). This is the guard against a
+/// misconfigured `store_path` pointing at `$HOME` or a documents folder.
+fn assert_looks_like_store(store: &std::path::Path) -> Result<()> {
+    if !store.exists() {
+        return Ok(());
+    }
+    let has_vaults = store.join("vaults").is_dir();
+    let is_empty = std::fs::read_dir(store)
+        .map(|mut entries| entries.next().is_none())
+        .unwrap_or(false);
+    if has_vaults || is_empty {
+        return Ok(());
+    }
+    Err(CrosstacheError::invalid_argument(format!(
+        "refusing to purge {}: it does not look like an xv store (no 'vaults/' directory). \
+         Check [local].store_path in your config.",
+        store.display()
+    )))
+}
+
+/// Delete the local store and age key. Destroys every secret in the store.
+fn purge_local_store(config: &Config) -> Result<()> {
+    let resolved =
+        crate::backend::local::config::ResolvedLocalConfig::from_raw(config.local.as_ref());
+    assert_looks_like_store(&resolved.store_path)?;
+
+    if resolved.store_path.exists() {
+        std::fs::remove_dir_all(&resolved.store_path).map_err(|e| {
+            CrosstacheError::config(format!(
+                "failed to delete store {}: {e}",
+                resolved.store_path.display()
+            ))
+        })?;
+    }
+    if resolved.key_file.exists() {
+        std::fs::remove_file(&resolved.key_file).map_err(|e| {
+            CrosstacheError::config(format!(
+                "failed to delete key file {}: {e}",
+                resolved.key_file.display()
+            ))
+        })?;
+    }
+    Ok(())
+}
+
 /// `config` is the dispatch-resolved config — see the doc comment on
 /// `execute_backend_add` for why it must never be the base for a save. It is
 /// used for exactly one thing here: `guard_against_project_vaults_overlay`
@@ -205,7 +251,21 @@ pub(crate) async fn execute_backend_rm(
         }
     }
 
-    if !confirm_proceed(
+    if purge {
+        let resolved =
+            crate::backend::local::config::ResolvedLocalConfig::from_raw(base.local.as_ref());
+        let prompt = format!(
+            "PERMANENTLY DELETE every secret in {} and the age key at {}? \
+             This cannot be undone — the key is deleted too, so the data is unrecoverable.",
+            resolved.store_path.display(),
+            resolved.key_file.display()
+        );
+        if !confirm_proceed(yes, &prompt, "--yes")? {
+            output::info("Aborted; nothing deleted.");
+            return Ok(());
+        }
+        purge_local_store(&base)?;
+    } else if !confirm_proceed(
         yes,
         &format!("Remove backend '{backend}' from the configuration?"),
         "--yes",
@@ -274,12 +334,18 @@ pub(crate) async fn execute_backend_rm(
         context_manager.save().await?;
     }
 
-    output::success(&format!(
-        "Removed backend '{backend}' from the configuration"
-    ));
-    output::info(&format!(
-        "Data was not deleted; it remains at: {data_location}"
-    ));
+    if purge {
+        output::success(&format!(
+            "Removed backend '{backend}' and deleted its store and key"
+        ));
+    } else {
+        output::success(&format!(
+            "Removed backend '{backend}' from the configuration"
+        ));
+        output::info(&format!(
+            "Data was not deleted; it remains at: {data_location}"
+        ));
+    }
     Ok(())
 }
 

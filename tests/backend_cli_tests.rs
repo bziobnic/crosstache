@@ -403,3 +403,149 @@ fn backend_rm_rejects_purge_for_non_local_backends() {
         "nothing removed on refusal: {saved}"
     );
 }
+
+/// A store directory that looks like a real xv store, so the safety check
+/// accepts it.
+fn make_store(root: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let store = root.join("store");
+    std::fs::create_dir_all(store.join("vaults")).unwrap();
+    let key = root.join("key.txt");
+    std::fs::write(&key, "AGE-SECRET-KEY-TEST\n").unwrap();
+    (store, key)
+}
+
+/// Writes a single-backend (local-only) config pointed at `store`/`key`.
+/// Every field lacking `#[serde(default)]` on `Config` must be present —
+/// matching the fixture pattern used throughout this file.
+fn write_local_only_config(home: &std::path::Path, store: &std::path::Path, key: &std::path::Path) {
+    let conf_dir = home.join("xv");
+    std::fs::create_dir_all(&conf_dir).unwrap();
+    std::fs::write(
+        conf_dir.join("xv.conf"),
+        format!(
+            r#"
+backend = "local"
+debug = false
+subscription_id = "11111111-1111-1111-1111-111111111111"
+default_vault = "default"
+default_resource_group = ""
+default_location = ""
+tenant_id = "22222222-2222-2222-2222-222222222222"
+output_json = false
+no_color = true
+
+[local]
+store_path = {:?}
+key_file = {:?}
+default_vault = "default"
+"#,
+            store, key
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn backend_rm_purge_deletes_the_store_and_key() {
+    let home = tempfile::tempdir().unwrap();
+    let (store, key) = make_store(home.path());
+    write_local_only_config(home.path(), &store, &key);
+
+    let out = xv(&["backend", "rm", "local", "--purge", "--yes"], home.path());
+    assert!(
+        out.status.success(),
+        "purge should succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!store.exists(), "store directory should be deleted");
+    assert!(!key.exists(), "age key should be deleted");
+}
+
+#[test]
+fn backend_rm_purge_refuses_a_store_path_that_is_not_an_xv_store() {
+    let home = tempfile::tempdir().unwrap();
+    let bogus = home.path().join("important-documents");
+    std::fs::create_dir_all(&bogus).unwrap();
+    std::fs::write(bogus.join("taxes.pdf"), "keep me").unwrap();
+    let key = home.path().join("key.txt");
+    std::fs::write(&key, "AGE-SECRET-KEY-TEST\n").unwrap();
+
+    write_local_only_config(home.path(), &bogus, &key);
+
+    let out = xv(&["backend", "rm", "local", "--purge", "--yes"], home.path());
+    assert!(!out.status.success(), "must refuse a non-store path");
+    assert!(bogus.join("taxes.pdf").exists(), "must not delete anything");
+    assert!(key.exists(), "key must survive a refused purge");
+
+    let saved = std::fs::read_to_string(home.path().join("xv/xv.conf")).unwrap();
+    assert!(
+        saved.contains("[local]"),
+        "config must be untouched on refusal: {saved}"
+    );
+}
+
+#[test]
+fn backend_rm_purge_refuses_in_non_tty_without_yes_and_deletes_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let (store, key) = make_store(home.path());
+    write_local_only_config(home.path(), &store, &key);
+    let conf_before = std::fs::read_to_string(home.path().join("xv/xv.conf")).unwrap();
+
+    // No `--yes`; the test harness runs the binary with piped, non-TTY
+    // stdio, so `confirm_proceed` must refuse rather than block or default
+    // to "yes".
+    let out = xv(&["backend", "rm", "local", "--purge"], home.path());
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !out.status.success(),
+        "non-TTY purge without --yes must be refused"
+    );
+    assert!(text.contains("--yes"), "should name the skip flag: {text}");
+
+    assert!(store.exists(), "store must survive an unconfirmed purge");
+    assert!(store.join("vaults").is_dir(), "store contents must survive");
+    assert!(key.exists(), "key must survive an unconfirmed purge");
+
+    let saved = std::fs::read_to_string(home.path().join("xv/xv.conf")).unwrap();
+    assert_eq!(
+        saved, conf_before,
+        "an unconfirmed purge must not touch the config file"
+    );
+}
+
+#[test]
+fn backend_rm_purge_leaves_everything_in_place_when_refused() {
+    // Covers every refusal path this test file exercises for `--purge`: not
+    // configured, non-local, and a bogus store shape. In each case the
+    // store, the key file, and the config on disk must all be byte-for-byte
+    // unchanged — a destructive command's claim on refusal is "nothing was
+    // deleted", not just "it printed an error".
+    let home = tempfile::tempdir().unwrap();
+    let (store, key) = make_store(home.path());
+    write_local_only_config(home.path(), &store, &key);
+    let conf_before = std::fs::read_to_string(home.path().join("xv/xv.conf")).unwrap();
+
+    // Not configured.
+    let out = xv(&["backend", "rm", "azure", "--purge", "--yes"], home.path());
+    assert!(!out.status.success());
+    assert!(store.exists() && store.join("vaults").is_dir());
+    assert!(key.exists());
+    assert_eq!(
+        std::fs::read_to_string(home.path().join("xv/xv.conf")).unwrap(),
+        conf_before
+    );
+
+    // Non-TTY, no --yes.
+    let out = xv(&["backend", "rm", "local", "--purge"], home.path());
+    assert!(!out.status.success());
+    assert!(store.exists() && store.join("vaults").is_dir());
+    assert!(key.exists());
+    assert_eq!(
+        std::fs::read_to_string(home.path().join("xv/xv.conf")).unwrap(),
+        conf_before
+    );
+}
