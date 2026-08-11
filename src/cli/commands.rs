@@ -1065,6 +1065,11 @@ pub enum Commands {
     },
     /// Initialize default configuration
     Init,
+    /// Manage configured secret backends (add, remove, list)
+    Backend {
+        #[command(subcommand)]
+        command: BackendCommands,
+    },
     /// Show information about a resource (vault, secret, or file)
     Info {
         /// Resource identifier (vault name, secret name, or file name)
@@ -1522,6 +1527,14 @@ pub enum CacheCommands {
         #[arg(long)]
         key: String,
     },
+}
+
+/// `xv backend` subcommands.
+#[derive(Subcommand, Debug)]
+pub enum BackendCommands {
+    /// List configured backends
+    #[command(alias = "list")]
+    Ls,
 }
 
 /// Rotation-schedule subcommands.
@@ -2375,6 +2388,9 @@ impl Cli {
                 }
             }
             Commands::Init => crate::cli::system_ops::execute_init_command(config).await,
+            Commands::Backend { command } => match command {
+                BackendCommands::Ls => crate::cli::backend_ops::execute_backend_ls(config).await,
+            },
             Commands::Info {
                 resource,
                 resource_type,
