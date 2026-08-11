@@ -109,6 +109,92 @@ impl Default for InteractivePrompt {
     }
 }
 
+/// The prompting surface used by setup flows.
+///
+/// Exists so `xv init` and `xv backend add` can be tested without a TTY —
+/// mirroring `src/schedule/`, which is tested against a fake `CommandRunner`
+/// so no test registers a real OS job. `input_text_validated` is absent
+/// deliberately: it is generic over a closure and so not object-safe.
+#[allow(dead_code)]
+pub trait Prompter {
+    fn confirm(&self, message: &str, default: bool) -> Result<bool>;
+    fn input_text(&self, message: &str, default: Option<&str>) -> Result<String>;
+    fn select(&self, message: &str, options: &[String], default: Option<usize>) -> Result<usize>;
+}
+
+impl Prompter for InteractivePrompt {
+    fn confirm(&self, message: &str, default: bool) -> Result<bool> {
+        InteractivePrompt::confirm(self, message, default)
+    }
+    fn input_text(&self, message: &str, default: Option<&str>) -> Result<String> {
+        InteractivePrompt::input_text(self, message, default)
+    }
+    fn select(&self, message: &str, options: &[String], default: Option<usize>) -> Result<usize> {
+        InteractivePrompt::select(self, message, options, default)
+    }
+}
+
+/// A queued answer for [`ScriptedPrompter`].
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub enum Answer {
+    Confirm(bool),
+    Text(String),
+    Select(usize),
+}
+
+/// Test double that replays queued answers and records the prompts it saw.
+#[cfg(test)]
+pub struct ScriptedPrompter {
+    answers: std::sync::Mutex<std::collections::VecDeque<Answer>>,
+    pub seen: std::sync::Mutex<Vec<String>>,
+}
+
+#[cfg(test)]
+impl ScriptedPrompter {
+    pub fn new(answers: Vec<Answer>) -> Self {
+        Self {
+            answers: std::sync::Mutex::new(answers.into()),
+            seen: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn next(&self, message: &str) -> Result<Answer> {
+        self.seen.lock().unwrap().push(message.to_string());
+        self.answers.lock().unwrap().pop_front().ok_or_else(|| {
+            CrosstacheError::config(format!("scripted prompter exhausted at '{message}'"))
+        })
+    }
+}
+
+#[cfg(test)]
+impl Prompter for ScriptedPrompter {
+    fn confirm(&self, message: &str, _default: bool) -> Result<bool> {
+        match self.next(message)? {
+            Answer::Confirm(value) => Ok(value),
+            other => Err(CrosstacheError::config(format!(
+                "expected Confirm at '{message}', got {other:?}"
+            ))),
+        }
+    }
+    fn input_text(&self, message: &str, _default: Option<&str>) -> Result<String> {
+        match self.next(message)? {
+            Answer::Text(value) => Ok(value),
+            other => Err(CrosstacheError::config(format!(
+                "expected Text at '{message}', got {other:?}"
+            ))),
+        }
+    }
+    fn select(&self, message: &str, _options: &[String], _default: Option<usize>) -> Result<usize> {
+        match self.next(message)? {
+            Answer::Select(value) => Ok(value),
+            other => Err(CrosstacheError::config(format!(
+                "expected Select at '{message}', got {other:?}"
+            ))),
+        }
+    }
+}
+
 /// Progress indicator for long-running operations
 pub struct ProgressIndicator {
     bar: ProgressBar,
@@ -428,5 +514,35 @@ mod tests {
         assert!(rg_name.starts_with("rg-"));
         assert!(rg_name.ends_with("-keyvaults"));
         assert!(SetupHelper::validate_resource_group_name(&rg_name).is_ok());
+    }
+
+    #[test]
+    fn scripted_prompter_returns_queued_answers_in_order() {
+        let prompter = ScriptedPrompter::new(vec![
+            Answer::Select(1),
+            Answer::Text("my-vault".into()),
+            Answer::Confirm(true),
+        ]);
+
+        assert_eq!(
+            prompter
+                .select("backend?", &["a".into(), "b".into()], Some(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(prompter.input_text("vault?", None).unwrap(), "my-vault");
+        assert!(prompter.confirm("sure?", false).unwrap());
+    }
+
+    #[test]
+    fn scripted_prompter_errors_when_the_script_runs_out() {
+        let prompter = ScriptedPrompter::new(vec![]);
+        assert!(prompter.confirm("sure?", false).is_err());
+    }
+
+    #[test]
+    fn scripted_prompter_errors_on_answer_type_mismatch() {
+        let prompter = ScriptedPrompter::new(vec![Answer::Text("oops".into())]);
+        assert!(prompter.confirm("sure?", false).is_err());
     }
 }
