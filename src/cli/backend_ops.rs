@@ -122,6 +122,136 @@ async fn execute_backend_add_inner(
     Ok(())
 }
 
+/// `_config` is the dispatch-resolved config — see the doc comment on
+/// `execute_backend_add` for why it must never be the base for a save. Load a
+/// fresh, unresolved copy of the on-disk config instead for the
+/// already-configured check, the active-backend refusal, and the save.
+pub(crate) async fn execute_backend_rm(
+    backend: String,
+    purge: bool,
+    yes: bool,
+    _config: Config,
+) -> Result<()> {
+    let backend: BackendType = backend.parse()?;
+    let base = load_config_no_validation().await.unwrap_or_default();
+    let configured = configured_backends(&base);
+
+    if !configured.contains(&backend) {
+        let names: Vec<&str> = configured.iter().map(|b| b.as_str()).collect();
+        let listed = if names.is_empty() {
+            "none".to_string()
+        } else {
+            names.join(", ")
+        };
+        return Err(crate::error::CrosstacheError::invalid_argument(format!(
+            "backend '{backend}' is not configured; configured backends: {listed}"
+        )));
+    }
+
+    if purge && backend != BackendType::Local {
+        return Err(crate::error::CrosstacheError::invalid_argument(format!(
+            "--purge deletes an on-disk store and applies to the local backend only; \
+             '{backend}' stores its secrets remotely. Remove the configuration with \
+             `xv backend rm {backend}`, and delete remote data with `xv vault delete`."
+        )));
+    }
+
+    // Refuse to silently relocate the write target.
+    if base.effective_backend_name() == backend.as_str() && configured.len() > 1 {
+        let others: Vec<&str> = configured
+            .iter()
+            .filter(|b| **b != backend)
+            .map(|b| b.as_str())
+            .collect();
+        return Err(crate::error::CrosstacheError::invalid_argument(format!(
+            "'{backend}' is the active backend; switch first with \
+             `xv config set backend {}`, then `xv backend rm {backend}`",
+            others[0]
+        )));
+    }
+
+    // Refuse when removal would strand the workspace's write target. Mirrors
+    // `execute_cx_rm` in src/cli/config_ops.rs.
+    let mut context_manager = crate::config::context::ContextManager::load().await?;
+    if let Some(ws) = context_manager.workspace.clone() {
+        let doomed: Vec<_> = ws
+            .entries
+            .iter()
+            .filter(|e| e.backend.as_deref() == Some(backend.as_str()))
+            .collect();
+        let removes_default = doomed.iter().any(|e| e.default);
+        let survivors = ws.entries.len() - doomed.len();
+        if removes_default && survivors > 0 {
+            return Err(crate::error::CrosstacheError::invalid_argument(format!(
+                "removing '{backend}' would remove the workspace's default vault; \
+                 choose a new default with `xv cx default <alias>` first"
+            )));
+        }
+    }
+
+    if !confirm_proceed(
+        yes,
+        &format!("Remove backend '{backend}' from the configuration?"),
+        "--yes",
+    )? {
+        output::info("Aborted; no changes made.");
+        return Ok(());
+    }
+
+    let mut updated = base;
+    let data_location = match backend {
+        BackendType::Local => {
+            let where_it_lives = updated
+                .local
+                .as_ref()
+                .and_then(|l| l.store_path.clone())
+                .unwrap_or_else(|| "(default store path)".into());
+            updated.local = None;
+            where_it_lives
+        }
+        BackendType::Azure => {
+            updated.azure = None;
+            updated.subscription_id.clear();
+            updated.tenant_id.clear();
+            updated.default_resource_group.clear();
+            updated.default_location.clear();
+            "Azure Key Vault (unchanged)".to_string()
+        }
+        BackendType::Aws => {
+            updated.aws = None;
+            "AWS Secrets Manager (unchanged)".to_string()
+        }
+    };
+
+    if updated.effective_backend_name() == backend.as_str() {
+        updated.backend = None;
+    }
+
+    // Drop workspace entries that pointed at the removed backend.
+    if let Some(mut ws) = context_manager.workspace.clone() {
+        let before = ws.entries.len();
+        ws.entries
+            .retain(|e| e.backend.as_deref() != Some(backend.as_str()));
+        if ws.entries.len() != before {
+            context_manager.workspace = if ws.entries.is_empty() {
+                None
+            } else {
+                Some(ws)
+            };
+            context_manager.save().await?;
+        }
+    }
+
+    atomic_save_config(&updated, &Config::get_config_path()?).await?;
+    output::success(&format!(
+        "Removed backend '{backend}' from the configuration"
+    ));
+    output::info(&format!(
+        "Data was not deleted; it remains at: {data_location}"
+    ));
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

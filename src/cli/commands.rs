@@ -1543,6 +1543,19 @@ pub enum BackendCommands {
         #[arg(long)]
         yes: bool,
     },
+    /// Remove a configured backend (config only unless --purge)
+    #[command(alias = "remove")]
+    Rm {
+        /// Backend type to remove
+        backend: String,
+        /// Also delete the local store and age key. Local backend only.
+        /// This destroys every secret in that store permanently.
+        #[arg(long)]
+        purge: bool,
+        /// Skip confirmation prompts
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 /// Rotation-schedule subcommands.
@@ -2401,6 +2414,11 @@ impl Cli {
                 BackendCommands::Add { backend, yes } => {
                     crate::cli::backend_ops::execute_backend_add(backend, yes, config).await
                 }
+                BackendCommands::Rm {
+                    backend,
+                    purge,
+                    yes,
+                } => crate::cli::backend_ops::execute_backend_rm(backend, purge, yes, config).await,
             },
             Commands::Info {
                 resource,
