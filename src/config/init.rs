@@ -195,8 +195,10 @@ impl ConfigInitializer {
             create_storage_account: blob_storage_configured,
         };
 
-        // Create and save the configuration
-        let config = self.build_config(init_config).await?;
+        // Create and save the configuration. `existing` (loaded above) is the
+        // base, so any already-configured `local`/`aws` blocks and unrelated
+        // settings survive choosing Azure, same as the local/aws branches.
+        let config = self.build_config(init_config, existing).await?;
         self.save_config(&config).await?;
 
         output::success("Setup completed successfully!");
@@ -1087,8 +1089,15 @@ impl ConfigInitializer {
         Ok(())
     }
 
-    /// Build the final configuration
-    async fn build_config(&self, init_config: InitConfig) -> Result<Config> {
+    /// Build the final configuration.
+    ///
+    /// `base` is the caller's already-loaded existing config (via
+    /// `load_config_file_only` in `run_interactive_setup`, or
+    /// `Config::default()` from the unit tests below), so choosing Azure
+    /// preserves other configured backends and unrelated settings the same
+    /// way the local/aws branches do. Kept pure — no disk access here — so
+    /// the tests stay host-independent; callers load and pass `base` in.
+    async fn build_config(&self, init_config: InitConfig, base: Config) -> Result<Config> {
         use crate::config::settings::BlobConfig;
 
         let InitConfig {
@@ -1117,13 +1126,20 @@ impl ConfigInitializer {
             None
         };
 
-        let mut base = Config {
-            blob_config,
-            ..Config::default()
-        };
+        let mut candidate = base;
+        candidate.blob_config = blob_config;
 
         if let Some(vault) = default_vault {
-            return build_setup_config(
+            // `build_setup_config` clears `local`/`aws` (and `azure`) to
+            // enforce the exclusive-backend invariant its other callers
+            // (`xv backend add`'s exclusive paths) need, but Azure `init`
+            // must not destroy an already-configured local/aws backend.
+            // Capture them and restore after: `build_setup_config` validates
+            // only the newly-active Azure backend, so restoring afterward
+            // does not affect that validation.
+            let existing_local = candidate.local.clone();
+            let existing_aws = candidate.aws.clone();
+            let mut config = build_setup_config(
                 &SetupRequest::Azure {
                     subscription_id,
                     tenant_id,
@@ -1131,23 +1147,27 @@ impl ConfigInitializer {
                     resource_group: default_resource_group,
                     location: default_location,
                 },
-                base,
-            );
+                candidate,
+            )?;
+            config.local = existing_local;
+            config.aws = existing_aws;
+            return Ok(config);
         }
 
         // Compatibility-only branch for the existing interactive
-        // "Create a test vault? = no" flow. Shared non-interactive Azure setup
-        // remains strict and always requires a vault.
-        base.backend = None;
-        base.subscription_id = subscription_id;
-        base.tenant_id = tenant_id;
-        base.default_vault.clear();
-        base.default_resource_group = default_resource_group;
-        base.default_location = default_location;
-        base.local = None;
-        base.aws = None;
-        base.validate()?;
-        Ok(base)
+        // "Create a test vault? = no" flow. Shared non-interactive Azure
+        // setup remains strict and always requires a vault. This branch
+        // never calls `build_setup_config` (so never clears `local`/`aws`),
+        // and `candidate` already carries the caller's `base`, so other
+        // configured backends and unrelated settings survive untouched.
+        candidate.backend = None;
+        candidate.subscription_id = subscription_id;
+        candidate.tenant_id = tenant_id;
+        candidate.default_vault.clear();
+        candidate.default_resource_group = default_resource_group;
+        candidate.default_location = default_location;
+        candidate.validate()?;
+        Ok(candidate)
     }
 
     /// Save configuration to file
@@ -1303,7 +1323,10 @@ mod tests {
             create_storage_account: false,
         };
 
-        let config = initializer.build_config(init_config).await.unwrap();
+        let config = initializer
+            .build_config(init_config, Config::default())
+            .await
+            .unwrap();
         assert_eq!(config.backend, None);
         assert_eq!(config.default_vault, "");
         assert_eq!(config.subscription_id, "test-sub");
@@ -1345,10 +1368,77 @@ mod tests {
         )
         .unwrap();
 
-        let actual = initializer.build_config(init_config).await.unwrap();
+        let actual = initializer
+            .build_config(init_config, Config::default())
+            .await
+            .unwrap();
         assert_eq!(
             toml::to_string(&actual).unwrap(),
             toml::to_string(&expected).unwrap()
         );
+    }
+
+    /// Regression test for the Bugbot finding: choosing Azure in `xv init`
+    /// must not silently destroy an already-configured `[local]` block or
+    /// unrelated top-level settings, matching the guarantee the local/aws
+    /// init branches already have via `add_backend`. Covers both the
+    /// with-vault (`build_setup_config`) and no-vault (legacy CLI shape)
+    /// branches of `build_config`.
+    #[tokio::test]
+    async fn azure_init_preserves_a_preexisting_local_backend_and_unrelated_settings() {
+        use crate::config::settings::LocalConfig;
+
+        let initializer = ConfigInitializer::new();
+        let base = Config {
+            local: Some(LocalConfig {
+                store_path: Some("/tmp/existing-store".into()),
+                key_file: Some("/tmp/existing-key.txt".into()),
+                default_vault: Some("existing".into()),
+                ..Default::default()
+            }),
+            clipboard_timeout: 999,
+            ..Config::default()
+        };
+
+        // With-vault branch.
+        let init_config = InitConfig {
+            subscription_id: "test-sub".to_string(),
+            tenant_id: "test-tenant".to_string(),
+            default_resource_group: "test-rg".to_string(),
+            default_location: "eastus".to_string(),
+            default_vault: Some("test-vault".to_string()),
+            create_test_vault: true,
+            storage_account_name: String::new(),
+            blob_container_name: String::new(),
+            create_storage_account: false,
+        };
+        let config = initializer
+            .build_config(init_config, base.clone())
+            .await
+            .unwrap();
+        assert!(
+            config.local.is_some(),
+            "the with-vault Azure branch must preserve the existing [local] block"
+        );
+        assert_eq!(config.clipboard_timeout, 999);
+
+        // No-vault (legacy) branch.
+        let init_config = InitConfig {
+            subscription_id: "test-sub".to_string(),
+            tenant_id: "test-tenant".to_string(),
+            default_resource_group: "test-rg".to_string(),
+            default_location: "eastus".to_string(),
+            default_vault: None,
+            create_test_vault: false,
+            storage_account_name: String::new(),
+            blob_container_name: String::new(),
+            create_storage_account: false,
+        };
+        let config = initializer.build_config(init_config, base).await.unwrap();
+        assert!(
+            config.local.is_some(),
+            "the no-vault legacy Azure branch must preserve the existing [local] block"
+        );
+        assert_eq!(config.clipboard_timeout, 999);
     }
 }
