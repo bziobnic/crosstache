@@ -474,8 +474,8 @@ output_json = false
 no_color = true
 
 [local]
-store_path = "{}"
-key_file = "{}"
+store_path = {:?}
+key_file = {:?}
 default_vault = "default"
 "#,
                 store_path.display(),
