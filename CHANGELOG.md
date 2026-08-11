@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.37.0 — Backend lifecycle (2026-08-11)
 
 ### Added
 
