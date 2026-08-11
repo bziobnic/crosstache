@@ -1,7 +1,7 @@
 //! Shared non-interactive configuration setup models and persistence.
 
 use crate::backend::{Backend, BackendKind, BackendRegistry};
-use crate::config::settings::{AwsConfig, Config, LocalConfig};
+use crate::config::settings::{AwsConfig, AzureConfig, Config, LocalConfig};
 use crate::error::{CrosstacheError, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -215,6 +215,7 @@ fn clear_backend_blocks(base: &mut Config) {
     base.backend = None;
     base.local = None;
     base.aws = None;
+    base.azure = None;
     base.subscription_id.clear();
     base.tenant_id.clear();
     base.default_resource_group.clear();
@@ -264,6 +265,13 @@ pub fn apply_backend(request: &SetupRequest, base: &mut Config) -> Result<()> {
             required(resource_group, "Azure resource group")?;
             required(location, "Azure location")?;
 
+            base.azure = Some(AzureConfig {
+                subscription_id: Some(subscription_id.clone()),
+                tenant_id: Some(tenant_id.clone()),
+                default_vault: Some(vault.clone()),
+                resource_group: Some(resource_group.clone()),
+                location: Some(location.clone()),
+            });
             base.subscription_id = subscription_id.clone();
             base.tenant_id = tenant_id.clone();
             base.default_resource_group = resource_group.clone();

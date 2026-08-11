@@ -99,6 +99,29 @@ pub struct AwsConfig {
     pub s3_bucket: Option<String>,
 }
 
+/// Azure Key Vault settings.
+///
+/// Azure historically had no block of its own — its settings *are* the
+/// top-level `subscription_id` / `tenant_id` / `default_vault` /
+/// `default_resource_group` / `default_location` fields. That works for a
+/// single-backend config but not once backends coexist, because
+/// `default_vault` is global and single-valued. This block gives Azure its own
+/// home; the top-level fields remain the legacy fallback and the mirror for
+/// whichever backend is active.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AzureConfig {
+    #[serde(default)]
+    pub subscription_id: Option<String>,
+    #[serde(default)]
+    pub tenant_id: Option<String>,
+    #[serde(default)]
+    pub default_vault: Option<String>,
+    #[serde(default)]
+    pub resource_group: Option<String>,
+    #[serde(default)]
+    pub location: Option<String>,
+}
+
 /// A named backend entry in `Config.named_backends`. Each entry is a
 /// fully-self-contained backend configuration tagged with its type.
 ///
@@ -255,6 +278,11 @@ pub struct Config {
     #[tabled(skip)]
     #[serde(default)]
     pub aws: Option<AwsConfig>,
+    /// Configuration for the Azure Key Vault backend. Absent in configs
+    /// written before this block existed — see [`Config::azure_settings`].
+    #[tabled(skip)]
+    #[serde(default)]
+    pub azure: Option<AzureConfig>,
     /// Named backend instances for multi-region / multi-tenant use.
     /// Active backend selected via `Config.backend` matching a key here.
     #[tabled(skip)]
@@ -370,6 +398,7 @@ impl Default for Config {
             azure_credential_priority: AzureCredentialType::Default,
             local: None,
             aws: None,
+            azure: None,
             named_backends: std::collections::HashMap::new(),
             clipboard_timeout: default_clipboard_timeout(),
             gen_default_charset: None,
@@ -413,6 +442,33 @@ impl Config {
             }
         }
         Ok(())
+    }
+
+    /// Azure settings with block-then-top-level precedence.
+    ///
+    /// Returns the `[azure]` block when present; otherwise synthesizes one
+    /// from the legacy top-level fields so pre-block configs behave
+    /// identically. Empty top-level strings resolve to `None` rather than
+    /// `Some("")`.
+    #[allow(dead_code)] // Consumed once callers read Azure settings through this block (later tasks).
+    pub fn azure_settings(&self) -> AzureConfig {
+        if let Some(azure) = &self.azure {
+            return azure.clone();
+        }
+        let non_empty = |value: &str| {
+            if value.is_empty() {
+                None
+            } else {
+                Some(value.to_string())
+            }
+        };
+        AzureConfig {
+            subscription_id: non_empty(&self.subscription_id),
+            tenant_id: non_empty(&self.tenant_id),
+            default_vault: non_empty(&self.default_vault),
+            resource_group: non_empty(&self.default_resource_group),
+            location: non_empty(&self.default_location),
+        }
     }
 
     pub fn get_config_path() -> Result<PathBuf> {
@@ -1121,6 +1177,65 @@ mod tests {
             ..Default::default()
         };
         assert!(cfg.validate().is_ok());
+    }
+
+    /// A config written before the [azure] block existed must resolve exactly as
+    /// it always did. This is the back-compat guarantee for every config file in
+    /// the wild.
+    #[test]
+    fn azure_settings_fall_back_to_top_level_fields() {
+        let cfg: Config = toml::from_str(
+            r#"
+debug = false
+subscription_id = "sub-123"
+tenant_id = "tenant-456"
+default_vault = "legacy-vault"
+default_resource_group = "rg-legacy"
+default_location = "eastus"
+output_json = false
+no_color = false
+"#,
+        )
+        .unwrap();
+
+        assert!(cfg.azure.is_none(), "no [azure] block in a legacy config");
+        let azure = cfg.azure_settings();
+        assert_eq!(azure.subscription_id.as_deref(), Some("sub-123"));
+        assert_eq!(azure.tenant_id.as_deref(), Some("tenant-456"));
+        assert_eq!(azure.default_vault.as_deref(), Some("legacy-vault"));
+        assert_eq!(azure.resource_group.as_deref(), Some("rg-legacy"));
+        assert_eq!(azure.location.as_deref(), Some("eastus"));
+    }
+
+    /// When the block is present it wins, so Azure keeps its own vault even when
+    /// another backend owns the shared top-level default_vault.
+    #[test]
+    fn azure_block_takes_precedence_over_top_level() {
+        let cfg: Config = toml::from_str(
+            r#"
+backend = "local"
+debug = false
+subscription_id = ""
+default_vault = "local-vault"
+default_resource_group = "Vaults"
+default_location = "eastus"
+tenant_id = ""
+output_json = false
+no_color = false
+
+[azure]
+subscription_id = "sub-999"
+tenant_id = "tenant-999"
+default_vault = "azure-vault"
+resource_group = "rg-9"
+location = "westus2"
+"#,
+        )
+        .unwrap();
+
+        let azure = cfg.azure_settings();
+        assert_eq!(azure.default_vault.as_deref(), Some("azure-vault"));
+        assert_eq!(azure.subscription_id.as_deref(), Some("sub-999"));
     }
 
     #[test]
