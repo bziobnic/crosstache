@@ -1470,10 +1470,20 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(atomic_save_config(&Config::default(), &path).await.is_err());
-        assert!(atomic_save_config(&Config::default(), &missing_path)
-            .await
-            .is_err());
+        // Deliberately invalid so both saves below fail `validate()` — the
+        // specific reason is incidental to this test, which only cares that
+        // a failed save leaves the existing file untouched and creates no
+        // partial artifacts. `backend = "aws"` with no `[aws]` block is
+        // invalid for a structural reason independent of `Config::default()`,
+        // so this test won't break again the next time Azure validation
+        // changes (it used to lean on `Config::default()` itself being
+        // invalid, which coupled it to that unrelated bug).
+        let invalid = Config {
+            backend: Some("aws".into()),
+            ..Config::default()
+        };
+        assert!(atomic_save_config(&invalid, &path).await.is_err());
+        assert!(atomic_save_config(&invalid, &missing_path).await.is_err());
         assert_eq!(
             tokio::fs::read(&path).await.unwrap(),
             b"backend = \"local\"\n"

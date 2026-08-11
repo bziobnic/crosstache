@@ -426,11 +426,11 @@ fn write_local_only_config(home: &std::path::Path, store: &std::path::Path, key:
             r#"
 backend = "local"
 debug = false
-subscription_id = "11111111-1111-1111-1111-111111111111"
+subscription_id = ""
 default_vault = "default"
 default_resource_group = ""
 default_location = ""
-tenant_id = "22222222-2222-2222-2222-222222222222"
+tenant_id = ""
 output_json = false
 no_color = true
 
@@ -451,6 +451,10 @@ fn backend_rm_purge_deletes_the_store_and_key() {
     let (store, key) = make_store(home.path());
     write_local_only_config(home.path(), &store, &key);
 
+    // `local` is the sole configured backend here, with empty Azure fields —
+    // this is the real-world shape of the bug the config-validate fix below
+    // addresses: removing your only backend must succeed and leave the
+    // config backend-less, not fail with an Azure-credentials error.
     let out = xv(&["backend", "rm", "local", "--purge", "--yes"], home.path());
     assert!(
         out.status.success(),
@@ -459,7 +463,25 @@ fn backend_rm_purge_deletes_the_store_and_key() {
     );
     assert!(!store.exists(), "store directory should be deleted");
     assert!(!key.exists(), "age key should be deleted");
+
+    let saved = std::fs::read_to_string(home.path().join("xv/xv.conf")).unwrap();
+    assert!(
+        !saved.contains("[local]"),
+        "local block should be gone: {saved}"
+    );
+    assert!(
+        !saved.contains("backend ="),
+        "config must be left backend-less, not defaulted to azure: {saved}"
+    );
 }
+
+// `Config::validate()`'s regression tests (explicit `backend = "azure"` with
+// no credentials must still fail; `Config::default()` must now pass) live as
+// Rust-level unit tests in src/config/settings.rs next to
+// `validate_requires_aws_block_when_backend_is_aws` — `xv backend ls`/`rm`
+// deliberately skip `config.validate()` at dispatch (see `needs_backend` in
+// main.rs), so a subprocess test through this binary would not actually
+// exercise the function.
 
 #[test]
 fn backend_rm_purge_refuses_a_store_path_that_is_not_an_xv_store() {

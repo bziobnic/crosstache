@@ -421,11 +421,30 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         let backend = self.effective_backend_name();
         if backend == "azure" {
-            if self.subscription_id.is_empty() {
-                return Err(CrosstacheError::config("Subscription ID is required"));
-            }
-            if self.tenant_id.is_empty() {
-                return Err(CrosstacheError::config("Tenant ID is required"));
+            // `effective_backend_name()` defaults to "azure" when `self.backend`
+            // is `None` — that's the fallback for a genuinely fresh/unconfigured
+            // config, not a declaration that Azure is the intended backend.
+            // Only demand Azure credentials when Azure was actually asked for:
+            // `backend` explicitly set to `"azure"`, or real Azure configuration
+            // (an `[azure]` block, or a non-empty legacy top-level
+            // subscription/tenant ID) is present. `default_resource_group` and
+            // `default_location` are deliberately excluded here: they carry
+            // non-empty defaults ("Vaults"/"eastus", see `impl Default for
+            // Config`) on every config, azure-backed or not, so they are not a
+            // signal of intent. A `None` backend with no Azure config at all
+            // (e.g. right after removing the last remaining backend) must
+            // validate cleanly and leave the config backend-less.
+            let azure_requested = self.backend.as_deref() == Some("azure");
+            let has_azure_config = self.azure.is_some()
+                || !self.subscription_id.is_empty()
+                || !self.tenant_id.is_empty();
+            if azure_requested || has_azure_config {
+                if self.subscription_id.is_empty() {
+                    return Err(CrosstacheError::config("Subscription ID is required"));
+                }
+                if self.tenant_id.is_empty() {
+                    return Err(CrosstacheError::config("Tenant ID is required"));
+                }
             }
         }
         if backend == "aws" {
@@ -1194,6 +1213,50 @@ mod tests {
             ..Default::default()
         };
         assert!(cfg.validate().is_ok());
+    }
+
+    /// A genuinely fresh/unconfigured config (no backend chosen, no Azure
+    /// config of any kind) must validate cleanly. Before the fix,
+    /// `effective_backend_name()` defaulting to `"azure"` made `validate()`
+    /// demand Azure credentials for a config that never asked for Azure at
+    /// all — the exact failure `xv backend rm <sole-backend>` hit when it
+    /// cleared `backend` back to `None`.
+    #[test]
+    fn validate_passes_for_a_fully_unconfigured_default_config() {
+        assert!(Config::default().validate().is_ok());
+    }
+
+    /// Guards against over-broadening the fix above: an *explicitly*
+    /// requested azure backend with no credentials must still fail, exactly
+    /// as before.
+    #[test]
+    fn validate_still_requires_credentials_for_an_explicit_azure_backend() {
+        let cfg = Config {
+            backend: Some("azure".into()),
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("Subscription ID"), "got: {err}");
+    }
+
+    /// An `[azure]` block being present is itself a declaration of intent,
+    /// even with `backend` left unset (legacy configs predate the `backend`
+    /// field) — it must still be held to the credential requirement.
+    #[test]
+    fn validate_still_requires_credentials_when_an_azure_block_is_present() {
+        let cfg = Config {
+            backend: None,
+            azure: Some(AzureConfig {
+                subscription_id: None,
+                tenant_id: None,
+                default_vault: None,
+                resource_group: None,
+                location: None,
+            }),
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("Subscription ID"), "got: {err}");
     }
 
     /// A config written before the [azure] block existed must resolve exactly as
