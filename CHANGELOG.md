@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.36.2 — Drawer close box and readable muted text (2026-08-10)
+
+### Added
+
+- **The secret drawer has a close box.** The create/edit drawer can now be
+  dismissed from an `x` in the top-right corner, not just the Cancel button at
+  the bottom. It goes through the same discard confirmation, so unsaved edits
+  are still protected, and it disables during a pending save like the other
+  drawer controls.
+
+### Fixed
+
+- **Muted text now meets WCAG AA on tinted backgrounds.** Secondary text sitting
+  on selected rows and on tags measured 4.26–4.28:1 against the required 4.5:1.
+  Muted tones are now derived against those tinted composites — the accent wash
+  on selected rows, the text wash on tags, and both stacked — as well as the
+  flat surfaces, so all four palettes pass in both light and dark modes.
+
 ## v0.36.1 — Windows reliability and install portability (2026-08-09)
 
 ### Fixed
