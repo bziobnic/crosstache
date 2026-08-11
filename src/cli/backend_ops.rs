@@ -81,5 +81,11 @@ pub(crate) async fn execute_backend_add(backend: String, yes: bool, config: Conf
         "It is not the active backend. Switch with `xv config set backend {backend}`, \
          or attach one of its vaults with `xv cx add <vault> --backend {backend}`."
     ));
+    if backend == BackendType::Azure {
+        output::info(
+            "Blob storage was not configured for this vault (used for `xv file` operations). \
+             `xv init` sets that up interactively; add it later if you need file storage.",
+        );
+    }
     Ok(())
 }
