@@ -1,8 +1,9 @@
 //! `xv backend` — configured-backend lifecycle.
 
+use crate::cli::config_ops::guard_against_project_vaults_overlay;
 use crate::cli::helpers::confirm_proceed;
 use crate::config::backend_ops::{add_backend, configured_backends, BackendType};
-use crate::config::settings::{load_config_no_validation, Config};
+use crate::config::settings::{load_config_file_only, Config};
 use crate::config::setup::atomic_save_config;
 use crate::error::Result;
 use crate::utils::output;
@@ -61,8 +62,11 @@ pub(crate) async fn execute_backend_ls(config: Config) -> Result<()> {
 /// out would silently relocate the user's actual active backend to whatever
 /// `--backend`/`XV_BACKEND`/the cwd's `.xv.toml` profile happened to resolve
 /// to for THIS invocation. `xv init` has the same trap and dodges it the same
-/// way (see `execute_init_command`'s `_config` parameter) — load a fresh,
-/// unresolved copy of the on-disk config as the base for both the
+/// way (see `execute_init_command`'s `_config` parameter) — load a fresh
+/// on-disk config (`load_config_file_only`, which unlike
+/// `load_config_no_validation` also skips environment-variable overrides —
+/// `XV_BACKEND` is exactly as dispatch-resolved as `--backend` is, and must
+/// never round-trip into a save either) as the base for both the
 /// already-configured check and `add_backend`.
 pub(crate) async fn execute_backend_add(backend: String, yes: bool, _config: Config) -> Result<()> {
     execute_backend_add_inner(
@@ -89,7 +93,7 @@ async fn execute_backend_add_inner(
     initializer: crate::config::init::ConfigInitializer,
 ) -> Result<()> {
     let backend: BackendType = backend.parse()?;
-    let base = load_config_no_validation().await.unwrap_or_default();
+    let base = load_config_file_only().await.unwrap_or_default();
 
     if configured_backends(&base).contains(&backend) {
         let prompt = format!(
@@ -122,18 +126,22 @@ async fn execute_backend_add_inner(
     Ok(())
 }
 
-/// `_config` is the dispatch-resolved config — see the doc comment on
-/// `execute_backend_add` for why it must never be the base for a save. Load a
-/// fresh, unresolved copy of the on-disk config instead for the
-/// already-configured check, the active-backend refusal, and the save.
+/// `config` is the dispatch-resolved config — see the doc comment on
+/// `execute_backend_add` for why it must never be the base for a save. It is
+/// used for exactly one thing here: `guard_against_project_vaults_overlay`
+/// needs `config.env_flag` (the CLI `--env` for THIS invocation, which is
+/// never persisted to disk) to know which `.xv.toml` env profile is active.
+/// Every value-affecting decision and the save itself use `base`, a fresh
+/// `load_config_file_only()` read — no environment-variable overrides, no
+/// dispatch-resolved `.backend`.
 pub(crate) async fn execute_backend_rm(
     backend: String,
     purge: bool,
     yes: bool,
-    _config: Config,
+    config: Config,
 ) -> Result<()> {
     let backend: BackendType = backend.parse()?;
-    let base = load_config_no_validation().await.unwrap_or_default();
+    let base = load_config_file_only().await.unwrap_or_default();
     let configured = configured_backends(&base);
 
     if !configured.contains(&backend) {
@@ -170,6 +178,14 @@ pub(crate) async fn execute_backend_rm(
         )));
     }
 
+    // A `.xv.toml` `[env.X].vaults` overlay REPLACES the context workspace
+    // entirely (see `guard_against_project_vaults_overlay`'s doc comment in
+    // config_ops.rs), so if one is active for this directory, the context
+    // workspace this function is about to read and mutate below is not the
+    // workspace actually in effect — same guard, same place in the sequence
+    // as `execute_cx_rm`, before any context read/write.
+    guard_against_project_vaults_overlay(&config).await?;
+
     // Refuse when removal would strand the workspace's write target. Mirrors
     // `execute_cx_rm` in src/cli/config_ops.rs.
     let mut context_manager = crate::config::context::ContextManager::load().await?;
@@ -198,6 +214,10 @@ pub(crate) async fn execute_backend_rm(
         return Ok(());
     }
 
+    // Resolve the config path and build the updated config up front, before
+    // either write, so a failure here (as opposed to mid-write) leaves both
+    // files untouched.
+    let config_path = Config::get_config_path()?;
     let mut updated = base;
     let data_location = match backend {
         BackendType::Local => {
@@ -227,22 +247,33 @@ pub(crate) async fn execute_backend_rm(
         updated.backend = None;
     }
 
-    // Drop workspace entries that pointed at the removed backend.
-    if let Some(mut ws) = context_manager.workspace.clone() {
+    // Save the config FIRST: it's the more-recoverable half (re-adding a
+    // backend is a scripted `xv backend add`) and it's the one that gates
+    // whether this backend is "removed" at all. If it fails, nothing else
+    // has been touched yet. Compute the pruned workspace now so the context
+    // write below is a plain save with no further decisions to make.
+    let pruned_workspace = context_manager.workspace.clone().and_then(|mut ws| {
         let before = ws.entries.len();
         ws.entries
             .retain(|e| e.backend.as_deref() != Some(backend.as_str()));
-        if ws.entries.len() != before {
-            context_manager.workspace = if ws.entries.is_empty() {
-                None
-            } else {
-                Some(ws)
-            };
-            context_manager.save().await?;
+        if ws.entries.len() == before {
+            None // nothing to drop; leave context_manager.workspace as-is
+        } else if ws.entries.is_empty() {
+            Some(None)
+        } else {
+            Some(Some(ws))
         }
+    });
+
+    atomic_save_config(&updated, &config_path).await?;
+
+    // Drop workspace entries that pointed at the removed backend, now that
+    // the config save committed.
+    if let Some(new_workspace) = pruned_workspace {
+        context_manager.workspace = new_workspace;
+        context_manager.save().await?;
     }
 
-    atomic_save_config(&updated, &Config::get_config_path()?).await?;
     output::success(&format!(
         "Removed backend '{backend}' from the configuration"
     ));

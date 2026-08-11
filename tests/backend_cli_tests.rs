@@ -4,8 +4,18 @@
 use std::process::Command;
 
 fn xv(args: &[&str], home: &std::path::Path) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_xv"))
-        .args(args)
+    xv_with_env(args, home, &[])
+}
+
+/// Same as `xv`, plus caller-supplied extra environment variables — used by
+/// the `XV_BACKEND` leak-through regression below.
+fn xv_with_env(
+    args: &[&str],
+    home: &std::path::Path,
+    extra_env: &[(&str, &str)],
+) -> std::process::Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_xv"));
+    cmd.args(args)
         .env("XDG_CONFIG_HOME", home)
         .env("HOME", home)
         // Pin the context store explicitly. Without this, ContextManager::load
@@ -13,9 +23,11 @@ fn xv(args: &[&str], home: &std::path::Path) -> std::process::Output {
         // test process happens to be sitting next to.
         .env("XV_CONTEXT_DIR", home.join("xv"))
         .env("XV_NO_PARENT_CONFIG", "1")
-        .env("NO_COLOR", "1")
-        .output()
-        .expect("xv should run")
+        .env("NO_COLOR", "1");
+    for (key, value) in extra_env {
+        cmd.env(key, value);
+    }
+    cmd.output().expect("xv should run")
 }
 
 /// The context store path used by the `xv` helper above. Note there is no
@@ -219,6 +231,65 @@ fn backend_rm_removes_an_inactive_backend() {
         "aws block should be gone: {saved}"
     );
     assert!(saved.contains("[local]"), "local must survive: {saved}");
+    assert!(
+        saved.contains("backend = \"local\""),
+        "the active backend must still say local: {saved}"
+    );
+}
+
+/// Regression: `load_config_no_validation` folds in `XV_BACKEND` (and other
+/// env overrides), so using it as the save base would let a per-invocation
+/// env var permanently overwrite the on-disk active backend — the same class
+/// of bug as the dispatch-config leak, arriving through the environment
+/// instead. It would also make the active-backend refusal fail open, since
+/// it would consult the env-overridden value instead of the file's.
+/// `execute_backend_rm` must use `load_config_file_only` instead, which skips
+/// env overrides entirely.
+#[test]
+fn backend_rm_ignores_xv_backend_env_var_for_both_the_refusal_and_the_save() {
+    let home = two_backend_home();
+
+    // XV_BACKEND says "azure" is active; the file says "local" is active.
+    // ("aws" is avoided here since a non-`--features aws` test build treats
+    // an *effective* backend of "aws" as build-unavailable before dispatch
+    // even reaches this command — orthogonal to what this test checks.)
+    // Removing "local" must still be refused as the active backend (the file
+    // is the source of truth), and removing "aws" must leave the file's
+    // `backend = "local"` line untouched.
+    let out = xv_with_env(
+        &["backend", "rm", "local"],
+        home.path(),
+        &[("XV_BACKEND", "azure")],
+    );
+    assert!(
+        !out.status.success(),
+        "the file, not XV_BACKEND, must decide which backend is active"
+    );
+    let saved = std::fs::read_to_string(home.path().join("xv/xv.conf")).unwrap();
+    assert!(
+        saved.contains("[local]") && saved.contains("backend = \"local\""),
+        "config must be untouched: {saved}"
+    );
+
+    let out = xv_with_env(
+        &["backend", "rm", "aws", "--yes"],
+        home.path(),
+        &[("XV_BACKEND", "azure")],
+    );
+    assert!(
+        out.status.success(),
+        "removing the inactive aws backend should succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let saved = std::fs::read_to_string(home.path().join("xv/xv.conf")).unwrap();
+    assert!(
+        !saved.contains("[aws]"),
+        "aws block should be gone: {saved}"
+    );
+    assert!(
+        saved.contains("backend = \"local\""),
+        "XV_BACKEND=azure must never be written as the saved active backend: {saved}"
+    );
 }
 
 #[test]

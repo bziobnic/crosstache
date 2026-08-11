@@ -800,8 +800,19 @@ pub async fn load_config() -> Result<Config> {
     Ok(config)
 }
 
-/// Load configuration without validation (for init and config commands)
-pub async fn load_config_no_validation() -> Result<Config> {
+/// Load the on-disk config file, with no environment-variable overrides and
+/// no dispatch-resolved `.backend` applied.
+///
+/// `load_config_no_validation` folds in `apply_environment_overrides` (so
+/// `XV_BACKEND` etc. win), which is correct for READ-ONLY callers that want
+/// this invocation's effective settings. It is WRONG for any caller that will
+/// **save** the result back to disk: `XV_BACKEND=aws` would round-trip into
+/// the saved file as `backend = "aws"`, permanently overwriting the user's
+/// real on-disk backend — the same class of bug fixed for the CLI/profile
+/// dispatch config (see `execute_backend_add`'s doc comment) arriving through
+/// the environment instead. Anything that reads-then-saves config (`xv
+/// backend add`, `xv backend rm`) must use this instead.
+pub(crate) async fn load_config_file_only() -> Result<Config> {
     let mut config = Config::default();
 
     // Load from configuration file if it exists
@@ -809,6 +820,13 @@ pub async fn load_config_no_validation() -> Result<Config> {
     if config_path.exists() {
         config = load_from_file(&config_path).await?;
     }
+
+    Ok(config)
+}
+
+/// Load configuration without validation (for init and config commands)
+pub async fn load_config_no_validation() -> Result<Config> {
+    let mut config = load_config_file_only().await?;
 
     // Override with environment variables
     apply_environment_overrides(&mut config);
