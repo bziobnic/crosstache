@@ -5,7 +5,7 @@
 
 use crate::auth::provider::{AzureAuthProvider, DefaultAzureCredentialProvider};
 use crate::config::backend_ops::{add_backend, configured_backends, BackendType};
-use crate::config::settings::{load_config_file_only, Config};
+use crate::config::settings::{load_config_file_only, AzureConfig, Config};
 use crate::config::setup::{atomic_save_config, build_setup_config, SetupRequest};
 use crate::error::{CrosstacheError, Result};
 use crate::utils::azure_detect::{AzureDetector, AzureEnvironment, AzureSubscription};
@@ -1161,11 +1161,26 @@ impl ConfigInitializer {
         // and `candidate` already carries the caller's `base`, so other
         // configured backends and unrelated settings survive untouched.
         candidate.backend = None;
-        candidate.subscription_id = subscription_id;
-        candidate.tenant_id = tenant_id;
+        candidate.subscription_id = subscription_id.clone();
+        candidate.tenant_id = tenant_id.clone();
         candidate.default_vault.clear();
-        candidate.default_resource_group = default_resource_group;
-        candidate.default_location = default_location;
+        candidate.default_resource_group = default_resource_group.clone();
+        candidate.default_location = default_location.clone();
+        // Write a fresh `[azure]` block from the values just collected
+        // rather than leaving whatever `base` carried: `azure_settings()`
+        // prefers the block over the legacy top-level fields, so a stale
+        // pre-existing block would otherwise keep reporting old
+        // subscription/tenant/vault values after this reconfigure. This is
+        // precisely the "user declined to create a vault" case, so the
+        // block's `default_vault` is `None` (not carried over from any
+        // prior block) so `azure_settings()` correctly reports no vault.
+        candidate.azure = Some(AzureConfig {
+            subscription_id: Some(subscription_id),
+            tenant_id: Some(tenant_id),
+            default_vault: None,
+            resource_group: Some(default_resource_group),
+            location: Some(default_location),
+        });
         candidate.validate()?;
         Ok(candidate)
     }
@@ -1440,5 +1455,95 @@ mod tests {
             "the no-vault legacy Azure branch must preserve the existing [local] block"
         );
         assert_eq!(config.clipboard_timeout, 999);
+    }
+
+    /// Regression test for the Bugbot finding on top of the previous fix:
+    /// the no-vault branch used to leave a pre-existing `[azure]` block
+    /// untouched while overwriting only the legacy top-level fields, so
+    /// `azure_settings()` (which prefers the block) kept reporting stale
+    /// subscription/tenant/vault values after a reconfigure.
+    #[tokio::test]
+    async fn azure_no_vault_reconfigure_overwrites_a_stale_azure_block() {
+        use crate::config::settings::AzureConfig;
+
+        let initializer = ConfigInitializer::new();
+        let base = Config {
+            azure: Some(AzureConfig {
+                subscription_id: Some("stale-sub".into()),
+                tenant_id: Some("stale-tenant".into()),
+                default_vault: Some("stale-vault".into()),
+                resource_group: Some("stale-rg".into()),
+                location: Some("stale-location".into()),
+            }),
+            ..Config::default()
+        };
+
+        let init_config = InitConfig {
+            subscription_id: "new-sub".to_string(),
+            tenant_id: "new-tenant".to_string(),
+            default_resource_group: "new-rg".to_string(),
+            default_location: "eastus".to_string(),
+            default_vault: None,
+            create_test_vault: false,
+            storage_account_name: String::new(),
+            blob_container_name: String::new(),
+            create_storage_account: false,
+        };
+
+        let config = initializer.build_config(init_config, base).await.unwrap();
+
+        let azure = config
+            .azure
+            .as_ref()
+            .expect("no-vault branch must write a fresh [azure] block");
+        assert_eq!(azure.subscription_id.as_deref(), Some("new-sub"));
+        assert_eq!(azure.tenant_id.as_deref(), Some("new-tenant"));
+        assert_eq!(azure.resource_group.as_deref(), Some("new-rg"));
+        assert_eq!(azure.location.as_deref(), Some("eastus"));
+        assert_eq!(
+            azure.default_vault, None,
+            "the no-vault branch declined a vault, so the block must not carry the stale one"
+        );
+
+        let settings = config.azure_settings();
+        assert_eq!(settings.subscription_id.as_deref(), Some("new-sub"));
+        assert_eq!(settings.tenant_id.as_deref(), Some("new-tenant"));
+        assert_eq!(settings.default_vault, None);
+    }
+
+    /// Companion regression: a no-vault init with NO pre-existing `[azure]`
+    /// block must still write one, so `configured_backends()` (which tests
+    /// `config.azure.is_some()`) reports Azure as configured even though
+    /// this path never calls `build_setup_config`/`apply_backend`.
+    #[tokio::test]
+    async fn azure_no_vault_init_writes_a_fresh_azure_block_when_none_existed() {
+        use crate::config::backend_ops::{configured_backends, BackendType};
+
+        let initializer = ConfigInitializer::new();
+        let init_config = InitConfig {
+            subscription_id: "test-sub".to_string(),
+            tenant_id: "test-tenant".to_string(),
+            default_resource_group: "test-rg".to_string(),
+            default_location: "eastus".to_string(),
+            default_vault: None,
+            create_test_vault: false,
+            storage_account_name: String::new(),
+            blob_container_name: String::new(),
+            create_storage_account: false,
+        };
+
+        let config = initializer
+            .build_config(init_config, Config::default())
+            .await
+            .unwrap();
+
+        assert!(
+            config.azure.is_some(),
+            "a fresh [azure] block must be written"
+        );
+        assert!(
+            configured_backends(&config).contains(&BackendType::Azure),
+            "azure must show up as a configured backend"
+        );
     }
 }
