@@ -11,6 +11,7 @@ xv set cred --type login --field username=bob   # structured record: username ri
 xv find --filter 'test-*' --names-only # every secret starting with "test-"
 xv mv --filter 'test-*' archive/       # bulk-move them into a folder
 xv scan install                        # block secret leaks before commit
+xv backend add local                   # configure a second backend alongside the active one
 ```
 
 **v0.22 highlights:** multi-vault workspaces with aliases, union `ls`/`find`,
@@ -1825,6 +1826,27 @@ valid default file before opening it. Editor resolution is `$VISUAL`, then
 `$EDITOR`, then `nano` on Unix or `notepad` on Windows; values with arguments
 such as `code --wait` are supported. A non-zero editor exit is surfaced as a
 configuration error.
+
+### Backends
+
+`xv init` bootstraps and switches to a single backend, but you can have more
+than one **configured** at once — a local store and a cloud vault, say — with
+only one **active**. `xv backend` manages that set without disturbing which
+one is active:
+
+```bash
+xv backend ls                    # configured backends, active one marked
+xv backend add local             # configure a backend (doesn't switch to it)
+xv backend add azure --yes       # skip the reconfigure confirmation
+xv backend rm aws                # config only — remote/local data untouched
+xv backend rm local --purge      # ALSO deletes the local store + age key — unrecoverable
+```
+
+`xv backend rm` refuses to remove the active backend while others remain
+configured (switch with `xv config set backend <other>` first), and refuses
+`--purge` on anything but `local` — cloud secrets are never deleted this way,
+use `xv vault delete` for that. See [docs/backends.md](docs/backends.md) for
+the full refusal table and the `--purge` guards.
 
 ### Repairing configuration
 
