@@ -4,6 +4,7 @@
 //! including Azure environment detection, configuration building, and vault creation.
 
 use crate::auth::provider::{AzureAuthProvider, DefaultAzureCredentialProvider};
+use crate::config::backend_ops::{add_backend, configured_backends, BackendType};
 use crate::config::settings::Config;
 use crate::config::setup::{atomic_save_config, build_setup_config, SetupRequest};
 use crate::error::{CrosstacheError, Result};
@@ -65,6 +66,29 @@ impl ConfigInitializer {
             &backend_options,
             Some(0),
         )?;
+
+        let chosen = match backend_index {
+            1 => BackendType::Local,
+            2 => BackendType::Aws,
+            _ => BackendType::Azure,
+        };
+
+        // Loading the existing config means init no longer silently discards
+        // other backends — but it can still replace the selected one, so ask.
+        let existing = Config::load().await.unwrap_or_default();
+        if configured_backends(&existing).contains(&chosen) {
+            let proceed = self.prompt.confirm(
+                &format!(
+                    "Backend '{chosen}' is already configured; reconfigure it? \
+                     Its existing settings will be replaced."
+                ),
+                false,
+            )?;
+            if !proceed {
+                output::info("Aborted; no changes made.");
+                return Ok(existing);
+            }
+        }
 
         if backend_index == 1 {
             return self.run_local_setup().await;
@@ -196,15 +220,13 @@ impl ConfigInitializer {
             key_file: key_file.clone().into(),
             vault: default_vault.clone(),
         };
-        let config = build_setup_config(&request, Config::default())?;
+        let base = Config::load().await.unwrap_or_default();
+        let progress = ProgressIndicator::new("Setting up local backend...");
+        let config = add_backend(&request, base, true).await?;
+        progress.finish_success("Local backend initialized");
         let local_config = config.local.as_ref().ok_or_else(|| {
             CrosstacheError::config("Local setup did not produce a local configuration")
         })?;
-
-        let progress = ProgressIndicator::new("Setting up local backend...");
-        crate::backend::local::LocalBackend::new(Some(local_config))
-            .map_err(|e| CrosstacheError::config(format!("Failed to create local backend: {e}")))?;
-        progress.finish_success("Local backend initialized");
 
         // Read the public key for the summary
         let resolved =
@@ -266,14 +288,13 @@ impl ConfigInitializer {
             .clone()
             .unwrap_or_else(|| "default".to_string());
 
-        let config = build_setup_config(
-            &SetupRequest::Aws {
-                region: init_config.aws_region.clone().unwrap_or_default(),
-                profile: init_config.aws_profile.clone(),
-                vault_prefix: aws_default_vault.clone(),
-            },
-            Config::default(),
-        )?;
+        let request = SetupRequest::Aws {
+            region: init_config.aws_region.clone().unwrap_or_default(),
+            profile: init_config.aws_profile.clone(),
+            vault_prefix: aws_default_vault.clone(),
+        };
+        let base = Config::load().await.unwrap_or_default();
+        let config = add_backend(&request, base, true).await?;
 
         self.save_config(&config).await?;
 
