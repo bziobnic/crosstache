@@ -54,9 +54,10 @@ will be replaced) unless `--yes` is passed. In a non-interactive shell without
 `--yes`, the confirmation refuses rather than silently overwriting your
 settings.
 
-Adding an `azure` backend that has no blob storage configured also prints a
-reminder that `xv init` sets that up interactively — `xv backend add` does
-not, so add it later if you need `xv file` operations on that vault.
+Adding or reconfiguring an `azure` backend always prints a reminder that blob
+storage (used for `xv file` operations) was not set up by this command —
+`xv init` sets it up interactively, `xv backend add` does not — so add it
+later if you need file storage on that vault.
 
 ## `xv backend ls`
 
@@ -166,14 +167,23 @@ Whenever `xv` itself writes an `[azure]` block (via `xv init` or
 `xv backend add azure`), it also mirrors `subscription_id` and `tenant_id` to
 the top level, so an `xv`-generated config is always valid both ways.
 
-**This is not a hand-authoring recommendation.** If you hand-write a config
-with *only* an `[azure]` block and leave the top-level `subscription_id` /
-`tenant_id` empty, `xv config show`/any Azure command will fail validation
-with `"Subscription ID is required"` — validation currently checks the
-top-level fields directly, not `azure_settings()`. This is a known gap, not a
-supported form: document the `[azure]` block as what `xv` writes and reads,
-and keep the top-level `subscription_id`/`tenant_id` present in any config you
-edit by hand.
+**This is not a hand-authoring recommendation.** The block is read correctly
+either way — `xv backend ls` and other config/lifecycle commands resolve the
+vault out of an `[azure]`-only config just fine, because they go through
+`azure_settings()`. But `Config::validate()` reads the top-level
+`subscription_id`/`tenant_id` directly and never consults `azure_settings()`,
+and validation runs for any command that actually needs a backend. So if you
+hand-write a config with *only* an `[azure]` block and leave the top-level
+`subscription_id`/`tenant_id` empty, `xv backend ls` still works, but
+`xv list` (or any other command that talks to the backend) fails with:
+
+```
+error[xv-config-invalid]: Configuration error: Subscription ID is required
+```
+
+This is a known gap, not a supported form. Keep the `[azure]` block as what
+`xv` itself writes and reads, and keep the top-level `subscription_id`/
+`tenant_id` present in any config you edit by hand.
 
 ## One instance per type — `named_backends` for more
 
