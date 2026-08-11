@@ -5,7 +5,7 @@
 
 use crate::auth::provider::{AzureAuthProvider, DefaultAzureCredentialProvider};
 use crate::config::backend_ops::{add_backend, configured_backends, BackendType};
-use crate::config::settings::{load_config_no_validation, Config};
+use crate::config::settings::{load_config_file_only, Config};
 use crate::config::setup::{atomic_save_config, build_setup_config, SetupRequest};
 use crate::error::{CrosstacheError, Result};
 use crate::utils::azure_detect::{AzureDetector, AzureEnvironment, AzureSubscription};
@@ -90,11 +90,20 @@ impl ConfigInitializer {
 
         // Loading the existing config means init no longer silently discards
         // other backends — but it can still replace the selected one, so ask.
-        // `load_config_no_validation` is used deliberately: a full `Config::load()`
-        // validates only the *active* backend, so an incomplete active backend
-        // (e.g. Azure with no subscription_id) would make `load()` fail and
-        // `unwrap_or_default()` would then discard every other configured block.
-        let existing = load_config_no_validation().await.unwrap_or_default();
+        // `load_config_file_only` is used deliberately, on two counts:
+        //   * it skips validation — a full `Config::load()` validates only the
+        //     *active* backend, so an incomplete active backend (e.g. Azure
+        //     with no subscription_id) would make `load()` fail and
+        //     `unwrap_or_default()` would then discard every other configured
+        //     block;
+        //   * it skips environment-variable overrides, unlike
+        //     `load_config_no_validation`. This value is the base of a config
+        //     that gets *written to disk*, and `add_backend` does not clear the
+        //     top-level Azure fields, so an env load would persist ambient
+        //     `AZURE_SUBSCRIPTION_ID` / `AZURE_TENANT_ID` / `DEBUG` / ... into
+        //     xv.conf for a local or AWS setup. Same reasoning as
+        //     `xv backend add`/`rm` (see `cli::backend_ops`).
+        let existing = load_config_file_only().await.unwrap_or_default();
         if configured_backends(&existing).contains(&chosen) {
             let proceed = self.prompt.confirm(
                 &format!(
@@ -343,7 +352,7 @@ impl ConfigInitializer {
     /// Run the simplified local backend setup (3 steps).
     ///
     /// `base` is the caller's already-loaded existing config (via
-    /// `load_config_no_validation`), so other configured backends survive.
+    /// `load_config_file_only`), so other configured backends survive.
     async fn run_local_setup(&self, base: Config) -> Result<Config> {
         let request = self.collect_local_request()?;
         let (store_path, key_file, default_vault) = match &request {
@@ -406,7 +415,7 @@ impl ConfigInitializer {
     /// Run the simplified AWS backend setup.
     ///
     /// `base` is the caller's already-loaded existing config (via
-    /// `load_config_no_validation`), so other configured backends survive.
+    /// `load_config_file_only`), so other configured backends survive.
     async fn run_aws_setup(&self, base: Config) -> Result<Config> {
         let request = self.collect_aws_request().await?;
         let (region, profile, default_vault) = match &request {

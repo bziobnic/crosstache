@@ -171,11 +171,10 @@ fn assert_looks_like_key(key_file: &std::path::Path) -> Result<()> {
 
 /// Delete the local store, age key, and recipients file. Destroys every
 /// secret in the store. Callers must run `assert_looks_like_store` and
-/// `assert_looks_like_key` first — this function does not re-check.
-fn purge_local_store(config: &Config) -> Result<()> {
-    let resolved =
-        crate::backend::local::config::ResolvedLocalConfig::from_raw(config.local.as_ref());
-
+/// `assert_looks_like_key` first — this function does not re-check. Takes the
+/// already-resolved paths rather than a `Config` so the caller can resolve
+/// them before the config is consumed by the save that must precede this.
+fn purge_local_store(resolved: &crate::backend::local::config::ResolvedLocalConfig) -> Result<()> {
     if resolved.store_path.exists() {
         std::fs::remove_dir_all(&resolved.store_path).map_err(|e| {
             CrosstacheError::config(format!(
@@ -282,7 +281,12 @@ pub(crate) async fn execute_backend_rm(
         }
     }
 
-    if purge {
+    // Resolved when purging, and deliberately kept until AFTER the config save
+    // below: the deletion it authorizes is irreversible, so it must be
+    // unreachable unless every fallible step ahead of it has already
+    // succeeded. `base` is consumed into `updated` before then, so the paths
+    // are resolved here while it is still available.
+    let purge_paths = if purge {
         let resolved =
             crate::backend::local::config::ResolvedLocalConfig::from_raw(base.local.as_ref());
         // Both shape guards run BEFORE the confirmation prompt: the user must
@@ -301,15 +305,18 @@ pub(crate) async fn execute_backend_rm(
             output::info("Aborted; nothing deleted.");
             return Ok(());
         }
-        purge_local_store(&base)?;
-    } else if !confirm_proceed(
-        yes,
-        &format!("Remove backend '{backend}' from the configuration?"),
-        "--yes",
-    )? {
-        output::info("Aborted; no changes made.");
-        return Ok(());
-    }
+        Some(resolved)
+    } else {
+        if !confirm_proceed(
+            yes,
+            &format!("Remove backend '{backend}' from the configuration?"),
+            "--yes",
+        )? {
+            output::info("Aborted; no changes made.");
+            return Ok(());
+        }
+        None
+    };
 
     // Resolve the config path and build the updated config up front, before
     // either write, so a failure here (as opposed to mid-write) leaves both
@@ -344,11 +351,16 @@ pub(crate) async fn execute_backend_rm(
         updated.backend = None;
     }
 
-    // Save the config FIRST: it's the more-recoverable half (re-adding a
-    // backend is a scripted `xv backend add`) and it's the one that gates
-    // whether this backend is "removed" at all. If it fails, nothing else
-    // has been touched yet. Compute the pruned workspace now so the context
-    // write below is a plain save with no further decisions to make.
+    // Save the config FIRST, before the `--purge` deletion below: it's the
+    // more-recoverable half (re-adding a backend is a scripted
+    // `xv backend add`) and it's the one that gates whether this backend is
+    // "removed" at all. `atomic_save_config` validates, and validation can
+    // fail on config state this command never touched (a half-populated
+    // top-level Azure block, say), so a purge ordered ahead of it would
+    // destroy the store and key while leaving the config advertising the
+    // backend — unrecoverable, since `--purge` deletes the age key too.
+    // Compute the pruned workspace now so the context write below is a plain
+    // save with no further decisions to make.
     let pruned_workspace = context_manager.workspace.clone().and_then(|mut ws| {
         let before = ws.entries.len();
         ws.entries
@@ -369,6 +381,13 @@ pub(crate) async fn execute_backend_rm(
     if let Some(new_workspace) = pruned_workspace {
         context_manager.workspace = new_workspace;
         context_manager.save().await?;
+    }
+
+    // Last, and only now: the irreversible step. Every fallible operation
+    // above has committed, so reaching here means the config on disk no longer
+    // claims this backend.
+    if let Some(resolved) = &purge_paths {
+        purge_local_store(resolved)?;
     }
 
     if purge {

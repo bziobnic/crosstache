@@ -98,8 +98,19 @@ its actual data still lives.
 | Removal would strand the workspace's default vault while other workspace entries remain | Refused, pointing at `xv cx default <alias>` | Pick a new default first |
 
 Removing the active backend **is** allowed when it is the *only* one
-configured — that leaves the config backend-less (the next command that needs
-a backend will prompt you, same as a fresh install).
+configured — that leaves the config backend-less. There is no prompt-on-demand
+after that: with no `backend` key set, backend resolution falls back to
+`azure`, so the next command that needs a backend fails validation rather than
+offering to set one up:
+
+```console
+$ xv list
+error[xv-config-invalid]: Configuration error: Subscription ID is required
+```
+
+Recover by configuring a backend again — `xv init` (interactive, also makes it
+active) or `xv backend add <local|azure|aws>` followed by
+`xv config set backend <type>`.
 
 ### Project vault overlays block `rm` entirely
 
@@ -137,12 +148,19 @@ Guards that limit the blast radius:
   prompt spells out exactly what is being destroyed and that it cannot be
   undone.
 
-Ordering caveat, stated honestly: the deletion happens **before** the config
-file is saved. If the config save then fails for some unrelated reason (disk
-full, permissions), the data is already gone while the config still lists the
-backend — the next use of that backend would create a fresh, empty store at
-the same path. This is a narrow window between two operations, not a
-transaction; there is no rollback of the delete.
+Ordering, stated honestly: the deletion happens **last**, after the config file
+and the context workspace have both been written. That ordering is deliberate —
+a config save can fail for reasons this command never touches (disk full,
+permissions, or config state elsewhere in the file that fails validation), and
+because `--purge` deletes the age identity too, a delete ordered ahead of the
+save would be unrecoverable. So the failure mode you can still hit is the
+recoverable one: the config no longer lists the backend, but the store, key,
+and recipients file are still on disk. Re-add the backend
+(`xv backend add local`, pointed at the same `store_path`/`key_file`) to get
+back to where you were, or delete the leftovers by hand. This is still two
+operations rather than a transaction — there is no rollback of the config save
+either — but nothing irreversible happens until every fallible step has
+already succeeded.
 
 ## The `[azure]` config block
 

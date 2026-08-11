@@ -141,9 +141,11 @@ mod tests {
     #[tokio::test]
     async fn add_backend_without_make_active_leaves_the_active_backend_alone() {
         let dir = tempfile::tempdir().unwrap();
-        let mut base = Config::default();
-        base.backend = Some("aws".into());
-        base.default_vault = "aws-vault".into();
+        let base = Config {
+            backend: Some("aws".into()),
+            default_vault: "aws-vault".into(),
+            ..Config::default()
+        };
 
         let config = add_backend(&local_request(dir.path()), base, false)
             .await
@@ -191,9 +193,11 @@ mod tests {
         let blocker = dir.path().join("store");
         std::fs::write(&blocker, "not a directory").unwrap();
 
-        let mut base = Config::default();
-        base.backend = Some("aws".into());
-        base.aws = Some(Default::default());
+        let base = Config {
+            backend: Some("aws".into()),
+            aws: Some(Default::default()),
+            ..Config::default()
+        };
         let before = toml::to_string(&base).unwrap();
 
         let result = add_backend(

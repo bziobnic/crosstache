@@ -36,9 +36,6 @@ fn xv_with_env(
 /// The context store path used by the `xv` helper above. Note there is no
 /// `.json` extension — the file is literally named `context`.
 ///
-/// Unused by Task 5 (`ls` doesn't touch context); Task 7 (`backend rm`) is
-/// expected to use it.
-#[allow(dead_code)]
 fn context_path(home: &std::path::Path) -> std::path::PathBuf {
     home.join("xv").join("context")
 }
@@ -667,5 +664,84 @@ fn backend_rm_purge_leaves_everything_in_place_when_refused() {
     assert_eq!(
         std::fs::read_to_string(home.path().join("xv/xv.conf")).unwrap(),
         conf_before
+    );
+}
+
+/// Regression for a CRITICAL data-loss finding: `--purge` used to delete the
+/// store and age key *before* saving the config, so a save that failed
+/// validation destroyed the secrets permanently (the key is gone too) while
+/// leaving the config still advertising the backend.
+///
+/// The trigger is config state `backend rm` never touches: a half-populated
+/// top-level Azure block. Removing `local` clears `backend`, so
+/// `effective_backend_name()` falls back to `azure`; a non-empty
+/// `subscription_id` makes the Azure block count as configured, and
+/// `Config::validate()` then demands the empty `tenant_id`. Every other
+/// fixture in this file writes `subscription_id = ""`, which is exactly why
+/// the ordering bug went unnoticed — so this one sets it.
+///
+/// The save must fail (that part is by design), but the store and key must
+/// still be there afterwards.
+#[test]
+fn backend_rm_purge_does_not_delete_anything_when_the_config_save_fails() {
+    let home = tempfile::tempdir().unwrap();
+    let (store, key) = make_store(home.path());
+    let recipients = home.path().join("recipients.txt");
+    let conf_dir = home.path().join("xv");
+    std::fs::create_dir_all(&conf_dir).unwrap();
+    std::fs::write(
+        conf_dir.join("xv.conf"),
+        format!(
+            r#"
+backend = "local"
+debug = false
+subscription_id = "sub-that-fails-validation"
+default_vault = "default"
+default_resource_group = ""
+default_location = ""
+tenant_id = ""
+output_json = false
+no_color = true
+
+[local]
+store_path = {:?}
+key_file = {:?}
+default_vault = "default"
+"#,
+            store, key
+        ),
+    )
+    .unwrap();
+    let conf_before = std::fs::read_to_string(conf_dir.join("xv.conf")).unwrap();
+
+    let out = xv(&["backend", "rm", "local", "--purge", "--yes"], home.path());
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !out.status.success(),
+        "the config save cannot succeed here, so the command must fail: {text}"
+    );
+
+    // The whole point: the irreversible half must not have run.
+    assert!(
+        store.exists() && store.join("vaults").is_dir(),
+        "store must survive a failed config save: {text}"
+    );
+    assert!(
+        key.exists(),
+        "age key must survive a failed config save — without it the store is \
+         unreadable even if restored: {text}"
+    );
+    assert!(
+        recipients.exists(),
+        "recipients file must survive a failed config save: {text}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(conf_dir.join("xv.conf")).unwrap(),
+        conf_before,
+        "a failed save must leave the config byte-for-byte unchanged"
     );
 }
