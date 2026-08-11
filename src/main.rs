@@ -309,8 +309,15 @@ Rebuild with `cargo build --features aws` or install an AWS-enabled binary.",
         cli.command,
         crate::cli::Commands::Config { .. }
             | crate::cli::Commands::Init
+            // `ls` and `add` are setup commands that must work before any
+            // valid config exists (that's the whole point of `backend add`
+            // on a fresh machine) — deliberately narrow so each new
+            // subcommand (e.g. a future `rm`, which DOES need a backend to
+            // remove) is a conscious decision, not swept in by `Backend { .. }`.
             | crate::cli::Commands::Backend {
-                command: crate::cli::commands::BackendCommands::Ls,
+                command:
+                    crate::cli::commands::BackendCommands::Ls
+                    | crate::cli::commands::BackendCommands::Add { .. },
             }
             | crate::cli::Commands::Upgrade { .. }
             | crate::cli::Commands::Version

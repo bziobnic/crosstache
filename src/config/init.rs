@@ -9,7 +9,7 @@ use crate::config::settings::{load_config_no_validation, Config};
 use crate::config::setup::{atomic_save_config, build_setup_config, SetupRequest};
 use crate::error::{CrosstacheError, Result};
 use crate::utils::azure_detect::{AzureDetector, AzureEnvironment, AzureSubscription};
-use crate::utils::interactive::{InteractivePrompt, ProgressIndicator, SetupHelper};
+use crate::utils::interactive::{InteractivePrompt, ProgressIndicator, Prompter, SetupHelper};
 use crate::utils::output;
 use crate::vault::manager::VaultManager;
 use crate::vault::models::VaultCreateRequest;
@@ -17,7 +17,13 @@ use std::sync::Arc;
 
 /// Interactive configuration initialization
 pub struct ConfigInitializer {
-    prompt: InteractivePrompt,
+    prompt: Box<dyn Prompter>,
+    /// Concrete prompt used only by helpers that need
+    /// `input_text_validated`, which is not on the `Prompter` trait (not
+    /// object-safe). Currently only the Azure provisioning helpers
+    /// (subscription/resource-group/location/storage/vault prompts) use it;
+    /// they are not driven through `Prompter` by tests in this task.
+    validated_prompt: InteractivePrompt,
 }
 
 /// Configuration data collected during initialization
@@ -34,24 +40,33 @@ pub struct InitConfig {
     pub blob_container_name: String,
     #[allow(dead_code)]
     pub create_storage_account: bool,
-    /// Which backend was chosen: "azure", "local", or "aws"
-    pub backend_choice: String,
-    pub aws_region: Option<String>,
-    pub aws_profile: Option<String>,
-    pub aws_default_vault: Option<String>,
 }
 
 impl ConfigInitializer {
     /// Create a new configuration initializer
     pub fn new() -> Self {
         Self {
-            prompt: InteractivePrompt::new(),
+            prompt: Box::new(InteractivePrompt::new()),
+            validated_prompt: InteractivePrompt::new(),
+        }
+    }
+
+    /// Create a configuration initializer driven by a scripted `Prompter`,
+    /// for tests. See the `validated_prompt` field docs above for what this
+    /// does and does not cover.
+    #[cfg(test)]
+    pub fn with_prompter(prompter: Box<dyn Prompter>) -> Self {
+        Self {
+            prompt: prompter,
+            validated_prompt: InteractivePrompt::new(),
         }
     }
 
     /// Run the complete interactive initialization process
     pub async fn run_interactive_setup(&self) -> Result<Config> {
-        self.prompt.welcome()?;
+        // `welcome` is a concrete-type convenience (not on `Prompter`, and
+        // not meaningful to script), so it goes through `validated_prompt`.
+        self.validated_prompt.welcome()?;
 
         // Step 0: Choose backend
         println!();
@@ -169,10 +184,6 @@ impl ConfigInitializer {
             storage_account_name: storage_account,
             blob_container_name: container_name,
             create_storage_account: blob_storage_configured,
-            backend_choice: "azure".to_string(),
-            aws_region: None,
-            aws_profile: None,
-            aws_default_vault: None,
         };
 
         // Create and save the configuration
@@ -185,11 +196,19 @@ impl ConfigInitializer {
         Ok(config)
     }
 
-    /// Run the simplified local backend setup (3 steps).
-    ///
-    /// `base` is the caller's already-loaded existing config (via
-    /// `load_config_no_validation`), so other configured backends survive.
-    async fn run_local_setup(&self, base: Config) -> Result<Config> {
+    /// Collect the interactive answers for one backend, producing a
+    /// `SetupRequest`. Pure prompting: no files are written and no backend is
+    /// contacted, so the caller decides whether to apply the result.
+    pub async fn collect_backend_request(&self, backend: BackendType) -> Result<SetupRequest> {
+        match backend {
+            BackendType::Local => self.collect_local_request(),
+            BackendType::Aws => self.collect_aws_request().await,
+            BackendType::Azure => self.collect_azure_request().await,
+        }
+    }
+
+    /// Prompt for the local backend's settings. No files are created.
+    fn collect_local_request(&self) -> Result<SetupRequest> {
         // Step 1: Store path
         println!();
         output::step("Step 1/3: Store Location");
@@ -220,13 +239,128 @@ impl ConfigInitializer {
             .prompt
             .input_text("Default vault name", Some("default"))?;
 
+        Ok(SetupRequest::Local {
+            store_path: store_path.into(),
+            key_file: key_file.into(),
+            vault: default_vault,
+        })
+    }
+
+    /// Collect AWS-specific settings from the user. No credentials are
+    /// contacted; region/profile default from the environment.
+    async fn collect_aws_request(&self) -> Result<SetupRequest> {
+        use dialoguer::Input;
+
+        println!();
+        output::step("Step 1/3: AWS Region");
+        let region: String = Input::new()
+            .with_prompt("AWS region")
+            .default(std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".to_string()))
+            .interact_text()
+            .map_err(|e| CrosstacheError::config(format!("Region prompt failed: {e}")))?;
+
+        println!();
+        output::step("Step 2/3: AWS Profile");
+        let profile: String = Input::new()
+            .with_prompt("AWS profile")
+            .default(std::env::var("AWS_PROFILE").unwrap_or_else(|_| "default".to_string()))
+            .interact_text()
+            .map_err(|e| CrosstacheError::config(format!("Profile prompt failed: {e}")))?;
+
+        println!();
+        output::step("Step 3/3: Default Vault");
+        let default_vault: String = Input::new()
+            .with_prompt("Default vault (prefix)")
+            .default("default".to_string())
+            .interact_text()
+            .map_err(|e| CrosstacheError::config(format!("Vault prompt failed: {e}")))?;
+
+        Ok(SetupRequest::Aws {
+            region,
+            profile: Some(profile),
+            vault_prefix: default_vault,
+        })
+    }
+
+    /// Collect Azure-specific settings from the user for `xv backend add
+    /// azure`, reusing the same environment-detection, subscription,
+    /// resource-group, and location helpers `xv init`'s Azure flow uses.
+    ///
+    /// Unlike `xv init`'s Azure flow, this always requires a vault — there is
+    /// no legacy "skip vault creation" compatibility concern here, since
+    /// `SetupRequest::Azure` (and therefore `add_backend`) requires one. Blob
+    /// storage is intentionally NOT collected here: it is an `xv init`-only
+    /// convenience unrelated to which secrets backend is configured, and
+    /// `SetupRequest::Azure` has no field for it.
+    async fn collect_azure_request(&self) -> Result<SetupRequest> {
+        println!();
+        output::step("Step 1/4: Detecting Azure Environment");
+        let azure_env = self.detect_azure_environment().await?;
+
+        println!();
+        output::step("Step 2/4: Configuring Subscription");
+        let subscription = self.configure_subscription(&azure_env).await?;
+
+        println!();
+        output::step("Step 3/4: Configuring Resource Group");
+        let resource_group = self.configure_resource_group(&subscription).await?;
+
+        println!();
+        output::step("Step 4/4: Configuring Default Location");
+        let location = self.configure_location(&subscription).await?;
+
+        let rg_exists = AzureDetector::resource_group_exists(&subscription.id, &resource_group)
+            .await
+            .unwrap_or(false);
+        if !rg_exists {
+            let progress = ProgressIndicator::new("Creating resource group...");
+            AzureDetector::create_resource_group(&subscription.id, &resource_group, &location)
+                .await?;
+            progress.finish_success(&format!("Created resource group '{resource_group}'"));
+        }
+
+        let vault = loop {
+            match self
+                .configure_vault_creation(&subscription, &resource_group, &location)
+                .await?
+            {
+                Some(vault) => break vault,
+                None => output::error(
+                    "A vault is required to add the Azure backend; please create one.",
+                ),
+            }
+        };
+
+        Ok(SetupRequest::Azure {
+            subscription_id: subscription.id,
+            tenant_id: subscription.tenant_id,
+            vault,
+            resource_group,
+            location,
+        })
+    }
+
+    /// Run the simplified local backend setup (3 steps).
+    ///
+    /// `base` is the caller's already-loaded existing config (via
+    /// `load_config_no_validation`), so other configured backends survive.
+    async fn run_local_setup(&self, base: Config) -> Result<Config> {
+        let request = self.collect_local_request()?;
+        let (store_path, key_file, default_vault) = match &request {
+            SetupRequest::Local {
+                store_path,
+                key_file,
+                vault,
+            } => (
+                store_path.to_string_lossy().to_string(),
+                key_file.to_string_lossy().to_string(),
+                vault.clone(),
+            ),
+            _ => unreachable!("collect_local_request always returns SetupRequest::Local"),
+        };
+
         // Validate and build the candidate before the backend creates keys or
         // directories.
-        let request = SetupRequest::Local {
-            store_path: store_path.clone().into(),
-            key_file: key_file.clone().into(),
-            vault: default_vault.clone(),
-        };
         let progress = ProgressIndicator::new("Setting up local backend...");
         let config = add_backend(&request, base, true).await?;
         progress.finish_success("Local backend initialized");
@@ -274,87 +408,30 @@ impl ConfigInitializer {
     /// `base` is the caller's already-loaded existing config (via
     /// `load_config_no_validation`), so other configured backends survive.
     async fn run_aws_setup(&self, base: Config) -> Result<Config> {
-        let mut init_config = InitConfig {
-            subscription_id: String::new(),
-            tenant_id: String::new(),
-            default_resource_group: String::new(),
-            default_location: String::new(),
-            default_vault: None,
-            create_test_vault: false,
-            storage_account_name: String::new(),
-            blob_container_name: String::new(),
-            create_storage_account: false,
-            backend_choice: "aws".to_string(),
-            aws_region: None,
-            aws_profile: None,
-            aws_default_vault: None,
+        let request = self.collect_aws_request().await?;
+        let (region, profile, default_vault) = match &request {
+            SetupRequest::Aws {
+                region,
+                profile,
+                vault_prefix,
+            } => (region.clone(), profile.clone(), vault_prefix.clone()),
+            _ => unreachable!("collect_aws_request always returns SetupRequest::Aws"),
         };
 
-        self.init_aws_backend(&mut init_config).await?;
-
-        let aws_default_vault = init_config
-            .aws_default_vault
-            .clone()
-            .unwrap_or_else(|| "default".to_string());
-
-        let request = SetupRequest::Aws {
-            region: init_config.aws_region.clone().unwrap_or_default(),
-            profile: init_config.aws_profile.clone(),
-            vault_prefix: aws_default_vault.clone(),
-        };
         let config = add_backend(&request, base, true).await?;
 
         self.save_config(&config).await?;
 
         output::success("AWS backend setup completed!");
         println!();
-        println!(
-            "  Region:        {}",
-            init_config.aws_region.as_deref().unwrap_or("us-east-1")
-        );
+        println!("  Region:        {region}");
         println!(
             "  Profile:       {}",
-            init_config.aws_profile.as_deref().unwrap_or("default")
+            profile.as_deref().unwrap_or("default")
         );
-        println!("  Default vault: {aws_default_vault}");
+        println!("  Default vault: {default_vault}");
 
         Ok(config)
-    }
-
-    /// Collect AWS-specific settings from the user.
-    async fn init_aws_backend(&self, init_config: &mut InitConfig) -> Result<()> {
-        use dialoguer::Input;
-
-        println!();
-        output::step("Step 1/3: AWS Region");
-        let region: String = Input::new()
-            .with_prompt("AWS region")
-            .default(std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".to_string()))
-            .interact_text()
-            .map_err(|e| CrosstacheError::config(format!("Region prompt failed: {e}")))?;
-
-        println!();
-        output::step("Step 2/3: AWS Profile");
-        let profile: String = Input::new()
-            .with_prompt("AWS profile")
-            .default(std::env::var("AWS_PROFILE").unwrap_or_else(|_| "default".to_string()))
-            .interact_text()
-            .map_err(|e| CrosstacheError::config(format!("Profile prompt failed: {e}")))?;
-
-        println!();
-        output::step("Step 3/3: Default Vault");
-        let default_vault: String = Input::new()
-            .with_prompt("Default vault (prefix)")
-            .default("default".to_string())
-            .interact_text()
-            .map_err(|e| CrosstacheError::config(format!("Vault prompt failed: {e}")))?;
-
-        init_config.aws_region = Some(region);
-        init_config.aws_profile = Some(profile);
-        init_config.aws_default_vault = Some(default_vault);
-        init_config.backend_choice = "aws".to_string();
-
-        Ok(())
     }
 
     /// Detect Azure environment and handle issues
@@ -441,7 +518,7 @@ impl ConfigInitializer {
         }
 
         // Manual entry if needed
-        let subscription_id = self.prompt.input_text_validated(
+        let subscription_id = self.validated_prompt.input_text_validated(
             "Enter subscription ID",
             None,
             SetupHelper::validate_subscription_id,
@@ -492,7 +569,7 @@ impl ConfigInitializer {
 
         // Create new resource group
         let default_name = SetupHelper::generate_default_resource_group();
-        let resource_group_name = self.prompt.input_text_validated(
+        let resource_group_name = self.validated_prompt.input_text_validated(
             "Enter resource group name",
             Some(&default_name),
             SetupHelper::validate_resource_group_name,
@@ -595,7 +672,7 @@ impl ConfigInitializer {
             } else {
                 // Create new storage account
                 let default_storage_name = SetupHelper::generate_storage_account_name();
-                let storage_name = self.prompt.input_text_validated(
+                let storage_name = self.validated_prompt.input_text_validated(
                     "Enter new storage account name",
                     Some(&default_storage_name),
                     SetupHelper::validate_storage_account_name,
@@ -605,7 +682,7 @@ impl ConfigInitializer {
         } else {
             // No existing accounts, create new one
             let default_storage_name = SetupHelper::generate_storage_account_name();
-            let storage_name = self.prompt.input_text_validated(
+            let storage_name = self.validated_prompt.input_text_validated(
                 "Enter storage account name",
                 Some(&default_storage_name),
                 SetupHelper::validate_storage_account_name,
@@ -613,7 +690,7 @@ impl ConfigInitializer {
             (storage_name, true)
         };
 
-        let container_name = self.prompt.input_text_validated(
+        let container_name = self.validated_prompt.input_text_validated(
             "Enter container name for files",
             Some("crosstache-files"),
             SetupHelper::validate_container_name,
@@ -926,7 +1003,7 @@ impl ConfigInitializer {
         }
 
         let default_vault_name = SetupHelper::generate_default_vault_name();
-        let vault_name = self.prompt.input_text_validated(
+        let vault_name = self.validated_prompt.input_text_validated(
             "Enter vault name",
             Some(&default_vault_name),
             SetupHelper::validate_vault_name,
@@ -1013,10 +1090,6 @@ impl ConfigInitializer {
             default_vault,
             storage_account_name,
             blob_container_name,
-            backend_choice,
-            aws_region,
-            aws_profile,
-            aws_default_vault,
             ..
         } = init_config;
 
@@ -1039,16 +1112,6 @@ impl ConfigInitializer {
             blob_config,
             ..Config::default()
         };
-        if backend_choice == "aws" {
-            return build_setup_config(
-                &SetupRequest::Aws {
-                    region: aws_region.unwrap_or_default(),
-                    profile: aws_profile,
-                    vault_prefix: aws_default_vault.unwrap_or_default(),
-                },
-                base,
-            );
-        }
 
         if let Some(vault) = default_vault {
             return build_setup_config(
@@ -1144,6 +1207,50 @@ impl Default for ConfigInitializer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::interactive::{Answer, ScriptedPrompter};
+
+    /// This is the justification for the `Prompter` seam: drive
+    /// `collect_local_request` through scripted answers instead of a real
+    /// terminal, and assert the resulting `SetupRequest` carries them.
+    #[test]
+    fn collect_local_request_carries_the_scripted_answers() {
+        let initializer = ConfigInitializer::with_prompter(Box::new(ScriptedPrompter::new(vec![
+            Answer::Text("/tmp/my-store".into()),
+            Answer::Text("/tmp/my-key.txt".into()),
+            Answer::Text("my-vault".into()),
+        ])));
+
+        let request = initializer.collect_local_request().unwrap();
+
+        match request {
+            SetupRequest::Local {
+                store_path,
+                key_file,
+                vault,
+            } => {
+                assert_eq!(store_path, std::path::PathBuf::from("/tmp/my-store"));
+                assert_eq!(key_file, std::path::PathBuf::from("/tmp/my-key.txt"));
+                assert_eq!(vault, "my-vault");
+            }
+            other => panic!("expected SetupRequest::Local, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn collect_backend_request_dispatches_local_through_the_same_collector() {
+        let initializer = ConfigInitializer::with_prompter(Box::new(ScriptedPrompter::new(vec![
+            Answer::Text("/tmp/my-store".into()),
+            Answer::Text("/tmp/my-key.txt".into()),
+            Answer::Text("my-vault".into()),
+        ])));
+
+        let request = initializer
+            .collect_backend_request(BackendType::Local)
+            .await
+            .unwrap();
+
+        assert!(matches!(request, SetupRequest::Local { .. }));
+    }
 
     #[test]
     fn test_config_initializer_creation() {
@@ -1164,10 +1271,6 @@ mod tests {
             storage_account_name: "teststorage".to_string(),
             blob_container_name: "test-container".to_string(),
             create_storage_account: true,
-            backend_choice: "azure".to_string(),
-            aws_region: None,
-            aws_profile: None,
-            aws_default_vault: None,
         };
 
         assert_eq!(init_config.subscription_id, "test-sub");
@@ -1189,10 +1292,6 @@ mod tests {
             storage_account_name: String::new(),
             blob_container_name: String::new(),
             create_storage_account: false,
-            backend_choice: "azure".to_string(),
-            aws_region: None,
-            aws_profile: None,
-            aws_default_vault: None,
         };
 
         let config = initializer.build_config(init_config).await.unwrap();
@@ -1224,10 +1323,6 @@ mod tests {
             storage_account_name: String::new(),
             blob_container_name: String::new(),
             create_storage_account: false,
-            backend_choice: "azure".to_string(),
-            aws_region: None,
-            aws_profile: None,
-            aws_default_vault: None,
         };
         let expected = build_setup_config(
             &SetupRequest::Azure {

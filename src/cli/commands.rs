@@ -1535,6 +1535,14 @@ pub enum BackendCommands {
     /// List configured backends
     #[command(alias = "list")]
     Ls,
+    /// Configure a backend (local | azure | aws)
+    Add {
+        /// Backend type to configure
+        backend: String,
+        /// Skip the confirmation when reconfiguring an already-configured backend
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 /// Rotation-schedule subcommands.
@@ -2390,6 +2398,9 @@ impl Cli {
             Commands::Init => crate::cli::system_ops::execute_init_command(config).await,
             Commands::Backend { command } => match command {
                 BackendCommands::Ls => crate::cli::backend_ops::execute_backend_ls(config).await,
+                BackendCommands::Add { backend, yes } => {
+                    crate::cli::backend_ops::execute_backend_add(backend, yes, config).await
+                }
             },
             Commands::Info {
                 resource,

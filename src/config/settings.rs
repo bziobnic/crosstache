@@ -450,7 +450,6 @@ impl Config {
     /// from the legacy top-level fields so pre-block configs behave
     /// identically. Empty top-level strings resolve to `None` rather than
     /// `Some("")`.
-    #[allow(dead_code)] // Consumed once callers read Azure settings through this block (later tasks).
     pub fn azure_settings(&self) -> AzureConfig {
         if let Some(azure) = &self.azure {
             return azure.clone();

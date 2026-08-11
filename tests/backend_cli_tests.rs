@@ -81,3 +81,58 @@ default_vault = "default"
         "should mark the active backend: {text}"
     );
 }
+
+#[test]
+fn backend_add_rejects_an_unknown_backend_name() {
+    let home = tempfile::tempdir().unwrap();
+    let out = xv(&["backend", "add", "postgres"], home.path());
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!out.status.success(), "unknown backend must fail");
+    assert!(
+        text.contains("local, azure, aws"),
+        "error should list the valid backends: {text}"
+    );
+}
+
+#[test]
+fn backend_add_refuses_to_reconfigure_without_confirmation_in_non_tty() {
+    let home = tempfile::tempdir().unwrap();
+    let conf_dir = home.path().join("xv");
+    std::fs::create_dir_all(&conf_dir).unwrap();
+    // Every field lacking `#[serde(default)]` on `Config` must be present —
+    // matching the fixture pattern used above and in
+    // tests/e2e_backend_resolution.rs.
+    std::fs::write(
+        conf_dir.join("xv.conf"),
+        r#"
+backend = "local"
+debug = false
+subscription_id = ""
+default_vault = "default"
+default_resource_group = ""
+default_location = ""
+tenant_id = ""
+output_json = false
+no_color = true
+
+[local]
+store_path = "/tmp/xv-store"
+key_file = "/tmp/xv-key.txt"
+default_vault = "default"
+"#,
+    )
+    .unwrap();
+
+    let out = xv(&["backend", "add", "local"], home.path());
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!out.status.success(), "reconfigure needs confirmation");
+    assert!(text.contains("--yes"), "should name the skip flag: {text}");
+}

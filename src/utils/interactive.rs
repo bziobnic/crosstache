@@ -115,7 +115,6 @@ impl Default for InteractivePrompt {
 /// mirroring `src/schedule/`, which is tested against a fake `CommandRunner`
 /// so no test registers a real OS job. `input_text_validated` is absent
 /// deliberately: it is generic over a closure and so not object-safe.
-#[allow(dead_code)]
 pub trait Prompter {
     fn confirm(&self, message: &str, default: bool) -> Result<bool>;
     fn input_text(&self, message: &str, default: Option<&str>) -> Result<String>;
