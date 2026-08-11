@@ -23,10 +23,6 @@ impl BackendType {
             Self::Aws => "aws",
         }
     }
-
-    // Consumed by `xv backend ls` in Task 5.
-    #[allow(dead_code)]
-    pub const ALL: [BackendType; 3] = [BackendType::Local, BackendType::Azure, BackendType::Aws];
 }
 
 impl std::str::FromStr for BackendType {

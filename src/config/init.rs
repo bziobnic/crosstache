@@ -5,7 +5,7 @@
 
 use crate::auth::provider::{AzureAuthProvider, DefaultAzureCredentialProvider};
 use crate::config::backend_ops::{add_backend, configured_backends, BackendType};
-use crate::config::settings::Config;
+use crate::config::settings::{load_config_no_validation, Config};
 use crate::config::setup::{atomic_save_config, build_setup_config, SetupRequest};
 use crate::error::{CrosstacheError, Result};
 use crate::utils::azure_detect::{AzureDetector, AzureEnvironment, AzureSubscription};
@@ -75,7 +75,11 @@ impl ConfigInitializer {
 
         // Loading the existing config means init no longer silently discards
         // other backends — but it can still replace the selected one, so ask.
-        let existing = Config::load().await.unwrap_or_default();
+        // `load_config_no_validation` is used deliberately: a full `Config::load()`
+        // validates only the *active* backend, so an incomplete active backend
+        // (e.g. Azure with no subscription_id) would make `load()` fail and
+        // `unwrap_or_default()` would then discard every other configured block.
+        let existing = load_config_no_validation().await.unwrap_or_default();
         if configured_backends(&existing).contains(&chosen) {
             let proceed = self.prompt.confirm(
                 &format!(
@@ -91,11 +95,11 @@ impl ConfigInitializer {
         }
 
         if backend_index == 1 {
-            return self.run_local_setup().await;
+            return self.run_local_setup(existing).await;
         }
 
         if backend_index == 2 {
-            return self.run_aws_setup().await;
+            return self.run_aws_setup(existing).await;
         }
 
         // Azure flow (unchanged)
@@ -182,7 +186,10 @@ impl ConfigInitializer {
     }
 
     /// Run the simplified local backend setup (3 steps).
-    async fn run_local_setup(&self) -> Result<Config> {
+    ///
+    /// `base` is the caller's already-loaded existing config (via
+    /// `load_config_no_validation`), so other configured backends survive.
+    async fn run_local_setup(&self, base: Config) -> Result<Config> {
         // Step 1: Store path
         println!();
         output::step("Step 1/3: Store Location");
@@ -220,7 +227,6 @@ impl ConfigInitializer {
             key_file: key_file.clone().into(),
             vault: default_vault.clone(),
         };
-        let base = Config::load().await.unwrap_or_default();
         let progress = ProgressIndicator::new("Setting up local backend...");
         let config = add_backend(&request, base, true).await?;
         progress.finish_success("Local backend initialized");
@@ -264,7 +270,10 @@ impl ConfigInitializer {
     }
 
     /// Run the simplified AWS backend setup.
-    async fn run_aws_setup(&self) -> Result<Config> {
+    ///
+    /// `base` is the caller's already-loaded existing config (via
+    /// `load_config_no_validation`), so other configured backends survive.
+    async fn run_aws_setup(&self, base: Config) -> Result<Config> {
         let mut init_config = InitConfig {
             subscription_id: String::new(),
             tenant_id: String::new(),
@@ -293,7 +302,6 @@ impl ConfigInitializer {
             profile: init_config.aws_profile.clone(),
             vault_prefix: aws_default_vault.clone(),
         };
-        let base = Config::load().await.unwrap_or_default();
         let config = add_backend(&request, base, true).await?;
 
         self.save_config(&config).await?;
