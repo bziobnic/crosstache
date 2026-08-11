@@ -3,6 +3,7 @@
 use crate::config::backend_ops::{configured_backends, BackendType};
 use crate::config::settings::Config;
 use crate::error::Result;
+use crate::utils::output;
 
 /// Where a backend's secrets live, for the `ls` listing.
 fn location(backend: BackendType, config: &Config) -> String {
@@ -29,11 +30,10 @@ fn location(backend: BackendType, config: &Config) -> String {
 pub(crate) async fn execute_backend_ls(config: Config) -> Result<()> {
     let configured = configured_backends(&config);
     if configured.is_empty() {
-        // Unlike output::info (stderr), this listing is `ls`'s data output,
-        // so the "nothing configured" line goes to stdout alongside the
-        // per-backend rows below — consistent within this command, and
-        // scriptable (`xv backend ls | grep -q 'No backends'`).
-        println!("No backends configured. Run `xv init` to configure one.");
+        // Matches every sibling list-style empty-state message in this repo
+        // (vault_ops, secret_ops, file_ops, ...): guidance/chrome goes to
+        // stderr via output::info, keeping stdout reserved for data rows.
+        output::info("No backends configured. Run `xv init` to configure one.");
         return Ok(());
     }
 

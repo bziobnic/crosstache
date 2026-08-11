@@ -32,7 +32,9 @@ fn context_path(home: &std::path::Path) -> std::path::PathBuf {
 fn backend_ls_reports_nothing_configured_on_a_fresh_config() {
     let home = tempfile::tempdir().unwrap();
     let out = xv(&["backend", "ls"], home.path());
-    let text = String::from_utf8_lossy(&out.stdout);
+    // Guidance/chrome (no data to show) goes to stderr, matching every
+    // sibling list-style empty-state message in this codebase (output::info).
+    let text = String::from_utf8_lossy(&out.stderr);
     assert!(
         text.contains("No backends configured"),
         "unexpected output: {text}"
