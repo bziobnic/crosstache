@@ -1411,7 +1411,7 @@ async fn load_cx_context(local: bool) -> Result<crate::config::ContextManager> {
 /// the write/read verb bugs fixed earlier in this PR. There is no override
 /// flag in v1: editing `.xv.toml` directly is the explicit, deliberate
 /// path (same reasoning as `context use`'s guard just above).
-async fn guard_against_project_vaults_overlay(config: &Config) -> Result<()> {
+pub(crate) async fn guard_against_project_vaults_overlay(config: &Config) -> Result<()> {
     let cwd = std::env::current_dir()?;
     if let Some((path, proj_cfg)) = crate::config::project::find_project_config(&cwd).await? {
         if let Some((env_name, profile)) =

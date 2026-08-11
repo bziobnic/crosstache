@@ -99,6 +99,29 @@ pub struct AwsConfig {
     pub s3_bucket: Option<String>,
 }
 
+/// Azure Key Vault settings.
+///
+/// Azure historically had no block of its own — its settings *are* the
+/// top-level `subscription_id` / `tenant_id` / `default_vault` /
+/// `default_resource_group` / `default_location` fields. That works for a
+/// single-backend config but not once backends coexist, because
+/// `default_vault` is global and single-valued. This block gives Azure its own
+/// home; the top-level fields remain the legacy fallback and the mirror for
+/// whichever backend is active.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AzureConfig {
+    #[serde(default)]
+    pub subscription_id: Option<String>,
+    #[serde(default)]
+    pub tenant_id: Option<String>,
+    #[serde(default)]
+    pub default_vault: Option<String>,
+    #[serde(default)]
+    pub resource_group: Option<String>,
+    #[serde(default)]
+    pub location: Option<String>,
+}
+
 /// A named backend entry in `Config.named_backends`. Each entry is a
 /// fully-self-contained backend configuration tagged with its type.
 ///
@@ -255,6 +278,11 @@ pub struct Config {
     #[tabled(skip)]
     #[serde(default)]
     pub aws: Option<AwsConfig>,
+    /// Configuration for the Azure Key Vault backend. Absent in configs
+    /// written before this block existed — see [`Config::azure_settings`].
+    #[tabled(skip)]
+    #[serde(default)]
+    pub azure: Option<AzureConfig>,
     /// Named backend instances for multi-region / multi-tenant use.
     /// Active backend selected via `Config.backend` matching a key here.
     #[tabled(skip)]
@@ -370,6 +398,7 @@ impl Default for Config {
             azure_credential_priority: AzureCredentialType::Default,
             local: None,
             aws: None,
+            azure: None,
             named_backends: std::collections::HashMap::new(),
             clipboard_timeout: default_clipboard_timeout(),
             gen_default_charset: None,
@@ -392,11 +421,30 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         let backend = self.effective_backend_name();
         if backend == "azure" {
-            if self.subscription_id.is_empty() {
-                return Err(CrosstacheError::config("Subscription ID is required"));
-            }
-            if self.tenant_id.is_empty() {
-                return Err(CrosstacheError::config("Tenant ID is required"));
+            // `effective_backend_name()` defaults to "azure" when `self.backend`
+            // is `None` — that's the fallback for a genuinely fresh/unconfigured
+            // config, not a declaration that Azure is the intended backend.
+            // Only demand Azure credentials when Azure was actually asked for:
+            // `backend` explicitly set to `"azure"`, or real Azure configuration
+            // (an `[azure]` block, or a non-empty legacy top-level
+            // subscription/tenant ID) is present. `default_resource_group` and
+            // `default_location` are deliberately excluded here: they carry
+            // non-empty defaults ("Vaults"/"eastus", see `impl Default for
+            // Config`) on every config, azure-backed or not, so they are not a
+            // signal of intent. A `None` backend with no Azure config at all
+            // (e.g. right after removing the last remaining backend) must
+            // validate cleanly and leave the config backend-less.
+            let azure_requested = self.backend.as_deref() == Some("azure");
+            let has_azure_config = self.azure.is_some()
+                || !self.subscription_id.is_empty()
+                || !self.tenant_id.is_empty();
+            if azure_requested || has_azure_config {
+                if self.subscription_id.is_empty() {
+                    return Err(CrosstacheError::config("Subscription ID is required"));
+                }
+                if self.tenant_id.is_empty() {
+                    return Err(CrosstacheError::config("Tenant ID is required"));
+                }
             }
         }
         if backend == "aws" {
@@ -413,6 +461,32 @@ impl Config {
             }
         }
         Ok(())
+    }
+
+    /// Azure settings with block-then-top-level precedence.
+    ///
+    /// Returns the `[azure]` block when present; otherwise synthesizes one
+    /// from the legacy top-level fields so pre-block configs behave
+    /// identically. Empty top-level strings resolve to `None` rather than
+    /// `Some("")`.
+    pub fn azure_settings(&self) -> AzureConfig {
+        if let Some(azure) = &self.azure {
+            return azure.clone();
+        }
+        let non_empty = |value: &str| {
+            if value.is_empty() {
+                None
+            } else {
+                Some(value.to_string())
+            }
+        };
+        AzureConfig {
+            subscription_id: non_empty(&self.subscription_id),
+            tenant_id: non_empty(&self.tenant_id),
+            default_vault: non_empty(&self.default_vault),
+            resource_group: non_empty(&self.default_resource_group),
+            location: non_empty(&self.default_location),
+        }
     }
 
     pub fn get_config_path() -> Result<PathBuf> {
@@ -745,8 +819,19 @@ pub async fn load_config() -> Result<Config> {
     Ok(config)
 }
 
-/// Load configuration without validation (for init and config commands)
-pub async fn load_config_no_validation() -> Result<Config> {
+/// Load the on-disk config file, with no environment-variable overrides and
+/// no dispatch-resolved `.backend` applied.
+///
+/// `load_config_no_validation` folds in `apply_environment_overrides` (so
+/// `XV_BACKEND` etc. win), which is correct for READ-ONLY callers that want
+/// this invocation's effective settings. It is WRONG for any caller that will
+/// **save** the result back to disk: `XV_BACKEND=aws` would round-trip into
+/// the saved file as `backend = "aws"`, permanently overwriting the user's
+/// real on-disk backend — the same class of bug fixed for the CLI/profile
+/// dispatch config (see `execute_backend_add`'s doc comment) arriving through
+/// the environment instead. Anything that reads-then-saves config (`xv
+/// backend add`, `xv backend rm`) must use this instead.
+pub(crate) async fn load_config_file_only() -> Result<Config> {
     let mut config = Config::default();
 
     // Load from configuration file if it exists
@@ -754,6 +839,13 @@ pub async fn load_config_no_validation() -> Result<Config> {
     if config_path.exists() {
         config = load_from_file(&config_path).await?;
     }
+
+    Ok(config)
+}
+
+/// Load configuration without validation (for init and config commands)
+pub async fn load_config_no_validation() -> Result<Config> {
+    let mut config = load_config_file_only().await?;
 
     // Override with environment variables
     apply_environment_overrides(&mut config);
@@ -1121,6 +1213,109 @@ mod tests {
             ..Default::default()
         };
         assert!(cfg.validate().is_ok());
+    }
+
+    /// A genuinely fresh/unconfigured config (no backend chosen, no Azure
+    /// config of any kind) must validate cleanly. Before the fix,
+    /// `effective_backend_name()` defaulting to `"azure"` made `validate()`
+    /// demand Azure credentials for a config that never asked for Azure at
+    /// all — the exact failure `xv backend rm <sole-backend>` hit when it
+    /// cleared `backend` back to `None`.
+    #[test]
+    fn validate_passes_for_a_fully_unconfigured_default_config() {
+        assert!(Config::default().validate().is_ok());
+    }
+
+    /// Guards against over-broadening the fix above: an *explicitly*
+    /// requested azure backend with no credentials must still fail, exactly
+    /// as before.
+    #[test]
+    fn validate_still_requires_credentials_for_an_explicit_azure_backend() {
+        let cfg = Config {
+            backend: Some("azure".into()),
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("Subscription ID"), "got: {err}");
+    }
+
+    /// An `[azure]` block being present is itself a declaration of intent,
+    /// even with `backend` left unset (legacy configs predate the `backend`
+    /// field) — it must still be held to the credential requirement.
+    #[test]
+    fn validate_still_requires_credentials_when_an_azure_block_is_present() {
+        let cfg = Config {
+            backend: None,
+            azure: Some(AzureConfig {
+                subscription_id: None,
+                tenant_id: None,
+                default_vault: None,
+                resource_group: None,
+                location: None,
+            }),
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("Subscription ID"), "got: {err}");
+    }
+
+    /// A config written before the [azure] block existed must resolve exactly as
+    /// it always did. This is the back-compat guarantee for every config file in
+    /// the wild.
+    #[test]
+    fn azure_settings_fall_back_to_top_level_fields() {
+        let cfg: Config = toml::from_str(
+            r#"
+debug = false
+subscription_id = "sub-123"
+tenant_id = "tenant-456"
+default_vault = "legacy-vault"
+default_resource_group = "rg-legacy"
+default_location = "eastus"
+output_json = false
+no_color = false
+"#,
+        )
+        .unwrap();
+
+        assert!(cfg.azure.is_none(), "no [azure] block in a legacy config");
+        let azure = cfg.azure_settings();
+        assert_eq!(azure.subscription_id.as_deref(), Some("sub-123"));
+        assert_eq!(azure.tenant_id.as_deref(), Some("tenant-456"));
+        assert_eq!(azure.default_vault.as_deref(), Some("legacy-vault"));
+        assert_eq!(azure.resource_group.as_deref(), Some("rg-legacy"));
+        assert_eq!(azure.location.as_deref(), Some("eastus"));
+    }
+
+    /// When the block is present it wins, so Azure keeps its own vault even when
+    /// another backend owns the shared top-level default_vault.
+    #[test]
+    fn azure_block_takes_precedence_over_top_level() {
+        let cfg: Config = toml::from_str(
+            r#"
+backend = "local"
+debug = false
+subscription_id = ""
+default_vault = "local-vault"
+default_resource_group = "Vaults"
+default_location = "eastus"
+tenant_id = ""
+output_json = false
+no_color = false
+
+[azure]
+subscription_id = "sub-999"
+tenant_id = "tenant-999"
+default_vault = "azure-vault"
+resource_group = "rg-9"
+location = "westus2"
+"#,
+        )
+        .unwrap();
+
+        let azure = cfg.azure_settings();
+        assert_eq!(azure.default_vault.as_deref(), Some("azure-vault"));
+        assert_eq!(azure.subscription_id.as_deref(), Some("sub-999"));
     }
 
     #[test]

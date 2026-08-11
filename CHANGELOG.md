@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Backends can now be added and removed after setup.** `xv backend add`,
+  `xv backend rm`, and `xv backend ls` manage configured backends, so a local
+  store and a cloud vault can coexist instead of `xv init` replacing whichever
+  was there. `xv backend rm` is config-only by default; `--purge` additionally
+  deletes the local store and age key (local backend only, and unrecoverable —
+  the age identity is deleted too).
+- **Azure has an `[azure]` config block.** Configs written before this change
+  keep working unchanged — the top-level Azure fields remain the fallback.
+
 ## v0.36.2 — Drawer close box and readable muted text (2026-08-10)
 
 ### Added
