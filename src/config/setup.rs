@@ -208,9 +208,26 @@ fn persisted_path(path: &Path, field: &str) -> Result<String> {
     Ok(value.to_string())
 }
 
-/// Build a validated candidate configuration without filesystem or backend
-/// side effects.
-pub fn build_setup_config(request: &SetupRequest, mut base: Config) -> Result<Config> {
+/// Reset every backend block, so exactly one backend is configured after the
+/// following `apply_backend`. This preserves `build_setup_config`'s historic
+/// mutually-exclusive contract for the desktop setup service.
+fn clear_backend_blocks(base: &mut Config) {
+    base.backend = None;
+    base.local = None;
+    base.aws = None;
+    base.subscription_id.clear();
+    base.tenant_id.clear();
+    base.default_resource_group.clear();
+    base.default_location.clear();
+    base.blob_config = None;
+}
+
+/// Validate `request` and write **only** its own backend block into `base`.
+///
+/// Additive by contract: a previously configured backend is left untouched, so
+/// `xv backend add` can add a second backend without erasing the first. Use
+/// [`build_setup_config`] when exactly one backend should survive.
+pub fn apply_backend(request: &SetupRequest, base: &mut Config) -> Result<()> {
     match request {
         SetupRequest::Local {
             store_path,
@@ -232,16 +249,7 @@ pub fn build_setup_config(request: &SetupRequest, mut base: Config) -> Result<Co
             };
             crate::backend::local::config::ResolvedLocalConfig::from_raw(Some(&local))
                 .validate()?;
-
-            base.backend = Some("local".into());
             base.local = Some(local);
-            base.aws = None;
-            base.subscription_id.clear();
-            base.tenant_id.clear();
-            base.default_vault = vault.clone();
-            base.default_resource_group.clear();
-            base.default_location.clear();
-            base.blob_config = None;
         }
         SetupRequest::Azure {
             subscription_id,
@@ -256,16 +264,10 @@ pub fn build_setup_config(request: &SetupRequest, mut base: Config) -> Result<Co
             required(resource_group, "Azure resource group")?;
             required(location, "Azure location")?;
 
-            // Preserve the CLI initializer's legacy representation: no
-            // explicit backend means Azure.
-            base.backend = None;
             base.subscription_id = subscription_id.clone();
             base.tenant_id = tenant_id.clone();
-            base.default_vault = vault.clone();
             base.default_resource_group = resource_group.clone();
             base.default_location = location.clone();
-            base.local = None;
-            base.aws = None;
         }
         SetupRequest::Aws {
             region,
@@ -278,7 +280,6 @@ pub fn build_setup_config(request: &SetupRequest, mut base: Config) -> Result<Co
                 required(profile, "AWS profile")?;
             }
 
-            base.backend = Some("aws".into());
             base.aws = Some(AwsConfig {
                 region: Some(region.clone()),
                 profile: profile.clone(),
@@ -286,13 +287,34 @@ pub fn build_setup_config(request: &SetupRequest, mut base: Config) -> Result<Co
                 default_vault: Some(vault_prefix.clone()),
                 s3_bucket: None,
             });
-            base.local = None;
-            base.subscription_id.clear();
-            base.tenant_id.clear();
+        }
+    }
+    Ok(())
+}
+
+/// Build a validated candidate configuration without filesystem or backend
+/// side effects.
+pub fn build_setup_config(request: &SetupRequest, mut base: Config) -> Result<Config> {
+    clear_backend_blocks(&mut base);
+    apply_backend(request, &mut base)?;
+
+    // The active backend and the shared default_vault mirror belong to the
+    // exclusive path only; `apply_backend` leaves both alone so an added
+    // backend never steals the write target.
+    match request {
+        SetupRequest::Local { vault, .. } => {
+            base.backend = Some("local".into());
+            base.default_vault = vault.clone();
+        }
+        // Preserve the CLI initializer's legacy representation: no explicit
+        // backend means Azure.
+        SetupRequest::Azure { vault, .. } => {
+            base.backend = None;
+            base.default_vault = vault.clone();
+        }
+        SetupRequest::Aws { vault_prefix, .. } => {
+            base.backend = Some("aws".into());
             base.default_vault = vault_prefix.clone();
-            base.default_resource_group.clear();
-            base.default_location.clear();
-            base.blob_config = None;
         }
     }
 
@@ -332,6 +354,60 @@ mod tests {
             key_file: root.join("key.txt"),
             vault: "default".into(),
         }
+    }
+
+    /// `apply_backend` is additive: configuring a second backend must not erase
+    /// the first. This is the whole reason the function exists — `xv backend add`
+    /// would otherwise silently wipe an existing configuration.
+    #[test]
+    fn apply_backend_keeps_previously_configured_backends() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+
+        apply_backend(&local_request(dir.path()), &mut config).unwrap();
+        apply_backend(
+            &SetupRequest::Aws {
+                region: "us-east-1".into(),
+                profile: Some("default".into()),
+                vault_prefix: "default".into(),
+            },
+            &mut config,
+        )
+        .unwrap();
+
+        assert!(
+            config.local.is_some(),
+            "local block must survive a subsequent aws apply"
+        );
+        assert!(config.aws.is_some(), "aws block must be written");
+        assert_eq!(
+            config.aws.as_ref().unwrap().region.as_deref(),
+            Some("us-east-1")
+        );
+    }
+
+    /// The exclusive wrapper keeps its old behavior: it clears siblings first.
+    #[test]
+    fn build_setup_config_still_clears_siblings() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut base = Config::default();
+        apply_backend(&local_request(dir.path()), &mut base).unwrap();
+
+        let config = build_setup_config(
+            &SetupRequest::Aws {
+                region: "us-east-1".into(),
+                profile: None,
+                vault_prefix: "default".into(),
+            },
+            base,
+        )
+        .unwrap();
+
+        assert!(
+            config.local.is_none(),
+            "build_setup_config must remain mutually exclusive"
+        );
+        assert!(config.aws.is_some());
     }
 
     struct InspectingVerifier {
