@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.37.1 — Backend lifecycle fixes (2026-08-11)
+
+### Fixed
+
+- **`xv backend add azure` can select an existing vault.** Declining to create a
+  new vault ended the flow with "a vault is required for the azure backend"
+  instead of offering the vaults already in the chosen resource group. The
+  prompt now lists them, with entering a name by hand and creating a new one as
+  the other choices.
+- **`[azure]`-only configs pass validation.** A config with the credentials in
+  the `[azure]` block and the top-level fields left empty passed `xv backend ls`
+  but failed `xv list` with `Configuration error: Subscription ID is required`,
+  because validation read the top-level fields directly. It now resolves through
+  `azure_settings()` like every other caller. Note the block still takes
+  precedence as a whole, not field by field — a partial `[azure]` block shadows
+  the top-level fields entirely and is rejected at validation.
+- **Clipboard tests no longer corrupt the heap on Windows.** Tests touching the
+  real system clipboard now serialize on a lock in the test code. They had
+  relied on a `--test-threads=1` note that nothing enforced, so CI's plain
+  `cargo test` opened concurrent handles to the single global Win32 clipboard
+  and failed with `STATUS_HEAP_CORRUPTION` (`0xc0000374`).
+
 ## v0.37.0 — Backend lifecycle (2026-08-11)
 
 ### Added
