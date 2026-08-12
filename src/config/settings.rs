@@ -439,10 +439,24 @@ impl Config {
                 || !self.subscription_id.is_empty()
                 || !self.tenant_id.is_empty();
             if azure_requested || has_azure_config {
-                if self.subscription_id.is_empty() {
+                // Resolve through `azure_settings()` rather than reading the
+                // top-level fields directly, so validation agrees with the
+                // resolver every other caller uses. Reading top-level here made
+                // a config that carries its credentials in the `[azure]` block
+                // fail every command that needed the backend, even though
+                // `azure_settings()` resolved it fine — `xv backend ls` worked
+                // and `xv list` did not.
+                //
+                // Note `azure_settings()` has whole-block precedence: a present
+                // `[azure]` block shadows the top-level fields entirely. So a
+                // partial block that omits the credentials now fails here
+                // instead of resolving to `None` later at the call site, which
+                // is the earlier and clearer place to notice it.
+                let azure = self.azure_settings();
+                if azure.subscription_id.is_none() {
                     return Err(CrosstacheError::config("Subscription ID is required"));
                 }
-                if self.tenant_id.is_empty() {
+                if azure.tenant_id.is_none() {
                     return Err(CrosstacheError::config("Tenant ID is required"));
                 }
             }
@@ -1229,6 +1243,53 @@ mod tests {
     /// Guards against over-broadening the fix above: an *explicitly*
     /// requested azure backend with no credentials must still fail, exactly
     /// as before.
+    #[test]
+    /// A config that carries its Azure credentials in the `[azure]` block and
+    /// leaves the legacy top-level fields empty must validate. Before this,
+    /// `validate()` read the top-level fields directly, so such a config passed
+    /// `xv backend ls` (which goes through `azure_settings()`) and then failed
+    /// `xv list` with "Subscription ID is required".
+    #[test]
+    fn validate_accepts_credentials_supplied_only_by_the_azure_block() {
+        let cfg = Config {
+            backend: None,
+            azure: Some(AzureConfig {
+                subscription_id: Some("sub-1".into()),
+                tenant_id: Some("ten-1".into()),
+                default_vault: Some("v".into()),
+                resource_group: Some("rg".into()),
+                location: Some("eastus".into()),
+            }),
+            ..Default::default()
+        };
+        cfg.validate()
+            .expect("an [azure]-only config with full credentials must validate");
+    }
+
+    /// `azure_settings()` has whole-block precedence — a present `[azure]`
+    /// block shadows the top-level fields entirely. A partial block that omits
+    /// the credentials therefore resolves to `None` at every call site, so
+    /// validation must reject it rather than let the top-level values create a
+    /// false impression that it is usable.
+    #[test]
+    fn validate_rejects_a_partial_azure_block_that_shadows_top_level_credentials() {
+        let cfg = Config {
+            backend: None,
+            subscription_id: "sub-from-top-level".into(),
+            tenant_id: "ten-from-top-level".into(),
+            azure: Some(AzureConfig {
+                subscription_id: None,
+                tenant_id: None,
+                default_vault: Some("v".into()),
+                resource_group: None,
+                location: None,
+            }),
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("Subscription ID"), "got: {err}");
+    }
+
     #[test]
     fn validate_still_requires_credentials_for_an_explicit_azure_backend() {
         let cfg = Config {
