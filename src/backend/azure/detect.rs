@@ -322,6 +322,61 @@ impl AzureDetector {
         Ok(resource_groups)
     }
 
+    /// List existing Key Vault names in a resource group.
+    ///
+    /// Used by `xv backend add azure` so a user can point at a vault they
+    /// already have instead of being forced to create one. Mirrors
+    /// [`Self::get_resource_groups`]: `az` subprocess, ARM-backed command, so
+    /// `--subscription` is honored.
+    ///
+    /// A caller that cannot list vaults (no `az`, no permission, none exist)
+    /// should fall back to asking for a name rather than failing — an empty
+    /// list and an error are both "offer manual entry" as far as setup is
+    /// concerned.
+    pub async fn get_key_vaults(
+        subscription_id: &str,
+        resource_group: &str,
+    ) -> Result<Vec<String>> {
+        let output = Command::new(az_program())
+            .args([
+                "keyvault",
+                "list",
+                "--subscription",
+                subscription_id,
+                "--resource-group",
+                resource_group,
+                "--query",
+                "[].name",
+                "--output",
+                "json",
+            ])
+            .output()
+            .map_err(|e| CrosstacheError::config(format!("Failed to execute Azure CLI: {e}")))?;
+
+        if !output.status.success() {
+            let error_msg = String::from_utf8_lossy(&output.stderr);
+            return Err(CrosstacheError::config(format!(
+                "Failed to list key vaults: {error_msg}"
+            )));
+        }
+
+        let output_str = String::from_utf8_lossy(&output.stdout);
+        let vaults_json: Value = serde_json::from_str(&output_str)
+            .map_err(|e| CrosstacheError::serialization(format!("Failed to parse vaults: {e}")))?;
+
+        let mut vaults = Vec::new();
+        if let Some(vaults_array) = vaults_json.as_array() {
+            for vault in vaults_array {
+                if let Some(name) = vault.as_str() {
+                    vaults.push(name.to_string());
+                }
+            }
+        }
+
+        vaults.sort();
+        Ok(vaults)
+    }
+
     /// Get available locations for a subscription
     ///
     /// Goes through the ARM REST endpoint rather than `az account

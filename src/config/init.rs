@@ -15,6 +15,35 @@ use crate::vault::manager::VaultManager;
 use crate::vault::models::VaultCreateRequest;
 use std::sync::Arc;
 
+/// What the user picked from the vault list in `configure_vault_selection`.
+#[derive(Debug, PartialEq, Eq)]
+enum VaultChoice {
+    /// An existing vault, by name.
+    Existing(String),
+    /// Name a vault that exists but was not listed (other resource group, or
+    /// not visible to this identity).
+    EnterName,
+    /// Create a new vault.
+    CreateNew,
+}
+
+/// Map a selection index back to what it means.
+///
+/// The picker shows the existing vault names followed by two sentinel entries,
+/// so the index arithmetic is the part that is easy to get wrong — an
+/// off-by-one here would silently hand back the wrong vault, which is why this
+/// is a pure function with its own tests rather than inline `if`s.
+fn vault_choice(existing: &[String], selected: usize) -> VaultChoice {
+    match selected.checked_sub(existing.len()) {
+        None => VaultChoice::Existing(existing[selected].clone()),
+        Some(0) => VaultChoice::EnterName,
+        // Anything past the two sentinels can only come from a picker that
+        // disagrees with the list it was given; treat it as "create" rather
+        // than indexing out of bounds.
+        Some(_) => VaultChoice::CreateNew,
+    }
+}
+
 /// Interactive configuration initialization
 pub struct ConfigInitializer {
     prompt: Box<dyn Prompter>,
@@ -330,17 +359,9 @@ impl ConfigInitializer {
             progress.finish_success(&format!("Created resource group '{resource_group}'"));
         }
 
-        let vault = loop {
-            match self
-                .configure_vault_creation(&subscription, &resource_group, &location)
-                .await?
-            {
-                Some(vault) => break vault,
-                None => output::error(
-                    "A vault is required to add the Azure backend; please create one.",
-                ),
-            }
-        };
+        let vault = self
+            .configure_vault_selection(&subscription, &resource_group, &location)
+            .await?;
 
         Ok(SetupRequest::Azure {
             subscription_id: subscription.id,
@@ -999,6 +1020,82 @@ impl ConfigInitializer {
     }
 
     /// Configure optional vault creation
+    /// Choose the vault for `xv backend add azure`.
+    ///
+    /// Unlike [`Self::configure_vault_creation`] — the `xv init` bootstrap
+    /// prompt, which only offers to *create* a "test vault to get started" —
+    /// adding a backend usually means pointing at a Key Vault that already
+    /// exists, so existing vaults are offered first. Mirrors the shape of
+    /// [`Self::configure_resource_group`], which already works this way.
+    ///
+    /// Always terminates: every branch either returns a name or propagates an
+    /// error. An earlier version looped on "a vault is required; please create
+    /// one" with no way out but Ctrl-C when the user declined creation.
+    async fn configure_vault_selection(
+        &self,
+        subscription: &AzureSubscription,
+        resource_group: &str,
+        location: &str,
+    ) -> Result<String> {
+        // Listing is best-effort: no `az`, no permission, or simply no vaults
+        // all mean the same thing here — fall through to naming one.
+        let existing = AzureDetector::get_key_vaults(&subscription.id, resource_group)
+            .await
+            .unwrap_or_default();
+
+        const ENTER_NAME: &str = "Enter the name of an existing vault not listed above";
+        const CREATE_NEW: &str = "Create a new vault";
+
+        if !existing.is_empty() {
+            output::info(&format!(
+                "Found {} existing key vault(s) in resource group '{resource_group}'",
+                existing.len()
+            ));
+
+            let mut options = existing.clone();
+            options.push(ENTER_NAME.to_string());
+            options.push(CREATE_NEW.to_string());
+
+            let selected = self.prompt.select("Select a vault", &options, Some(0))?;
+            match vault_choice(&existing, selected) {
+                VaultChoice::Existing(name) => return Ok(name),
+                VaultChoice::EnterName => return self.prompt_existing_vault_name(),
+                VaultChoice::CreateNew => {} // fall through to the create flow below
+            }
+        } else {
+            output::info(&format!(
+                "No key vaults found in resource group '{resource_group}' \
+                 (or they could not be listed)"
+            ));
+            if !self.prompt.confirm("Create a new vault?", true)? {
+                return self.prompt_existing_vault_name();
+            }
+        }
+
+        let default_vault_name = SetupHelper::generate_default_vault_name();
+        let vault_name = self.validated_prompt.input_text_validated(
+            "Enter new vault name",
+            Some(&default_vault_name),
+            SetupHelper::validate_vault_name,
+        )?;
+        self.create_test_vault(&vault_name, subscription, resource_group, location)
+            .await?;
+        Ok(vault_name)
+    }
+
+    /// Ask for the name of a vault that already exists, without creating it.
+    ///
+    /// The name is only shape-validated here; whether the vault actually exists
+    /// and is reachable surfaces on first use, the same as for any other
+    /// configured backend.
+    fn prompt_existing_vault_name(&self) -> Result<String> {
+        self.validated_prompt.input_text_validated(
+            "Enter the existing vault name",
+            None,
+            SetupHelper::validate_vault_name,
+        )
+    }
+
     async fn configure_vault_creation(
         &self,
         subscription: &AzureSubscription,
@@ -1252,6 +1349,50 @@ impl Default for ConfigInitializer {
 mod tests {
     use super::*;
     use crate::utils::interactive::{Answer, ScriptedPrompter};
+
+    /// `xv backend add azure` must let a user point at a Key Vault they
+    /// already have. Selecting any listed vault returns that exact name —
+    /// an off-by-one against the two trailing sentinels would silently
+    /// configure the wrong vault.
+    #[test]
+    fn selecting_a_listed_vault_returns_that_vault() {
+        let existing = vec!["kv-alpha".to_string(), "kv-beta".to_string()];
+        assert_eq!(
+            vault_choice(&existing, 0),
+            VaultChoice::Existing("kv-alpha".into())
+        );
+        assert_eq!(
+            vault_choice(&existing, 1),
+            VaultChoice::Existing("kv-beta".into())
+        );
+    }
+
+    /// The two entries after the vault names are the escape hatches: name an
+    /// unlisted vault, or create a new one.
+    #[test]
+    fn the_trailing_entries_are_enter_name_then_create_new() {
+        let existing = vec!["kv-alpha".to_string(), "kv-beta".to_string()];
+        assert_eq!(vault_choice(&existing, 2), VaultChoice::EnterName);
+        assert_eq!(vault_choice(&existing, 3), VaultChoice::CreateNew);
+    }
+
+    /// With nothing listed, index 0 is the first sentinel, not a vault —
+    /// the branch that used to dead-end on "a vault is required".
+    #[test]
+    fn with_no_listed_vaults_the_first_entry_is_not_a_vault() {
+        assert_eq!(vault_choice(&[], 0), VaultChoice::EnterName);
+        assert_eq!(vault_choice(&[], 1), VaultChoice::CreateNew);
+    }
+
+    /// A picker returning an index past the sentinels must not panic on an
+    /// out-of-bounds slice index.
+    #[test]
+    fn an_out_of_range_selection_does_not_panic() {
+        assert_eq!(
+            vault_choice(&["kv".to_string()], 99),
+            VaultChoice::CreateNew
+        );
+    }
 
     /// This is the justification for the `Prompter` seam: drive
     /// `collect_local_request` through scripted answers instead of a real

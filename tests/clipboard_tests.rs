@@ -1,9 +1,13 @@
 //! Tests for clipboard functionality: arboard integration, configurable timeout,
 //! and detached process clipboard clearing.
 //!
-//! NOTE: Clipboard tests must run single-threaded to avoid segfaults from
-//! concurrent clipboard access:
-//!   cargo test --test clipboard_tests -- --test-threads=1
+//! Tests that touch the real system clipboard serialize on [`clipboard_guard`].
+//! This used to be a note asking for `--test-threads=1`, but nothing enforced
+//! it — CI runs a plain `cargo test`, so two `arboard::Clipboard` handles opened
+//! concurrently would corrupt the process heap on Windows
+//! (`STATUS_HEAP_CORRUPTION` / exit code `0xc0000374`). The Win32 clipboard is a
+//! single global resource, so the serialization has to live in the code rather
+//! than in how the suite happens to be invoked.
 
 #[cfg(target_os = "macos")]
 use std::process::Command;
@@ -38,6 +42,18 @@ fn set_clipboard(text: &str) {
     child.wait().unwrap();
 }
 
+/// Serializes every test that touches the real system clipboard.
+static CLIPBOARD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Take the clipboard lock for the duration of a test.
+///
+/// Poisoning is deliberately ignored: a panicking clipboard test must fail on
+/// its own assertion, not cascade into every other clipboard test failing with
+/// a poison error that hides the original cause.
+fn clipboard_guard() -> std::sync::MutexGuard<'static, ()> {
+    CLIPBOARD_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 // ─── arboard basic read/write ───────────────────────────────────────────────
 
 /// Read clipboard text after `set_text`, with retries. Some hosts (CI, remote desktop,
@@ -60,6 +76,8 @@ fn arboard_get_text_after_set(
 
 #[test]
 fn test_arboard_set_and_get_text() {
+    let _clipboard_guard = clipboard_guard();
+
     let mut clipboard = match arboard::Clipboard::new() {
         Ok(c) => c,
         Err(e) => {
@@ -93,6 +111,8 @@ fn test_arboard_set_and_get_text() {
 
 #[test]
 fn test_arboard_set_empty_string() {
+    let _clipboard_guard = clipboard_guard();
+
     let mut clipboard = match arboard::Clipboard::new() {
         Ok(c) => c,
         Err(e) => {
@@ -131,6 +151,8 @@ fn test_arboard_set_empty_string() {
 #[cfg(target_os = "macos")]
 #[test]
 fn test_detached_clear_process_clears_clipboard() {
+    let _clipboard_guard = clipboard_guard();
+
     let sentinel = format!("crosstache-clear-test-{}", std::process::id());
     set_clipboard(&sentinel);
 
@@ -169,6 +191,8 @@ fn test_detached_clear_process_clears_clipboard() {
 #[cfg(target_os = "macos")]
 #[test]
 fn test_detached_process_does_not_block() {
+    let _clipboard_guard = clipboard_guard();
+
     let start = Instant::now();
 
     let child = Command::new("sh")

@@ -185,23 +185,39 @@ Whenever `xv` itself writes an `[azure]` block (via `xv init` or
 `xv backend add azure`), it also mirrors `subscription_id` and `tenant_id` to
 the top level, so an `xv`-generated config is always valid both ways.
 
-**This is not a hand-authoring recommendation.** The block is read correctly
-either way — `xv backend ls` and other config/lifecycle commands resolve the
-vault out of an `[azure]`-only config just fine, because they go through
-`azure_settings()`. But `Config::validate()` reads the top-level
-`subscription_id`/`tenant_id` directly and never consults `azure_settings()`,
-and validation runs for any command that actually needs a backend. So if you
-hand-write a config with *only* an `[azure]` block and leave the top-level
-`subscription_id`/`tenant_id` empty, `xv backend ls` still works, but
-`xv list` (or any other command that talks to the backend) fails with:
+An `[azure]`-only config — the block filled in, the top-level fields left
+empty — is supported. Validation resolves through `azure_settings()` like
+every other caller, so the block alone is enough:
 
-```
-error[xv-config-invalid]: Configuration error: Subscription ID is required
+```toml
+# No top-level subscription_id/tenant_id needed.
+[azure]
+subscription_id = "00000000-0000-0000-0000-000000000000"
+tenant_id       = "11111111-1111-1111-1111-111111111111"
+default_vault   = "my-vault"
 ```
 
-This is a known gap, not a supported form. Keep the `[azure]` block as what
-`xv` itself writes and reads, and keep the top-level `subscription_id`/
-`tenant_id` present in any config you edit by hand.
+(In v0.37.0 this form passed `xv backend ls` but failed `xv list` with
+`Configuration error: Subscription ID is required`, because validation read
+the top-level fields directly instead of resolving through the block.)
+
+One thing to know if you hand-edit: **the `[azure]` block takes precedence as a
+whole, not field by field.** When the block is present, `azure_settings()`
+reads it and does not fall back to the top-level fields for anything. So a
+partial block shadows them:
+
+```toml
+subscription_id = "..."   # ignored — the block below wins
+tenant_id       = "..."   # ignored
+
+[azure]
+default_vault = "my-vault"   # subscription_id/tenant_id missing here
+```
+
+That config is rejected at validation with `Subscription ID is required`,
+rather than silently resolving to nothing later. Either put the credentials in
+the block, or leave the block out and use the top-level fields — do not split
+them across both.
 
 ## One instance per type — `named_backends` for more
 
