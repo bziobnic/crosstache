@@ -2,8 +2,12 @@
 
 mod common;
 
+use data_encoding::BASE32_NOPAD;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use std::path::Path;
 use std::process::{Command, Output};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const SEED: &str = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
 
@@ -48,6 +52,73 @@ fn assert_numeric_code(output: &Output, digits: usize) {
     );
 }
 
+fn unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock after Unix epoch")
+        .as_secs()
+}
+
+fn sha256_totp_at(seed: &str, unix_seconds: u64, period: u64, digits: u32) -> String {
+    let key = BASE32_NOPAD
+        .decode(seed.as_bytes())
+        .expect("valid Base32 seed");
+    let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC accepts key");
+    mac.update(&(unix_seconds / period).to_be_bytes());
+    let digest = mac.finalize().into_bytes();
+    let offset = usize::from(digest[digest.len() - 1] & 0x0f);
+    let binary = (u32::from(digest[offset] & 0x7f) << 24)
+        | (u32::from(digest[offset + 1]) << 16)
+        | (u32::from(digest[offset + 2]) << 8)
+        | u32::from(digest[offset + 3]);
+    format!(
+        "{:0width$}",
+        binary % 10_u32.pow(digits),
+        width = digits as usize
+    )
+}
+
+fn stable_sixty_second_window() -> u64 {
+    loop {
+        let now = unix_seconds();
+        if 60 - (now % 60) > 10 {
+            return now;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+fn snapshot_tree(root: &Path) -> Vec<(std::path::PathBuf, Option<Vec<u8>>)> {
+    fn visit(
+        root: &Path,
+        relative: &Path,
+        entries: &mut Vec<(std::path::PathBuf, Option<Vec<u8>>)>,
+    ) {
+        let mut children = std::fs::read_dir(root.join(relative))
+            .expect("read store tree")
+            .map(|entry| entry.expect("read store entry"))
+            .collect::<Vec<_>>();
+        children.sort_by_key(|entry| entry.file_name());
+        for child in children {
+            let child_relative = relative.join(child.file_name());
+            let path = root.join(&child_relative);
+            if child.file_type().expect("read entry type").is_dir() {
+                entries.push((child_relative.clone(), None));
+                visit(root, &child_relative, entries);
+            } else {
+                entries.push((
+                    child_relative,
+                    Some(std::fs::read(path).expect("read store file")),
+                ));
+            }
+        }
+    }
+
+    let mut entries = Vec::new();
+    visit(root, Path::new(""), &mut entries);
+    entries
+}
+
 #[test]
 fn canonical_bare_seed_generates_raw_code_only() {
     let (_cmd, temp) = common::xv_isolated_local();
@@ -61,18 +132,31 @@ fn canonical_bare_seed_generates_raw_code_only() {
 }
 
 #[test]
-fn keeper_uri_honors_eight_digits_and_sha256() {
+fn keeper_uri_honors_sha256_and_sixty_second_period() {
     let (_cmd, temp) = common::xv_isolated_local();
     let uri = format!(
         "otpauth://totp/GitHub:alice?secret={SEED}&issuer=GitHub&algorithm=SHA256&digits=8&period=60"
     );
     let set = set_record(temp.path(), "github", "one-time-code", &uri);
     assert!(set.status.success(), "stderr: {}", common::stderr_str(&set));
-    let output = xv_again(temp.path())
-        .args(["totp", "github", "-r"])
-        .output()
-        .unwrap();
-    assert_numeric_code(&output, 8);
+    for _ in 0..2 {
+        let before = stable_sixty_second_window();
+        let output = xv_again(temp.path())
+            .args(["totp", "github", "-r"])
+            .output()
+            .unwrap();
+        let after = unix_seconds();
+        if before / 60 == after / 60 {
+            assert_numeric_code(&output, 8);
+            assert_eq!(
+                common::stdout_str(&output),
+                sha256_totp_at(SEED, before, 60, 8),
+                "URI TOTP must use SHA-256 and its 60-second period"
+            );
+            return;
+        }
+    }
+    panic!("TOTP invocation crossed a 60-second boundary twice");
 }
 
 #[test]
@@ -101,6 +185,23 @@ fn explicit_field_override_uses_only_the_named_field() {
         .output()
         .unwrap();
     assert_numeric_code(&output, 6);
+}
+
+#[test]
+fn explicit_field_override_does_not_fall_back_to_another_secret_field() {
+    let (_cmd, temp) = common::xv_isolated_local();
+    let set = set_record(temp.path(), "github", "authenticator-seed", SEED);
+    assert!(set.status.success(), "stderr: {}", common::stderr_str(&set));
+    let output = xv_again(temp.path())
+        .args(["totp", "github", "--field", "one-time-code", "--raw"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3));
+    let stderr = common::stderr_str(&output);
+    assert!(stderr.contains("one-time-code"), "{stderr}");
+    assert!(stderr.contains("authenticator-seed"), "{stderr}");
+    assert!(!stderr.contains(SEED), "{stderr}");
+    assert!(output.stdout.is_empty());
 }
 
 #[test]
@@ -218,10 +319,7 @@ fn generating_a_code_does_not_mutate_or_version_the_record() {
     let set = set_record(temp.path(), "github", "one-time-code", SEED);
     assert!(set.status.success());
     let secrets = temp.path().join("store/vaults/default/secrets");
-    let meta_path = secrets.join("github.meta.json");
-    let value_path = secrets.join("github.age");
-    let meta_before = std::fs::read(&meta_path).unwrap();
-    let value_before = std::fs::read(&value_path).unwrap();
+    let tree_before = snapshot_tree(&secrets);
 
     let output = xv_again(temp.path())
         .args(["totp", "github", "--raw"])
@@ -229,6 +327,5 @@ fn generating_a_code_does_not_mutate_or_version_the_record() {
         .unwrap();
     assert_numeric_code(&output, 6);
 
-    assert_eq!(std::fs::read(meta_path).unwrap(), meta_before);
-    assert_eq!(std::fs::read(value_path).unwrap(), value_before);
+    assert_eq!(snapshot_tree(&secrets), tree_before);
 }
