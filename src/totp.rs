@@ -96,6 +96,10 @@ fn generate_for_totp(totp: &Totp, unix_seconds: u64) -> GeneratedTotp {
     }
 }
 
+#[allow(
+    dead_code,
+    reason = "deterministic generator is exercised by unit tests"
+)]
 pub fn generate_at(material: &str, unix_seconds: u64) -> Result<GeneratedTotp> {
     let totp = parse_material(material)?;
     Ok(generate_for_totp(&totp, unix_seconds))
