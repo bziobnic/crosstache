@@ -9,6 +9,7 @@
 
 use crate::error::{CrosstacheError, Result};
 use std::collections::BTreeMap;
+use zeroize::Zeroizing;
 
 /// Content type marker that decides record-ness. Never inferred by JSON
 /// sniffing — only an exact content-type match makes a secret a record.
@@ -51,6 +52,15 @@ pub fn parse_envelope(value: &str) -> Result<BTreeMap<String, String>> {
     }
 
     Ok(fields)
+}
+
+/// Parses a record envelope into individually zeroizing sensitive values.
+pub fn parse_sensitive_envelope(value: &str) -> Result<BTreeMap<String, Zeroizing<String>>> {
+    serde_json::from_str(value).map_err(|error| {
+        CrosstacheError::config(format!(
+            "record envelope is not a JSON object of strings: {error}"
+        ))
+    })
 }
 
 /// Returns true iff `content_type` exactly matches [`RECORD_CONTENT_TYPE`].
@@ -106,5 +116,26 @@ mod tests {
         b.insert("b".to_string(), "2".to_string());
 
         assert_eq!(encode_envelope(&a).unwrap(), encode_envelope(&b).unwrap());
+    }
+
+    #[test]
+    fn sensitive_parser_returns_zeroizing_values() {
+        let mut fields = parse_sensitive_envelope(
+            r#"{"password":"hunter2","one-time-code":"GEZDGNBVGY3TQOJQ"}"#,
+        )
+        .unwrap();
+        let code = fields.remove("one-time-code").unwrap();
+        assert_eq!(code.as_str(), "GEZDGNBVGY3TQOJQ");
+        assert_eq!(fields["password"].as_str(), "hunter2");
+    }
+
+    #[test]
+    fn sensitive_parser_keeps_the_strict_object_of_strings_contract() {
+        for invalid in [r#"["value"]"#, r#"{"field":1}"#, r#"{"field":null}"#] {
+            assert!(
+                parse_sensitive_envelope(invalid).is_err(),
+                "accepted {invalid}"
+            );
+        }
     }
 }
