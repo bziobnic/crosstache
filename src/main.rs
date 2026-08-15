@@ -19,6 +19,7 @@ mod records;
 mod scan;
 mod schedule;
 mod secret;
+mod totp;
 #[cfg(feature = "tui")]
 mod tui;
 mod utils;

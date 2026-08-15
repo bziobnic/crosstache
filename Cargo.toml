@@ -2,6 +2,7 @@
 name = "crosstache"
 version = "0.37.1"
 edition = "2021"
+rust-version = "1.88"
 authors = ["crosstache Team"]
 description = "A comprehensive tool for managing secrets across Azure Key Vault, AWS Secrets Manager, and local age-encrypted storage"
 license = "MIT"
@@ -85,6 +86,7 @@ ratatui = "0.30"
 # Security
 zeroize = { version = "1.0", features = ["serde"] }
 age = "0.10"
+totp-rs = { version = "6.0.0", default-features = false, features = ["std", "otpauth", "zeroize"] }
 
 # Time handling
 chrono = { version = "0.4", features = ["serde"] }

@@ -15,6 +15,7 @@ pub mod records;
 pub mod scan;
 pub mod schedule;
 pub mod secret;
+pub mod totp;
 #[cfg(feature = "tui")]
 pub mod tui;
 pub mod utils;
