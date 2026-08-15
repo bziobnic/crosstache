@@ -632,7 +632,7 @@ then generate the current authenticator code:
 
 ```bash
 xv update github --field-secret one-time-code='otpauth://totp/GitHub:alice?secret=REDACTED_BASE32&issuer=GitHub'
-xv totp github                       # copies the code and reports seconds to expiry
+xv totp github                       # copies without printing; reports seconds to expiry
 xv totp github --raw                 # code only, with no trailing newline
 xv totp custom --field otp-seed -r   # exact custom encrypted field
 ```
@@ -640,9 +640,11 @@ xv totp custom --field otp-seed -r   # exact custom encrypted field
 `one-time-code` is the only automatic field name. xv accepts bare Base32
 (SHA-1, six digits, 30 seconds) and TOTP Key URIs carrying `algorithm`,
 `digits`, and `period`. The field must be stored with `--field-secret`; xv
-refuses a listable metadata field. Clipboard clearing happens at the earlier
-of the configured clipboard timeout and the code's expiry. The initial release
-is CLI-only; TUI and web/desktop display are future enhancements.
+refuses a listable metadata field. Default output copies the code without
+printing it and reports seconds to expiry. When clipboard clearing is enabled,
+it happens at the earlier of the configured clipboard timeout and the code's
+expiry; a clipboard timeout of `0` disables clearing. The initial release is
+CLI-only; TUI and web/desktop display are future enhancements.
 
 ### Worked example — a database record end to end
 

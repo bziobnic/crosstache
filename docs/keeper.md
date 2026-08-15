@@ -48,7 +48,7 @@ A TOTP seed is a second authentication factor, so `$oneTimeCode` is stored as
 encrypted secret material rather than as a tag. It never appears in `xv ls`:
 
 ```bash
-xv totp Facebook                         # copy the current code, show expiry
+xv totp Facebook                         # copy without printing; show expiry
 xv totp Facebook --raw                   # print only the current code
 xv get Facebook --field one-time-code    # retrieve the seed itself only when needed
 ```

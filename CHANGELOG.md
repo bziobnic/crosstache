@@ -7,9 +7,9 @@
 - **`xv totp` generates current authenticator codes from secret records.** It
   reads encrypted `one-time-code` fields by default, accepts an explicit
   `--field`, supports bare Base32 and `otpauth://totp` parameters, copies the
-  one-shot code with expiry-aware clipboard clearing, and provides code-only
-  `--raw` / `-r` output for scripts. TUI and web/desktop support remain future
-  enhancements.
+  one-shot code without printing it, with expiry-aware clipboard clearing, and
+  provides code-only `--raw` / `-r` output for scripts. TUI and web/desktop
+  support remain future enhancements.
 - **`xv ui` tells an open tab when its server goes away.** The browser polls a
   new backend-free `GET /api/health` while the tab is visible and raises a
   banner once the `xv ui` process stops answering, instead of looking healthy
