@@ -1,6 +1,6 @@
 use crate::error::{CrosstacheError, Result};
 use std::time::{SystemTime, UNIX_EPOCH};
-use totp_rs::{Builder, Secret, Totp};
+use totp_rs::{Builder, Secret, Totp, TotpError};
 use zeroize::Zeroizing;
 
 pub const DEFAULT_TOTP_FIELD: &str = "one-time-code";
@@ -48,7 +48,33 @@ fn parse_uri(material: &str) -> Result<Totp> {
     if parsed.path().trim_matches('/').is_empty() {
         return Err(invalid_material("TOTP URI account label is empty"));
     }
-    Totp::from_url(material).map_err(|error| invalid_material(error.to_string()))
+    Totp::from_url(material).map_err(invalid_uri_error)
+}
+
+fn invalid_uri_error(error: TotpError) -> CrosstacheError {
+    let message = match error {
+        TotpError::InvalidAlgorithm { .. } => "algorithm parameter is invalid",
+        TotpError::DigitsParse { .. } | TotpError::InvalidDigits { .. } => {
+            "digits parameter is invalid"
+        }
+        TotpError::StepParse { .. } | TotpError::InvalidStepZero => "period parameter is invalid",
+        TotpError::InvalidSecret | TotpError::SecretTooShort { .. } => {
+            "secret parameter is invalid"
+        }
+        TotpError::SecretNotSet => "secret parameter is missing",
+        TotpError::InvalidAccountName { .. }
+        | TotpError::AccountNameDecode { .. }
+        | TotpError::AccountNameNotSet => "account label is invalid",
+        TotpError::InvalidIssuer { .. }
+        | TotpError::IssuerDecode { .. }
+        | TotpError::IssuerMismatch { .. } => "issuer parameter is invalid",
+        TotpError::InvalidScheme { .. } | TotpError::InvalidHost { .. } => {
+            "URI must use otpauth://totp"
+        }
+        TotpError::UrlParse(_) => "TOTP URI is malformed",
+        _ => "TOTP URI parameters are invalid",
+    };
+    invalid_material(message)
 }
 
 fn parse_material(material: &str) -> Result<Totp> {
@@ -174,5 +200,42 @@ mod tests {
         let message = error_text(&material);
         assert!(!message.contains(sentinel), "{message}");
         assert!(!message.contains(&material), "{message}");
+    }
+
+    #[test]
+    fn dependency_parser_errors_never_echo_parameter_values() {
+        let sentinel = "MZXW6YTBOI======SENTINEL";
+        let materials = [
+            (
+                "malformed period",
+                format!("otpauth://totp/Test?secret={SHA1_SECRET}&period={sentinel}"),
+            ),
+            (
+                "malformed digits",
+                format!("otpauth://totp/Test?secret={SHA1_SECRET}&digits={sentinel}"),
+            ),
+            (
+                "invalid issuer",
+                format!("otpauth://totp/Test?secret={SHA1_SECRET}&issuer={sentinel}:bad"),
+            ),
+            (
+                "invalid label",
+                format!("otpauth://totp/Test:{sentinel}:bad?secret={SHA1_SECRET}"),
+            ),
+            (
+                "issuer percent-decoding",
+                format!("otpauth://totp/{sentinel}%FF:Test?secret={SHA1_SECRET}"),
+            ),
+            (
+                "label percent-decoding",
+                format!("otpauth://totp/Test:{sentinel}%FF?secret={SHA1_SECRET}"),
+            ),
+        ];
+
+        for (case, material) in materials {
+            let message = error_text(&material);
+            assert!(!message.contains(sentinel), "{case}: {message}");
+            assert!(!message.contains(&material), "{case}: {message}");
+        }
     }
 }
