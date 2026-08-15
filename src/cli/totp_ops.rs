@@ -5,7 +5,7 @@ use crate::cli::helpers::{
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
 use crate::records::{parse_sensitive_envelope, FIELD_TAG_PREFIX, RECORD_CONTENT_TYPE};
-use crate::totp::{generate_current, DEFAULT_TOTP_FIELD};
+use crate::totp::{generate_current, GeneratedTotp, DEFAULT_TOTP_FIELD};
 use crate::utils::output;
 use crate::workspace::TargetMode;
 use std::collections::HashMap;
@@ -44,6 +44,35 @@ fn write_raw(writer: &mut impl Write, code: &str) -> std::io::Result<()> {
     write!(writer, "{code}")
 }
 
+fn present_to_clipboard<C, S, F, L>(
+    name: &str,
+    generated: &GeneratedTotp,
+    clipboard_timeout: u64,
+    copy: C,
+    on_success: S,
+    on_failure: F,
+    schedule_clear: L,
+) where
+    C: FnOnce(&str) -> std::result::Result<(), String>,
+    S: FnOnce(&str),
+    F: FnOnce(&str, &str),
+    L: FnOnce(u64),
+{
+    match copy(generated.code.as_str()) {
+        Ok(()) => {
+            let policy = clipboard_policy(name, generated.expires_in_seconds, clipboard_timeout);
+            on_success(&policy.message);
+            if let Some(seconds) = policy.clear_after_seconds {
+                schedule_clear(seconds);
+            }
+        }
+        Err(error) => on_failure(
+            &format!("Failed to copy TOTP code to clipboard: {error}"),
+            "Use '--raw' to print the TOTP code to stdout instead.",
+        ),
+    }
+}
+
 fn extract_totp_material(
     name: &str,
     content_type: &str,
@@ -58,9 +87,9 @@ fn extract_totp_material(
     }
     let raw = value
         .ok_or_else(|| CrosstacheError::config(format!("secret '{name}' has no record value")))?;
-    let mut envelope = parse_sensitive_envelope(raw).map_err(|error| {
+    let mut envelope = parse_sensitive_envelope(raw).map_err(|_| {
         CrosstacheError::config(format!(
-            "secret '{name}' has an invalid record envelope: {error}"
+            "secret '{name}' has an invalid record envelope: expected a JSON object of strings"
         ))
     })?;
     if let Some(material) = envelope.remove(field) {
@@ -123,20 +152,18 @@ pub(crate) async fn execute_totp(
         return Ok(());
     }
 
-    match copy_to_clipboard(generated.code.as_str()) {
-        Ok(()) => {
-            let policy =
-                clipboard_policy(name, generated.expires_in_seconds, config.clipboard_timeout);
-            output::success(&policy.message);
-            if let Some(seconds) = policy.clear_after_seconds {
-                schedule_clipboard_clear(seconds);
-            }
-        }
-        Err(error) => {
-            output::warn(&format!("Failed to copy TOTP code to clipboard: {error}"));
-            eprintln!("Use '--raw' to print the TOTP code to stdout instead.");
-        }
-    }
+    present_to_clipboard(
+        name,
+        &generated,
+        config.clipboard_timeout,
+        copy_to_clipboard,
+        output::success,
+        |warning, hint| {
+            output::warn(warning);
+            eprintln!("{hint}");
+        },
+        schedule_clipboard_clear,
+    );
     Ok(())
 }
 
@@ -238,6 +265,37 @@ mod tests {
                 clear_after_seconds: None,
             }
         );
+    }
+
+    #[test]
+    fn clipboard_failure_never_presents_code_or_schedules_clear() {
+        let code = "731904";
+        let generated = GeneratedTotp {
+            code: Zeroizing::new(code.to_string()),
+            expires_in_seconds: 17,
+        };
+        let mut successes = Vec::new();
+        let mut failures = Vec::new();
+        let mut scheduled = Vec::new();
+
+        present_to_clipboard(
+            "github",
+            &generated,
+            30,
+            |_| Err("clipboard unavailable".to_string()),
+            |message| successes.push(message.to_string()),
+            |warning, hint| failures.push((warning.to_string(), hint.to_string())),
+            |seconds| scheduled.push(seconds),
+        );
+
+        assert!(successes.is_empty());
+        assert!(scheduled.is_empty());
+        assert_eq!(failures.len(), 1);
+        let (warning, hint) = &failures[0];
+        assert!(warning.contains("Failed to copy TOTP code to clipboard"));
+        assert!(hint.contains("--raw"));
+        assert!(!warning.contains(code), "{warning}");
+        assert!(!hint.contains(code), "{hint}");
     }
 
     #[test]

@@ -33,6 +33,53 @@ fn set_record(temp: &Path, name: &str, field: &str, material: &str) -> Output {
         .unwrap()
 }
 
+fn overwrite_record_envelope(temp: &Path, name: &str, envelope: &str) {
+    let store_path = temp.join("store");
+    let key_file = temp.join("key.txt");
+    let local_config = crosstache::config::settings::LocalConfig {
+        store_path: Some(store_path.to_string_lossy().to_string()),
+        key_file: Some(key_file.to_string_lossy().to_string()),
+        default_vault: Some("default".to_string()),
+        encrypt_metadata: None,
+        opaque_filenames: None,
+        audit: None,
+        git: None,
+    };
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        use crosstache::backend::local::LocalBackend;
+        use crosstache::backend::Backend;
+        use crosstache::secret::manager::SecretRequest;
+
+        let backend = LocalBackend::new(Some(&local_config)).expect("open local backend");
+        let existing = backend
+            .secrets()
+            .get_secret("default", name, false)
+            .await
+            .expect("get existing record");
+        backend
+            .secrets()
+            .set_secret(
+                "default",
+                SecretRequest {
+                    name: name.to_string(),
+                    value: zeroize::Zeroizing::new(envelope.to_string()),
+                    content_type: Some("application/vnd.xv.record".to_string()),
+                    enabled: Some(true),
+                    expires_on: None,
+                    not_before: None,
+                    tags: Some(existing.tags),
+                    groups: None,
+                    note: None,
+                    folder: None,
+                },
+            )
+            .await
+            .expect("overwrite record envelope");
+    });
+}
+
 fn assert_numeric_code(output: &Output, digits: usize) {
     assert!(
         output.status.success(),
@@ -264,6 +311,7 @@ fn missing_and_malformed_material_fail_without_disclosure() {
         .unwrap();
     assert_eq!(missing_output.status.code(), Some(3));
     assert!(common::stderr_str(&missing_output).contains("one-time-code"));
+    assert!(missing_output.stdout.is_empty());
 
     let bad_uri = "otpauth://hotp/Test?secret=SENTINEL-SEED&counter=1";
     let malformed = set_record(temp.path(), "malformed", "one-time-code", bad_uri);
@@ -276,6 +324,31 @@ fn missing_and_malformed_material_fail_without_disclosure() {
     let stderr = common::stderr_str(&malformed_output);
     assert!(!stderr.contains("SENTINEL-SEED"), "{stderr}");
     assert!(!stderr.contains(bad_uri), "{stderr}");
+    assert!(malformed_output.stdout.is_empty());
+}
+
+#[test]
+fn malformed_envelope_scalars_do_not_leak_through_totp_command_errors() {
+    let (_cmd, temp) = common::xv_isolated_local();
+    let uri = "otpauth://totp/Leak?secret=FULL-URI-SENTINEL&issuer=Leak";
+    for (name, envelope, sentinel) in [
+        ("uri-scalar", format!(r#""{uri}""#), uri),
+        ("code-scalar", "731904".to_string(), "731904"),
+    ] {
+        let set = set_record(temp.path(), name, "one-time-code", SEED);
+        assert!(set.status.success(), "stderr: {}", common::stderr_str(&set));
+        overwrite_record_envelope(temp.path(), name, &envelope);
+
+        let output = xv_again(temp.path())
+            .args(["totp", name, "--raw"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(3));
+        assert!(output.stdout.is_empty());
+        let stderr = common::stderr_str(&output);
+        assert!(stderr.contains("invalid record envelope"), "{stderr}");
+        assert!(!stderr.contains(sentinel), "{stderr}");
+    }
 }
 
 #[test]
