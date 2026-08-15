@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.38.0 — TOTP codes and UI connection monitoring (2026-08-15)
 
 ### Added
 
