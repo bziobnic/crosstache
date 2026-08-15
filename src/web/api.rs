@@ -97,6 +97,18 @@ pub(crate) async fn list_types(State(state): State<Arc<WebState>>) -> Json<serde
     Json(json!({ "types": state.types }))
 }
 
+/// Liveness probe for the browser's connection monitor.
+///
+/// Deliberately touches no backend: the question it answers is "is this
+/// `xv ui` process still serving this session", not "is the vault
+/// reachable". The client polls it, so a backend round trip here would put a
+/// Key Vault call on a timer for as long as a tab stays open. Backend
+/// reachability stays where it already lives, in `/api/context`'s
+/// `connection` summary.
+pub(crate) async fn health() -> Json<serde_json::Value> {
+    Json(json!({ "status": "ok" }))
+}
+
 #[derive(Deserialize)]
 pub(crate) struct ListQuery {
     alias: Option<String>,

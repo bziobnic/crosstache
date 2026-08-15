@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`xv ui` tells an open tab when its server goes away.** The browser polls a
+  new backend-free `GET /api/health` while the tab is visible and raises a
+  banner once the `xv ui` process stops answering, instead of looking healthy
+  until the next click fails. A live server that answers `401` is reported
+  separately as an expired session link, since the fix there is reopening the
+  URL from the terminal rather than restarting anything. The context rail's
+  connection pill follows the same state, so it stops claiming a healthy
+  backend once the server it learned that from is gone. Polling pauses on a
+  hidden tab, a failed request probes immediately, and a single failed probe
+  is confirmed before the banner appears.
+
 ## v0.37.1 — Backend lifecycle fixes (2026-08-11)
 
 ### Fixed

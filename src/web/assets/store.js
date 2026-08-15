@@ -38,6 +38,7 @@ const TERMINAL_OPERATION_STATUSES = new Set([
   'cancelled',
   'failed',
 ]);
+const CONNECTION_STATES = new Set(['ok', 'disconnected', 'session-expired']);
 export const MAX_ROUTINE_OPERATION_HISTORY = 50;
 export const MAX_OPERATION_TOMBSTONES = 100;
 
@@ -193,6 +194,10 @@ export function draftReducer(state, event) {
       const operations = { ...state.operations };
       delete operations[event.operationId];
       return { ...state, operations };
+    }
+    case 'connection/state': {
+      const next = CONNECTION_STATES.has(event.state) ? event.state : 'ok';
+      return next === state.connection ? state : { ...state, connection: next };
     }
     case 'context/loaded':
       return { ...state, context: structuredClone(event.context), contextError: null };
