@@ -458,6 +458,17 @@ pub enum Commands {
         #[arg(long, conflicts_with = "field")]
         record: bool,
     },
+    /// Generate the current TOTP code from an encrypted record field
+    Totp {
+        /// Secret record containing the TOTP seed
+        name: String,
+        /// Encrypted seed field (defaults to one-time-code)
+        #[arg(long, value_name = "NAME")]
+        field: Option<String>,
+        /// Print only the code to stdout instead of copying it
+        #[arg(short = 'r', long)]
+        raw: bool,
+    },
     /// Ranked fuzzy search over secrets (alias: search). Non-interactive;
     /// pipe the output through fzf or similar for an interactive picker.
     /// Default search field is the secret name; opt in to other fields
@@ -2017,6 +2028,10 @@ impl Cli {
                 )
                 .await
             }
+            Commands::Totp { name, field, raw } => {
+                crate::cli::totp_ops::execute_totp(&name, field.as_deref(), raw, config, registry)
+                    .await
+            }
             Commands::Find {
                 pattern,
                 in_fields,
@@ -2537,6 +2552,40 @@ impl Cli {
 mod tests {
     use super::*;
     use crate::cli::helpers::generate_random_value;
+
+    #[test]
+    fn totp_command_parses_defaults() {
+        let cli = Cli::try_parse_from(["xv", "totp", "github"]).unwrap();
+        match cli.command {
+            Commands::Totp { name, field, raw } => {
+                assert_eq!(name, "github");
+                assert_eq!(field, None);
+                assert!(!raw);
+            }
+            _ => panic!("expected totp command"),
+        }
+    }
+
+    #[test]
+    fn totp_command_parses_field_and_raw_short_flag() {
+        let cli = Cli::try_parse_from([
+            "xv",
+            "totp",
+            "github",
+            "--field",
+            "authenticator-seed",
+            "-r",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Totp { name, field, raw } => {
+                assert_eq!(name, "github");
+                assert_eq!(field.as_deref(), Some("authenticator-seed"));
+                assert!(raw);
+            }
+            _ => panic!("expected totp command"),
+        }
+    }
 
     #[test]
     fn test_charset_default_is_alphanumeric() {

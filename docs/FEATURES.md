@@ -29,6 +29,7 @@
 |---------|-------------|
 | `xv set <name>` | Create a secret (interactive prompt, `--stdin`, `--value`, or bulk `K1=v1 K2=v2`); write-time metadata via `--group` (repeatable), `--note`, `--folder`, `--expires`, `--not-before`, `--tag key=value` |
 | `xv gen` | Generate a random password to the clipboard (`--length`, `--charset`, `--raw`); `--save <name>` stores it as a secret with the same write-time metadata flags as `set` (`--group`, `--note`, `--folder`, `--expires`, `--not-before`, `--tag`, `--vault`) |
+| `xv totp <secret> [--field <name>] [--raw\|-r]` | Generate a current TOTP code from encrypted field `one-time-code`; `--field` selects a custom encrypted field and `--raw`/`-r` prints only the code. Default output copies the code without printing it and reports expiry. Clipboard clearing uses the earlier of its configured timeout and code expiry; timeout `0` disables clearing. |
 | `xv get <name>` | Retrieve a secret (clipboard by default; `--raw` for stdout) |
 | `xv list` (alias `xv ls`) | List secrets. Default TTY output is a folder-aware grid (folders first, shown as `prod/`); pass a `[FOLDER]` positional to list inside a folder. `-l` for a long listing (name, updated, groups, note), `-r` to recurse (folder-qualified names in the grid/long/`--names-only` views), `--format table` for the classic table. Filters: `--group`, `--all` (include disabled), `--expiring <period>`, `--expired`, `--deleted` (soft-deleted secrets; conflicts with `FOLDER`, `-r`, `--group`, `--all`, `--expiring`, `--expired`). `--sort name\|updated` (default `name`). `--names-only`, `--page-size`, `--page`, `--pager [auto\|always\|never]`, `--no-cache` |
 | `xv delete <name>` | Soft-delete a secret (`--force` to skip confirmation) |
@@ -119,6 +120,7 @@ new tags, unless explicitly converted.
 | `xv set <name> --type <type>` | Create a typed record; `--field name=value` for metadata/non-primary-secret fields (repeatable), `--field-secret name=value` for ad-hoc secret fields, primary value via `--value`/`--stdin`/prompt |
 | `xv get <name> --field <name>` | Read one field (either kind) |
 | `xv get <name> --record` | Full record (all fields) in the requested `--format` |
+| `xv totp <secret> [--field <name>] [--raw\|-r]` | Generate a one-shot RFC 6238 code from an encrypted record field; bare Base32 and `otpauth://totp` are supported, and raw mode prints only the code |
 | `xv update <name> --field name=value` | Edit a metadata field (tag-only) or type-declared non-primary secret field (new version) |
 | `xv update <name> --field-secret name=value` | Edit/add an ad-hoc secret field (rewrites the envelope, new version) |
 | `xv update <name> --type <type>` | Explicit conversion: bare secret's value becomes the primary field |
