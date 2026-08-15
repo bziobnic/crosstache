@@ -55,6 +55,17 @@ like `xv gen` or `xv find --all-vaults`, the UI uses the context/config
 default vault, not the workspace seam. Workspace-aware switching is tracked
 as a follow-up.
 
+While a tab is visible it polls `GET /api/health` every 10 seconds to check
+that the `xv ui` process it was opened against is still there. Two consecutive
+failed probes raise a banner across the top of the page and switch the rail's
+connection pill to "Disconnected"; the page recovers on its own if you restart
+`xv ui` on the same port with the same session link. A probe that comes back
+`401` means something is answering but it is a *new* process with a new token,
+which the banner reports separately — reopen the URL printed in the terminal.
+The probe touches no backend, so it does not put a Key Vault call on a timer;
+backend reachability is still what the connection pill shows while connected,
+sampled from `/api/context` at load and on each vault switch.
+
 Security model: loopback bind only; per-session bearer token (the `?token=`
 in the URL, held in per-tab session storage); Host/Origin validation; secret
 values only in POST bodies; `Cache-Control: no-store`. There is no TLS and no
