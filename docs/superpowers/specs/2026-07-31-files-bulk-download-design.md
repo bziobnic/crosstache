@@ -1,5 +1,8 @@
 # Files Bulk Download Design
 
+> **Status:** ✅ Shipped in v0.32.0. Operator notes:
+> [`docs/web-ui.md`](../../web-ui.md) (Files tab ZIP download).
+
 ## Goal
 
 Allow a user in the web UI Files tab to select files and download the exact

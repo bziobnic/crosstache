@@ -127,9 +127,24 @@ new tags, unless explicitly converted.
 | `xv update <name> --untype [--yes]` | Flatten a record back to a bare secret holding the primary value |
 | `xv ls --type <type>` | Filter listing by record type; JSON output lifts `f.*` fields into a `fields` map plus `record_type` |
 
-Built-ins: `login` (username\*, url; password\* primary), `api-key` (url,
-account; key\* primary), `database` (host, port, database, username;
-password\* primary, connection-string optional secret) — `\*` = required.
+Built-ins (`*` = required):
+
+| Type | Metadata | Secret (primary last) |
+|------|----------|------------------------|
+| `login` | username\*, url | password\* |
+| `api-key` | url, account | key\* |
+| `database` | host, port, database, username | password\*, connection-string |
+| `ssh-key` | host, username | private-key\*, public-key, passphrase |
+| `payment-card` | cardholder-name | card-number\*, card-security-code, card-expiration-date |
+| `secure-note` | url, username | content\* |
+
+`ssh-key`, `payment-card`, and `secure-note` exist because a record must have
+exactly one primary field and many credentials have no password — they are
+ordinary types, usable from `xv set --type` independently of Keeper import.
+`public-key` is stored as secret material so it can exceed Azure's 256-character
+tag cap. Card numbers, security codes, and expiry are secret; only the
+cardholder name is listable.
+
 Custom types are `[types.<name>]` TOML blocks in global `xv.conf` or
 project `.xv.toml`; a project type shadows a global one, shadowing a
 built-in works but warns. **One invalid `[types.*]` block fails type
@@ -381,11 +396,15 @@ See [migration.md](migration.md) for the full guide.
 
 | Command | Description |
 |---------|-------------|
-| `xv init` | Interactive setup |
+| `xv init` | Interactive setup (switches to the chosen backend; preserves any others already configured) |
+| `xv backend ls` | List configured backends; marks the active one |
+| `xv backend add <local\|azure\|aws>` | Configure a backend without switching to it (`--yes` skips reconfigure confirmation). See [backends.md](backends.md) |
+| `xv backend rm <type>` | Drop a backend from config (data untouched); `--purge` is local-only and deletes the store + age key |
 | `xv config show` | Show current config |
 | `xv config set <key> <value>` | Set a config value |
 | `xv config path` | Show config file location |
 | `xv config edit` | Open the config file in `$VISUAL`/`$EDITOR` (or a platform default) |
+| `xv doctor` | Bootstrap-safe repair of global `xv.conf` (dispatched before normal load). See [doctor.md](doctor.md) |
 
 ### Hierarchy
 
@@ -443,7 +462,9 @@ message for human formats goes to stderr. Counts are plural-aware (`1 vault`,
 One documented exception: `xv config show --format json|yaml` serializes the
 full configuration object (it is a resource view, not a list). Its human table
 and the `--resolved` rows render through the shared formatter, so `--columns`
-and `--no-color` apply there like everywhere else.
+and `--no-color` apply there like everywhere else. `xv doctor` is the other
+exception: `--format json|yaml` is refused so its human report cannot mix into
+a JSON error envelope.
 
 Long list-style output can be paged when both stdin and stdout are terminals:
 

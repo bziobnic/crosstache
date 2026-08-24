@@ -17,8 +17,9 @@ xv backend add local                   # configure a second backend alongside th
 **v0.22 highlights:** multi-vault workspaces with aliases, union `ls`/`find`,
 cross-vault `mv`/`copy`, and alias-aware templates · file storage through the
 unified backend path (`xv file sync` works on Azure and local; AWS sync remains
-gated) · record types with typed fields (`login`, `api-key`, `database`, plus
-custom types) · fail-fast `xv run`/`xv inject` with `--best-effort` opt-out ·
+gated) · record types with typed fields (`login`, `api-key`, `database`,
+`ssh-key`, `payment-card`, `secure-note`, plus custom types) · fail-fast
+`xv run`/`xv inject` with `--best-effort` opt-out ·
 pre-commit leak scanner that matches files against your *actual* vault values.
 
 **Web UI**: `xv ui` opens a local browser interface (build with `--features ui`).
@@ -566,6 +567,14 @@ every code path.
 | `login` | `username` (required), `url` | **`password`** (primary) |
 | `api-key` | `url`, `account` | **`key`** (primary) |
 | `database` | `host`, `port`, `database`, `username` | **`password`** (primary), `connection-string` (optional) |
+| `ssh-key` | `host`, `username` | **`private-key`** (primary), `public-key`, `passphrase` |
+| `payment-card` | `cardholder-name` | **`card-number`** (primary), `card-security-code`, `card-expiration-date` |
+| `secure-note` | `url`, `username` | **`content`** (primary) |
+
+`ssh-key` / `payment-card` / `secure-note` exist because a record must have
+exactly one primary and many credentials have no password. `public-key` is
+secret so it can exceed Azure's 256-character tag cap. Card PAN/CVC/expiry
+are secret; only the cardholder name is listable.
 
 ```bash
 xv type list                             # resolved types + source (built-in/global/project)
@@ -645,6 +654,19 @@ printing it and reports seconds to expiry. When clipboard clearing is enabled,
 it happens at the earlier of the configured clipboard timeout and the code's
 expiry; a clipboard timeout of `0` disables clearing. The initial release is
 CLI-only; TUI and web/desktop display are future enhancements.
+
+Constraints (verified against `src/totp.rs` / `src/cli/totp_ops.rs`):
+
+- The secret must already be a typed record (`application/vnd.xv.record`). An
+  untyped secret is refused — there is no envelope field to read.
+- Bare seeds are unpadded RFC 4648 Base32 (`A–Z` and `2–7`); whitespace is
+  ignored and letters are uppercased. Padded or alphabet-invalid seeds fail.
+- A value that contains `://` is parsed as a URI and must be `otpauth://totp`
+  with a non-empty account label. `otpauth://hotp` and other schemes are
+  rejected. Algorithm / digits / period come from the URI; there are no CLI
+  overrides.
+- Generation is one-shot (no `--watch`). Running the command never writes a
+  new secret version.
 
 ### Worked example — a database record end to end
 
@@ -1635,7 +1657,10 @@ value timing, Trash with Undo/restore, typed secret editing, command palette
 (`Cmd/Ctrl+K`), file search and upload queue, responsive stacked rows below
 768px, plus context-led Settings and Help. Use Settings for theme, density,
 and the policy-bounded protected-value timeout; Help contains session scope,
-capabilities, shortcuts, and redacted diagnostics.
+capabilities, shortcuts, and redacted diagnostics. Files-tab **Select** can
+download the current selection as `crosstache-files.zip`. An open tab polls
+`GET /api/health` and banners when the `xv ui` process goes away — details in
+[`docs/web-ui.md`](docs/web-ui.md).
 
 ## Desktop app
 
@@ -1882,7 +1907,8 @@ Doctor repairs deterministic schema omissions automatically. Before changing
 cannot be safely inferred are reported with manual next steps and exit code 3.
 Doctor output is human-readable; explicit `--format json` or `--format yaml`
 requests are rejected before diagnosis so machine-readable error output remains
-a single valid document.
+a single valid document. See [`docs/doctor.md`](docs/doctor.md) for the repair
+field list, backup rules, Azure `[azure]`-block pitfall, and scope limits.
 
 ### Key environment variables
 
@@ -2019,6 +2045,17 @@ xv context show                          # see which .xv.toml is being used
 az login                                 # re-authenticate with Azure CLI
 xv config show | grep credential         # check current priority
 xv list --credential-type cli            # try Azure CLI explicitly
+```
+
+### `error[xv-backend-unavailable]` from a workspace alias
+
+A workspace entry (`xv cx add`) can outlive the backend it pointed at. Reads
+then name the missing backend and tell you to detach that alias — not to
+re-run `xv init`:
+
+```bash
+xv cx ls                                 # find the stale alias
+xv cx rm <alias>                         # drop it, or restore [named_backends.<name>]
 ```
 
 ### Attachment decrypt / key errors

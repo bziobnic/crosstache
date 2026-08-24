@@ -25,6 +25,21 @@ cargo test -- --test-threads=1    # required for env-var-mutating tests in
                                   # config::project (Plan #2)
 ```
 
+## Windows
+
+CI runs the full suite on `windows-latest` (`windows-test` in
+`.github/workflows/build.yml`) — not just `cargo check`. The job puts
+Git for Windows' `bin` directory on `PATH` so child-process tests that
+spawn `sh` (`xv run`, output masking, clipboard) find `sh.exe`.
+
+Clipboard tests that touch the real system clipboard serialize on a
+process-wide lock in `tests/clipboard_tests.rs`. Do **not** rely on
+`--test-threads=1` for that: parallel `cargo test` opens concurrent
+Win32 clipboard handles and historically failed with
+`STATUS_HEAP_CORRUPTION`. Isolated config/context paths honour
+`XDG_CONFIG_HOME` on Windows as well as Unix so the harness does not
+write into the real `%APPDATA%`.
+
 Hermetic tests live in:
 
 - `tests/common/mod.rs` — shared harness (xv_isolated, parse_json_envelope, …)
