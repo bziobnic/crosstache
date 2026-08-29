@@ -1,7 +1,9 @@
 # TOTP Code Generation for Secret Records
 
 **Date:** 2026-08-15
-**Status:** Approved design; implementation not started
+**Status:** ✅ Shipped in v0.38.0 (CLI only). Usage: README “TOTP codes”;
+[`docs/FEATURES.md`](../../FEATURES.md); Keeper mapping in
+[`docs/keeper.md`](../../keeper.md).
 **Initial surface:** CLI only
 
 ## Goal

@@ -19,7 +19,8 @@ requires a person.
 
 `--format json` and `--format yaml` are rejected up front so a machine-readable
 error envelope stays a single valid document (doctor's human report is never
-mixed into that envelope).
+mixed into that envelope). Use `--format plain` if you need to override a
+global format default.
 
 ## Scope
 
@@ -30,6 +31,7 @@ mixed into that envelope).
 | Missing required `[blob_config]` fields when that table exists | Backend service health (Key Vault, S3, …) |
 | TOML or legacy JSON parse of the global file | Guessing invalid types / enum values |
 | Semantic checks for the selected backend after repair | Rewriting healthy JSON solely to convert to TOML |
+| Filling **top-level** Azure credential fields | Filling or validating an `[azure]` block |
 
 ## What it repairs automatically
 
@@ -45,7 +47,8 @@ Only deterministic schema omissions from `Config::default()` /
 
 Comments, formatting, unknown keys, and existing user values are preserved for
 editable TOML. There is currently no legacy-key rename table; type mismatches
-and invalid enums are reported, never overwritten.
+and invalid enums are reported, never overwritten. Doctor does **not** add
+missing keys inside `[azure]`, `[aws]`, or `[local]`.
 
 ## Backup and write semantics
 
@@ -57,7 +60,7 @@ xv.conf.backup-20260807T153012Z
 
 - Create-new only (never overwrites an existing backup name)
 - Does not follow a final-component symlink
-- Private file permissions
+- Private file permissions (`0600` on Unix)
 - Atomic replace of `xv.conf`; backup/write failure is fatal (no false success)
 
 Deterministic repairs can persist even when a separate semantic problem remains
@@ -74,6 +77,7 @@ Configuration: /home/you/.config/xv/xv.conf
 fixed: Restored missing configuration field 'debug'.
 …
 ok: Configuration file '/home/you/.config/xv/xv.conf' is valid.
+ok: Configuration is healthy.
 Backup: /home/you/.config/xv/xv.conf.backup-20260807T153012Z
 ```
 
@@ -95,10 +99,19 @@ are **not** persisted):
 
 | Selected backend | Unresolved when |
 |------------------|-----------------|
-| Azure | `subscription_id` or `tenant_id` empty → suggests `xv config set …` |
+| Azure | top-level `subscription_id` or `tenant_id` empty → suggests `xv config set …` |
 | AWS | missing `[aws]` / named AWS entry, or no region (`[aws].region`, `AWS_REGION`, or `AWS_DEFAULT_REGION`) |
 | Unavailable backend | `backend` is not a compiled built-in and not an exact `[named_backends]` key |
 | Local | no extra semantic gate beyond a valid document |
+
+Named-backend keys take precedence over built-in aliases: a
+`[named_backends.aws]` local entry is treated as local, not AWS. Built-in
+aliases such as `az`/`keyvault` (Azure) and `file` (local) are accepted
+without constructing a client.
+
+Environment variables (`AZURE_SUBSCRIPTION_ID`, `AZURE_TENANT_ID`,
+`AWS_REGION`, …) can make a sparse file validate for this process without
+being written into `xv.conf`.
 
 ## Common pitfalls
 
@@ -111,9 +124,11 @@ are **not** persisted):
 | Healthy JSON left as JSON | By design. Format conversion alone is not a repair. |
 | `--format json doctor` | Rejected; use plain output, or fix config then use JSON on other commands. |
 | Expecting `.xv.toml` repair | Out of scope. Edit the project file or see [`env-profiles.md`](env-profiles.md). |
+| `[azure]`-only config that `xv list` accepts, doctor still wants IDs | Doctor's Azure semantic check reads the **top-level** `subscription_id` / `tenant_id` fields, not `azure_settings()`. `xv`-generated configs mirror both. For a hand-authored `[azure]` block, copy the IDs to the top level (or run `xv backend add azure`, which writes both). The reverse also bites: a partial `[azure]` block shadows top-level credentials for `xv list` (`Config::validate` uses whole-block precedence) even if doctor sees the top-level fields as healthy. See [`backends.md`](backends.md#the-azure-config-block). |
 
 ## Related
 
 - Design: [`superpowers/specs/2026-08-07-xv-doctor-design.md`](superpowers/specs/2026-08-07-xv-doctor-design.md)
 - Exit codes: [`exit-codes.md`](exit-codes.md) (doctor unresolved → `3`)
+- Backend lifecycle: [`backends.md`](backends.md)
 - Config hierarchy overview: [`FEATURES.md`](FEATURES.md#configuration)

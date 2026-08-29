@@ -219,6 +219,13 @@ rather than silently resolving to nothing later. Either put the credentials in
 the block, or leave the block out and use the top-level fields — do not split
 them across both.
 
+`xv doctor`'s Azure semantic check still reads the **top-level**
+`subscription_id` / `tenant_id` fields, not `azure_settings()`. An
+`[azure]`-only file that `xv list` accepts can therefore still be reported as
+needing IDs, and a partial block that shadows top-level credentials can make
+`xv list` fail while doctor looks healthy. Mirror both, or see
+[`doctor.md`](doctor.md).
+
 ## One instance per type — `named_backends` for more
 
 `xv backend` manages exactly one instance each of `local`, `azure`, and `aws`

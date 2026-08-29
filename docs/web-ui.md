@@ -7,6 +7,10 @@ port on 127.0.0.1, prints a tokenized URL, and opens your browser
 Everything the UI does goes through the same backend layer as the CLI, so
 all backends (Azure, AWS, local) work, including offline local vaults.
 
+If `xv ui` cannot start because `xv.conf` is invalid, run
+[`xv doctor`](doctor.md) — it repairs the global config without needing a
+healthy normal load path.
+
 ## Secrets and attachments
 
 Typed records are supported: create one via the type picker on the "New
@@ -20,9 +24,10 @@ that still has attachments is refused (`xv-attachments-block-rename`) —
 detach first, or keep the current name. See
 [`docs/attachments.md`](attachments.md).
 
-The secret drawer can be dismissed with the close control (top of the drawer),
-**Cancel**, or Escape. Unsaved edits follow the same discard confirmation as
-other sheets.
+The secret drawer can be dismissed with the close control (top-right `x`),
+**Cancel**, Escape, or the backdrop. Unsaved edits follow the same discard
+confirmation as other sheets. Close, Cancel, and the other drawer controls
+disable while a save (or a vault switch) is pending.
 
 ## Tree grid and selection
 
@@ -81,7 +86,7 @@ surface is unavailable there anyway).
 |------------|----------------|
 | Display mode (`theme`) | `system`, `light`, `dark` — independent of palette |
 | Palette | `forest` (default), `nord`, `solarized`, `high-contrast`, `custom` |
-| Custom theme | When palette is `custom`: light and dark each need `canvas`, `surface`, `text`, `accent`, `danger` as `#RRGGBB`. Server rejects unknown keys and pairs below 4.5:1 contrast. |
+| Custom theme | When palette is `custom`: light and dark each need `canvas`, `surface`, `text`, `accent`, `danger` as `#RRGGBB`. Server rejects unknown keys and pairs below 4.5:1 contrast (`text-canvas`, `text-surface`, `accent-surface`, `danger-surface`). |
 | Density | `comfortable` or `compact` |
 | Protected-value timeout | Seconds; clamped by config `clipboard_timeout` when that value is non-zero (`0` disables the clamp) |
 
@@ -97,7 +102,7 @@ Space toggles selection, and Enter opens a secret, downloads a file, or
 toggles a folder. Escape closes the topmost sheet or dialog (drawer, Settings,
 Help, command palette) before leaving selection mode.
 
-## Session and security
+## Session, connection, and security
 
 The URL token is copied into per-tab `sessionStorage`, so reloads in that tab
 remain authenticated while the server is running. Closing the tab discards the
@@ -118,19 +123,17 @@ connection pill to "Disconnected"; the page recovers on its own if you restart
 `xv ui` on the same port with the same session link. A probe that comes back
 `401` means something is answering but it is a *new* process with a new token,
 which the banner reports separately — reopen the URL printed in the terminal.
-The probe touches no backend, so it does not put a Key Vault call on a timer;
-backend reachability is still what the connection pill shows while connected,
-sampled from `/api/context` at load and on each vault switch.
+Polling pauses on a hidden tab; a failed request probes immediately, and a
+single failed probe is confirmed before the banner appears. The probe touches
+no backend, so it does not put a Key Vault call on a timer; backend
+reachability is still what the connection pill shows while connected, sampled
+from `/api/context` at load and on each vault switch.
 
 Security model: loopback bind only; per-session bearer token (the `?token=`
 in the URL, held in per-tab session storage); Host/Origin validation; secret
 values only in POST bodies; `Cache-Control: no-store`. There is no TLS and no
 login — if you need network access to your vaults from another device, this is
 deliberately not the tool.
-
-If `xv ui` cannot start because `xv.conf` is invalid, run
-[`xv doctor`](doctor.md) — it repairs the global config without needing a
-healthy normal load path.
 
 ## Related designs
 
