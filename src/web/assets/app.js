@@ -5,6 +5,7 @@ import { announce, mountTabs } from './accessibility.js';
 import { mountSecrets } from './secrets.js';
 import { createPreferenceClient } from './preferences.js';
 import { formatContextLine, mountContextRail } from './context.js';
+import { mountConnectionMonitor } from './connection.js';
 import { createCommandRegistry, mountCommandPalette } from './commands.js';
 import { mountHelp, mountSettings } from './settings.js';
 
@@ -22,15 +23,22 @@ const store = createStore({
   contextSwitchPending: false,
   scopedMutationPending: false,
   contextError: null,
+  connection: 'ok',
   draft: null,
   savePending: false,
 }, draftReducer);
 if (navigator.webdriver) {
   globalThis.__xvTestStoreSnapshot = () => store.snapshot();
 }
+let connectionMonitor = null;
 const api = createApiClient({
   token,
-  onOperation: (event) => store.dispatch({ type: 'operation/status', ...event }),
+  onOperation: (event) => {
+    store.dispatch({ type: 'operation/status', ...event });
+    // A failed request is the earliest evidence the server may be gone —
+    // probe now rather than waiting out the rest of the poll interval.
+    if (event.status === 'failed') void connectionMonitor?.check();
+  },
   onInflight: (inflight) => {
     const progress = document.getElementById('progress');
     progress.hidden = inflight === 0;
@@ -79,6 +87,8 @@ for (const id of ['settings-retry', 'settings-error-retry']) {
   const button = document.getElementById(id);
   button.onclick = () => retrySettings(button);
 }
+
+if (token) connectionMonitor = mountConnectionMonitor({ store, token });
 
 const contextRail = token ? mountContextRail({
   store,

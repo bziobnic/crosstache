@@ -58,6 +58,10 @@ fn asset(path: &str) -> Option<(&'static str, &'static str)> {
         "/store.js" => Some(("application/javascript", include_str!("assets/store.js"))),
         "/dialogs.js" => Some(("application/javascript", include_str!("assets/dialogs.js"))),
         "/context.js" => Some(("application/javascript", include_str!("assets/context.js"))),
+        "/connection.js" => Some((
+            "application/javascript",
+            include_str!("assets/connection.js"),
+        )),
         "/accessibility.js" => Some((
             "application/javascript",
             include_str!("assets/accessibility.js"),
@@ -298,6 +302,7 @@ impl PreparedWebServer {
 
 pub(crate) fn build_router(state: Arc<WebState>) -> Router {
     let api = Router::new()
+        .route("/health", get(api::health))
         .route("/context", get(context::get_context))
         .route("/context/activate", post(context::activate_context))
         .route("/workspaces/activate", post(context::activate_workspace))
@@ -564,9 +569,50 @@ mod tests {
             "/commands.js",
             "/files.js",
             "/tree-grid.js",
+            "/connection.js",
         ] {
             assert!(asset(path).is_some(), "missing {path}");
         }
+    }
+
+    #[tokio::test]
+    async fn health_reports_liveness_to_an_authorized_session() {
+        let state = testutil::test_state_with_token("sekrit");
+        let res = build_router(state)
+            .oneshot(
+                Request::get("/api/health")
+                    .header(axum::http::header::HOST, "127.0.0.1:1")
+                    .header(axum::http::header::AUTHORIZATION, "Bearer sekrit")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "ok");
+    }
+
+    /// The browser's monitor reads 401 as "server alive, new session link",
+    /// which is only true because /api/health sits behind the same auth gate
+    /// as every other API route.
+    #[tokio::test]
+    async fn health_rejects_a_stale_session_token() {
+        let state = testutil::test_state_with_token("sekrit");
+        let res = build_router(state)
+            .oneshot(
+                Request::get("/api/health")
+                    .header(axum::http::header::HOST, "127.0.0.1:1")
+                    .header(axum::http::header::AUTHORIZATION, "Bearer previous-run")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[test]

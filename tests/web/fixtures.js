@@ -63,18 +63,22 @@ vaults = [
       FORCE_COLOR: '0',
     };
     const server = startUi(binary, environment, home);
-    try {
-      await use({ baseURL: await server.url, vault: 'playwright' });
-    } finally {
+    const stopServer = async () => {
       if (server.child.exitCode === null && server.child.signalCode === null) {
         server.child.kill('SIGTERM');
         await once(server.child, 'exit').catch(() => {});
       }
+    };
+    try {
+      await use({ baseURL: await server.url, vault: 'playwright', stopServer });
+    } finally {
+      await stopServer();
       await rm(home, { recursive: true, force: true });
     }
   },
   baseURL: async ({ appContext }, use) => use(appContext.baseURL),
   vault: async ({ appContext }, use) => use(appContext.vault),
+  stopServer: async ({ appContext }, use) => use(appContext.stopServer),
   // `use.reducedMotion` in playwright.config.js does not reach the page in
   // Playwright 1.61, so entry animations kept running and axe sampled elements
   // mid-fade (a sheet at 76% opacity reads as a contrast failure). Apply the

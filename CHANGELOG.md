@@ -1,5 +1,79 @@
 # Changelog
 
+## v0.38.0 — TOTP codes and UI connection monitoring (2026-08-15)
+
+### Added
+
+- **`xv totp` generates current authenticator codes from secret records.** It
+  reads encrypted `one-time-code` fields by default, accepts an explicit
+  `--field`, supports bare Base32 and `otpauth://totp` parameters, copies the
+  one-shot code without printing it, with expiry-aware clipboard clearing, and
+  provides code-only `--raw` / `-r` output for scripts. TUI and web/desktop
+  support remain future enhancements.
+- **`xv ui` tells an open tab when its server goes away.** The browser polls a
+  new backend-free `GET /api/health` while the tab is visible and raises a
+  banner once the `xv ui` process stops answering, instead of looking healthy
+  until the next click fails. A live server that answers `401` is reported
+  separately as an expired session link, since the fix there is reopening the
+  URL from the terminal rather than restarting anything. The context rail's
+  connection pill follows the same state, so it stops claiming a healthy
+  backend once the server it learned that from is gone. Polling pauses on a
+  hidden tab, a failed request probes immediately, and a single failed probe
+  is confirmed before the banner appears.
+
+## v0.37.1 — Backend lifecycle fixes (2026-08-11)
+
+### Fixed
+
+- **`xv backend add azure` can select an existing vault.** Declining to create a
+  new vault ended the flow with "a vault is required for the azure backend"
+  instead of offering the vaults already in the chosen resource group. The
+  prompt now lists them, with entering a name by hand and creating a new one as
+  the other choices.
+- **`[azure]`-only configs pass validation.** A config with the credentials in
+  the `[azure]` block and the top-level fields left empty passed `xv backend ls`
+  but failed `xv list` with `Configuration error: Subscription ID is required`,
+  because validation read the top-level fields directly. It now resolves through
+  `azure_settings()` like every other caller. Note the block still takes
+  precedence as a whole, not field by field — a partial `[azure]` block shadows
+  the top-level fields entirely and is rejected at validation.
+- **Clipboard tests no longer corrupt the heap on Windows.** Tests touching the
+  real system clipboard now serialize on a lock in the test code. They had
+  relied on a `--test-threads=1` note that nothing enforced, so CI's plain
+  `cargo test` opened concurrent handles to the single global Win32 clipboard
+  and failed with `STATUS_HEAP_CORRUPTION` (`0xc0000374`).
+
+## v0.37.0 — Backend lifecycle (2026-08-11)
+
+### Added
+
+- **Backends can now be added and removed after setup.** `xv backend add`,
+  `xv backend rm`, and `xv backend ls` manage configured backends, so a local
+  store and a cloud vault can coexist instead of `xv init` replacing whichever
+  was there. `xv backend rm` is config-only by default; `--purge` additionally
+  deletes the local store and age key (local backend only, and unrecoverable —
+  the age identity is deleted too).
+- **Azure has an `[azure]` config block.** Configs written before this change
+  keep working unchanged — the top-level Azure fields remain the fallback.
+
+## v0.36.2 — Drawer close box and readable muted text (2026-08-10)
+
+### Added
+
+- **The secret drawer has a close box.** The create/edit drawer can now be
+  dismissed from an `x` in the top-right corner, not just the Cancel button at
+  the bottom. It goes through the same discard confirmation, so unsaved edits
+  are still protected, and it disables during a pending save like the other
+  drawer controls.
+
+### Fixed
+
+- **Muted text now meets WCAG AA on tinted backgrounds.** Secondary text sitting
+  on selected rows and on tags measured 4.26–4.28:1 against the required 4.5:1.
+  Muted tones are now derived against those tinted composites — the accent wash
+  on selected rows, the text wash on tags, and both stacked — as well as the
+  flat surfaces, so all four palettes pass in both light and dark modes.
+
 ## v0.36.1 — Windows reliability and install portability (2026-08-09)
 
 ### Fixed

@@ -100,6 +100,7 @@ function bootstrapDocument() {
     addEventListener() {},
     removeEventListener() {},
     querySelector() { return { textContent: '', hidden: false, setAttribute() {} }; },
+    querySelectorAll() { return []; },
   });
   const get = (selector) => {
     if (!elements.has(selector)) elements.set(selector, element());
@@ -144,7 +145,9 @@ test('app bootstrap supplies its persisted token to every initial API request', 
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.deepEqual(
       calls.map(({ requestPath }) => requestPath).sort(),
-      ['/api/context', '/api/preferences'],
+      // The connection monitor's liveness probe is authenticated like every
+      // other call, so it belongs in this token check rather than beside it.
+      ['/api/context', '/api/health', '/api/preferences'],
     );
     assert.ok(calls.every(({ options }) => (
       options.headers.Authorization === 'Bearer bootstrap-token'

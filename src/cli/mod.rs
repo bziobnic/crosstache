@@ -5,6 +5,7 @@
 
 #[cfg(feature = "file-ops")]
 pub(crate) mod attach_ops;
+pub(crate) mod backend_ops;
 pub mod commands;
 pub(crate) mod config_ops;
 pub(crate) mod doctor_ops;
@@ -22,6 +23,7 @@ pub(crate) mod scan_ops;
 pub(crate) mod schedule_ops;
 pub(crate) mod secret_ops;
 pub(crate) mod system_ops;
+pub(crate) mod totp_ops;
 pub(crate) mod type_ops;
 pub(crate) mod upgrade_ops;
 pub(crate) mod vault_ops;

@@ -20,7 +20,8 @@ pub use conversion::{
 };
 #[allow(unused_imports)]
 pub use envelope::{
-    encode_envelope, is_record, parse_envelope, FIELD_TAG_PREFIX, RECORD_CONTENT_TYPE, TYPE_TAG,
+    encode_envelope, is_record, parse_envelope, parse_sensitive_envelope, FIELD_TAG_PREFIX,
+    RECORD_CONTENT_TYPE, TYPE_TAG,
 };
 #[allow(unused_imports)]
 pub use types::{

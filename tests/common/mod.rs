@@ -123,6 +123,20 @@ default_vault = "default"
     (cmd, temp)
 }
 
+/// Spawn another hermetic local-backend command using an existing test store.
+pub fn xv_existing_isolated_local(temp: &Path, cwd: &Path) -> Command {
+    let mut cmd = xv();
+    cmd.env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", temp)
+        .env("XDG_CONFIG_HOME", temp.join(".config"))
+        .env("XV_NO_PARENT_CONFIG", "1")
+        .env("XV_BACKEND", "local")
+        .env("NO_COLOR", "1")
+        .current_dir(cwd);
+    cmd
+}
+
 /// Isolated local-backend `xv` command with the audit and/or git-versioning
 /// options enabled under `[local]`.
 ///

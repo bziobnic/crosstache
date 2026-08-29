@@ -94,6 +94,11 @@ export function contextDetails(context) {
   };
 }
 
+const TRANSPORT_CONNECTION_COPY = {
+  disconnected: 'Disconnected: xv ui is not running',
+  'session-expired': 'Disconnected: session link expired',
+};
+
 function errorCopy(error) {
   return {
     message: error?.message || 'Workspace activation could not be completed.',
@@ -168,12 +173,20 @@ export function mountContextRail({
         : '';
     }
     const context = snapshot.context;
+    // Transport state outranks the backend health summary: if the server this
+    // tab talks to is gone, "Connected to Azure" is a lie regardless of what
+    // the last /api/context said.
+    const transport = TRANSPORT_CONNECTION_COPY[snapshot.connection];
+    if (transport && byId('context-connection')) {
+      byId('context-connection').textContent = transport;
+      byId('context-connection').dataset.state = 'unavailable';
+    }
     if (!context) return;
     const details = contextDetails(context);
     const line = formatContextLine(context);
     if (byId('context-line')) byId('context-line').textContent = line;
     if (byId('context-backend-kind')) byId('context-backend-kind').textContent = titleCase(named(context.backend_kind));
-    if (byId('context-connection')) {
+    if (!transport && byId('context-connection')) {
       byId('context-connection').textContent = details.connection;
       byId('context-connection').dataset.state = context.connection?.state || 'unknown';
     }

@@ -11,6 +11,7 @@ xv set cred --type login --field username=bob   # structured record: username ri
 xv find --filter 'test-*' --names-only # every secret starting with "test-"
 xv mv --filter 'test-*' archive/       # bulk-move them into a folder
 xv scan install                        # block secret leaks before commit
+xv backend add local                   # configure a second backend alongside the active one
 ```
 
 **v0.22 highlights:** multi-vault workspaces with aliases, union `ls`/`find`,
@@ -623,6 +624,27 @@ xv ls --format json                       # includes "record_type" and a "fields
 exclusive with each other and with every classic update flag
 (`--value`/`--stdin`/`--note`/`--tags`/…) — a record field edit or
 conversion is a standalone operation in v1.
+
+### TOTP codes
+
+Attach a Base32 seed or an `otpauth://totp` Key URI as encrypted record material,
+then generate the current authenticator code:
+
+```bash
+xv update github --field-secret one-time-code='otpauth://totp/GitHub:alice?secret=REDACTED_BASE32&issuer=GitHub'
+xv totp github                       # copies without printing; reports seconds to expiry
+xv totp github --raw                 # code only, with no trailing newline
+xv totp custom --field otp-seed -r   # exact custom encrypted field
+```
+
+`one-time-code` is the only automatic field name. xv accepts bare Base32
+(SHA-1, six digits, 30 seconds) and TOTP Key URIs carrying `algorithm`,
+`digits`, and `period`. The field must be stored with `--field-secret`; xv
+refuses a listable metadata field. Default output copies the code without
+printing it and reports seconds to expiry. When clipboard clearing is enabled,
+it happens at the earlier of the configured clipboard timeout and the code's
+expiry; a clipboard timeout of `0` disables clearing. The initial release is
+CLI-only; TUI and web/desktop display are future enhancements.
 
 ### Worked example — a database record end to end
 
@@ -1828,6 +1850,27 @@ valid default file before opening it. Editor resolution is `$VISUAL`, then
 `$EDITOR`, then `nano` on Unix or `notepad` on Windows; values with arguments
 such as `code --wait` are supported. A non-zero editor exit is surfaced as a
 configuration error.
+
+### Backends
+
+`xv init` bootstraps and switches to a single backend, but you can have more
+than one **configured** at once — a local store and a cloud vault, say — with
+only one **active**. `xv backend` manages that set without disturbing which
+one is active:
+
+```bash
+xv backend ls                    # configured backends, active one marked
+xv backend add local             # configure a backend (doesn't switch to it)
+xv backend add azure --yes       # skip the reconfigure confirmation
+xv backend rm aws                # config only — remote/local data untouched
+xv backend rm local --purge      # ALSO deletes the local store + age key — unrecoverable
+```
+
+`xv backend rm` refuses to remove the active backend while others remain
+configured (switch with `xv config set backend <other>` first), and refuses
+`--purge` on anything but `local` — cloud secrets are never deleted this way,
+use `xv vault delete` for that. See [docs/backends.md](docs/backends.md) for
+the full refusal table and the `--purge` guards.
 
 ### Repairing configuration
 

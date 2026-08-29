@@ -4,6 +4,7 @@
 //! from multiple sources including command-line arguments, environment variables,
 //! configuration files, and default values.
 
+pub mod backend_ops;
 pub mod context;
 pub mod doctor;
 pub mod init;
