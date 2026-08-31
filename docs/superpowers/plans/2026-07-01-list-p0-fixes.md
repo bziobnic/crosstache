@@ -1,5 +1,8 @@
 # List Command P0 Fixes Implementation Plan
 
+> **Status:** ✅ Implemented in **v0.17.0** (2026-07-02).
+> Implementation history lives in CHANGELOG.md. This file is retained as design context — do not edit it to describe current behavior; open a new spec instead.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Fix the four P0 list-command defects from `docs/superpowers/specs/2026-07-01-list-p0-fixes-design.md`: broken table width rendering, the dead `--columns` flag, `xv share list` ignoring `--format`, and `xv context list` ignoring color settings.

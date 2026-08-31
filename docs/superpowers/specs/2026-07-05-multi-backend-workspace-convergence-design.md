@@ -1,7 +1,7 @@
 # Multi-Backend Workspace Convergence: Roadmap & Phase 1
 
 **Date:** 2026-07-05
-**Status:** Approved design, targeting **v0.21.0**. Phase 1 (this design's execution scope) not yet implemented.
+**Status:** ✅ Implemented in **v0.21.0** (2026-07-05). Retained as design history.
 **Depends on:** [`2026-07-04-multi-vault-workspaces-design.md`](./2026-07-04-multi-vault-workspaces-design.md)
 (Phases A–C, shipped v0.20.0/v0.20.1 — `Workspace`, `WorkspaceEntry`,
 `resolve_workspace`/`resolve_secret_target`, lazy `BackendRegistry`),

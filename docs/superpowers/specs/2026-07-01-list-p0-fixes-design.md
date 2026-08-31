@@ -1,6 +1,6 @@
 # List Command P0 Fixes Design
 
-> **Status:** 📋 Approved design — not yet implemented. | **Date:** 2026-07-01 | **Author:** Claude + Scott
+> **Status:** ✅ Implemented in **v0.17.0** (2026-07-02). Retained as design history. | **Date:** 2026-07-01 | **Author:** Claude + Scott
 > Tier P0 of the 2026-07-01 list-command UX review. Later tiers (ls-style default output, folder-aware `xv ls`, format-flag unification) will get their own specs.
 
 ---

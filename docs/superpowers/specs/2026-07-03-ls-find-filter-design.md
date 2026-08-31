@@ -1,7 +1,7 @@
 # `--filter <GLOB>` on `xv ls` and `xv find`
 
 **Date:** 2026-07-03
-**Status:** Approved design, not yet implemented
+**Status:** ✅ Implemented in **v0.19.1** (2026-07-03). Retained as design history.
 
 ## Motivation
 

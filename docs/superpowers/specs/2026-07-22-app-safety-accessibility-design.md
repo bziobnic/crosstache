@@ -1,6 +1,6 @@
 # App Safety and Accessibility Design
 
-**Date:** 2026-07-22 · **Status:** Approved design
+**Date:** 2026-07-22 · **Status:** ✅ Implemented in **v0.29.0** (2026-07-24). Retained as design history.
 
 **Backlog coverage:** items 1–4 and the safety foundation for items 9 and 13
 

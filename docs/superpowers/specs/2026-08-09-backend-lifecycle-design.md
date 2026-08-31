@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-09
 **Revised:** 2026-08-10 — scope changed; see "Change of direction" below.
-**Status:** Approved design, not yet implemented
+**Status:** ✅ Implemented in **v0.37.0** (2026-08-11); lifecycle fixes shipped in **v0.37.1** (2026-08-11). Retained as design history.
 **Depends on:** multi-vault workspaces (`src/workspace/`, Phase A), the shared
 setup service (`src/config/setup.rs`, `SetupRequest` / `build_setup_config`),
 stale-workspace-entry messaging (#404), bootstrap-safe config recovery (v0.36.0)

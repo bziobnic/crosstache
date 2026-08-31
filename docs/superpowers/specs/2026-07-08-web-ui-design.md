@@ -1,7 +1,7 @@
 # Embedded Web UI: `xv ui`
 
 **Date:** 2026-07-08
-**Status:** Approved design, not yet implemented
+**Status:** ✅ Implemented in **v0.23.0** (2026-07-08). Retained as design history.
 
 ## Motivation
 

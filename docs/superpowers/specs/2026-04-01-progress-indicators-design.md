@@ -6,7 +6,7 @@
 > Implementation history lives in `CHANGELOG.md`. This file is retained as design context — do not edit to reflect current behavior; open a new spec instead.
 
 
-> Date: 2026-04-01 | Status: Approved
+> Date: 2026-04-01
 
 ## Overview
 

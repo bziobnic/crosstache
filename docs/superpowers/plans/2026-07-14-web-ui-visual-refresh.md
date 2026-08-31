@@ -1,5 +1,8 @@
 # `xv ui` Visual Refresh Implementation Plan
 
+> **Status:** ✅ Implemented in **v0.26.0** (2026-07-14).
+> Implementation history lives in CHANGELOG.md. This file is retained as design context — do not edit it to describe current behavior; open a new spec instead.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Transform the embedded `xv ui` frontend into the approved calm-premium vault design while preserving every existing secret, file, selection, authentication, and storage workflow.

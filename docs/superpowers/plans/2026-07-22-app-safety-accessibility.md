@@ -1,5 +1,8 @@
 # App Safety and Accessibility Implementation Plan
 
+> **Status:** ✅ Implemented in **v0.29.0** (2026-07-24).
+> Implementation history lives in CHANGELOG.md. This file is retained as design context — do not edit it to describe current behavior; open a new spec instead.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Prevent edit loss, make modal workflows keyboard and screen-reader complete, add recoverable deletion, and bound exposure of protected values.

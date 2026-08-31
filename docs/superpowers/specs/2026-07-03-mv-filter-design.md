@@ -1,7 +1,7 @@
 # `--filter <GLOB>` on `xv mv`
 
 **Date:** 2026-07-03
-**Status:** Approved design, not yet implemented
+**Status:** ✅ Implemented in **v0.19.2** (2026-07-04). Retained as design history.
 **Depends on:** the shared glob helper from #326 (`compile_name_glob` / `glob_matches_either_name` in `src/utils/helpers.rs`); `xv mv` bulk machinery (v0.18.0, PR #300)
 
 ## Motivation

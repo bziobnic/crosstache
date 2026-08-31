@@ -1,25 +1,20 @@
-# Documentation automation — v0.36–v0.38 operator gaps
+# Documentation maintenance
 
-## Goal
+[`ROADMAP.md`](./ROADMAP.md) is the canonical list of open product and engineering
+work. This file is only the recurring checklist for keeping public documentation
+truthful; it does not track feature implementation.
 
-Land public operator docs for subsystems that shipped with design specs or
-CHANGELOG entries but weak `docs/` / FEATURES coverage. Prefer updating
-existing pages; do not invent behavior.
+Before merging documentation for a release or feature:
 
-## Plan
-
-- [x] Inventory CHANGELOG vs public docs; confirm `xv doctor` (v0.36) still
-      missing from `docs/` (prior draft PR #408 never merged), plus web UI
-      themes/ZIP, built-in types `ssh-key`/`payment-card`/`secure-note`, and
-      stale TOTP design status.
-- [x] Add `docs/doctor.md` verified against `src/config/doctor.rs`,
-      `src/cli/doctor_ops.rs`, and `src/main.rs` early dispatch.
-- [x] Cross-link doctor from README, FEATURES, exit-codes, CLAUDE.md; mark
-      the doctor design shipped.
-- [x] Refresh `docs/web-ui.md` for themes, ZIP archive limits, drawer close,
-      keeping the v0.38 `/api/health` connection section.
-- [x] Update FEATURES built-ins and configuration command table (`xv doctor`,
-      `xv backend`).
-- [x] Mark TOTP design shipped; add README TOTP pitfalls from `src/totp.rs`.
-- [x] Document Windows test-suite / clipboard lock in `docs/testing.md`.
-- [ ] Commit, push, open PR.
+- [ ] Verify commands, flags, defaults, metadata keys, limits, and failure modes
+      against the current source and tests.
+- [ ] Update the relevant operator guide plus `README.md` and
+      `docs/FEATURES.md` where the public surface changes.
+- [ ] Add the release entry to `CHANGELOG.md`; remove completed work from
+      `ROADMAP.md` rather than leaving checked-off history there.
+- [ ] Mark retained specs/plans with an accurate shipped, partial, superseded, or
+      unshipped status and version.
+- [ ] Re-check backend and UI parity claims (Azure/AWS/local, CLI/TUI/web/desktop)
+      and document unsupported combinations explicitly.
+- [ ] Validate links and copy-paste examples, and search for stale version numbers,
+      renamed commands, metadata keys, and obsolete limitations.

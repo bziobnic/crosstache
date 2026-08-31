@@ -1,5 +1,8 @@
 # App Context and Core Workflows Implementation Plan
 
+> **Status:** ✅ Implemented in **v0.29.0** (2026-07-24).
+> Implementation history lives in CHANGELOG.md. This file is retained as design context — do not edit it to describe current behavior; open a new spec instead.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make effective scope unmistakable, expose foldered content immediately, provide guided typed-secret workflows, and keep failures contextual and recoverable.

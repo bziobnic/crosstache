@@ -1,5 +1,8 @@
 # Web UI Selection and Folder Indentation Implementation Plan
 
+> **Status:** ✅ Implemented in **v0.26.0** (2026-07-14).
+> Implementation history lives in CHANGELOG.md. This file is retained as design context — do not edit it to describe current behavior; open a new spec instead.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Indent expanded folder children and add accessible selection mode with visible-only select-all, bulk delete for secrets/files, and bulk secret move.

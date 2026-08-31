@@ -1,5 +1,7 @@
 # Ponytail Audit — crosstache
 
+> **Status:** Point-in-time complexity audit retained as historical review evidence. Findings have not been revalidated against v0.38.0 and are not the active product backlog; use [`ROADMAP.md`](ROADMAP.md) for current work.
+
 Whole-repo over-engineering audit. Scope: complexity and bloat only (not
 correctness, security, or performance). Findings ranked biggest cut first.
 One line per finding: `<tag> <what to cut>. <replacement>. [path]`.

@@ -1,7 +1,7 @@
 # Web UI UX Remediation Design
 
 **Date:** 2026-07-13<br>
-**Status:** Approved
+**Status:** ✅ Implemented in **v0.26.0** (2026-07-14). Retained as design history.
 
 ## Goal
 

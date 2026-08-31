@@ -1,5 +1,8 @@
 # Record Types Implementation Plan
 
+> **Status:** ✅ Implemented in **v0.19.0** (2026-07-03).
+> Implementation history lives in CHANGELOG.md. This file is retained as design context — do not edit it to describe current behavior; open a new spec instead.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Typed secret records (built-in + custom types) with per-field metadata/secret storage, per the approved spec `docs/superpowers/specs/2026-07-03-record-types-design.md`.

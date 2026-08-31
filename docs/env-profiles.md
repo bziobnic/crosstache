@@ -112,10 +112,11 @@ targets. Resolution order (highest first):
 
 1. `--backend` CLI flag
 2. `backend` field in the active env profile (`.xv.toml`)
-3. `backend` key in the global config file (`xv.conf`) or `XV_BACKEND` env var
-4. Default: `azure`
+3. `XV_BACKEND` environment variable
+4. `backend` key in the global config file (`xv.conf`)
+5. Default: `azure`
 
-Valid values: `azure`, `local`, `aws` (canonical names only — aliases like `az`, `file`, or `secretsmanager` are not accepted in `.xv.toml`; named backend keys defined under `[backends.*]` in `xv.conf` are also not supported here).
+Valid values: `azure`, `local`, `aws` (canonical names only — aliases like `az`, `file`, or `secretsmanager` are not accepted in `.xv.toml`; named backend keys defined under `[named_backends.*]` in `xv.conf` are also not supported here).
 
 ## Backend-prefixed addressing (`xv://backend:vault/secret`)
 

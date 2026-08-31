@@ -1,6 +1,6 @@
 # List Command P2 Surface-Consistency Design
 
-> **Status:** 📋 Approved design — not yet implemented. | **Date:** 2026-07-01 | **Author:** Claude + Scott
+> **Status:** ✅ Implemented in **v0.17.0** (2026-07-02). Retained as design history. | **Date:** 2026-07-01 | **Author:** Claude + Scott
 > Phase A of the P2 tier of the 2026-07-01 list-command UX review (P0 = PR #289, P1 = PR #290). Phase B (renderer unification through `TableFormatter`, `--columns`, machine formats for the bespoke renderers) is a separate future spec.
 
 ---

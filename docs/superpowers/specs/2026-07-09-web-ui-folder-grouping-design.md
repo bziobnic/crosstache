@@ -1,7 +1,7 @@
 # Web UI Folder Grouping, Collapsible Sections, Human-Readable Sizes
 
 **Date:** 2026-07-09
-**Status:** Approved design, not yet implemented
+**Status:** ✅ Implemented in **v0.25.0** (2026-07-10); later superseded in presentation by the **v0.31.0** tree grid. Retained as design history.
 
 ## Motivation
 

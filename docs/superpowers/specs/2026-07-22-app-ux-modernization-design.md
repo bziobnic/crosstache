@@ -1,6 +1,6 @@
 # Crosstache App UX Modernization Design
 
-**Date:** 2026-07-22 · **Status:** Approved design
+**Date:** 2026-07-22 · **Status:** ✅ Implemented in **v0.29.0** (2026-07-24). Retained as design history.
 
 ## Goal
 

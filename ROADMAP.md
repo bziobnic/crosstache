@@ -1,294 +1,174 @@
 # Crosstache Roadmap
 
-> **Last reviewed:** 2026-07-05 · **Latest released version:** `v0.15.0` · **Branch protection:** `main` (all changes via PR)
+> **Baseline:** `v0.38.0` · **Scope:** open work only
 
-Single source of truth for **unimplemented** ideas, deferred work, and known
-limitations worth fixing. Anything already shipped lives in [`CHANGELOG.md`](./CHANGELOG.md).
-Implementation history for individual features lives in the dated specs under
-`docs/superpowers/specs/` — each one is tagged with the version that shipped it.
+This is the canonical backlog for work not yet shipped. Released behavior and
+completed work belong in [`CHANGELOG.md`](./CHANGELOG.md); retained designs under
+`docs/superpowers/` are implementation history, not evidence that a feature is
+still open.
 
-Severity legend (mirrors the UX/code reviews):
-- **P0** — blocks core flows / data-loss / security
-- **P1** — high user-pain, ships next minor
-- **P2** — medium friction
-- **P3** — polish / nice-to-have
+Priority is a risk/order signal, not a release commitment:
 
----
+- **P0** — possible data loss, unrecoverable data, or security boundary failure
+- **P1** — correctness or architecture needed before broadening the product
+- **P2** — important product/capability gap
+- **P3** — useful expansion or polish
 
-## In flight
+## Safety and correctness
 
-No active release-soak lane. Implemented work is tracked in
-[`CHANGELOG.md`](./CHANGELOG.md); this roadmap only tracks open work.
+### P0 — Make attachment-key creation race-free
 
----
+`get_or_create_identity` currently performs get → unconditional set → re-read.
+Two first attachments can therefore encrypt with different keys while the
+reserved `xv-attachment-key` secret is being overwritten; re-reading makes a
+client converge for subsequent work but cannot repair ciphertext already written
+with the losing key. Add an atomic create-if-absent/conditional-write path, cover
+all providers, and test the real two-writer outcome before treating first use as
+safe.
 
-## Multi-backend workspace convergence
+### P1 — Make rename and migration attachment-aware
 
-✅ **COMPLETE — all three phases shipped 2026-07-05.**
-Design: [`2026-07-05-multi-backend-workspace-convergence-design.md`](./docs/superpowers/specs/2026-07-05-multi-backend-workspace-convergence-design.md),
-targeting `v0.21.0`. Sequenced the remaining multi-backend completion work
-(after Phases A–C of multi-vault workspaces shipped in v0.20.0/v0.20.1) into
-three ordered phases, converging the legacy no-workspace resolution path into
-a single workspace path (ADR-1: workspace-of-one convergence over dual-path
-hardening) and fully retiring the legacy Azure managers (ADR-2: full manager
-retirement over partial). Full user-visible change list in `CHANGELOG.md` §
-Unreleased.
+Attachments are associated by `attachments/<secret-name>/<filename>`. Rename
+currently cannot portably move that prefix (the web UI refuses the operation),
+and `xv migrate` copies secrets but not attachment ciphertext or key custody.
+Design and implement recoverable rename/move semantics plus migration that
+preserves readability, handles target-key conflicts explicitly, and is safe to
+resume after partial failure. Do not silently leave or orphan blobs.
 
-### P1 — Phase 1: workspace-of-one resolution convergence
-Eliminate the legacy no-workspace secret-resolution path (`Config::resolve_vault_name`,
-`BackendRegistry::active()`/`active_arc()`, `get_azure_auth_provider`) from the
-CLI's secret-resolution seam; bare/no-workspace usage becomes a degenerate
-workspace-of-one (`WorkspaceSource::Degenerate`, `Workspace::is_configured()`),
-not a second code path.
-**Acceptance bar (seam-scoped, not repo-wide):** the no-workspace `else` at
-`resolve_workspace_or_default` (`src/cli/helpers.rs:155-164`) is deleted;
-`resolve_workspace` never returns `None`; every enumerated presence-gate uses
-`is_configured()`; every surviving legacy resolution call site carries a
-`// Phase 2`/`// Phase 3` annotation matching the design doc's survivor
-allowlist; `cargo test`/`cargo clippy --all-targets` green; `CHANGELOG.md`
-lists every intentional break.
+### P1 — Persist a scheduled target manifest
 
-### P1 — Phase 2: full legacy manager retirement
-✅ **Shipped 2026-07-05.** Deleted `SecretManager` entirely and reduced
-`VaultManager` to the interactive `xv init`/setup path only; all other CLI
-verbs, including Azure-only share/RBAC, audit, and vault-lifecycle operations,
-now route through `Backend` and its `VaultBackend`/`AuditBackend` sub-traits.
-Shipped the design doc's A4 `--vault` composition semantics for
-`run`/`inject`/`rotate`. Also closed the `has_audit` capability-flag
-inconsistency (see § Security hardening below) as a side effect of migrating
-Azure audit onto the trait. See `CHANGELOG.md` § Unreleased for the full
-user-visible change list.
-**Acceptance bar (met):** zero manager references from `src/cli/**`.
+`xv schedule` embeds an explicit `--vault` when supplied and otherwise pins the
+current non-empty global `default_vault`; only a schedule with neither resolves
+its vault name at execution time. It still does not pin the full target identity:
+backend or named-backend instance, project environment/workspace alias, config
+path, and working directory can differ in the scheduler session, so a same-named
+vault may resolve against the wrong provider or fail. Installation should persist
+and validate an explicit resolved target manifest. Define upgrade, missing-target,
+drift-reporting, and uninstall behavior and exercise the manifest on real
+scheduler runners where practical.
 
-### P2 — Phase 3: default-entry file-ops routing
-✅ **Shipped 2026-07-05.** `xv file` now routes through a `FileBackend`
-resolution against the workspace's default entry, uniformly across
-Azure/local/AWS; the separate AWS-only file-ops code path is deleted. No
-union file views, no alias-qualified file addressing. `xv file sync` now also
-works on the local backend (previously Azure-only); AWS sync remains
-unsupported (see § Backend ecosystem below).
-**Acceptance bar (met):** `xv file` resolves through the workspace default
-entry only; no union/aliased file addressing.
+### P1 — Harden cache storage and close stale issue [#337](https://github.com/bziobnic/crosstache/issues/337)
 
-**Deferred non-goals (all phases):** multi-instance same-kind backends
-(`NamedBackendEntry::Azure`), union file views, alias-qualified file
-addressing, cross-vault file operations, byte-for-byte legacy output/exit-code
-parity, new backends (tracked separately below).
+Current `main` resolves the backend embedded in a stale secrets-list key through
+`BackendRegistry::with_lazy` before refreshing, so the Azure-only poisoning path
+described by #337 is no longer present; close that stale issue after adding a
+focused regression test if coverage is missing. Remaining cache work is local
+filesystem and identity hardening: private/no-follow atomic writes, random
+exclusive temporary files, explicit config/account fingerprints in keys,
+centralized mutation invalidation, corruption diagnostics, and a strict mode for
+CI. Cache failures must not silently widen trust or return another target's data.
 
----
+### P1 — Split secret-domain types from provider/legacy manager types
 
-## Security hardening
+Backend-neutral traits still exchange request/property models owned by
+`secret::manager`, which preserves Azure-era coupling in otherwise generic code.
+Move value-bearing requests, summaries, properties, updates, and deleted/version
+models into a dedicated secret-domain module with explicit redaction/zeroization
+contracts. Keep provider adapters responsible for translation and avoid another
+flag-day rewrite.
 
-Sourced from `docs/code-review-gpt55.md` (GPT-5.5 code review, 2026-05-09).
-Each item names the source file at review time — verify line numbers before
-fixing as code drifts.
+## Product and platform work
 
-All four P2 items from this review shipped on 2026-06-11 (#242 rename
-recoverability, #243 blob download streaming, #244 per-call file vault
-resolution, #245 Azure deleted/backup/restore REST paths). Several P3
-hardening items shipped in v0.14.0; see [Shipped history](#shipped-history).
-Remaining items are P3 and below.
+### P2 — Workspace-wide UI views and TOTP surface parity
 
-### P3 — Age identity files not zeroized
-`src/backend/local/crypto.rs:138,139`. Load into `Zeroizing<String>`;
-open with no-follow and read from the file handle to close the TOCTOU
-window.
+- The current web/desktop UI can switch among resolved workspace entries across
+  backends and routes each request to the selected `(alias, backend, vault)`.
+  It still has no CLI-style union `ls`/`find` view across every attached entry.
+  Re-scope or close stale issue [#353](https://github.com/bziobnic/crosstache/issues/353)
+  before tracking the remaining union-view work.
+- Bring the shipped CLI `xv totp` flow to the web/desktop UI and TUI with the same
+  encrypted-field-only, no-accidental-stdout, clipboard-expiry, and redaction
+  guarantees. Live/watch output, QR enrollment, and seed provisioning remain
+  separate decisions.
 
-### P3 — CSV output manually assembled
-`src/utils/format.rs:174`. Use the `csv` crate.
+### P2 — Provider compare-and-swap primitives
 
-### P4 — Code-quality polish
-Deduplicate Azure secret response parsing
-(`src/secret/manager.rs:493`); update stale "placeholder" comments in
-`src/blob/manager.rs:6`; refresh Azure SDK version comments
-(`src/secret/manager.rs:382`); make `path_to_blob_name` return
-`Result` instead of silently normalizing
-(`src/cli/file_ops.rs:814`); replace `.expect(...)` with `is_some_and`
-(`src/secret/manager.rs:418`); skip `xv://` env scan when `inherit_env`
-is false (`src/secret/manager.rs:2020`); keep TUI clipboard state
-`Zeroizing` (`src/tui/update.rs:142`); add safety comment to the
-SIGPIPE `unsafe` block (`src/main.rs:170`); surface corrupted version
-listings (`src/backend/local/secrets.rs:651`); add adversarial tests
-for traversal/symlink/rollback/duplicate-trash
-(`src/backend/local/secrets.rs:861`); cover single-file and sync
-download with traversal tests (`src/cli/file_ops.rs:1203`); replace
-regex-only entropy fallback with real entropy or label as
-low-confidence (`src/scan/patterns.rs:62`).
+Define portable conditional secret mutation semantics (create-if-absent and
+update-if-version/etag-matches) across Azure, AWS, and local. Use provider-native
+preconditions where available and a fail-closed local implementation. Attachment
+key initialization is the first required consumer; rotation and other concurrent
+workflows should reuse the same contract rather than inventing command-specific
+locks.
 
----
+### P2 — Rotation workflow and rollout coordination
 
-## Rotation, audit, and CI/CD (2026-07-24)
+`xv rotate` can replace a stored value, run a generator, or delegate AWS native
+rotation, but it does not provide a transactional external-system change,
+validation, staged rollout, restart/redeploy, or rollback workflow. Design an
+explicit hook/workflow model with failure states and idempotency before adding
+surface; do not imply that updating the vault also updates consumers.
 
-Four capability gaps from the competitive feature review closed this pass; see
-`CHANGELOG.md` § Unreleased for the user-visible list. Remaining follow-ups:
+### P2 — Off-box audit durability
 
-### ~~P2 — Local audit log records successes only~~ — closed
-✅ **Closed 2026-07-24.** All nine audited operations now record failures as well
-as successes, with status tokens from a closed set keyed off the error variant
-(`failure_status`). `BackendError::Decryption` was split out of `Internal` so a
-failed decryption is its own status. Metadata-only probes remain unlogged on both
-paths.
+The local hash chain is tamper-evident, not tamper-proof: a key holder can rewrite
+it and a writer can truncate it. Add an append-only off-box sink (for example
+syslog, an authenticated HTTP collector, or WORM/object-lock storage) with
+backpressure, retry, and fail-open/fail-closed policy made explicit. A manually
+pushed local Git remote is not a complete audit sink.
 
-### P2 — No off-box audit sink
-The hash chain is tamper-evident but not tamper-proof: whoever holds the age
-identity can rewrite it wholesale, and anyone who can write the file can truncate
-the tail. `[local].git` plus a remote is the current answer (the remote holds
-copies a local attacker cannot reach), which requires the operator to push.
-A native append-only sink (syslog, an HTTP endpoint, a WORM bucket) would close
-it properly.
+### P2 — AWS file-operation parity
 
-### ~~P2 — No first-party scheduling for due rotation~~ — closed
-✅ **Closed 2026-07-24.** `xv schedule install|status|uninstall` manages a
-per-user job in the platform scheduler (launchd / systemd user timer / Task
-Scheduler). See `src/schedule/mod.rs`. Remaining: no cron fallback is installed
-automatically on systemd-less Linux (a diagnostic error prints the line to add),
-and lifecycle verification on Windows and systemd is untested in CI — the unit
-tests cover rendering and command sequencing against a fake runner, but no test
-registers a real job, by design.
+Implement `xv file sync` for S3 and restore streaming upload/download plus atomic
+local download replacement on the unified backend path. Preserve containment,
+size limits, progress, metadata, and interruption safety rather than achieving
+parity with an in-memory shortcut.
 
-### P2 — Rotation policy has no external-system hook
-`xv rotate` replaces the stored value; it does not change the password on the
-database. `--generator` can wrap a script that does both, and AWS `--native`
-delegates to a Lambda, but there is no first-class "rotate this, then run this"
-step, and no rollout coordination — a rotated credential that an app read at
-startup needs a restart. Worth a design pass before adding surface.
+### P2 — Managed named backends
 
-### P3 — Scheduler lifecycle is not exercised on a real runner
-`src/schedule/mod.rs` unit-tests rendering and command sequencing against a fake
-`CommandRunner`, and `tests/schedule_cli_tests.rs` covers `--print` and argument
-validation. Nothing installs a real job: `launchctl`, `systemctl --user`, and
-`schtasks` act on the invoking user's live session regardless of `HOME`, so a test
-that installed would leave a rotation job on the developer's machine. A container
-or VM job could cover systemd end-to-end; launchd and Task Scheduler would need
-dedicated runners. The macOS path was verified manually (install → reinstall →
-status → uninstall, with `plutil -lint` on the plist).
+`xv backend add|rm|ls` manages one canonical instance per provider while advanced
+`named_backends` entries still require hand-edited config (and Azure lacks a
+managed multi-instance path). Add lifecycle commands for named instances,
+including validation, workspace-reference safeguards, reconfiguration, and safe
+removal. Keep backend configuration distinct from `xv cx` workspace attachment.
 
-### P3 — `xv rotate --check` emits two JSON documents on stdout
-With an explicit `--format json`, a non-zero exit also writes the machine-readable
-error envelope to stdout (`print_user_friendly_error`), so `--check` output is
-rows followed by the envelope and `| jq` sees two documents. This matches
-`xv scan --format json`, which has behaved this way since it shipped — the
-inconsistency is in the framework's error path, not in either command, so fixing
-it means deciding the contract for the whole 50–59 exit-code family at once
-rather than special-casing one command.
+### P3 — First-party CI integrations
 
-### P3 — No first-party GitLab / CircleCI integration
-`action.yml` covers GitHub. GitLab and CircleCI work via a documented plain
-install step (`docs/ci-cd.md`), but there is no CI component or orb, and no
-OIDC-native path for GitLab's `CI_JOB_JWT_V2` (the exchange in
-`src/backend/azure/oidc.rs` is generic; only the token-fetch step is
-GitHub-specific, so this is a small addition).
-
-### P3 — Git versioning is local-only by design
-Deliberate, not an omission: mirroring Azure/AWS secret values into a git history
-would create a second, effectively permanent copy of every secret version. If a
-cloud mirror is ever wanted, it needs its own design pass covering key custody
-for the mirror and a redaction story — not a straight extension of the local
-implementation.
-
----
-
-## Backend ecosystem
-
-### P1 — AWS capability matrix gaps (deferred from v0.10.0)
-Source: `CHANGELOG.md` § AWS capabilities matrix.
-
-All four gaps shipped in **v0.12.0** (2026-06-12, #248–#251). Retained here
-as history; current AWS capability state lives in `CHANGELOG.md`.
-
-| Feature           | AWS status                                             | Shipped                                                                       |
-| ----------------- | ------------------------------------------------------ | ---------------------------------------------------------------------------- |
-| `xv share` (RBAC) | ✅ Capability-aware hint with `aws secretsmanager put-resource-policy` example | v0.12.0 (#248) |
-| `xv audit`        | ✅ Reads CloudTrail `LookupEvents`, mirrors Azure Activity Log UX | v0.12.0 (#249) |
-| Native rotation   | ✅ `xv rotate --native` invokes Secrets Manager `RotateSecret` (Lambda) | v0.12.0 (#250) |
-| File storage (S3) | ✅ `xv file` on S3, vault-prefixed, streaming + containment | v0.12.0 (#251) |
-
-### P3 — `xv file sync` unsupported on AWS (S3)
-Carried over from the Multi-backend workspace convergence Phase 3 (default-entry
-file-ops routing, shipped 2026-07-05): `xv file sync` now works on both Azure
-and local, but AWS S3 storage still has no sync support — a capability-gated
-error names the limitation. `xv file upload`/`download`/`list`/`delete`/`info`
-are unaffected and work on AWS today.
-
-### P3 — AWS file ops no longer stream to/from disk
-Also from Phase 3: routing `xv file` through the unified `Backend` trait
-moved AWS uploads/downloads off the old AWS-specific streaming path onto
-in-memory buffering (bounded by the existing 5 GiB download-size guard) — see
-`CHANGELOG.md` § Unreleased for the full behavior-change note, including the
-loss of the old download path's atomic temp-file rename. Candidate follow-up:
-give AWS a streaming upload/download path (mirroring Azure's) if large-file
-memory pressure or partial-write safety on AWS becomes a real-world problem.
-
-### ~~P3 — `has_audit` capability flag is inconsistent across audit backends~~ — closed
-✅ **Closed 2026-07-05** by the Multi-backend workspace convergence Phase 2
-manager retirement (see § above). Azure `xv audit`/`--resource-group` now
-dispatches through the `AuditBackend` trait exactly like AWS; the legacy
-Activity Log client is deleted, so `has_audit: true` for Azure is no longer a
-lie. Retained here for traceability; details in `CHANGELOG.md` § Unreleased.
-
-### ~~P1 — Rotation limited to AWS native / manual value replacement~~ — closed
-✅ **Closed 2026-07-24.** Rotation policies (`xv:rotate_every` +
-`xv:rotated_at`), `xv rotate --due`, and `xv rotate --check` work on Azure, AWS,
-and local; `--native` remains the AWS server-side path. See § Rotation, audit,
-and CI/CD above for remaining follow-ups.
-
-### ~~P2 — Local backend has no audit trail~~ — closed
-✅ **Closed 2026-07-24.** `[local].audit` writes a hash-chained log verified by
-`xv audit --verify`. Scope limits and the missing off-box sink are tracked above.
+The GitHub Action is first-party; GitLab and CircleCI currently use documented
+install steps. Add a GitLab component with OIDC token acquisition and a CircleCI
+orb, plus release/install verification and representative hosted-runner tests.
+Do not claim provider OIDC parity until each path is exercised end to end.
 
 ### P3 — Additional backends
-Open ground from `2026-04-29-strategic-improvements-phase-1-design.md`:
-- GCP Secret Manager
-- HashiCorp Vault (KV v2)
-- 1Password CLI bridge
 
-Each new backend appends to `docs/superpowers/specs/backend-trait-checklist.md`.
+Candidate providers remain GCP Secret Manager, HashiCorp Vault KV v2, and a
+1Password CLI bridge. Each implementation must satisfy and extend
+[`backend-trait-checklist.md`](./docs/superpowers/specs/backend-trait-checklist.md),
+state unsupported capabilities honestly, and include hermetic contract tests.
 
----
+### P3 — Agent credential broker research
 
-## Shipped history
+Research a least-privilege broker for short-lived agent/tool access without
+handing long-lived vault credentials or unrestricted secret values to an agent
+process. Threat-model policy scope, approval/consent, process identity, TTL,
+revocation, audit, redaction, prompt-injection boundaries, and platform support
+before proposing commands or a daemon.
 
-- **Missing serialization guards for value-like fields** — closed after the
-  `src/error.rs` guard was expanded to cover cache entries, scan findings,
-  structured output, log output, and tracing diagnostics.
-- **Local secret names disclosed via filenames** — closed in v0.15.0 by
-  opaque local-backend filenames in #276. The retained design plan is
-  [`docs/plans/2026-06-19-local-secret-filename-opaquing.md`](./docs/plans/2026-06-19-local-secret-filename-opaquing.md);
-  release notes live in [`CHANGELOG.md`](./CHANGELOG.md) under `v0.15.0`.
+### P3 — P2P secret sharing (design-ready, unshipped)
 
----
+The retained plan at
+[`2026-05-27-p2p-secret-sharing.md`](./docs/plans/2026-05-27-p2p-secret-sharing.md)
+covers identities, authenticated age encryption, trust, claim codes, and a relay;
+validated spikes are recorded there. It is design-ready but no client, relay, or
+public command has shipped. Revalidate dependencies, relay abuse controls,
+identity recovery, and operational ownership before implementation.
 
-## UX & docs polish
+## Explicitly discarded decisions
 
-From `docs/UX-REVIEW.md` (2026-05-16 AWS-backend baseline).
+These are deliberate non-goals, not deferred backlog:
 
-The full P2 lane and P3-1..4 shipped post-v0.12.0 (#254 §P2-1/§P2-5,
-#255 §P2-2, #256 §P2-3/§P2-4, #257 §P3-4, #258 §P3-1..3). They are
-recorded in [`CHANGELOG.md`](./CHANGELOG.md) under `v0.13.0`. §P3-5 is
-also addressed in unreleased CLI output by inline hints on
-`config show --resolved`, `context show`, and `context envs` that explain
-env profile vs vault context vs global config precedence where users see the
-resolved values.
+- **No cloud Git mirroring.** Do not copy Azure/AWS secret values into Git
+  history; that creates a second, durable secret store with a different custody
+  and deletion model. Git-native versioning remains local-backend-only.
+- **No continuous replication.** Workspaces compose explicitly selected
+  backends/vaults, and `xv migrate` is an operator-invoked transfer. Do not add a
+  background bidirectional sync loop with ambiguous conflict ownership or silent
+  propagation of deletes/rotations.
 
-No substantive UX review items remain open.
+## Maintaining this file
 
----
-
-## Discarded / superseded
-
-These ideas are *not* on the roadmap; recording for traceability:
-
-- **`bd`/`beads` issue tracking** — per `AGENTS.md`, out-of-band, do not reintroduce.
-- **`--progress` / `--stream` / `--metadata` flags on file ops** — removed in v0.5.0; functionality replaced by built-in progress indicators (v0.7.3) and streaming defaults.
-- **`Config.cache_ttl` and `Config.function_app_url`** — never used, removed during cleanup.
-- **`bd` integration plans, output-consistency redesign, README audit, e2e test fixes, list-pagination plan, output-consistency design** — all shipped; plans removed in the 2026-05-23 docs sweep.
-
----
-
-## How to read this file
-
-- Items here are **not yet implemented**. If you find one that's actually shipped, file a PR moving it to `CHANGELOG.md` and updating the matching spec banner under `docs/superpowers/specs/`.
-- Severity is a rough triage signal, not a deadline. Re-rank as priorities shift.
-- New feature ideas go here first (a one-paragraph sketch is fine). Promote to a full spec under `docs/superpowers/specs/YYYY-MM-DD-<slug>-design.md` once design is converging.
-- When a spec ships, add a banner at the top:
-  `> **Status:** ✅ Implemented in **vX.Y.Z** (YYYY-MM-DD). Retained as design history.`
+- Add only unshipped work. Move completed behavior to `CHANGELOG.md` and mark its
+  design/spec as implemented.
+- Link an issue or design when one exists, but keep this file understandable on
+  its own.
+- Re-check assumptions against current source before changing priority or calling
+  an item complete.

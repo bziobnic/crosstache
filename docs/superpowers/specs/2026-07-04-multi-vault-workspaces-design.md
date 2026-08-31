@@ -1,7 +1,7 @@
 # Multi-Vault Workspaces: Simultaneous Vaults Across Backends
 
 **Date:** 2026-07-04
-**Status:** Approved design, not yet implemented
+**Status:** ✅ Implemented in **v0.20.0–v0.20.1** (2026-07-04–2026-07-05). Retained as design history.
 **Depends on:** multi-backend registry (`BackendRegistry`, v0.10+), `BackendRef`
 `backend:vault` addressing (`src/backend/addressing.rs`), env profiles
 (docs/env-profiles.md), record types (#321), `--filter` glob helpers (#326)
