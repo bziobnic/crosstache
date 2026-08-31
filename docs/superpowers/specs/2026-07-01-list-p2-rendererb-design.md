@@ -1,6 +1,6 @@
 # List Command P2 Phase B — Renderer Unification Design
 
-> **Status:** 📋 Approved design — not yet implemented. | **Date:** 2026-07-01 | **Author:** Claude + Scott
+> **Status:** ✅ Implemented in **v0.17.0** (2026-07-02). Retained as design history. | **Date:** 2026-07-01 | **Author:** Claude + Scott
 > Phase B of the P2 tier of the 2026-07-01 list-command UX review (P0 = PR #289, P1 = PR #290, Phase A = PR #291). Executed autonomously under Scott's standing "recommended options, don't stop" instruction; the batched up-front decisions are recorded below.
 
 ---

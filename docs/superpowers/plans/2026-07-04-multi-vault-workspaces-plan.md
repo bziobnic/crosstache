@@ -1,5 +1,8 @@
 # Multi-Vault Workspaces Implementation Plan
 
+> **Status:** ✅ Implemented in **v0.20.0–v0.20.1** (2026-07-04–2026-07-05).
+> Implementation history lives in CHANGELOG.md. This file is retained as design context — do not edit it to describe current behavior; open a new spec instead.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Multiple vaults, potentially on different backends, open simultaneously — per the approved spec `docs/superpowers/specs/2026-07-04-multi-vault-workspaces-design.md`.

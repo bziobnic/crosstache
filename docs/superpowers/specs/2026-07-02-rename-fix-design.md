@@ -1,6 +1,6 @@
 # Rename Fix Design (`xv update --rename`, issue #295)
 
-> **Status:** 📋 Approved design — not yet implemented. | **Date:** 2026-07-02 | **Author:** Claude + Scott
+> **Status:** ✅ Implemented in **v0.18.0** (2026-07-02). Retained as design history. | **Date:** 2026-07-02 | **Author:** Claude + Scott
 > Executed under Scott's standing autonomous instruction; adopted decisions recorded verbatim below. Scott is the sole user; backwards compatibility is a non-feature.
 > Fixes [GitHub issue #295](https://github.com/bziobnic/crosstache/issues/295).
 

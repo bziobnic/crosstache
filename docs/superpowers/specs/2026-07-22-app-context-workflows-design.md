@@ -1,6 +1,6 @@
 # App Context and Core Workflows Design
 
-**Date:** 2026-07-22 · **Status:** Approved design
+**Date:** 2026-07-22 · **Status:** ✅ Implemented in **v0.29.0** (2026-07-24). Retained as design history.
 
 **Backlog coverage:** items 6–9 and the information architecture required by 14
 

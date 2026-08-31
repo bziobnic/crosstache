@@ -1,5 +1,8 @@
 # Remove Azure CLI Installer Dependency Implementation Plan
 
+> **Status:** ✅ Implemented in **v0.36.1** (2026-08-09).
+> Implementation history lives in CHANGELOG.md. This file is retained as design context — do not edit it to describe current behavior; open a new spec instead.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Stop the generic crosstache installers from checking for or installing Azure CLI, because `xv` supports local, AWS, environment-credential, managed-identity, and OIDC operation without it.

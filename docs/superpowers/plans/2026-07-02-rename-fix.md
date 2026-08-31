@@ -1,5 +1,8 @@
 # Rename Fix Implementation Plan (`xv update --rename`, issue #295)
 
+> **Status:** ✅ Implemented in **v0.18.0** (2026-07-02).
+> Implementation history lives in CHANGELOG.md. This file is retained as design context — do not edit it to describe current behavior; open a new spec instead.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Implement the spec (`docs/superpowers/specs/2026-07-02-rename-fix-design.md`): make `xv update --rename` actually move a secret on all three backends via a new provided `SecretBackend::rename_secret` trait method (read value+metadata → create under new name → delete old), restore the `RenameIncomplete` error + exit code 43, delete the ignorable `SecretUpdateRequest.new_name` field, and wire the CLI so other update flags apply first, then the rename.

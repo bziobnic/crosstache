@@ -1,6 +1,6 @@
 # Legacy Code Cleanup Design
 
-> **Status:** 📋 Approved design — not yet implemented. | **Date:** 2026-07-02 | **Author:** Claude + Scott
+> **Status:** ✅ Implemented in **v0.17.0** (2026-07-02). Retained as design history. | **Date:** 2026-07-02 | **Author:** Claude + Scott
 > Executed under Scott's standing autonomous instruction; recommended scope adopted at the option prompt. Scott is the sole user; backwards compatibility is a non-feature.
 
 ---

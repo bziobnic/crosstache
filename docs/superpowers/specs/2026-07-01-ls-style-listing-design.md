@@ -1,6 +1,6 @@
 # ls-Style Folder-Aware `xv ls` Design (P1)
 
-> **Status:** 📋 Approved design — not yet implemented. | **Date:** 2026-07-01 | **Author:** Claude + Scott
+> **Status:** ✅ Implemented in **v0.17.0** (2026-07-02). Retained as design history. | **Date:** 2026-07-01 | **Author:** Claude + Scott
 > Tier P1 of the 2026-07-01 list-command UX review. Builds on the merged P0 fixes (PR #289). The P2 tier (format/pager/count unification across all list commands) is separate.
 
 ---

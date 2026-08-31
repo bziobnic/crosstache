@@ -1,5 +1,8 @@
 # ls-Style Folder-Aware `xv ls` Implementation Plan
 
+> **Status:** ✅ Implemented in **v0.17.0** (2026-07-02).
+> Implementation history lives in CHANGELOG.md. This file is retained as design context — do not edit it to describe current behavior; open a new spec instead.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Implement the P1 spec (`docs/superpowers/specs/2026-07-01-ls-style-listing-design.md`): `xv ls [FOLDER]` with folder-first ls-style grid output by default, `-l` long mode, `-r` recursive flatten, unchanged machine-output schema.

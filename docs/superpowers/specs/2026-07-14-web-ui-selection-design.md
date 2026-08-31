@@ -1,7 +1,7 @@
 # Web UI Selection and Folder Indentation Design
 
 **Date:** 2026-07-14  
-**Status:** Approved
+**Status:** ✅ Implemented in **v0.26.0** (2026-07-14). Retained as design history.
 
 ## Goal
 

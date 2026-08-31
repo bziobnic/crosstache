@@ -14,13 +14,11 @@ xv scan install                        # block secret leaks before commit
 xv backend add local                   # configure a second backend alongside the active one
 ```
 
-**v0.22 highlights:** multi-vault workspaces with aliases, union `ls`/`find`,
-cross-vault `mv`/`copy`, and alias-aware templates · file storage through the
-unified backend path (`xv file sync` works on Azure and local; AWS sync remains
-gated) · record types with typed fields (`login`, `api-key`, `database`,
-`ssh-key`, `payment-card`, `secure-note`, plus custom types) · fail-fast
-`xv run`/`xv inject` with `--best-effort` opt-out ·
-pre-commit leak scanner that matches files against your *actual* vault values.
+**v0.38 highlights:** manage Azure, AWS, and local backends side by side with
+`xv backend` and multi-vault workspaces · six built-in structured record types,
+Keeper JSON import/export, encrypted attachments, and `xv totp` · rotation
+policies with OS-native scheduling · local audit and git history · leak scanning,
+TUI, web UI, and the Tauri desktop app.
 
 **Web UI**: `xv ui` opens a local browser interface (build with `--features ui`).
 
@@ -1806,7 +1804,7 @@ jobs:
     steps:
       - uses: bziobnic/crosstache@v1
         with:
-          version: v0.28.0
+          version: v0.38.0
           vault: myproj-prod-kv
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
@@ -1875,10 +1873,12 @@ configuration error.
 
 ### Backends
 
-`xv init` bootstraps and switches to a single backend, but you can have more
-than one **configured** at once — a local store and a cloud vault, say — with
-only one **active**. `xv backend` manages that set without disturbing which
-one is active:
+`xv init` bootstraps and switches to one active default backend, but you can
+configure several at once—a local store and cloud backends, for example. An
+attached workspace may use several of those backends in one invocation: union
+reads span its entries, while unqualified writes and default file operations go
+to the workspace default. `xv backend` manages the configured set without
+changing the active default:
 
 ```bash
 xv backend ls                    # configured backends, active one marked

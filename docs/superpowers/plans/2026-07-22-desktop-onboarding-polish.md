@@ -1,5 +1,8 @@
 # Desktop Onboarding and Product Polish Implementation Plan
 
+> **Status:** ✅ Implemented in **v0.29.0** (2026-07-24).
+> Implementation history lives in CHANGELOG.md. This file is retained as design context — do not edit it to describe current behavior; open a new spec instead.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Let an unconfigured or broken macOS desktop launch reach a verified vault, then finish the context-led visual hierarchy, settings, help, and completion evidence.

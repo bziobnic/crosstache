@@ -1,5 +1,7 @@
 # crosstache `xv` CLI UX Review
 
+> **Status:** Historical review baseline. Many findings were resolved in subsequent releases through v0.38.0; inline resolution notes remain as evidence. This file is not the active backlog—use [`ROADMAP.md`](../ROADMAP.md) for current open work and [`CHANGELOG.md`](../CHANGELOG.md) for shipped behavior.
+
 Scope: deep-dive review of the `xv` CLI for discoverability, command naming,
 error messages, configuration model, and first-run/onboarding, especially for a
 user moving between Azure and AWS backends.

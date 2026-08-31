@@ -1,7 +1,7 @@
 # Web UI Tweaks: Dates, Record Editing, Loading Indicator
 
 **Date:** 2026-07-09
-**Status:** Approved design, not yet implemented
+**Status:** ✅ Implemented in **v0.24.0** (2026-07-09). Retained as design history.
 
 ## Motivation
 

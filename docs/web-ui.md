@@ -109,25 +109,26 @@ remain authenticated while the server is running. Closing the tab discards the
 app's session access. Opening the scrubbed URL in a new tab requires the
 original tokenized URL printed in the terminal.
 
-Scope note: the UI operates on the **active backend** — the vault switcher
-lists that backend's vaults and every operation targets it. Multi-backend
-workspaces (`xv cx` attached vaults and aliases) are not resolved here yet;
-like `xv gen` or `xv find --all-vaults`, the UI uses the context/config
-default vault, not the workspace seam. Workspace-aware switching is tracked
-as a follow-up.
+Scope note: the UI resolves the effective workspace and lists its entries as
+`alias — backend / vault` in the workspace switcher, including entries attached
+to different backends. Each request is scoped to the single selected entry,
+however: the UI does not perform the CLI's union reads across all attached
+entries. The original switching request in #353 is now implemented; re-scope or
+close that stale issue before using it to track a future union view.
 
 While a tab is visible it polls `GET /api/health` every 10 seconds to check
 that the `xv ui` process it was opened against is still there. Two consecutive
 failed probes raise a banner across the top of the page and switch the rail's
-connection pill to "Disconnected"; the page recovers on its own if you restart
-`xv ui` on the same port with the same session link. A probe that comes back
-`401` means something is answering but it is a *new* process with a new token,
-which the banner reports separately — reopen the URL printed in the terminal.
-Polling pauses on a hidden tab; a failed request probes immediately, and a
-single failed probe is confirmed before the banner appears. The probe touches
-no backend, so it does not put a Key Vault call on a timer; backend
-reachability is still what the connection pill shows while connected, sampled
-from `/api/context` at load and on each vault switch.
+connection status to "Disconnected"; a single failed probe gets a fast recheck
+before the banner appears, and polling pauses on a hidden tab, probing
+immediately when you return. A transient failure can recover on its own, but
+restarting `xv ui` mints a new token and session link even on the same port, so
+the old tab cannot authenticate to the restarted process. Its next probe
+receives `401`, which the banner reports separately and which stops further
+probing — reopen the new URL printed in the terminal. The probe touches no
+backend, so it does not put a Key Vault call on a timer. While the tab's server
+session is healthy, the rail's connection status instead shows backend
+reachability sampled from `/api/context` at load and on each workspace switch.
 
 Security model: loopback bind only; per-session bearer token (the `?token=`
 in the URL, held in per-tab session storage); Host/Origin validation; secret

@@ -1,7 +1,7 @@
 # `xv ui` Visual Refresh
 
 **Date:** 2026-07-14
-**Status:** Approved design
+**Status:** ✅ Implemented in **v0.26.0** (2026-07-14). Retained as design history.
 
 ## Motivation
 

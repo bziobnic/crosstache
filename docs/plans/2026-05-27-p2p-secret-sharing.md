@@ -1,5 +1,7 @@
 # xv P2P Secret Sharing — Implementation Plan
 
+> **Status:** 📋 Design-ready but unshipped as of **v0.38.0**. No `xv identity`, relay-backed transfer/claim client, or public P2P command has shipped. Revalidate this plan and its relay/security assumptions before execution; current priority lives in [`ROADMAP.md`](../../ROADMAP.md).
+
 > **For Hermes:** Use subagent-driven-development skill to implement this plan task-by-task.
 
 **Goal:** Ship `xv identity`, `xv share`, and `xv claim` so any two xv users can send encrypted secrets to each other out-of-band of their respective vaults, with origin authentication and a relay-mediated handoff.

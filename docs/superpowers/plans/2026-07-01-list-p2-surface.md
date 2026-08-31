@@ -1,5 +1,8 @@
 # List Command P2 Surface-Consistency Implementation Plan
 
+> **Status:** ✅ Implemented in **v0.17.0** (2026-07-02).
+> Implementation history lives in CHANGELOG.md. This file is retained as design context — do not edit it to describe current behavior; open a new spec instead.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Implement Phase A of the P2 spec (`docs/superpowers/specs/2026-07-01-list-p2-surface-design.md`): unify list-command flags (`--format`/`--fmt`/`--pager`/`--names-only`), add a global `--no-color`, and standardize empty-states and counts through a new `src/utils/list_output.rs` helper module.

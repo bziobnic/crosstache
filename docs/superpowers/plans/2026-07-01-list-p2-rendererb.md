@@ -1,5 +1,8 @@
 # List Command P2 Phase B — Renderer Unification Implementation Plan
 
+> **Status:** ✅ Implemented in **v0.17.0** (2026-07-02).
+> Implementation history lives in CHANGELOG.md. This file is retained as design context — do not edit it to describe current behavior; open a new spec instead.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Implement Phase B of the P2 spec (`docs/superpowers/specs/2026-07-01-list-p2-rendererb-design.md`): route `audit`, `find`, `context list`, `env list`, `config show`, and `file list` CSV through the one shared `TableFormatter`, bring back the global `--columns` flag, make counts plural-aware, give `history`/`find`/`audit` valid-empty machine output, and delete the dead legacy list path plus the `format_table()` free function.

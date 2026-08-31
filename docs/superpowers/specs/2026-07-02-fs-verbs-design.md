@@ -1,7 +1,7 @@
 # Filesystem Verbs, Round 1: `ls` Aliases Everywhere + `xv mv`
 
 **Date:** 2026-07-02
-**Status:** Approved design, not yet implemented
+**Status:** ✅ Implemented in **v0.18.0** (2026-07-02). Retained as design history.
 **Depends on:** trait-level rename (issue #295, shipped in PR #298 — merged to main)
 
 ## Motivation

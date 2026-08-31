@@ -1,5 +1,8 @@
 # Tauri Web UI Table and Secret Fixes Implementation Plan
 
+> **Status:** ✅ Implemented in **v0.26.2** (2026-07-16).
+> Implementation history lives in CHANGELOG.md. This file is retained as design context — do not edit it to describe current behavior; open a new spec instead.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Fix secret dates and protected-value masking, add persistent resizable and sortable tables, and simplify file download/delete behavior in the embedded Tauri web UI.

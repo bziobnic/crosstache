@@ -1,10 +1,13 @@
 # `xv backend` — configured-backend lifecycle
 
 `xv` supports three backend types — `local`, `azure`, `aws` — and can have more
-than one **configured** at once, even though only one is **active** (the one
-commands actually use) at a time. `xv backend add/rm/ls` manage that set
-without disturbing which backend is active, so a local store and a cloud vault
-can coexist instead of one replacing the other.
+than one **configured** at once. One backend is the active **default**, but that
+does not limit an invocation to that backend: attached workspace entries may
+span several backends, and union reads resolve across all of them. Unqualified
+writes and default file operations target the workspace's default entry (or the
+active default backend when no workspace overrides it). `xv backend add/rm/ls`
+manage the configured set without disturbing the active default, so a local
+store and a cloud vault can coexist instead of one replacing the other.
 
 - [Backend types](#backend-types)
 - [`xv init` vs `xv backend add`](#xv-init-vs-xv-backend-add)
