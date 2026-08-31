@@ -41,6 +41,10 @@ xv list
 # Filter by group
 xv list --group "production"
 xv list --group "myapp/database"
+
+# Groups with member counts (same secrets-list cache as `xv ls`; `--no-cache` to bypass)
+xv group list
+xv group list --format csv
 ```
 
 ## Organizing with Groups

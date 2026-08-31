@@ -1107,7 +1107,9 @@ pub enum Commands {
     Whoami,
     /// Check for and install new versions
     Upgrade {
-        /// Only check if an update is available (exit code 0 = up-to-date, 1 = update available)
+        /// Only check if an update is available. Always exits 0; whether an
+        /// update exists is reported in the message so
+        /// `xv upgrade --check && xv upgrade` can chain.
         #[arg(long)]
         check: bool,
         /// Skip confirmation prompt

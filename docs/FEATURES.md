@@ -204,8 +204,8 @@ to the previous warn-and-continue behavior.
 | `xv vault restore <name>` | Restore a soft-deleted vault |
 | `xv vault purge <name>` | Permanently purge a soft-deleted vault |
 | `xv vault update <name>` | Update vault properties and tags |
-| `xv vault export <name>` | Export secrets to JSON, ENV, or TXT |
-| `xv vault import <name>` | Import secrets from file (`--overwrite`, `--dry-run`) |
+| `xv vault export <name>` | Export secrets to JSON, ENV, TXT, or Keeper (`--fmt keeper` requires `--include-values`). Works on every backend. See [keeper.md](keeper.md) |
+| `xv vault import <name>` | Import secrets from file (`--fmt json\|env\|txt\|keeper`, `--overwrite`, `--dry-run`). `--dry-run` exits non-zero when any record is unimportable. Works on every backend |
 
 ### Access Control
 
@@ -316,6 +316,7 @@ JSON/YAML keep the full-fidelity serialization (etags, raw byte sizes, extra met
 | `xv parse <conn-string>` | Parse and display connection string components |
 | `xv completion <shell>` | Generate shell completions (bash, zsh, fish, powershell) |
 | `xv version` | Build info (version, git hash, target) |
+| `xv upgrade` | Replace the running binary with the latest GitHub Release (`--check` reports without installing and always exits 0; `--force` skips confirmation). Fail-closed minisign + SHA-256 + extracted `--version`. See [upgrade.md](upgrade.md) |
 
 ## Git-native versioning (local backend)
 
@@ -405,6 +406,8 @@ See [migration.md](migration.md) for the full guide.
 | `xv config path` | Show config file location |
 | `xv config edit` | Open the config file in `$VISUAL`/`$EDITOR` (or a platform default) |
 | `xv doctor` | Bootstrap-safe repair of global `xv.conf` (dispatched before normal load). See [doctor.md](doctor.md) |
+| `xv cache status` | Show listing-cache directory, TTL, and fresh/stale entries. See [cache.md](cache.md) |
+| `xv cache clear` | Wipe listing cache (`--vault NAME` for that vault on every backend) |
 
 ### Hierarchy
 
@@ -419,6 +422,9 @@ Key backend config:
 ```toml
 # Azure remains the default when no backend is selected.
 backend = "aws" # or "azure", "local", or a named backend
+
+cache_enabled = true       # listing cache for ls / vault list / file list / group list
+cache_ttl_secs = 900       # seconds; 0 disables. See [cache.md](cache.md)
 
 [aws]
 region = "us-east-1"       # falls through to AWS_REGION

@@ -53,6 +53,7 @@ pre-commit leak scanner that matches files against your *actual* vault values.
 - [Scripting & CI](#scripting--ci) — exit codes, JSON envelope, examples
 - [GitHub Action & OIDC](#github-action--oidc) — no stored credentials in CI
 - [Configuration](#configuration)
+- [Listing cache](#listing-cache) — `xv cache`, `--no-cache`
 - [Authentication](#authentication)
 - [Troubleshooting](#troubleshooting)
 - [Security model](#security-model)
@@ -323,6 +324,22 @@ If macOS blocks the binary ("developer cannot be verified"):
 ```bash
 xattr -d com.apple.quarantine ~/.local/bin/xv
 ```
+
+### Self-update
+
+```bash
+xv upgrade              # prompt, then download / verify / replace
+xv upgrade --force      # skip confirmation
+xv upgrade --check      # report whether an update exists (always exits 0)
+```
+
+`xv upgrade` talks only to GitHub Releases (no vault, no `xv.conf`). It
+refuses an unsigned latest release, verifies minisign + SHA-256 + the
+extracted binary's `--version`, then atomically replaces the running file.
+`--check` always exits 0 so `xv upgrade --check && xv upgrade` can chain;
+availability is in the message, not the exit code. Full pitfalls (rate
+limit, cargo-install overwrite, platform matrix) in
+[`docs/upgrade.md`](docs/upgrade.md).
 
 ---
 
@@ -1865,6 +1882,8 @@ xv config set azure_credential_priority cli
 xv config path                           # path to the config file
 xv config edit                           # open xv.conf in $VISUAL/$EDITOR
 xv config unset clipboard_timeout
+xv config set cache_enabled false        # disable listing cache
+xv config set cache_ttl_secs 300         # 5-minute listing TTL (0 disables)
 ```
 
 `xv config edit` creates the parent directory and seeds a missing config with a
@@ -1872,6 +1891,25 @@ valid default file before opening it. Editor resolution is `$VISUAL`, then
 `$EDITOR`, then `nano` on Unix or `notepad` on Windows; values with arguments
 such as `code --wait` are supported. A non-zero editor exit is surfaced as a
 configuration error.
+
+### Listing cache
+
+Repeated `xv ls` / `xv vault list` / `xv file list` / `xv group list` reuse a
+disk cache of listing metadata (names, notes, tags — never secret values).
+Default TTL is 15 minutes.
+
+```bash
+xv ls --no-cache                 # one-shot bypass
+xv cache status                  # directory, TTL, fresh/stale entries
+xv cache clear                   # wipe all listing cache
+xv cache clear --vault myvault   # that vault name on every backend
+```
+
+Writes invalidate the matching `(backend, vault)` entry. After switching
+the active backend, `xv vault list` can still show the previous backend's
+vaults until the TTL expires — pass `--no-cache` or `xv cache clear`. Tab
+completion is cache-only (silent when cold). See
+[`docs/cache.md`](docs/cache.md).
 
 ### Backends
 
@@ -1924,8 +1962,9 @@ field list, backup rules, Azure `[azure]`-block pitfall, and scope limits.
 | `XV_ENV` | Active env from `.xv.toml` (highest priority for env selection) |
 | `XV_NO_PARENT_CONFIG` | `1` disables `.xv.toml` walk-up |
 | `XV_SCAN_DISABLE` | `1` / `true` skips `xv scan` entirely (stderr notice, exit 0) |
-| `CACHE_TTL` | Cache TTL in seconds |
-| `XV_CACHE_DIR` | Override the on-disk cache root directory (default: OS cache dir + `xv`) |
+| `CACHE_ENABLED` | `true` / `1` enables the listing cache (default on) |
+| `CACHE_TTL` | Listing-cache TTL in seconds (`0` disables; default `900`) |
+| `XV_CACHE_DIR` | Override the on-disk cache root directory (default: OS cache dir + `xv`; use an absolute path) |
 | `XV_CONTEXT_DIR` | Override the directory holding the vault context/workspace file (default: `$XDG_CONFIG_HOME/xv` or `$HOME/.config/xv`) — also skips the local `.xv/context` (cwd) check entirely, so this is "my context store lives here, full stop"; mainly for tests that need isolation from the real context |
 | `DEBUG` | `true` / `1` enables debug logging |
 | `NO_COLOR` | Disable colored output (any value; standard [NO_COLOR](https://no-color.org/) convention) |
@@ -2089,6 +2128,20 @@ xv cx rm <alias>                         # drop the stale entry
 Do not run `xv init` for this — that rebuilds global config for a single bad
 workspace line. The error names the alias and the missing backend.
 
+### Stale `xv ls` / `xv vault list` after an external change
+
+The listing cache can outlive an edit made in the Azure portal, another
+machine, or a second `xv` process with a different `XV_CACHE_DIR`:
+
+```bash
+xv ls --no-cache                 # fetch now
+xv vault list --no-cache         # vault-list cache is not per-backend
+xv cache clear                   # drop every listing entry
+xv cache status                  # confirm enabled / TTL / fresh vs stale
+```
+
+See [`docs/cache.md`](docs/cache.md).
+
 ### Debug logging
 
 ```bash
@@ -2168,6 +2221,8 @@ minisign-signed binaries for all four platforms.
 - [`docs/env-profiles.md`](docs/env-profiles.md) — `.xv.toml` walk-up reference
 - [`docs/find.md`](docs/find.md) — `xv find` ranked search
 - [`docs/doctor.md`](docs/doctor.md) — bootstrap-safe `xv doctor` config recovery
+- [`docs/cache.md`](docs/cache.md) — listing cache (`xv cache`, `--no-cache`)
+- [`docs/upgrade.md`](docs/upgrade.md) — `xv upgrade` self-update
 - [`docs/keeper.md`](docs/keeper.md) — Keeper Security JSON import/export
 - [`docs/scan.md`](docs/scan.md) — pre-commit leak scanner
 - [`docs/tui.md`](docs/tui.md) — terminal UI keymap
@@ -2184,7 +2239,7 @@ Release archives are signed with [minisign](https://jedisct1.github.io/minisign/
 minisign -Vm xv-linux-x64.tar.gz -P RWRuXFh34rB613dgsXyAMmtKvYK0SFwxq4i44dhGFXVTrhAQ7hJXf6Ym
 ```
 
-The public key is also embedded in the `xv` binary — `xv upgrade` automatically verifies signatures.
+The public key is also embedded in the `xv` binary — `xv upgrade` automatically verifies signatures. See [`docs/upgrade.md`](docs/upgrade.md).
 
 ---
 

@@ -30,6 +30,10 @@ crosstache is a cross-platform secrets manager CLI written in Rust. The binary i
   - `manager.rs`: Core blob operations (upload, download, list, delete)
   - `models.rs`: File-related data structures
   - `operations.rs`: Batch and sync operations
+- `cache/`: Client-side listing cache (`xv ls` / `vault list` / `file list` / `group list`)
+  - `manager.rs`: Get/set/invalidate/clear/status; TTL 0 or `cache_enabled=false` is a no-op; I/O never fails the command
+  - `models.rs`: `CacheKey` (`secrets:<backend>:<vault>`, `vaults`, `files:` / `files-recursive:`), versioned secrets-list filename
+  - `refresh.rs`: Detached `xv cache refresh --key` child + atomic create-new lock files
 - `config/`: Configuration management with hierarchy (CLI → env vars → config file → defaults)
   - `settings.rs`: Configuration structure and loading
   - `context.rs`: Runtime context management
@@ -221,7 +225,8 @@ As of `v0.14.0` plus current `main`:
 - **Web UI**: Embedded localhost browser UI (`xv ui`, `--features ui`) — secret CRUD, folder/group metadata, rename/move, file upload/download (including Files-tab ZIP bulk download), customizable color themes/palettes, vault switching; loopback-only with a per-session bearer token. See `docs/web-ui.md`.
 - **Config recovery**: `xv doctor` diagnoses/repairs global `xv.conf` before normal config load (timestamped backup, exit 3 when manual steps remain). See `docs/doctor.md`.
 - **Leak Scanner**: `xv scan` pre-commit scanner, shipped v0.7.0-rc.1.
-- **Self-update**: `xv upgrade`, shipped v0.5.1.
+- **Self-update**: `xv upgrade`, shipped v0.5.1. Fail-closed minisign (required since v0.11.0) + SHA-256 + extracted `--version`; `--check` always exits 0. See `docs/upgrade.md`, `src/cli/upgrade_ops.rs`.
+- **Listing cache**: `xv cache status|clear`, `--no-cache` on list commands. Keys are per `(backend, vault)` except `vaults-list.json` (active backend only). Tab completion is cache-only. See `docs/cache.md`.
 - **Secret File Attachments**: `xv attach`/`xv attachments`/`xv detach` plus `xv file upload --encrypt` — client-side age encryption with per-vault key custody in the vault's secret store (`xv-attachment-key`); see `docs/superpowers/specs/2026-07-21-secret-file-attachments-design.md`.
 - **Rotation policies (all backends)**: `xv:rotate_every` + `xv:rotated_at` tags, `xv update --rotate-every`, `xv rotate --every/--due/--check` (exit 51 `xv-rotation-due`). AWS `--native` is still the only *server-side* rotation. See `src/secret/rotation.rs`, `docs/rotation.md`.
 - **Automatic rotation scheduling**: `xv schedule install|status|uninstall` manages a per-user job in the OS scheduler (launchd / systemd user timer / Task Scheduler) running `xv rotate --due --force`. No daemon, nothing system-wide. `--print` renders without installing. Units carry no credentials; `HOME`/`XDG_CONFIG_HOME` are pinned so the scheduled run resolves the same config. Lifecycle logic is tested against a fake `CommandRunner` — no test registers a real job. See `src/schedule/mod.rs`, `src/cli/schedule_ops.rs`.
