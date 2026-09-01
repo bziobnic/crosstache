@@ -36,6 +36,18 @@ pub(crate) async fn execute_doctor_command() -> Result<()> {
         println!("Backup: {}", backup_path.display());
     }
 
+    // Cache-health check (advisory; does not affect the exit status — a degraded
+    // cache is non-fatal and self-heals on next use).
+    let cache_dir = crate::cache::CacheManager::resolve_cache_dir();
+    let cache_check = crate::config::doctor::cache_health_check(&cache_dir);
+    println!("Cache: {}", cache_dir.display());
+    let cache_status = match cache_check.status {
+        DoctorCheckStatus::Ok => "ok",
+        DoctorCheckStatus::Fixed => "fixed",
+        DoctorCheckStatus::Error => "error",
+    };
+    println!("{cache_status}: {}", cache_check.message);
+
     if report.unresolved.is_empty() {
         Ok(())
     } else {

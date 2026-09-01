@@ -670,9 +670,140 @@ fn add_semantic_unresolved(report: &mut DoctorReport, config: &Config) {
     }
 }
 
+/// Legacy (pre-v5) cache filenames whose presence means the on-disk cache
+/// layout predates the fingerprint layout. Entries in these files are simply
+/// missed by the current code (they cannot be read at the new path), so this is
+/// diagnostic only — never a repair target.
+fn is_legacy_cache_filename(name: &str) -> bool {
+    matches!(
+        name,
+        "secrets-list.json"
+            | "secrets-list-v2.json"
+            | "secrets-list-v3.json"
+            | "secrets-list-v4.json"
+            | "files-list.json"
+            | "files-list-recursive.json"
+    )
+}
+
+/// Best-effort, read-only walk counting cache entries with loose permissions,
+/// quarantined `.corrupt` files, and pre-v5 layout files.
+fn scan_cache_tree(dir: &Path, loose: &mut usize, corrupt: &mut usize, legacy: &mut usize) {
+    let read_dir = match std::fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(_) => return,
+    };
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::symlink_metadata(dir) {
+            if meta.permissions().mode() & 0o077 != 0 {
+                *loose += 1;
+            }
+        }
+    }
+
+    for item in read_dir.flatten() {
+        let path = item.path();
+        let ft = match item.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        if ft.is_symlink() {
+            continue;
+        }
+        if ft.is_dir() {
+            scan_cache_tree(&path, loose, corrupt, legacy);
+            continue;
+        }
+
+        let ext = path.extension().and_then(|e| e.to_str());
+        if !matches!(ext, Some("json" | "lock" | "corrupt")) {
+            continue;
+        }
+        if ext == Some("corrupt") {
+            *corrupt += 1;
+        }
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if is_legacy_cache_filename(name) {
+                *legacy += 1;
+            }
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = std::fs::symlink_metadata(&path) {
+                if meta.permissions().mode() & 0o077 != 0 {
+                    *loose += 1;
+                }
+            }
+        }
+    }
+}
+
+/// Cache-health check for `xv doctor`.
+///
+/// Verifies (best-effort, read-only) that the cache tree at `cache_dir` uses
+/// private modes (0700 directories / 0600 `.json`/`.lock`/`.corrupt` files),
+/// contains no quarantined `.corrupt` files, and carries only current (v5)
+/// layout filenames. Purely diagnostic: it never mutates the cache, and its
+/// result does not affect `xv doctor`'s exit status — a degraded cache is
+/// non-fatal, since `xv` tightens modes on next use and re-fetches missed
+/// entries.
+pub fn cache_health_check(cache_dir: &Path) -> DoctorCheck {
+    if !cache_dir.exists() {
+        return DoctorCheck {
+            status: DoctorCheckStatus::Ok,
+            message: format!(
+                "Cache directory '{}' does not exist yet.",
+                cache_dir.display()
+            ),
+        };
+    }
+
+    let mut loose = 0usize;
+    let mut corrupt = 0usize;
+    let mut legacy = 0usize;
+    scan_cache_tree(cache_dir, &mut loose, &mut corrupt, &mut legacy);
+
+    if loose == 0 && corrupt == 0 && legacy == 0 {
+        return DoctorCheck {
+            status: DoctorCheckStatus::Ok,
+            message: format!(
+                "Cache directory '{}' is healthy: private modes, no corrupt or legacy entries.",
+                cache_dir.display()
+            ),
+        };
+    }
+
+    let mut problems = Vec::new();
+    if loose > 0 {
+        problems.push(format!(
+            "{loose} path(s) with loose (non-0700/0600) permissions"
+        ));
+    }
+    if corrupt > 0 {
+        problems.push(format!("{corrupt} quarantined .corrupt file(s)"));
+    }
+    if legacy > 0 {
+        problems.push(format!("{legacy} pre-v5 layout file(s)"));
+    }
+    DoctorCheck {
+        status: DoctorCheckStatus::Error,
+        message: format!(
+            "Cache directory '{}' has issues ({}). Non-fatal: run any `xv` command to re-tighten \
+             modes and re-fetch, or `xv cache clear` to reset.",
+            cache_dir.display(),
+            problems.join(", ")
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::path::Path;
 
     use crate::config::{
         settings::apply_environment_overrides_with, AwsConfig, Config, LocalConfig,
@@ -682,8 +813,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        backup_path, diagnose_and_repair, diagnose_and_repair_with, persist_repair, repair_json,
-        repair_toml, DoctorReport,
+        backup_path, cache_health_check, diagnose_and_repair, diagnose_and_repair_with,
+        persist_repair, repair_json, repair_toml, DoctorCheckStatus, DoctorReport,
     };
 
     const SPARSE_LOCAL: &str = r#"# keep this comment
@@ -1512,5 +1643,70 @@ future_setting = "{FUTURE_SENTINEL}"
         assert!(report.is_healthy(), "{:?}", report.unresolved);
         assert!(report.backup_path.is_none());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn cache_health_check_reports_missing_dir_as_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope");
+        let check = cache_health_check(&missing);
+        assert_eq!(check.status, DoctorCheckStatus::Ok);
+        assert!(check.message.contains("does not exist"));
+    }
+
+    #[test]
+    fn cache_health_check_ok_for_clean_v5_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("cache");
+        let vault = root.join("fp").join("azure").join("v1");
+        std::fs::create_dir_all(&vault).unwrap();
+        std::fs::write(vault.join("secrets-list-v5.json"), b"{}").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let set = |p: &Path, m: u32| {
+                std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap()
+            };
+            set(&root, 0o700);
+            set(&root.join("fp"), 0o700);
+            set(&root.join("fp").join("azure"), 0o700);
+            set(&vault, 0o700);
+            set(&vault.join("secrets-list-v5.json"), 0o600);
+        }
+        let check = cache_health_check(&root);
+        assert_eq!(
+            check.status,
+            DoctorCheckStatus::Ok,
+            "clean tree should be healthy: {}",
+            check.message
+        );
+    }
+
+    #[test]
+    fn cache_health_check_flags_corrupt_and_legacy_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("cache");
+        let vault = root.join("fp").join("azure").join("v1");
+        std::fs::create_dir_all(&vault).unwrap();
+        // A quarantined file and a pre-v5 legacy file.
+        std::fs::write(vault.join("secrets-list-v5.json.corrupt"), b"garbage").unwrap();
+        std::fs::write(vault.join("secrets-list-v4.json"), b"{}").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let set = |p: &Path, m: u32| {
+                std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap()
+            };
+            set(&root, 0o700);
+            set(&root.join("fp"), 0o700);
+            set(&root.join("fp").join("azure"), 0o700);
+            set(&vault, 0o700);
+            set(&vault.join("secrets-list-v5.json.corrupt"), 0o600);
+            set(&vault.join("secrets-list-v4.json"), 0o600);
+        }
+        let check = cache_health_check(&root);
+        assert_eq!(check.status, DoctorCheckStatus::Error);
+        assert!(check.message.contains("corrupt"), "{}", check.message);
+        assert!(check.message.contains("pre-v5"), "{}", check.message);
     }
 }

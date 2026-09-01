@@ -195,3 +195,155 @@ fn test_cache_ttl_zero_expires_immediately() {
     let result: Option<Vec<String>> = mgr.get(&key);
     assert!(result.is_none());
 }
+
+// ---------------------------------------------------------------------------
+// v5 hardening — private modes and no-follow I/O (Task 1)
+// ---------------------------------------------------------------------------
+
+/// After a `set`, the entry file is mode 0600 and every directory from the
+/// cache root down to the entry's parent is 0700.
+#[cfg(unix)]
+#[test]
+fn test_cache_set_creates_private_dirs_and_files() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().to_path_buf();
+    let mgr = CacheManager::new(root.clone(), true, 900);
+    let key = CacheKey::SecretsList {
+        backend: "azure".to_string(),
+        vault_name: "vault-x".to_string(),
+    };
+    mgr.set(&key, &vec!["s1".to_string()]);
+
+    let entry = key.to_path(&root);
+    assert!(entry.exists(), "entry file should have been written");
+
+    let file_mode = std::fs::metadata(&entry).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        file_mode, 0o600,
+        "entry file must be 0600, got {file_mode:o}"
+    );
+
+    let mut d = entry.parent().unwrap().to_path_buf();
+    loop {
+        let mode = std::fs::metadata(&d).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode,
+            0o700,
+            "dir {} must be 0700, got {mode:o}",
+            d.display()
+        );
+        if d == root {
+            break;
+        }
+        d = d.parent().unwrap().to_path_buf();
+    }
+}
+
+/// A symlink pre-planted at the final entry path must not be written through:
+/// the outside target file must never come into existence.
+#[cfg(unix)]
+#[test]
+fn test_cache_set_refuses_symlinked_entry_path() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().to_path_buf();
+    let mgr = CacheManager::new(root.clone(), true, 900);
+    let key = CacheKey::SecretsList {
+        backend: "azure".to_string(),
+        vault_name: "vault-y".to_string(),
+    };
+
+    let entry = key.to_path(&root);
+    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    let outside = dir.path().join("outside-secret.txt");
+    std::os::unix::fs::symlink(&outside, &entry).unwrap();
+
+    mgr.set(&key, &vec!["should-not-be-written".to_string()]);
+
+    assert!(
+        !outside.exists(),
+        "set() must not write through a symlinked entry path to an outside file"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// v5 hardening — tightening pre-existing loose cache trees (Task 2)
+// ---------------------------------------------------------------------------
+
+/// A cache tree created before v5 (dirs 0755, files 0644) is tightened to
+/// 0700/0600 on first construction of a manager over it.
+#[cfg(unix)]
+#[test]
+fn test_cache_tightens_preexisting_loose_tree_on_first_use() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().join("cacheroot");
+    let backend_dir = root.join("azure");
+    let vault_dir = backend_dir.join("v1");
+    std::fs::create_dir_all(&vault_dir).unwrap();
+
+    let set = |p: &std::path::Path, m: u32| {
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap();
+    };
+    let json = vault_dir.join("secrets-list-v5.json");
+    std::fs::write(&json, b"{}").unwrap();
+    let lock = vault_dir.join("secrets-list-v5.lock");
+    std::fs::write(&lock, b"").unwrap();
+    // Loosen everything to simulate a pre-v5 world-readable tree.
+    set(&json, 0o644);
+    set(&lock, 0o644);
+    set(&vault_dir, 0o755);
+    set(&backend_dir, 0o755);
+    set(&root, 0o755);
+
+    // Construction triggers the run-once tighten walk for this root.
+    let _mgr = CacheManager::new(root.clone(), true, 900);
+
+    let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&root), 0o700, "root dir must be tightened to 0700");
+    assert_eq!(mode(&backend_dir), 0o700, "backend dir must be tightened");
+    assert_eq!(mode(&vault_dir), 0o700, "vault dir must be tightened");
+    assert_eq!(mode(&json), 0o600, ".json entry must be tightened to 0600");
+    assert_eq!(mode(&lock), 0o600, ".lock file must be tightened to 0600");
+}
+
+// ---------------------------------------------------------------------------
+// v5 hardening — corruption quarantine + status count (Task 5)
+// ---------------------------------------------------------------------------
+
+/// Garbage JSON at an entry path: `get` returns None, the file is renamed to
+/// `<name>.corrupt`, and `status` counts it as quarantined.
+#[test]
+fn test_corrupt_entry_is_quarantined_and_counted_in_status() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().to_path_buf();
+    let mgr = CacheManager::new(root.clone(), true, 900);
+    let key = CacheKey::VaultList;
+
+    let path = key.to_path(&root);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"not valid json at all {{{{").unwrap();
+
+    let result: Option<Vec<String>> = mgr.get(&key);
+    assert!(result.is_none(), "corrupt entry must be a miss");
+    assert!(
+        !path.exists(),
+        "corrupt entry must be renamed aside, not left in place"
+    );
+
+    let file_name = path.file_name().unwrap().to_str().unwrap();
+    let corrupt = path.with_file_name(format!("{file_name}.corrupt"));
+    assert!(
+        corrupt.exists(),
+        "corrupt entry must be quarantined to a .corrupt file"
+    );
+
+    let status = mgr.status();
+    assert_eq!(
+        status.corrupt_count, 1,
+        "status must count the quarantined file"
+    );
+    assert_eq!(status.corrupt_entries.len(), 1);
+}

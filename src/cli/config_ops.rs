@@ -810,6 +810,13 @@ pub(crate) async fn execute_cache_command(command: CacheCommands, config: Config
                 "Total size      : {}",
                 format_cache_size(status.total_size_bytes)
             );
+            println!("Quarantined     : {}", status.corrupt_count);
+            if !status.corrupt_entries.is_empty() {
+                println!("\nQuarantined (corrupt) entries:");
+                for entry in &status.corrupt_entries {
+                    println!("  {entry}");
+                }
+            }
             if !status.entries.is_empty() {
                 println!("\nEntries:");
                 for entry in &status.entries {
@@ -838,9 +845,10 @@ async fn execute_cache_refresh(key: &str, config: Config) -> Result<()> {
     let cache_key: CacheKey = key.parse().map_err(CrosstacheError::invalid_argument)?;
 
     let cache_manager = CacheManager::from_config(&config);
-    let lock_path = cache_key
-        .to_path(cache_manager.cache_dir())
-        .with_extension("lock");
+    // Resolve the lock path through the manager so it lands under the same
+    // identity-fingerprint entry root that `get`'s stale-while-revalidate path
+    // used when it acquired the lock.
+    let lock_path = cache_manager.lock_path(&cache_key);
 
     let result = match cache_key {
         CacheKey::SecretsList {

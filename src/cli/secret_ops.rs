@@ -1067,8 +1067,7 @@ fn trait_secret_cache_key(backend_name: &str, vault_name: &str) -> crate::cache:
 /// mismatch here would invalidate the wrong `(backend, vault)` cache
 /// directory, leaving a stale cached list behind after a write.
 pub(crate) fn invalidate_trait_secret_cache(config: &Config, backend_name: &str, vault_name: &str) {
-    let cache_manager = crate::cache::CacheManager::from_config(config);
-    cache_manager.invalidate(&trait_secret_cache_key(backend_name, vault_name));
+    crate::cache::invalidation::on_secret_mutation(config, backend_name, vault_name);
 }
 
 /// Extra confirmation gate for any CLI write that targets the reserved
@@ -3142,11 +3141,7 @@ pub(crate) async fn execute_secret_rotate_direct(
     // hardcoded KIND (e.g. "local"), which silently invalidates the wrong
     // `(backend, vault)` cache path whenever the entry's registry name
     // differs from its kind (any named backend) — Bugbot review.
-    let cache_manager = crate::cache::CacheManager::from_config(&config);
-    cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
-        backend: backend_name,
-        vault_name,
-    });
+    crate::cache::invalidation::on_secret_mutation(&config, &backend_name, &vault_name);
 
     Ok(())
 }
@@ -3234,11 +3229,7 @@ pub(crate) async fn execute_rotation_policy_update(
         .await
         .map_err(CrosstacheError::from)?;
 
-    let cache_manager = crate::cache::CacheManager::from_config(&config);
-    cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
-        backend: backend_name,
-        vault_name: vault_name.clone(),
-    });
+    crate::cache::invalidation::on_secret_mutation(&config, &backend_name, &vault_name);
 
     if clear {
         output::success(&format!("Removed the rotation policy from '{name}'."));
@@ -4953,15 +4944,12 @@ pub(crate) async fn execute_secret_copy_direct(
         crate::cli::helpers::vault_ref_cache_identity(from_vault, ws.as_ref(), &config);
     let (to_backend_name, to_vault_resolved) =
         crate::cli::helpers::vault_ref_cache_identity(to_vault, ws.as_ref(), &config);
-    let cache_manager = crate::cache::CacheManager::from_config(&config);
-    cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
-        backend: from_backend_name,
-        vault_name: from_vault_resolved,
-    });
-    cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
-        backend: to_backend_name,
-        vault_name: to_vault_resolved,
-    });
+    crate::cache::invalidation::on_secret_mutation(
+        &config,
+        &from_backend_name,
+        &from_vault_resolved,
+    );
+    crate::cache::invalidation::on_secret_mutation(&config, &to_backend_name, &to_vault_resolved);
 
     Ok(())
 }
@@ -5001,15 +4989,12 @@ pub(crate) async fn execute_secret_move_direct(
         crate::cli::helpers::vault_ref_cache_identity(from_vault, ws.as_ref(), &config);
     let (to_backend_name, to_vault_resolved) =
         crate::cli::helpers::vault_ref_cache_identity(to_vault, ws.as_ref(), &config);
-    let cache_manager = crate::cache::CacheManager::from_config(&config);
-    cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
-        backend: from_backend_name,
-        vault_name: from_vault_resolved,
-    });
-    cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
-        backend: to_backend_name,
-        vault_name: to_vault_resolved,
-    });
+    crate::cache::invalidation::on_secret_mutation(
+        &config,
+        &from_backend_name,
+        &from_vault_resolved,
+    );
+    crate::cache::invalidation::on_secret_mutation(&config, &to_backend_name, &to_vault_resolved);
 
     Ok(())
 }

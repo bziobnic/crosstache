@@ -113,6 +113,17 @@ Environment variables (`AZURE_SUBSCRIPTION_ID`, `AZURE_TENANT_ID`,
 `AWS_REGION`, …) can make a sparse file validate for this process without
 being written into `xv.conf`.
 
+## Cache health check
+
+After the config checks, `xv doctor` prints a `Cache:` line and a status for the
+listing cache tree: whether it uses private modes (0700 directories / 0600
+files), is free of quarantined `.corrupt` files, and carries only the current
+(v5) layout. This check is **advisory** — it never mutates the cache and does
+not affect doctor's exit status, because a degraded cache is non-fatal and
+self-heals on the next `xv` command (modes are re-tightened, missed entries are
+re-fetched). To reset it explicitly, run `xv cache clear`. See
+[`cache.md`](cache.md).
+
 ## Common pitfalls
 
 | Symptom | Cause / fix |
@@ -131,4 +142,5 @@ being written into `xv.conf`.
 - Design: [`superpowers/specs/2026-08-07-xv-doctor-design.md`](superpowers/specs/2026-08-07-xv-doctor-design.md)
 - Exit codes: [`exit-codes.md`](exit-codes.md) (doctor unresolved → `3`)
 - Backend lifecycle: [`backends.md`](backends.md)
+- Listing cache (v5 layout, private modes, strict mode): [`cache.md`](cache.md)
 - Config hierarchy overview: [`FEATURES.md`](FEATURES.md#configuration)

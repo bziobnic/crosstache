@@ -6,13 +6,30 @@
 
 use chrono::Utc;
 use serde::{de::DeserializeOwned, Serialize};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use tracing::debug;
 
 use crate::cache::models::{
     validate_cache_vault_name, CacheEntry, CacheEntryInfo, CacheKey, CacheStatus,
 };
 use crate::cache::refresh;
+use crate::utils::helpers::{atomic_write_file_no_follow, read_file_no_follow};
+
+/// Log a cache *failure* (write error, quarantine event, permission-tightening
+/// failure). Normally at `debug!` so a broken cache stays silent, but promoted
+/// to `warn!` when `XV_CACHE_STRICT` is set (see [`crate::cache::strict_mode`])
+/// so CI can see cache trouble without the cache ever becoming fatal.
+macro_rules! cache_log_failure {
+    ($($arg:tt)*) => {
+        if $crate::cache::strict_mode() {
+            tracing::warn!($($arg)*);
+        } else {
+            tracing::debug!($($arg)*);
+        }
+    };
+}
 
 // ---------------------------------------------------------------------------
 // CacheManager
@@ -20,9 +37,16 @@ use crate::cache::refresh;
 
 /// Client-side disk cache for expensive listing operations.
 pub struct CacheManager {
+    /// Root cache directory (contains one sub-directory per config
+    /// fingerprint in the v5 layout).
     cache_dir: PathBuf,
     enabled: bool,
     ttl_secs: u64,
+    /// Account/config fingerprint that isolates this identity's entries under
+    /// `cache_dir/<fingerprint>/…`. Empty for the low-level [`CacheManager::new`]
+    /// constructor, which keeps the flat (fingerprint-less) layout used by unit
+    /// tests; production always goes through [`CacheManager::from_config`].
+    fingerprint: String,
 }
 
 impl CacheManager {
@@ -31,11 +55,20 @@ impl CacheManager {
     /// * `cache_dir`  – root directory where cache files are stored.
     /// * `enabled`    – when `false` all operations become no-ops.
     /// * `ttl_secs`   – how long a cache entry is considered fresh.
+    ///
+    /// This low-level constructor uses no fingerprint component, so entries land
+    /// directly under `cache_dir`. Production code uses
+    /// [`CacheManager::from_config`], which derives the identity fingerprint.
+    ///
+    /// Best-effort tightens a pre-existing (pre-v5, possibly world-readable)
+    /// cache tree at `cache_dir` on first touch of that root this process.
     pub fn new(cache_dir: PathBuf, enabled: bool, ttl_secs: u64) -> Self {
+        tighten_permissions(&cache_dir);
         Self {
             cache_dir,
             enabled,
             ttl_secs,
+            fingerprint: String::new(),
         }
     }
 
@@ -47,10 +80,15 @@ impl CacheManager {
     /// rather than the resolved `XV_CACHE_DIR`/`dirs::cache_dir()` location.
     ///
     /// Intended for tests that need an isolated cache directory (e.g. a
-    /// `tempfile::TempDir`) without touching the real OS cache path.
+    /// `tempfile::TempDir`) without touching the real OS cache path. The
+    /// identity fingerprint is derived from `config` exactly as in
+    /// [`CacheManager::from_config`], so cross-config isolation can be tested
+    /// against a temp root.
     pub fn from_config_with_dir(config: &crate::config::Config, cache_dir: PathBuf) -> Self {
         let enabled = config.cache_enabled && config.cache_ttl_secs > 0;
-        Self::new(cache_dir, enabled, config.cache_ttl_secs)
+        let mut manager = Self::new(cache_dir, enabled, config.cache_ttl_secs);
+        manager.fingerprint = crate::cache::fingerprint::config_fingerprint(config);
+        manager
     }
 
     /// Resolve the root cache directory: `XV_CACHE_DIR` env var override
@@ -58,7 +96,7 @@ impl CacheManager {
     /// `xv`, else `/tmp/xv` as a last resort. A relative `XV_CACHE_DIR` is
     /// resolved against the process's current working directory, which can
     /// shift under `cd`/`chdir` — an absolute path is recommended.
-    fn resolve_cache_dir() -> PathBuf {
+    pub fn resolve_cache_dir() -> PathBuf {
         if let Ok(dir) = std::env::var("XV_CACHE_DIR") {
             if !dir.is_empty() {
                 return PathBuf::from(dir);
@@ -69,11 +107,24 @@ impl CacheManager {
             .join("xv")
     }
 
+    /// Directory that entries for THIS identity live under. In the v5 layout
+    /// that is `cache_dir/<fingerprint>`; with no fingerprint (the low-level
+    /// [`CacheManager::new`] path) it is the cache root itself.
+    fn entry_root(&self) -> PathBuf {
+        if self.fingerprint.is_empty() {
+            self.cache_dir.clone()
+        } else {
+            self.cache_dir.join(&self.fingerprint)
+        }
+    }
+
     // ------------------------------------------------------------------
     // Getters
     // ------------------------------------------------------------------
 
-    /// Return the root cache directory.
+    /// Return the root cache directory (the fingerprint sub-directory is joined
+    /// on internally; see [`CacheManager::lock_path`]).
+    #[allow(dead_code)] // public getter; not currently used by the `xv` binary
     pub fn cache_dir(&self) -> &PathBuf {
         &self.cache_dir
     }
@@ -103,19 +154,25 @@ impl CacheManager {
             return None;
         }
 
-        let path = key.to_path(&self.cache_dir);
-        let raw = match std::fs::read_to_string(&path) {
-            Ok(s) => s,
+        let path = key.to_path(&self.entry_root());
+        let raw = match read_file_no_follow(&path) {
+            Ok(bytes) => bytes,
             Err(e) => {
                 debug!("Cache miss ({key}): {e}");
                 return None;
             }
         };
 
-        let entry: CacheEntry<T> = match serde_json::from_str(&raw) {
+        let entry: CacheEntry<T> = match serde_json::from_slice(&raw) {
             Ok(e) => e,
             Err(e) => {
-                debug!("Cache parse error ({key}): {e} — treating as miss");
+                // Quarantine the unparseable file instead of leaving it to be
+                // re-read and silently rewritten on the next miss forever.
+                // Still a miss from the caller's point of view.
+                quarantine_corrupt_entry(&path, key);
+                cache_log_failure!(
+                    "Cache parse error ({key}): {e} — quarantined, treating as miss"
+                );
                 return None;
             }
         };
@@ -154,14 +211,7 @@ impl CacheManager {
             return;
         }
 
-        let path = key.to_path(&self.cache_dir);
-
-        if let Some(parent) = path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                debug!("Cache set ({key}): failed to create directories: {e}");
-                return;
-            }
-        }
+        let path = key.to_path(&self.entry_root());
 
         // Use a local serialisation-only struct so we can hold `&T` without
         // requiring `T: DeserializeOwned` (which `CacheEntry<T>` demands).
@@ -185,20 +235,17 @@ impl CacheManager {
         let json = match serde_json::to_string_pretty(&entry) {
             Ok(s) => s,
             Err(e) => {
-                debug!("Cache set ({key}): serialisation error: {e}");
+                cache_log_failure!("Cache set ({key}): serialisation error: {e}");
                 return;
             }
         };
 
-        // Atomic write via a temp file in the same directory.
-        let tmp_path = path.with_extension("tmp");
-        if let Err(e) = std::fs::write(&tmp_path, &json) {
-            debug!("Cache set ({key}): write temp error: {e}");
-            return;
-        }
-        if let Err(e) = std::fs::rename(&tmp_path, &path) {
-            debug!("Cache set ({key}): rename error: {e}");
-            let _ = std::fs::remove_file(&tmp_path);
+        // Private (0600 file / 0700 dirs), no-follow, atomic write. This creates
+        // any missing parent directories itself (owner-only) and refuses to
+        // write through a symlinked destination, replacing the old
+        // create_dir_all + world-readable temp-file + rename dance.
+        if let Err(e) = atomic_write_file_no_follow(&path, json.as_bytes(), true) {
+            cache_log_failure!("Cache set ({key}): atomic write error: {e}");
             return;
         }
 
@@ -207,7 +254,7 @@ impl CacheManager {
 
     /// Delete a single cache entry (and its lock file if present).
     pub fn invalidate(&self, key: &CacheKey) {
-        let path = key.to_path(&self.cache_dir);
+        let path = key.to_path(&self.entry_root());
         remove_file_if_exists(&path, "invalidate cache entry");
 
         let lock_path = self.lock_path(key);
@@ -251,8 +298,11 @@ impl CacheManager {
             return;
         }
 
-        let vault_dir = self.cache_dir.join(vault_name);
-        if vault_dir.starts_with(&self.cache_dir) && vault_dir.exists() {
+        // Walk this identity's entry root (one level deeper than the cache
+        // root in the v5 fingerprint layout).
+        let root = self.entry_root();
+        let vault_dir = root.join(vault_name);
+        if vault_dir.starts_with(&root) && vault_dir.exists() {
             if looks_like_v3_backend_dir(&vault_dir) {
                 // `cache_dir/<vault_name>` is actually a v3 BACKEND directory
                 // (a backend happens to be named like this vault) — removing it
@@ -276,14 +326,14 @@ impl CacheManager {
             }
         }
 
-        if let Ok(read_dir) = std::fs::read_dir(&self.cache_dir) {
+        if let Ok(read_dir) = std::fs::read_dir(&root) {
             for entry in read_dir.flatten() {
                 let backend_dir = entry.path();
                 if !backend_dir.is_dir() {
                     continue;
                 }
                 let nested = backend_dir.join(vault_name);
-                if nested.starts_with(&self.cache_dir) && nested.is_dir() {
+                if nested.starts_with(&root) && nested.is_dir() {
                     if let Err(e) = std::fs::remove_dir_all(&nested) {
                         debug!("invalidate_vault({vault_name}): {e}");
                     } else {
@@ -299,8 +349,13 @@ impl CacheManager {
 
     /// Clear cached data.
     ///
-    /// * `vault = Some(name)` — clears only that vault's directory.
-    /// * `vault = None`       — clears the entire cache directory.
+    /// * `vault = Some(name)` — clears only that vault's directory, scoped to
+    ///   this identity's entry root (via [`CacheManager::invalidate_vault`]).
+    /// * `vault = None`       — GLOBAL reset: removes the entire cache root,
+    ///   i.e. every identity's fingerprint sub-tree plus any pre-v5 leftovers,
+    ///   not just this identity's. This deliberate asymmetry with `status`
+    ///   (which is identity-scoped) makes `xv cache clear` a full maintenance
+    ///   wipe; other identities' caches simply repopulate on next use.
     pub fn clear(&self, vault: Option<&str>) {
         match vault {
             Some(name) => {
@@ -323,19 +378,26 @@ impl CacheManager {
     }
 
     /// Return a summary of the current cache state.
+    ///
+    /// Walks this identity's entry root (one level deeper than the cache root
+    /// in the v5 fingerprint layout), counting fresh/stale entries and any
+    /// quarantined `.corrupt` files.
     pub fn status(&self) -> CacheStatus {
         let mut entry_count = 0usize;
         let mut total_size_bytes = 0u64;
         let mut entries = Vec::new();
+        let mut corrupt_entries = Vec::new();
 
-        if self.cache_dir.exists() {
+        let root = self.entry_root();
+        if root.exists() {
             collect_entries(
-                &self.cache_dir,
-                &self.cache_dir,
+                &root,
+                &root,
                 self.ttl_secs,
                 &mut entry_count,
                 &mut total_size_bytes,
                 &mut entries,
+                &mut corrupt_entries,
             );
         }
 
@@ -346,6 +408,8 @@ impl CacheManager {
             entry_count,
             total_size_bytes,
             entries,
+            corrupt_count: corrupt_entries.len(),
+            corrupt_entries,
         }
     }
 
@@ -353,8 +417,11 @@ impl CacheManager {
     // Internal helpers
     // ------------------------------------------------------------------
 
-    fn lock_path(&self, key: &CacheKey) -> PathBuf {
-        key.to_path(&self.cache_dir).with_extension("lock")
+    /// Path of the background-refresh lock file for `key`, under this
+    /// identity's entry root. Public so the `xv cache refresh` command can
+    /// release the same lock `get`'s stale-while-revalidate path acquired.
+    pub fn lock_path(&self, key: &CacheKey) -> PathBuf {
+        key.to_path(&self.entry_root()).with_extension("lock")
     }
 }
 
@@ -368,6 +435,88 @@ fn remove_file_if_exists(path: &Path, context: &str) {
             debug!("{context}: {e}");
         } else {
             debug!("{context}: removed {}", path.display());
+        }
+    }
+}
+
+/// Move an unparseable cache file aside to `<name>.corrupt` so it is not
+/// re-read and silently rewritten on every future miss. Best-effort and
+/// non-fatal; the caller still reports a miss. The rename preserves the file's
+/// existing (already-private) permissions.
+fn quarantine_corrupt_entry(path: &Path, key: &CacheKey) {
+    let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+        return;
+    };
+    let corrupt = path.with_file_name(format!("{file_name}.corrupt"));
+    match std::fs::rename(path, &corrupt) {
+        Ok(()) => cache_log_failure!(
+            "Cache quarantine ({key}): moved corrupt entry to {}",
+            corrupt.display()
+        ),
+        Err(e) => cache_log_failure!("Cache quarantine ({key}): rename failed: {e}"),
+    }
+}
+
+/// Tracks cache roots already permission-tightened in this process so the walk
+/// runs at most once per root (the run-once-per-process contract) while staying
+/// test-friendly: each test uses a distinct temp root, so each still runs once.
+static TIGHTENED_ROOTS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+
+/// Lazily, best-effort tighten a possibly pre-v5 (world-readable) cache tree:
+/// directories to 0700, `.json`/`.lock`/`.corrupt` files to 0600. Runs at most
+/// once per root per process. Every failure is logged (strict-aware) and
+/// ignored — a cache that cannot be tightened must never break a command.
+/// A no-op on non-unix platforms, which do not use these numeric modes.
+fn tighten_permissions(cache_dir: &Path) {
+    let guard = TIGHTENED_ROOTS.get_or_init(|| Mutex::new(HashSet::new()));
+    {
+        let mut seen = match guard.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if !seen.insert(cache_dir.to_path_buf()) {
+            return; // already tightened this root in this process
+        }
+    }
+    #[cfg(unix)]
+    tighten_permissions_walk(cache_dir);
+    #[cfg(not(unix))]
+    let _ = cache_dir;
+}
+
+#[cfg(unix)]
+fn tighten_permissions_walk(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let read_dir = match std::fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(_) => return, // missing/inaccessible: nothing to tighten
+    };
+
+    // Tighten the directory itself before descending.
+    if let Err(e) = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)) {
+        cache_log_failure!("Cache tighten: chmod 0700 {}: {e}", dir.display());
+    }
+
+    for item in read_dir.flatten() {
+        let path = item.path();
+        let ft = match item.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        if ft.is_symlink() {
+            continue; // never chase symlinks while tightening
+        }
+        if ft.is_dir() {
+            tighten_permissions_walk(&path);
+        } else if matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("json" | "lock" | "corrupt")
+        ) {
+            if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            {
+                cache_log_failure!("Cache tighten: chmod 0600 {}: {e}", path.display());
+            }
         }
     }
 }
@@ -393,7 +542,9 @@ fn looks_like_v3_backend_dir(dir: &Path) -> bool {
     false
 }
 
-/// Recursively walk `dir`, collecting metadata for every `.json` cache file.
+/// Recursively walk `dir`, collecting metadata for every `.json` cache file and
+/// the relative paths of any quarantined `.corrupt` files.
+#[allow(clippy::too_many_arguments)]
 fn collect_entries(
     dir: &Path,
     cache_root: &Path,
@@ -401,6 +552,7 @@ fn collect_entries(
     entry_count: &mut usize,
     total_size_bytes: &mut u64,
     entries: &mut Vec<CacheEntryInfo>,
+    corrupt_entries: &mut Vec<String>,
 ) {
     let read_dir = match std::fs::read_dir(dir) {
         Ok(rd) => rd,
@@ -425,6 +577,18 @@ fn collect_entries(
                 entry_count,
                 total_size_bytes,
                 entries,
+                corrupt_entries,
+            );
+            continue;
+        }
+
+        // Track quarantined files separately so `status`/`doctor` can surface
+        // them; they are not counted as live entries.
+        if path.extension().and_then(|e| e.to_str()) == Some("corrupt") {
+            let rel = path.strip_prefix(cache_root).unwrap_or(&path);
+            corrupt_entries.push(
+                rel.to_string_lossy()
+                    .replace(std::path::MAIN_SEPARATOR, "/"),
             );
             continue;
         }
@@ -474,8 +638,8 @@ fn parse_entry_timestamps(
         created_at: chrono::DateTime<Utc>,
     }
 
-    let raw = std::fs::read_to_string(path).unwrap_or_default();
-    let created_at = serde_json::from_str::<Header>(&raw)
+    let raw = read_file_no_follow(path).unwrap_or_default();
+    let created_at = serde_json::from_slice::<Header>(&raw)
         .map(|h| h.created_at)
         .unwrap_or_else(|_| Utc::now());
 
@@ -573,8 +737,8 @@ mod tests {
             "set() must not overwrite/consume the legacy file"
         );
         assert!(
-            key.to_path(dir.path()).ends_with("secrets-list-v4.json"),
-            "current schema must resolve to the v4 filename"
+            key.to_path(dir.path()).ends_with("secrets-list-v5.json"),
+            "current schema must resolve to the v5 filename"
         );
     }
 
@@ -620,7 +784,7 @@ mod tests {
             dir.path()
                 .join("azure")
                 .join("myvault")
-                .join("secrets-list-v4.json"),
+                .join("secrets-list-v5.json"),
             "current schema must nest under a backend directory"
         );
     }
@@ -661,7 +825,7 @@ mod tests {
             "pre-expiry v3 cache entry must miss instead of classifying expiry as absent"
         );
         assert!(legacy_path.exists());
-        assert!(key.to_path(dir.path()).ends_with("secrets-list-v4.json"));
+        assert!(key.to_path(dir.path()).ends_with("secrets-list-v5.json"));
     }
 
     #[test]
@@ -1041,5 +1205,101 @@ mod tests {
             outside.exists(),
             "clear(Some(traversal)) should NOT delete outside directory"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // v5 hardening — fingerprint layout (Task 3)
+    // -----------------------------------------------------------------------
+
+    fn azure_config(tenant: &str) -> crate::config::Config {
+        crate::config::Config {
+            backend: Some("azure".to_string()),
+            azure: Some(crate::config::settings::AzureConfig {
+                tenant_id: Some(tenant.to_string()),
+                subscription_id: Some("sub".to_string()),
+                ..Default::default()
+            }),
+            cache_enabled: true,
+            cache_ttl_secs: 300,
+            ..Default::default()
+        }
+    }
+
+    /// An entry written under config A must be a MISS under config B (a
+    /// different tenant), because the two identities key different fingerprint
+    /// sub-directories.
+    #[test]
+    fn test_fingerprint_isolates_entries_across_configs() {
+        let dir = tempdir().unwrap();
+        let key = CacheKey::SecretsList {
+            backend: "azure".to_string(),
+            vault_name: "shared".to_string(),
+        };
+
+        let mgr_a =
+            CacheManager::from_config_with_dir(&azure_config("tenant-a"), dir.path().to_path_buf());
+        mgr_a.set(&key, &vec!["a-secret".to_string()]);
+        assert!(
+            mgr_a.get::<Vec<String>>(&key).is_some(),
+            "config A must read back its own entry"
+        );
+
+        let mgr_b =
+            CacheManager::from_config_with_dir(&azure_config("tenant-b"), dir.path().to_path_buf());
+        assert!(
+            mgr_b.get::<Vec<String>>(&key).is_none(),
+            "config B must MISS config A's entry (cross-identity isolation)"
+        );
+
+        // A still hits after B's miss.
+        assert!(mgr_a.get::<Vec<String>>(&key).is_some());
+    }
+
+    /// Entries physically nest under the fingerprint directory, and
+    /// `status`/`invalidate_vault`/`clear` all operate correctly at that depth.
+    #[test]
+    fn test_entries_nest_under_fingerprint_and_ops_work_at_depth() {
+        let dir = tempdir().unwrap();
+        let config = azure_config("tenant-x");
+        let fp = crate::cache::fingerprint::config_fingerprint(&config);
+        let mgr = CacheManager::from_config_with_dir(&config, dir.path().to_path_buf());
+
+        let skey = CacheKey::SecretsList {
+            backend: "azure".to_string(),
+            vault_name: "v1".to_string(),
+        };
+        let fkey = CacheKey::FileList {
+            backend: "azure".to_string(),
+            vault_name: "v1".to_string(),
+            recursive: false,
+        };
+        mgr.set(&skey, &vec!["s".to_string()]);
+        mgr.set(&fkey, &vec!["f".to_string()]);
+
+        let nested = dir
+            .path()
+            .join(&fp)
+            .join("azure")
+            .join("v1")
+            .join("secrets-list-v5.json");
+        assert!(
+            nested.exists(),
+            "entry must nest under the fingerprint dir: {}",
+            nested.display()
+        );
+
+        // status walks one level deeper and finds both entries.
+        assert_eq!(mgr.status().entry_count, 2);
+
+        // invalidate_vault removes them at the new depth.
+        mgr.invalidate_vault("v1");
+        assert!(mgr.get::<Vec<String>>(&skey).is_none());
+        assert!(mgr.get::<Vec<String>>(&fkey).is_none());
+
+        // clear(None) wipes the whole tree.
+        mgr.set(&skey, &vec!["s2".to_string()]);
+        assert!(mgr.get::<Vec<String>>(&skey).is_some());
+        mgr.clear(None);
+        assert!(mgr.get::<Vec<String>>(&skey).is_none());
     }
 }
