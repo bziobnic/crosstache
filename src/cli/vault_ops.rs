@@ -223,8 +223,6 @@ pub(crate) async fn execute_vault_command(
     // CLI-side.
     let backend = active_or_construct_backend(registry, &config).await?;
 
-    let vault_cache_manager = crate::cache::CacheManager::from_config(&config);
-
     match command {
         VaultCommands::Create {
             name,
@@ -239,7 +237,7 @@ pub(crate) async fn execute_vault_command(
                 &config,
             )
             .await?;
-            vault_cache_manager.invalidate(&crate::cache::CacheKey::VaultList);
+            crate::cache::invalidation::on_vault_mutation(&config);
         }
         VaultCommands::List {
             resource_group,
@@ -276,7 +274,7 @@ pub(crate) async fn execute_vault_command(
                 &config,
             )
             .await?;
-            vault_cache_manager.invalidate(&crate::cache::CacheKey::VaultList);
+            crate::cache::invalidation::on_vault_mutation(&config);
         }
         VaultCommands::Info {
             name,
@@ -287,7 +285,7 @@ pub(crate) async fn execute_vault_command(
         }
         VaultCommands::Restore { name, location } => {
             execute_vault_restore(vaults_of(backend.as_ref())?, &name, &location, &config).await?;
-            vault_cache_manager.invalidate(&crate::cache::CacheKey::VaultList);
+            crate::cache::invalidation::on_vault_mutation(&config);
         }
         VaultCommands::Purge {
             name,
@@ -302,7 +300,7 @@ pub(crate) async fn execute_vault_command(
                 &config,
             )
             .await?;
-            vault_cache_manager.invalidate(&crate::cache::CacheKey::VaultList);
+            crate::cache::invalidation::on_vault_mutation(&config);
         }
         VaultCommands::Export {
             name,
@@ -349,10 +347,11 @@ pub(crate) async fn execute_vault_command(
             // `effective_backend_name()` rather than a hardcoded "azure" —
             // which also keeps every `CacheKey::SecretsList` producer on one
             // convention.
-            vault_cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
-                backend: config.effective_backend_name().to_string(),
-                vault_name: name,
-            });
+            crate::cache::invalidation::on_secret_mutation(
+                &config,
+                config.effective_backend_name(),
+                &name,
+            );
         }
         VaultCommands::Update {
             name,
@@ -377,7 +376,7 @@ pub(crate) async fn execute_vault_command(
                 &config,
             )
             .await?;
-            vault_cache_manager.invalidate(&crate::cache::CacheKey::VaultList);
+            crate::cache::invalidation::on_vault_mutation(&config);
         }
         VaultCommands::Share { command } => {
             // Capability gate: vault sharing requires RBAC support. The gate is
@@ -1364,11 +1363,11 @@ async fn execute_vault_import(
     // hardcoded "azure" — which also keeps every `CacheKey::SecretsList`
     // producer on one convention.
     if imported_count > 0 {
-        let cache_manager = crate::cache::CacheManager::from_config(config);
-        cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
-            backend: config.effective_backend_name().to_string(),
-            vault_name: name.to_string(),
-        });
+        crate::cache::invalidation::on_secret_mutation(
+            config,
+            config.effective_backend_name(),
+            name,
+        );
     }
 
     // Any failed secret import must surface as a non-zero exit so scripted

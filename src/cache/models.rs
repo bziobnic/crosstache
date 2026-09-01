@@ -56,7 +56,27 @@ pub enum CacheEntryType {
 /// Bumped v3 -> v4 when display-safe canonical expiry metadata was added to
 /// `SecretSummary`, so cached pre-expiry rows cannot silently misclassify
 /// expiring secrets as having no expiry.
-pub(crate) const SECRETS_LIST_FILENAME: &str = "secrets-list-v4.json";
+///
+/// Bumped v4 -> v5 for the cache-hardening work: the on-disk layout now nests
+/// every entry under an account/config *fingerprint* directory
+/// (`cache_dir/<fingerprint>/<backend>/<vault>/…`, see `CacheManager`) so two
+/// different accounts/tenants/configs reached through the same backend NAME no
+/// longer share cache files. A pre-v5 entry lived one directory level higher
+/// (no fingerprint component) and keyed only on `(backend, vault)`, so it could
+/// belong to a different account entirely; renaming the file guarantees such an
+/// entry simply misses instead of being served across an identity boundary.
+/// Bump this suffix again on any future change to `SecretSummary`'s shape or the
+/// cache path layout.
+pub(crate) const SECRETS_LIST_FILENAME: &str = "secrets-list-v5.json";
+
+/// On-disk filename for a non-recursive file-list cache entry. Versioned in the
+/// name for the same reason as [`SECRETS_LIST_FILENAME`]; bumped to `v5` with
+/// the fingerprint layout change so pre-v5 entries miss cleanly.
+pub(crate) const FILES_LIST_FILENAME: &str = "files-list-v5.json";
+
+/// On-disk filename for a recursive file-list cache entry. See
+/// [`FILES_LIST_FILENAME`].
+pub(crate) const FILES_LIST_RECURSIVE_FILENAME: &str = "files-list-recursive-v5.json";
 
 /// Identifies a cache entry and determines its file path.
 #[allow(clippy::enum_variant_names)]
@@ -164,9 +184,9 @@ impl CacheKey {
                 recursive,
             } => {
                 let filename = if *recursive {
-                    "files-list-recursive.json"
+                    FILES_LIST_RECURSIVE_FILENAME
                 } else {
-                    "files-list.json"
+                    FILES_LIST_FILENAME
                 };
                 // Nested under `backend` (like SecretsList) so two workspace
                 // entries sharing a vault NAME on different backends never
@@ -324,6 +344,14 @@ pub struct CacheStatus {
     pub entry_count: usize,
     pub total_size_bytes: u64,
     pub entries: Vec<CacheEntryInfo>,
+    /// Number of quarantined (`.corrupt`) files found under the cache tree.
+    /// A corrupt entry is one whose JSON failed to parse on read; `get`
+    /// renames it aside (see [`crate::cache::CacheManager::get`]) so it is not
+    /// re-read and silently rewritten forever.
+    pub corrupt_count: usize,
+    /// Human-readable relative paths of the quarantined files, for
+    /// `xv cache status` and `xv doctor` diagnostics.
+    pub corrupt_entries: Vec<String>,
 }
 
 /// Metadata about a single cache entry file.
@@ -455,7 +483,7 @@ mod tests {
         };
         assert_eq!(
             key.to_path(&base),
-            PathBuf::from("/cache/azure/myvault/secrets-list-v4.json")
+            PathBuf::from("/cache/azure/myvault/secrets-list-v5.json")
         );
 
         let key = CacheKey::VaultList;
@@ -468,7 +496,7 @@ mod tests {
         };
         assert_eq!(
             key.to_path(&base),
-            PathBuf::from("/cache/azure/myvault/files-list.json")
+            PathBuf::from("/cache/azure/myvault/files-list-v5.json")
         );
 
         let key = CacheKey::FileList {
@@ -478,7 +506,7 @@ mod tests {
         };
         assert_eq!(
             key.to_path(&base),
-            PathBuf::from("/cache/azure/myvault/files-list-recursive.json")
+            PathBuf::from("/cache/azure/myvault/files-list-recursive-v5.json")
         );
     }
 

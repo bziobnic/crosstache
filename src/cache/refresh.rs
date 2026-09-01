@@ -111,11 +111,17 @@ pub fn acquire_lock(lock_path: &Path) -> bool {
     const MAX_STALE_RECLAIMS: usize = 2;
     let mut stale_reclaims = 0;
     loop {
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(lock_path)
+        // Create the lock owner-only (0600) on unix so it matches the private
+        // modes the rest of the cache tree now uses. Windows still compiles
+        // (the mode extension is cfg-gated).
+        let mut open_options = std::fs::OpenOptions::new();
+        open_options.write(true).create_new(true);
+        #[cfg(unix)]
         {
+            use std::os::unix::fs::OpenOptionsExt;
+            open_options.mode(0o600);
+        }
+        match open_options.open(lock_path) {
             Ok(mut file) => {
                 // Best-effort metadata for diagnosing stale locks; failure to
                 // write the body does not invalidate the (already-held) lock.

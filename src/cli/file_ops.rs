@@ -258,16 +258,9 @@ pub(crate) async fn execute_file_command(command: FileCommands, config: Config) 
                 )
                 .await?;
             }
-            // Invalidate the file list cache (both recursive and hierarchical) after any upload
-            let cache_manager = crate::cache::CacheManager::from_config(&config);
+            // Invalidate the file list cache (both recursive and hierarchical) after any upload.
             // Keyed by the resolved (backend, vault) — the ONE-identifier convention.
-            for recursive in [true, false] {
-                cache_manager.invalidate(&crate::cache::CacheKey::FileList {
-                    backend: backend_name.clone(),
-                    vault_name: vault.clone(),
-                    recursive,
-                });
-            }
+            crate::cache::invalidation::on_file_mutation(&config, &backend_name, &vault);
         }
         FileCommands::Download {
             files,
@@ -393,16 +386,9 @@ pub(crate) async fn execute_file_command(command: FileCommands, config: Config) 
                 )
                 .await?;
             }
-            // Invalidate the file list cache (both recursive and hierarchical) after any delete
-            let cache_manager = crate::cache::CacheManager::from_config(&config);
+            // Invalidate the file list cache (both recursive and hierarchical) after any delete.
             // Keyed by the resolved (backend, vault) — the ONE-identifier convention.
-            for recursive in [true, false] {
-                cache_manager.invalidate(&crate::cache::CacheKey::FileList {
-                    backend: backend_name.clone(),
-                    vault_name: vault.clone(),
-                    recursive,
-                });
-            }
+            crate::cache::invalidation::on_file_mutation(&config, &backend_name, &vault);
         }
         FileCommands::Info { name } => {
             execute_file_info(&blob_manager, &name, &config).await?;
@@ -2463,14 +2449,11 @@ async fn execute_file_sync(
     }
 
     if mutated && !dry_run {
-        let cache_manager = crate::cache::CacheManager::from_config(config);
-        for recursive in [true, false] {
-            cache_manager.invalidate(&crate::cache::CacheKey::FileList {
-                backend: blob_manager.backend_name.to_string(),
-                vault_name: blob_manager.vault.to_string(),
-                recursive,
-            });
-        }
+        crate::cache::invalidation::on_file_mutation(
+            config,
+            blob_manager.backend_name,
+            blob_manager.vault,
+        );
     }
 
     if config.output_json {
