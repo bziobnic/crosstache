@@ -455,6 +455,7 @@ fn enforced_secret_command_initializes_decision_log_before_local_backend() {
         .args(["get", "missing"])
         .env("HOME", env.tmp_path())
         .env("XDG_STATE_HOME", &blocked_state_root)
+        .env("LOCALAPPDATA", &blocked_state_root)
         .env("XV_AGENT_ID", "test-agent")
         .env_remove("ACTIONS_ID_TOKEN_REQUEST_URL")
         .env_remove("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
