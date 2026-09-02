@@ -2604,6 +2604,53 @@ fn ls_union_fails_loud_when_vault_unreachable() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn background_cache_refresh_uses_backend_named_in_cache_key() {
+    fn collect_secret_cache_files(root: &std::path::Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(root).expect("read cache directory") {
+            let path = entry.expect("read cache entry").path();
+            if path.is_dir() {
+                collect_secret_cache_files(&path, out);
+            } else if path.file_name().and_then(|name| name.to_str())
+                == Some("secrets-list-v5.json")
+            {
+                out.push(path);
+            }
+        }
+    }
+
+    let env = WorkspaceEnv::with_cache_enabled(300);
+    env.ok(&["set", "BUILTIN_ONLY", "--value", "builtin"]);
+    env.ok_with_backend("local-a", &["set", "NAMED_ONLY", "--value", "named"]);
+
+    env.ok(&["cache", "refresh", "--key", "secrets:local-a:default"]);
+
+    let mut files = Vec::new();
+    collect_secret_cache_files(&env.cache_dir, &mut files);
+    assert_eq!(
+        files.len(),
+        1,
+        "expected one refreshed cache entry: {files:?}"
+    );
+    let entry: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&files[0]).expect("read refreshed cache entry"))
+            .expect("parse refreshed cache entry");
+    let names: Vec<&str> = entry["data"]
+        .as_array()
+        .expect("cached secret list")
+        .iter()
+        .map(|secret| secret["name"].as_str().expect("cached secret name"))
+        .collect();
+    assert_eq!(names, vec!["NAMED_ONLY"]);
+    assert!(
+        files[0]
+            .components()
+            .any(|part| part.as_os_str() == "local-a"),
+        "cache entry path must retain the named backend key: {}",
+        files[0].display()
+    );
+}
+
+#[test]
 fn ls_then_qualified_set_then_ls_reflects_write_with_cache_enabled() {
     let env = WorkspaceEnv::with_cache_enabled(300);
     env.ok(&[
