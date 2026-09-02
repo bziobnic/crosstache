@@ -247,5 +247,14 @@ fn parse_activity_log_entry(event: &Value) -> Result<AuditEvent> {
         status,
         source_ip: None,
         event_id,
+        agent_id: None,
+        identity_source: None,
+        verified: None,
+        invoking_principal: None,
+        session_id: None,
+        delegation_chain: None,
+        purpose: None,
+        policy_version: None,
+        decision: None,
     })
 }

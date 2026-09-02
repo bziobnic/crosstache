@@ -39,7 +39,7 @@ use serde::Deserialize;
 use crate::error::{CrosstacheError, Result};
 
 /// Audience Azure AD requires on a federated ID token.
-const AZURE_AUDIENCE: &str = "api://AzureADTokenExchange";
+pub(crate) const AZURE_AUDIENCE: &str = "api://AzureADTokenExchange";
 
 /// The client-assertion type for a JWT bearer assertion (RFC 7523).
 const ASSERTION_TYPE: &str = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
@@ -216,40 +216,20 @@ impl GithubOidcCredential {
 
     /// Fetch the GitHub ID token for the Azure AD audience.
     async fn fetch_id_token(&self) -> Result<String> {
-        // GitHub's endpoint already carries query parameters, so the audience
-        // must be appended with `&`, not `?`.
-        let separator = if self.config.request_url.contains('?') {
-            '&'
-        } else {
-            '?'
-        };
-        let url = format!(
-            "{}{separator}audience={}",
-            self.config.request_url,
-            urlencoding::encode(AZURE_AUDIENCE)
-        );
+        fetch_id_token_with(
+            self.http.as_ref(),
+            &self.config.request_url,
+            &self.config.request_token,
+        )
+        .await
+    }
 
-        let body = self
-            .http
-            .get_with_bearer(&url, &self.config.request_token)
-            .await?;
-
-        #[derive(Deserialize)]
-        struct IdTokenResponse {
-            value: Option<String>,
-        }
-
-        let parsed: IdTokenResponse = serde_json::from_str(&body).map_err(|e| {
-            CrosstacheError::authentication(format!(
-                "GitHub OIDC token response was not valid JSON: {e}"
-            ))
-        })?;
-
-        parsed.value.filter(|v| !v.is_empty()).ok_or_else(|| {
-            CrosstacheError::authentication(
-                "GitHub returned an OIDC response with no token value.".to_string(),
-            )
-        })
+    /// Fetch the GitHub token that backs agent identity resolution without
+    /// duplicating the Actions runtime exchange implemented by this module.
+    pub(crate) async fn request_identity_token(config: &OidcConfig) -> Result<String> {
+        validate_github_actions_token_url(&config.request_url)?;
+        let http = ReqwestTokenHttp::new()?;
+        fetch_id_token_with(&http, &config.request_url, &config.request_token).await
     }
 
     /// Exchange the ID token for an Azure AD access token scoped to `scopes`.
@@ -308,6 +288,68 @@ impl GithubOidcCredential {
         let expires_on = time::OffsetDateTime::now_utc() + time::Duration::seconds(expires_in);
         Ok(AccessToken::new(parsed.access_token, expires_on))
     }
+}
+
+async fn fetch_id_token_with(
+    http: &dyn TokenHttp,
+    request_url: &str,
+    request_token: &str,
+) -> Result<String> {
+    // GitHub's endpoint already carries query parameters, so the audience
+    // must be appended with `&`, not `?`.
+    let separator = if request_url.contains('?') { '&' } else { '?' };
+    let url = format!(
+        "{}{separator}audience={}",
+        request_url,
+        urlencoding::encode(AZURE_AUDIENCE)
+    );
+
+    let body = http.get_with_bearer(&url, request_token).await?;
+
+    #[derive(Deserialize)]
+    struct IdTokenResponse {
+        value: Option<String>,
+    }
+
+    let parsed: IdTokenResponse = serde_json::from_str(&body).map_err(|e| {
+        CrosstacheError::authentication(format!(
+            "GitHub OIDC token response was not valid JSON: {e}"
+        ))
+    })?;
+
+    parsed.value.filter(|v| !v.is_empty()).ok_or_else(|| {
+        CrosstacheError::authentication(
+            "GitHub returned an OIDC response with no token value.".to_string(),
+        )
+    })
+}
+
+/// Validate the bearer-token destination before any request is created.
+///
+/// The Actions runtime bearer is itself a credential. Its endpoint therefore
+/// cannot be accepted from the environment without authentication: only the
+/// documented GitHub-hosted Actions pipeline endpoint is trusted.
+pub(crate) fn validate_github_actions_token_url(request_url: &str) -> Result<()> {
+    let parsed = url::Url::parse(request_url).map_err(|error| {
+        CrosstacheError::authentication(format!("invalid GitHub Actions OIDC request URL: {error}"))
+    })?;
+    if parsed.scheme() != "https" {
+        return Err(CrosstacheError::authentication(
+            "GitHub Actions OIDC request URL must use HTTPS".to_string(),
+        ));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(CrosstacheError::authentication(
+            "GitHub Actions OIDC request URL must not contain user information".to_string(),
+        ));
+    }
+    if parsed.host_str() != Some("pipelines.actions.githubusercontent.com") {
+        return Err(CrosstacheError::authentication(
+            "GitHub Actions OIDC request URL host is not the trusted Actions token host"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -593,6 +635,24 @@ mod tests {
             url.starts_with("https://example.com/token?audience="),
             "{url}"
         );
+    }
+
+    #[tokio::test]
+    async fn agent_identity_rejects_untrusted_oidc_urls() {
+        for url in [
+            "http://pipelines.actions.githubusercontent.com/token",
+            "https://localhost/token",
+            "https://127.0.0.1/token",
+            "https://attacker.example/token",
+            "https://user@pipelines.actions.githubusercontent.com/token",
+        ] {
+            let mut cfg = config();
+            cfg.request_url = url.into();
+            let error = GithubOidcCredential::request_identity_token(&cfg)
+                .await
+                .unwrap_err();
+            assert!(format!("{error:#}").contains("OIDC request URL"));
+        }
     }
 
     #[test]

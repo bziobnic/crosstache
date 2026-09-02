@@ -7824,6 +7824,47 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn cross_backend_uri_resolution_preserves_policy_wrappers() {
+        let temp = tempfile::tempdir().unwrap();
+        let policy =
+            crate::agent::policy::CompiledPolicy::compile(&crate::config::settings::AgentConfig {
+                enforce: true,
+                ..Default::default()
+            })
+            .unwrap();
+        let wrapped: Arc<dyn Backend> =
+            Arc::new(crate::agent::enforce::PolicyEnforcedBackend::for_test(
+                Arc::new(TestBackend::local()),
+                crate::agent::AgentIdentity::new(
+                    crate::agent::IdentitySource::EnvAssertion,
+                    "cross-backend-agent",
+                ),
+                policy,
+                temp.path().join("decisions.jsonl"),
+            ));
+        let mut cross_backends = std::collections::HashMap::new();
+        cross_backends.insert(BackendKind::Local, wrapped);
+        let active = TestBackend::azure();
+        let reference = BackendRef {
+            backend: Some(BackendKind::Local),
+            vault: "prod".into(),
+            secret: Some("existing".into()),
+        };
+
+        let error = resolve_uri_secret(
+            &reference,
+            "existing",
+            active.secrets(),
+            &Config::default(),
+            BackendKind::Azure,
+            &mut cross_backends,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("agent policy denied"), "{error}");
+    }
+
     /// Helper: run stream_and_mask but redirect its print!/eprint! output to files
     /// so we can verify masking actually happened.
     fn stream_and_mask_to_files(

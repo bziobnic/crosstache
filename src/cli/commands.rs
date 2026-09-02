@@ -1618,6 +1618,9 @@ pub enum ScheduleCommands {
 }
 
 /// Git-native versioning subcommands for the local store.
+///
+/// Unavailable while agent policy enforcement is active because repository-wide
+/// history reads and transfers cannot yet be authorized per secret.
 #[derive(Subcommand)]
 pub enum GitCommands {
     /// Initialize a git repository in the local store.
@@ -1673,6 +1676,8 @@ pub enum LocalCommands {
     /// Re-encrypt existing plaintext secret metadata at rest.
     ///
     /// Requires `encrypt_metadata = true` under `[local]` in your config.
+    /// Unavailable while agent policy enforcement is active because the raw
+    /// filesystem scan cannot be authorized per secret.
     /// Walks every vault and rewrites any plaintext `.meta.json` (including
     /// archived versions and trash) as age ciphertext. Already-encrypted
     /// metadata is left untouched, so the command is safe to re-run.
@@ -1685,6 +1690,8 @@ pub enum LocalCommands {
     /// Migrate an existing store to opaque on-disk filenames.
     ///
     /// Requires `opaque_filenames = true` under `[local]` in your config.
+    /// Unavailable while agent policy enforcement is active because the raw
+    /// filesystem scan cannot be authorized per secret.
     /// Renames every secret's active, version, and trash files to keyed-hash
     /// stems, builds the encrypted `.index.age`, and rebuilds any missing index
     /// entries from metadata. Idempotent and safe to re-run.

@@ -1,6 +1,6 @@
 //! Shared non-interactive configuration setup models and persistence.
 
-use crate::backend::{Backend, BackendKind, BackendRegistry};
+use crate::backend::BackendRegistry;
 use crate::config::settings::{AwsConfig, AzureConfig, Config, LocalConfig};
 use crate::error::{CrosstacheError, Result};
 use async_trait::async_trait;
@@ -76,22 +76,12 @@ struct DefaultSetupVerifier;
 impl SetupVerifier for DefaultSetupVerifier {
     async fn verify(&self, config: &Config) -> Result<SetupVerification> {
         let backend_name = config.effective_backend_name();
-        let kind: BackendKind = backend_name.parse().map_err(CrosstacheError::config)?;
         let vault = config.default_vault.as_str();
-
-        match kind {
-            BackendKind::Local => {
-                // Construction intentionally initializes the configured age
-                // identity and vault directories before the list operation.
-                let backend = crate::backend::local::LocalBackend::new(config.local.as_ref())?;
-                backend.health_check().await?;
-                backend.secrets().list_secrets(vault, None).await?;
-            }
-            BackendKind::Azure | BackendKind::Aws => {
-                let registry = BackendRegistry::from_config(config)?;
-                registry.verify_active_vault(vault).await?;
-            }
-        }
+        // Registry construction initializes local key/vault directories just
+        // as direct LocalBackend construction did, while also preserving the
+        // mandatory policy wrapper for the secrets-capable verification list.
+        let registry = BackendRegistry::from_config(config)?;
+        registry.verify_active_vault(vault).await?;
 
         Ok(SetupVerification {
             operation: "list-secrets".into(),

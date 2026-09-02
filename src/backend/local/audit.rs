@@ -187,6 +187,13 @@ pub fn failure_status(err: &BackendError) -> &'static str {
 /// One line of the audit log.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditRecord {
+    /// Canonical encoding version. Missing on legacy records and omitted when
+    /// writing v1, so unenforced logs remain byte-for-byte unchanged.
+    #[serde(
+        default = "default_record_version",
+        skip_serializing_if = "record_version_is_v1"
+    )]
+    pub record_version: u8,
     /// 1-based position in the chain.
     pub seq: u64,
     /// When the operation completed.
@@ -199,6 +206,28 @@ pub struct AuditRecord {
     pub caller: String,
     /// `Succeeded`, or a short failure token.
     pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invoking_principal: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation_chain: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_rule: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deny_reason: Option<String>,
     /// MAC of the preceding record ([`GENESIS_MAC`] for the first).
     pub prev: String,
     /// `HMAC-SHA256(chain_key, prev || canonical(self))`, hex.
@@ -206,6 +235,20 @@ pub struct AuditRecord {
 }
 
 impl AuditRecord {
+    fn has_v2_fields(&self) -> bool {
+        self.agent_id.is_some()
+            || self.identity_source.is_some()
+            || self.verified.is_some()
+            || self.invoking_principal.is_some()
+            || self.session_id.is_some()
+            || self.delegation_chain.is_some()
+            || self.purpose.is_some()
+            || self.policy_version.is_some()
+            || self.decision.is_some()
+            || self.matched_rule.is_some()
+            || self.deny_reason.is_some()
+    }
+
     /// Canonical byte encoding fed to the MAC.
     ///
     /// Every field is length-prefixed (`<byte-len>:<bytes>`) rather than
@@ -226,11 +269,47 @@ impl AuditRecord {
         push(self.resource_name.as_bytes());
         push(self.caller.as_bytes());
         push(self.status.as_bytes());
+        if self.record_version == 2 {
+            push(b"crosstache-audit-record-v2");
+            push(b"2");
+            let mut push_optional = |value: Option<&[u8]>| match value {
+                Some(value) => {
+                    let mut tagged = Vec::with_capacity(value.len() + 1);
+                    tagged.push(b'1');
+                    tagged.extend_from_slice(value);
+                    push(&tagged);
+                }
+                None => push(b"0"),
+            };
+            push_optional(self.agent_id.as_deref().map(str::as_bytes));
+            push_optional(self.identity_source.as_deref().map(str::as_bytes));
+            push_optional(
+                self.verified
+                    .map(|value| if value { &b"true"[..] } else { &b"false"[..] }),
+            );
+            push_optional(self.invoking_principal.as_deref().map(str::as_bytes));
+            push_optional(self.session_id.as_deref().map(str::as_bytes));
+            let delegation = self.delegation_chain.as_ref().map(|chain| {
+                let mut encoded = Vec::new();
+                encode_field(&mut encoded, chain.len().to_string().as_bytes());
+                for element in chain {
+                    encode_field(&mut encoded, element.as_bytes());
+                }
+                encoded
+            });
+            push_optional(delegation.as_deref());
+            push_optional(self.purpose.as_deref().map(str::as_bytes));
+            push_optional(self.policy_version.as_deref().map(str::as_bytes));
+            push_optional(self.decision.as_deref().map(str::as_bytes));
+            push_optional(self.matched_rule.as_deref().map(str::as_bytes));
+            push_optional(self.deny_reason.as_deref().map(str::as_bytes));
+        }
         out
     }
 
     /// Convert to the backend-agnostic event shape rendered by `xv audit`.
     fn to_event(&self) -> AuditEvent {
+        let is_v2 = self.record_version == 2;
         AuditEvent {
             timestamp: self.timestamp,
             operation: self.operation.clone(),
@@ -242,8 +321,31 @@ impl AuditRecord {
             // "127.0.0.1", which would imply a network hop that never happened.
             source_ip: None,
             event_id: self.mac.clone(),
+            agent_id: is_v2.then(|| self.agent_id.clone()).flatten(),
+            identity_source: is_v2.then(|| self.identity_source.clone()).flatten(),
+            verified: is_v2.then_some(self.verified).flatten(),
+            invoking_principal: is_v2.then(|| self.invoking_principal.clone()).flatten(),
+            session_id: is_v2.then(|| self.session_id.clone()).flatten(),
+            delegation_chain: is_v2.then(|| self.delegation_chain.clone()).flatten(),
+            purpose: is_v2.then(|| self.purpose.clone()).flatten(),
+            policy_version: is_v2.then(|| self.policy_version.clone()).flatten(),
+            decision: is_v2.then(|| self.decision.clone()).flatten(),
         }
     }
+}
+
+fn encode_field(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.extend_from_slice(bytes.len().to_string().as_bytes());
+    out.push(b':');
+    out.extend_from_slice(bytes);
+}
+
+fn default_record_version() -> u8 {
+    1
+}
+
+fn record_version_is_v1(version: &u8) -> bool {
+    *version == 1
 }
 
 /// Outcome of [`LocalAuditLog::verify_chain`].
@@ -278,7 +380,19 @@ pub enum ChainStatus {
 /// serialize instead of interleaving partial lines.
 pub struct LocalAuditLog {
     store_path: PathBuf,
+    standalone_path: Option<PathBuf>,
     chain_key: [u8; 32],
+}
+
+/// Data for a policy decision written through the shared chain machinery.
+pub(crate) struct PolicyDecisionRecord<'a> {
+    pub identity: &'a crate::agent::AgentIdentity,
+    pub operation: &'a str,
+    pub resource_name: &'a str,
+    pub decision: &'a str,
+    pub matched_rule: Option<&'a str>,
+    pub deny_reason: Option<&'a str>,
+    pub policy_version: &'a str,
 }
 
 impl LocalAuditLog {
@@ -286,17 +400,36 @@ impl LocalAuditLog {
     pub fn new(store_path: PathBuf, identity: &age::x25519::Identity) -> Self {
         Self {
             store_path,
+            standalone_path: None,
+            chain_key: derive_chain_key(identity),
+        }
+    }
+
+    /// Use the audit chain codec and locked append machinery for a standalone
+    /// log rather than a local-store vault log.
+    pub(crate) fn new_standalone(path: PathBuf, identity: &age::x25519::Identity) -> Self {
+        Self {
+            store_path: PathBuf::new(),
+            standalone_path: Some(path),
             chain_key: derive_chain_key(identity),
         }
     }
 
     /// `<store>/vaults/<vault>/.audit/`.
     fn audit_dir(&self, vault: &str) -> Result<PathBuf, BackendError> {
+        if let Some(path) = &self.standalone_path {
+            return path.parent().map(Path::to_path_buf).ok_or_else(|| {
+                BackendError::Internal("standalone audit log has no parent directory".into())
+            });
+        }
         Ok(paths::vault_dir(&self.store_path, vault)?.join(".audit"))
     }
 
     /// `<store>/vaults/<vault>/.audit/log.jsonl`.
     fn log_path(&self, vault: &str) -> Result<PathBuf, BackendError> {
+        if let Some(path) = &self.standalone_path {
+            return Ok(path.clone());
+        }
         Ok(self.audit_dir(vault)?.join("log.jsonl"))
     }
 
@@ -334,6 +467,39 @@ impl LocalAuditLog {
         resource_name: &str,
         status: &str,
     ) -> Result<(), BackendError> {
+        self.append_fields(vault, op.as_str(), resource_name, status, None)
+    }
+
+    /// Append an allow/deny decision through the same locked, length-prefixed,
+    /// HMAC-chained machinery as local backend audit records.
+    pub(crate) fn record_policy_decision(
+        &self,
+        vault: &str,
+        decision: &PolicyDecisionRecord<'_>,
+    ) -> Result<(), BackendError> {
+        self.append_fields(
+            vault,
+            decision.operation,
+            decision.resource_name,
+            decision.decision,
+            Some(ExplicitAgentFields {
+                identity: decision.identity,
+                policy_version: decision.policy_version,
+                decision: decision.decision,
+                matched_rule: decision.matched_rule,
+                deny_reason: decision.deny_reason,
+            }),
+        )
+    }
+
+    fn append_fields(
+        &self,
+        vault: &str,
+        operation: &str,
+        resource_name: &str,
+        status: &str,
+        explicit: Option<ExplicitAgentFields<'_>>,
+    ) -> Result<(), BackendError> {
         let dir = self.audit_dir(vault)?;
         create_private_dir(&dir)
             .map_err(|e| BackendError::Internal(format!("create audit dir: {e}")))?;
@@ -352,13 +518,40 @@ impl LocalAuditLog {
             None => (1, GENESIS_MAC.to_string()),
         };
 
+        let context = crate::agent::AUDIT_CONTEXT.try_with(Clone::clone).ok();
+        let identity = explicit
+            .as_ref()
+            .map(|fields| fields.identity)
+            .or_else(|| context.as_ref().map(|value| &value.identity));
         let mut record = AuditRecord {
+            record_version: if identity.is_some() { 2 } else { 1 },
             seq,
             timestamp: Utc::now(),
-            operation: op.as_str().to_string(),
+            operation: operation.to_string(),
             resource_name: resource_name.to_string(),
             caller: current_caller(),
             status: status.to_string(),
+            agent_id: identity.map(|value| value.id.clone()),
+            identity_source: identity.map(|value| value.source.to_string()),
+            verified: identity.map(|value| value.verified),
+            invoking_principal: identity.and_then(|value| value.invoking_principal.clone()),
+            session_id: identity.and_then(|value| value.session_id.clone()),
+            delegation_chain: identity.map(|value| value.delegation_chain.clone()),
+            purpose: identity.and_then(|value| value.purpose.clone()),
+            policy_version: explicit
+                .as_ref()
+                .map(|fields| fields.policy_version.to_string())
+                .or_else(|| context.as_ref().map(|value| value.policy_version.clone())),
+            decision: explicit
+                .as_ref()
+                .map(|fields| fields.decision.to_string())
+                .or_else(|| context.as_ref().map(|value| value.decision.clone())),
+            matched_rule: explicit
+                .as_ref()
+                .and_then(|fields| fields.matched_rule.map(str::to_string)),
+            deny_reason: explicit
+                .as_ref()
+                .and_then(|fields| fields.deny_reason.map(str::to_string)),
             prev,
             mac: String::new(),
         };
@@ -428,6 +621,23 @@ impl LocalAuditLog {
         let mut expected_prev = GENESIS_MAC.to_string();
         for (idx, rec) in records.iter().enumerate() {
             let expected_seq = idx as u64 + 1;
+            if !matches!(rec.record_version, 1 | 2) {
+                return Ok(ChainStatus::Broken {
+                    seq: rec.seq,
+                    verified: idx as u64,
+                    reason: format!(
+                        "unsupported audit record version {} (only versions 1 and 2 are defined)",
+                        rec.record_version
+                    ),
+                });
+            }
+            if rec.record_version == 1 && rec.has_v2_fields() {
+                return Ok(ChainStatus::Broken {
+                    seq: rec.seq,
+                    verified: idx as u64,
+                    reason: "legacy v1 record contains unbound v2 attribution fields".to_string(),
+                });
+            }
             if rec.seq != expected_seq {
                 return Ok(ChainStatus::Broken {
                     seq: rec.seq,
@@ -486,6 +696,14 @@ impl LocalAuditLog {
         events.reverse();
         Ok(events)
     }
+}
+
+struct ExplicitAgentFields<'a> {
+    identity: &'a crate::agent::AgentIdentity,
+    policy_version: &'a str,
+    decision: &'a str,
+    matched_rule: Option<&'a str>,
+    deny_reason: Option<&'a str>,
 }
 
 #[async_trait]
@@ -646,6 +864,208 @@ mod tests {
     }
 
     #[test]
+    fn pre_change_v1_record_still_verifies_and_serializes_without_v2_fields() {
+        const LEGACY_KEY: &str =
+            "AGE-SECRET-KEY-1QAMJ3TTWX8NGQ9GCZYWMQ4AG5HZD52J62VMHVQ8R34TY5UVA78PQK4W0GV";
+        const LEGACY_MAC: &str = "e175d6f6e8f5bc47b4aa84a883db6ac191c9849091f22ae02eead6848e5a63f4";
+        let tmp = TempDir::new().unwrap();
+        let vault = "default".to_string();
+        create_private_dir(paths::vaults_dir(tmp.path()).join(&vault)).unwrap();
+        let identity: age::x25519::Identity = LEGACY_KEY.parse().unwrap();
+        let log = LocalAuditLog::new(tmp.path().to_path_buf(), &identity);
+        let line = format!(
+            "{{\"seq\":1,\"timestamp\":\"2025-01-02T03:04:05Z\",\"operation\":\"GetSecretValue\",\"resource_name\":\"legacy\",\"caller\":\"alice\",\"status\":\"Succeeded\",\"prev\":\"{GENESIS_MAC}\",\"mac\":\"{LEGACY_MAC}\"}}"
+        );
+        create_private_dir(log.audit_dir(&vault).unwrap()).unwrap();
+        fs::write(log.log_path(&vault).unwrap(), format!("{line}\n")).unwrap();
+        let record = log.read_all(&vault).unwrap().remove(0);
+        assert_eq!(record.record_version, 1);
+        assert_eq!(record.mac, LEGACY_MAC);
+        assert!(!record.has_v2_fields());
+        assert_eq!(serde_json::to_string(&record).unwrap(), line);
+        assert_eq!(
+            log.verify_chain(&vault).unwrap(),
+            ChainStatus::Intact { records: 1 }
+        );
+    }
+
+    #[tokio::test]
+    async fn mixed_v1_then_v2_chain_verifies_end_to_end() {
+        let (_tmp, log, vault) = fixture();
+        log.record(&vault, AuditOp::GetSecretValue, "legacy")
+            .unwrap();
+        let context = crate::agent::AuditContext {
+            identity: crate::agent::AgentIdentity::new(
+                crate::agent::IdentitySource::GithubOidc,
+                "github:o/r:w@refs/heads/main",
+            ),
+            policy_version: "abcd".into(),
+            decision: "allow".into(),
+        };
+        crate::agent::AUDIT_CONTEXT
+            .scope(context, async {
+                log.record(&vault, AuditOp::GetSecretValue, "agent-read")
+                    .unwrap();
+            })
+            .await;
+        let records = log.read_all(&vault).unwrap();
+        assert_eq!(records[0].record_version, 1);
+        assert_eq!(records[1].record_version, 2);
+        assert_eq!(
+            records[1].agent_id.as_deref(),
+            Some("github:o/r:w@refs/heads/main")
+        );
+        assert_eq!(
+            log.verify_chain(&vault).unwrap(),
+            ChainStatus::Intact { records: 2 }
+        );
+    }
+
+    #[test]
+    fn v2_decision_record_verifies_and_every_new_field_is_mac_bound() {
+        let (_tmp, log, vault) = fixture();
+        let mut identity = crate::agent::AgentIdentity::new(
+            crate::agent::IdentitySource::GithubOidc,
+            "github:o/r:w@refs/heads/main",
+        );
+        identity.invoking_principal = Some("alice".into());
+        identity.session_id = Some("session-1".into());
+        identity.delegation_chain = vec!["human:alice".into(), "orchestrator:ci".into()];
+        identity.purpose = Some("deploy".into());
+        log.record_policy_decision(
+            &vault,
+            &PolicyDecisionRecord {
+                identity: &identity,
+                operation: "get",
+                resource_name: "prod/deploy/key",
+                decision: "deny",
+                matched_rule: Some("rule-1"),
+                deny_reason: Some("reason"),
+                policy_version: "policy-v1",
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            log.verify_chain(&vault).unwrap(),
+            ChainStatus::Intact { records: 1 }
+        );
+        let records = log.read_all(&vault).unwrap();
+        assert_eq!(
+            records[0].delegation_chain.as_deref(),
+            Some(&["human:alice".to_string(), "orchestrator:ci".to_string()][..])
+        );
+
+        let path = log.log_path(&vault).unwrap();
+        let original = fs::read_to_string(&path).unwrap();
+        for (field, replacement) in [
+            ("agent_id", serde_json::json!("changed")),
+            ("identity_source", serde_json::json!("env-assertion")),
+            ("verified", serde_json::json!(false)),
+            ("invoking_principal", serde_json::json!("mallory")),
+            ("session_id", serde_json::json!("other")),
+            ("delegation_chain", serde_json::json!(["human:mallory"])),
+            ("purpose", serde_json::json!("other")),
+            ("policy_version", serde_json::json!("other")),
+            ("decision", serde_json::json!("allow")),
+            ("matched_rule", serde_json::json!("other")),
+            ("deny_reason", serde_json::json!("other")),
+        ] {
+            let mut value: serde_json::Value = serde_json::from_str(original.trim()).unwrap();
+            value[field] = replacement;
+            fs::write(
+                &path,
+                format!("{}\n", serde_json::to_string(&value).unwrap()),
+            )
+            .unwrap();
+            assert!(
+                matches!(
+                    log.verify_chain(&vault).unwrap(),
+                    ChainStatus::Broken { .. }
+                ),
+                "tampering with {field} must break the chain"
+            );
+        }
+        fs::write(path, original).unwrap();
+    }
+
+    #[test]
+    fn unknown_record_versions_are_rejected_even_when_the_mac_is_unchanged() {
+        let (_tmp, log, vault) = fixture();
+        let mut identity = crate::agent::AgentIdentity::new(
+            crate::agent::IdentitySource::GithubOidc,
+            "github:o/r:w@refs/heads/main",
+        );
+        identity.delegation_chain = vec!["human:alice".into()];
+        log.record_policy_decision(
+            &vault,
+            &PolicyDecisionRecord {
+                identity: &identity,
+                operation: "get",
+                resource_name: "prod/key",
+                decision: "allow",
+                matched_rule: Some("rule"),
+                deny_reason: None,
+                policy_version: "policy",
+            },
+        )
+        .unwrap();
+        let path = log.log_path(&vault).unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_str(fs::read_to_string(&path).unwrap().trim()).unwrap();
+        value["record_version"] = serde_json::json!(3);
+        fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&value).unwrap()),
+        )
+        .unwrap();
+        match log.verify_chain(&vault).unwrap() {
+            ChainStatus::Broken { reason, .. } => {
+                assert!(reason.contains("unsupported"), "{reason}")
+            }
+            other => panic!("expected unsupported-version break, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v1_rows_with_any_v2_field_are_rejected_and_never_render_attribution() {
+        let (_tmp, log, vault) = fixture();
+        log.record(&vault, AuditOp::GetSecretValue, "legacy")
+            .unwrap();
+        let path = log.log_path(&vault).unwrap();
+        let original: serde_json::Value =
+            serde_json::from_str(fs::read_to_string(&path).unwrap().trim()).unwrap();
+        for (field, value) in [
+            ("agent_id", serde_json::json!("forged")),
+            ("identity_source", serde_json::json!("github-oidc")),
+            ("verified", serde_json::json!(true)),
+            ("invoking_principal", serde_json::json!("alice")),
+            ("session_id", serde_json::json!("session")),
+            ("delegation_chain", serde_json::json!(["alice", "child"])),
+            ("purpose", serde_json::json!("forged")),
+            ("policy_version", serde_json::json!("policy")),
+            ("decision", serde_json::json!("allow")),
+            ("matched_rule", serde_json::json!("rule")),
+            ("deny_reason", serde_json::json!("none")),
+        ] {
+            let mut forged = original.clone();
+            forged[field] = value;
+            fs::write(
+                &path,
+                format!("{}\n", serde_json::to_string(&forged).unwrap()),
+            )
+            .unwrap();
+            assert!(matches!(
+                log.verify_chain(&vault).unwrap(),
+                ChainStatus::Broken { .. }
+            ));
+            let event = log.read_all(&vault).unwrap()[0].to_event();
+            assert!(event.agent_id.is_none(), "v1 {field} leaked attribution");
+            assert!(event.delegation_chain.is_none());
+            assert!(event.decision.is_none());
+        }
+    }
+
+    #[test]
     fn tampering_with_a_record_breaks_the_chain() {
         let (_tmp, log, vault) = fixture();
         for name in ["A", "B", "C"] {
@@ -715,12 +1135,24 @@ mod tests {
         // delimiter-free or newline-joined encoding must still MAC differently.
         let (_tmp, log, _vault) = fixture();
         let base = AuditRecord {
+            record_version: 1,
             seq: 1,
             timestamp: Utc::now(),
             operation: "GetSecretValue".into(),
             resource_name: "AB".into(),
             caller: "C".into(),
             status: "Succeeded".into(),
+            agent_id: None,
+            identity_source: None,
+            verified: None,
+            invoking_principal: None,
+            session_id: None,
+            delegation_chain: None,
+            purpose: None,
+            policy_version: None,
+            decision: None,
+            matched_rule: None,
+            deny_reason: None,
             prev: GENESIS_MAC.into(),
             mac: String::new(),
         };

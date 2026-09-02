@@ -10,7 +10,7 @@
 //! These tests are NOT `#[ignore]` — they run in every CI build.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tempfile::TempDir;
 
@@ -193,6 +193,292 @@ default_vault = "default"
     fn tmp_path(&self) -> &std::path::Path {
         self._tmp.path()
     }
+}
+
+fn snapshot_files(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    fn visit(root: &Path, dir: &Path, files: &mut Vec<(PathBuf, Vec<u8>)>) {
+        let mut entries = std::fs::read_dir(dir)
+            .expect("read snapshot directory")
+            .collect::<std::io::Result<Vec<_>>>()
+            .expect("collect snapshot entries");
+        entries.sort_by_key(std::fs::DirEntry::path);
+        for entry in entries {
+            let path = entry.path();
+            if path.is_dir() {
+                visit(root, &path, files);
+            } else {
+                files.push((
+                    path.strip_prefix(root).unwrap().to_path_buf(),
+                    std::fs::read(&path).expect("read snapshot file"),
+                ));
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    visit(root, root, &mut files);
+    files
+}
+
+#[test]
+fn enforced_store_maintenance_fails_before_scanning_or_rewriting_even_in_dry_run() {
+    let cases: &[&[&str]] = &[
+        &["local", "encrypt-metadata"],
+        &["local", "encrypt-metadata", "--dry-run"],
+        &["local", "migrate"],
+        &["local", "migrate", "--dry-run"],
+        &["git", "init"],
+        &["git", "log"],
+        &["git", "status"],
+        &["git", "diff"],
+        &["git", "push"],
+        &["git", "pull"],
+    ];
+
+    for args in cases {
+        let env = TestEnv::new();
+        let secret_name = "policy-hidden-maintenance-secret";
+        env.set_secret(secret_name, "classified-value");
+
+        let config_path = env.config_dir.join("xv").join("xv.conf");
+        let mut config = std::fs::read_to_string(&config_path).expect("read config");
+        config.push_str(
+            r#"
+encrypt_metadata = true
+opaque_filenames = true
+
+[agent]
+enforce = true
+"#,
+        );
+        std::fs::write(&config_path, config).expect("enable enforcement");
+
+        let before = snapshot_files(&env.store_dir);
+        let output = env
+            .xv()
+            .args(*args)
+            .env("HOME", env.tmp_path())
+            .env("XDG_STATE_HOME", env.tmp_path().join("state"))
+            .output()
+            .expect("execute local maintenance command");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let combined = format!("{stdout}\n{stderr}");
+
+        assert!(!output.status.success(), "{args:?} unexpectedly succeeded");
+        assert!(
+            stderr.contains("agent policy enforcement"),
+            "{args:?} did not report the enforcement gate:\n{combined}"
+        );
+        for leaked in [
+            secret_name,
+            "classified-value",
+            "Dry run:",
+            "Encrypted ",
+            "Migrated ",
+            "change(s) would be made",
+        ] {
+            assert!(
+                !combined.contains(leaked),
+                "{args:?} leaked maintenance detail {leaked:?}:\n{combined}"
+            );
+        }
+        assert_eq!(
+            snapshot_files(&env.store_dir),
+            before,
+            "{args:?} changed the local store before failing closed"
+        );
+    }
+}
+
+#[test]
+fn enforced_maintenance_fails_before_backend_initialization_creates_local_state() {
+    let cases: &[&[&str]] = &[
+        &["init"],
+        &["git", "status"],
+        &["backend", "add", "local", "--yes"],
+        &["backend", "rm", "local", "--purge", "--yes"],
+    ];
+
+    for args in cases {
+        let env = TestEnv::new();
+        let key_file = env._tmp.path().join("key.txt");
+        let config_path = env.config_dir.join("xv").join("xv.conf");
+        let mut config = std::fs::read_to_string(&config_path).expect("read config");
+        config.push_str("\n[agent]\nenforce = true\n");
+        std::fs::write(&config_path, config).expect("enable enforcement");
+
+        assert!(!key_file.exists(), "test precondition: no age key yet");
+        assert!(snapshot_files(&env.store_dir).is_empty());
+
+        let output = env
+            .xv()
+            .args(*args)
+            .env("HOME", env.tmp_path())
+            .env("XDG_STATE_HOME", env.tmp_path().join("state"))
+            .output()
+            .expect("execute enforced maintenance command");
+        let combined = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        assert!(!output.status.success(), "{args:?} unexpectedly succeeded");
+        assert!(
+            combined.contains("agent policy enforcement"),
+            "{args:?} did not report enforcement gate: {combined}"
+        );
+        assert!(!key_file.exists(), "{args:?} created the age key");
+        assert!(
+            snapshot_files(&env.store_dir).is_empty(),
+            "{args:?} initialized or changed local store state"
+        );
+        assert!(
+            !env.tmp_path()
+                .join("state/xv/agent-decisions.age-key")
+                .exists(),
+            "{args:?} should not resolve identity or create decision state"
+        );
+    }
+}
+
+#[test]
+fn enforced_preflight_rejects_untrusted_actions_url_even_with_manual_identity() {
+    let env = TestEnv::new();
+    let key_file = env.tmp_path().join("key.txt");
+    std::fs::remove_dir(&env.store_dir).expect("remove pre-created empty store directory");
+
+    let config_path = env.config_dir.join("xv").join("xv.conf");
+    let mut config = std::fs::read_to_string(&config_path).expect("read config");
+    config.push_str("git = true\n\n[agent]\nenforce = true\n");
+    std::fs::write(&config_path, config).expect("enable enforcement");
+
+    let output = env
+        .xv()
+        .args(["get", "missing"])
+        .env("HOME", env.tmp_path())
+        .env("XDG_STATE_HOME", env.tmp_path().join("state"))
+        .env("XV_AGENT_ID", "manual-agent")
+        .env(
+            "ACTIONS_ID_TOKEN_REQUEST_URL",
+            "https://attacker.invalid/oidc",
+        )
+        .env("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "runtime-bearer")
+        .output()
+        .expect("execute enforced secret command");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(!output.status.success());
+    assert!(
+        combined.contains("trusted Actions token host"),
+        "{combined}"
+    );
+    assert!(!combined.contains("runtime-bearer"), "{combined}");
+    assert!(
+        !key_file.exists(),
+        "URL rejection created the local age key"
+    );
+    assert!(
+        !env.store_dir.exists(),
+        "URL rejection created vault metadata, a git repo, or store state"
+    );
+}
+
+#[test]
+fn enforced_secret_command_without_identity_leaves_fresh_local_config_untouched() {
+    let env = TestEnv::new();
+    let key_file = env.tmp_path().join("key.txt");
+    std::fs::remove_dir(&env.store_dir).expect("remove pre-created empty store directory");
+
+    let config_path = env.config_dir.join("xv").join("xv.conf");
+    let mut config = std::fs::read_to_string(&config_path).expect("read config");
+    config.push_str("git = true\n\n[agent]\nenforce = true\n");
+    std::fs::write(&config_path, config).expect("enable enforcement");
+
+    let output = env
+        .xv()
+        .args(["get", "missing"])
+        .env("HOME", env.tmp_path())
+        .env("XDG_STATE_HOME", env.tmp_path().join("state"))
+        .env_remove("ACTIONS_ID_TOKEN_REQUEST_URL")
+        .env_remove("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+        .env_remove("AZURE_CLIENT_ID")
+        .env_remove("AZURE_TENANT_ID")
+        .env_remove("AZURE_FEDERATED_TOKEN_FILE")
+        .env_remove("XV_AGENT_ID")
+        .output()
+        .expect("execute enforced secret command");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(!output.status.success());
+    assert!(combined.contains("failing closed"), "{combined}");
+    assert!(
+        !key_file.exists(),
+        "identity failure created the local age key"
+    );
+    assert!(
+        !env.store_dir.exists(),
+        "identity failure created vault metadata, a git repo, or other store state"
+    );
+    assert!(
+        !env.tmp_path()
+            .join("state/xv/agent-decisions.age-key")
+            .exists(),
+        "identity failure created policy decision-log state"
+    );
+}
+
+#[test]
+fn enforced_secret_command_initializes_decision_log_before_local_backend() {
+    let env = TestEnv::new();
+    let key_file = env.tmp_path().join("key.txt");
+    std::fs::remove_dir(&env.store_dir).expect("remove pre-created empty store directory");
+
+    let config_path = env.config_dir.join("xv").join("xv.conf");
+    let mut config = std::fs::read_to_string(&config_path).expect("read config");
+    config.push_str("git = true\n\n[agent]\nenforce = true\n");
+    std::fs::write(&config_path, config).expect("enable enforcement");
+    let blocked_state_root = env.tmp_path().join("state-is-a-file");
+    std::fs::write(&blocked_state_root, b"not a directory").expect("create blocked state root");
+
+    let output = env
+        .xv()
+        .args(["get", "missing"])
+        .env("HOME", env.tmp_path())
+        .env("XDG_STATE_HOME", &blocked_state_root)
+        .env("XV_AGENT_ID", "test-agent")
+        .env_remove("ACTIONS_ID_TOKEN_REQUEST_URL")
+        .env_remove("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+        .env_remove("AZURE_CLIENT_ID")
+        .env_remove("AZURE_TENANT_ID")
+        .env_remove("AZURE_FEDERATED_TOKEN_FILE")
+        .output()
+        .expect("execute enforced secret command");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(!output.status.success());
+    assert!(combined.contains("agent state directory"), "{combined}");
+    assert!(
+        !key_file.exists(),
+        "decision-log failure created the local age key"
+    );
+    assert!(
+        !env.store_dir.exists(),
+        "decision-log failure created vault metadata, a git repo, or other store state"
+    );
 }
 
 // ===========================================================================

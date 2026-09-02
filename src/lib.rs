@@ -3,6 +3,7 @@
 //! A comprehensive CLI tool for managing Azure Key Vault operations
 //! including vault management, secret operations, and access control.
 
+pub mod agent;
 pub mod auth;
 pub mod backend;
 #[cfg(feature = "file-ops")]

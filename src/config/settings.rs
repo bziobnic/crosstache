@@ -122,6 +122,148 @@ pub struct AzureConfig {
     pub location: Option<String>,
 }
 
+// ---------------------------------------------------------------------------
+// Agent identity + policy configuration (`[agent]`)
+// ---------------------------------------------------------------------------
+
+/// Per-agent identity and policy configuration, read from `[agent]` in
+/// `xv.conf`.
+///
+/// **Absent by default.** A config with no `[agent]` block deserializes to
+/// `Config.agent == None`, which means *unenforced*: no identity resolution, no
+/// decision point, no new audit fields, and byte-identical audit records to a
+/// build without this feature. Enforcement is a mode that is off unless
+/// explicitly configured — see `crate::agent` and `docs/agent-identity.md`.
+///
+/// When present with `enforce = true`, every secret operation passes the policy
+/// decision point (see [`crate::agent::enforce::PolicyEnforcedBackend`]); when
+/// present but the agent identity cannot be resolved, xv fails closed with an
+/// actionable diagnostic.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentConfig {
+    /// Turn the decision point on. When `false`, the block is inert: identity
+    /// is not resolved and no operation is checked.
+    #[serde(default)]
+    pub enforce: bool,
+
+    /// Permit rules to allow an *unverified* identity (the `XV_AGENT_ID` env
+    /// assertion) even when the rule discloses raw secret material. Off by
+    /// default: an unverified identity is refused for any `raw_disclosure`
+    /// rule unless this is set.
+    #[serde(default)]
+    pub allow_unverified_identities: bool,
+
+    /// What to do when no rule matches. The only supported value is `"deny"`:
+    /// access is allowed only by a matching rule.
+    #[serde(default = "default_agent_decision")]
+    pub default_decision: String,
+
+    /// Ordered policy rules. First matching rule wins. Written as repeated
+    /// `[[agent.policy]]` blocks.
+    #[serde(default)]
+    pub policy: Vec<AgentPolicyRule>,
+}
+
+/// A single `[[agent.policy]]` rule.
+///
+/// A rule matches a request only when the identity glob, the identity source,
+/// the workspace, the secret-name pattern, and the operation all match. An
+/// empty `identity` / `identity_source` / `workspace` is a wildcard (matches
+/// any); an empty `secrets` or `operations` list matches nothing, so such a
+/// rule can never allow anything.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentPolicyRule {
+    /// Human-readable rule name, recorded on the resulting decision.
+    #[serde(default)]
+    pub name: String,
+
+    /// Glob over the resolved identity id (e.g. `github:owner/repo:*`). Empty
+    /// means any identity.
+    #[serde(default)]
+    pub identity: String,
+
+    /// Required identity source: `github-oidc`, `entra-workload-identity`,
+    /// `aws-role`, `spiffe`, or `env-assertion`. Empty means any source.
+    #[serde(default)]
+    pub identity_source: String,
+
+    /// Workspace (vault) this rule applies to. Empty means any workspace.
+    #[serde(default)]
+    pub workspace: String,
+
+    /// Secret-name glob patterns this rule covers.
+    #[serde(default)]
+    pub secrets: Vec<String>,
+
+    /// Operations this rule permits: any of `get`, `list`, `set`, `update`,
+    /// `delete`, `rename`, `rollback`, `restore`, `purge`, `rotate`.
+    #[serde(default)]
+    pub operations: Vec<String>,
+
+    /// Maximum credential lifetime for this rule (e.g. `10m`, `1h`).
+    ///
+    /// PARSED and VALIDATED at load time so the schema is stable, but **NOT
+    /// ENFORCED** in this build: lifetime enforcement needs the broker session
+    /// that a later change introduces. Present here only so enabling it later
+    /// needs no config migration. Do not deploy believing durations are
+    /// enforced.
+    #[serde(default)]
+    pub max_duration: Option<String>,
+
+    /// Whether this rule may satisfy a value-bearing read. Plaintext gets,
+    /// version/snapshot reads with values, and backups require this to be
+    /// `true`; an unverified identity additionally needs the global opt-in on
+    /// [`AgentConfig::allow_unverified_identities`].
+    #[serde(default)]
+    pub raw_disclosure: bool,
+
+    /// Approval tier: `none` (default), `notify`, or `required`.
+    ///
+    /// PARSED and VALIDATED at load time, but **NOT ENFORCED** in this build:
+    /// approvals need a human-in-the-loop channel that does not exist yet. A
+    /// `required` tier does NOT currently block anything. Do not deploy
+    /// believing approvals are live.
+    #[serde(default = "default_approval_tier")]
+    pub approval_tier: String,
+}
+
+fn default_agent_decision() -> String {
+    "deny".to_string()
+}
+
+fn default_approval_tier() -> String {
+    "none".to_string()
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            enforce: false,
+            allow_unverified_identities: false,
+            default_decision: default_agent_decision(),
+            policy: Vec::new(),
+        }
+    }
+}
+
+impl Default for AgentPolicyRule {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            identity: String::new(),
+            identity_source: String::new(),
+            workspace: String::new(),
+            secrets: Vec::new(),
+            operations: Vec::new(),
+            max_duration: None,
+            raw_disclosure: false,
+            approval_tier: default_approval_tier(),
+        }
+    }
+}
+
 /// A named backend entry in `Config.named_backends`. Each entry is a
 /// fully-self-contained backend configuration tagged with its type.
 ///
@@ -288,6 +430,14 @@ pub struct Config {
     #[tabled(skip)]
     #[serde(default)]
     pub named_backends: std::collections::HashMap<String, NamedBackendEntry>,
+    /// Per-agent identity and policy configuration (`[agent]`).
+    ///
+    /// Absent (`None`) on every config that predates this feature and on every
+    /// install that has not opted in — which means *unenforced*, with zero
+    /// behavior change. See [`AgentConfig`].
+    #[tabled(skip)]
+    #[serde(default)]
+    pub agent: Option<AgentConfig>,
     /// Seconds before clipboard is automatically cleared (0 to disable)
     #[tabled(rename = "Clipboard Timeout")]
     #[serde(default = "default_clipboard_timeout")]
@@ -400,6 +550,7 @@ impl Default for Config {
             aws: None,
             azure: None,
             named_backends: std::collections::HashMap::new(),
+            agent: None,
             clipboard_timeout: default_clipboard_timeout(),
             gen_default_charset: None,
             env_flag: None,
@@ -473,6 +624,15 @@ impl Config {
                     "AWS region required: set [aws].region in config or AWS_REGION env var",
                 ));
             }
+        }
+        // Validate the `[agent]` block at load time (not first use): unknown
+        // operation names, malformed globs, unparseable durations, and bad
+        // enum values are config errors with actionable messages. Compiling the
+        // policy here is the validation; the compiled form is rebuilt at
+        // enforcement time. An absent block skips this entirely (unenforced).
+        if let Some(agent) = &self.agent {
+            crate::agent::policy::CompiledPolicy::compile(agent)
+                .map_err(CrosstacheError::config)?;
         }
         Ok(())
     }
@@ -1011,6 +1171,54 @@ pub(crate) async fn save_config_to_path(
 mod tests {
     use super::{NamedBackendEntry, *};
 
+    #[test]
+    fn config_without_agent_block_loads_unenforced() {
+        let legacy = toml::to_string(&Config::default()).unwrap();
+        assert!(!legacy.contains("[agent]"));
+        let config: Config = toml::from_str(&legacy).unwrap();
+        assert!(config.agent.is_none());
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn agent_policy_is_validated_during_config_validation() {
+        let config = Config {
+            agent: Some(AgentConfig {
+                enforce: true,
+                policy: vec![AgentPolicyRule {
+                    name: "bad".into(),
+                    identity: "*".into(),
+                    secrets: vec!["unterminated-[".into()],
+                    operations: vec!["get".into()],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("invalid secret glob"), "{error}");
+    }
+
+    #[test]
+    fn misspelled_agent_fields_are_rejected_instead_of_disabling_enforcement() {
+        let block_error = toml::from_str::<AgentConfig>("enfroce = true\n")
+            .unwrap_err()
+            .to_string();
+        assert!(block_error.contains("enfroce"), "{block_error}");
+
+        let rule_error = toml::from_str::<AgentPolicyRule>("name = 'r'\nraw_disclousre = true\n")
+            .unwrap_err()
+            .to_string();
+        assert!(rule_error.contains("raw_disclousre"), "{rule_error}");
+    }
+
+    #[test]
+    fn explicit_agent_enforcement_opt_out_remains_valid() {
+        let config = toml::from_str::<AgentConfig>("enforce = false\n").unwrap();
+        assert!(!config.enforce);
+    }
+
     #[tokio::test]
     async fn settings_save_to_path_is_atomic_private_and_parseable() {
         let dir = tempfile::tempdir().unwrap();
@@ -1240,10 +1448,6 @@ mod tests {
         assert!(Config::default().validate().is_ok());
     }
 
-    /// Guards against over-broadening the fix above: an *explicitly*
-    /// requested azure backend with no credentials must still fail, exactly
-    /// as before.
-    #[test]
     /// A config that carries its Azure credentials in the `[azure]` block and
     /// leaves the legacy top-level fields empty must validate. Before this,
     /// `validate()` read the top-level fields directly, so such a config passed

@@ -264,6 +264,26 @@ chain for `xv` to verify on a cloud backend, and none is needed.
 The log grows by one line per audited operation. It is committed with the store
 when git versioning is on, so it is covered by the same history.
 
+### Agent-aware v2 records and policy decisions
+
+Legacy and unenforced local audit rows use record version 1. When agent-policy
+enforcement is active, an allowed secret operation writes a version 2 row that
+also MAC-binds the agent id, identity source, verification flag, invoking
+principal, session id, audit-only purpose, policy version, and decision. Each
+ordered delegation-chain element is bound as well. The v2 domain/version tag
+is part of the MAC input; unknown versions and v1 rows carrying v2-only fields
+are rejected. Each row is verified using its own canonical version, so an upgraded log may contain
+v1 rows followed by v2 rows without breaking the chain. Missing v1 version and
+agent fields remain omitted in JSON for byte compatibility.
+
+Policy denials never reach a backend, so allow and deny decisions also go to a
+separate HMAC-chained log at `$XDG_STATE_HOME/xv/agent-decisions.jsonl` (or
+`~/.local/state/xv/agent-decisions.jsonl`). It uses the same chain encoding and
+locked append implementation as the local audit log and records the requested
+operation/resource, matched rule or denial reason, identity context, and policy
+version. See [Agent identity and policy](agent-identity.md) for its threat model
+and configuration.
+
 ---
 
 ## Why local only

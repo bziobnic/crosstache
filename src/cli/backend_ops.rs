@@ -56,6 +56,18 @@ pub(crate) async fn execute_backend_ls(config: Config) -> Result<()> {
     Ok(())
 }
 
+fn guard_agent_backend_lifecycle(config: &Config) -> Result<()> {
+    if config.agent.as_ref().is_some_and(|agent| agent.enforce) {
+        return Err(CrosstacheError::config(
+            "agent policy enforcement is active; backend add/remove cannot bind setup, \
+             configuration replacement, or store purge to per-secret policy, so xv refused \
+             before inspecting or changing backend state"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// `_config` is the dispatch-resolved config (`main.rs` unconditionally
 /// overwrites `.backend` on it to compute the *effective* backend for the
 /// command about to run — see `resolve_effective_backend`). Saving that back
@@ -68,11 +80,12 @@ pub(crate) async fn execute_backend_ls(config: Config) -> Result<()> {
 /// `XV_BACKEND` is exactly as dispatch-resolved as `--backend` is, and must
 /// never round-trip into a save either) as the base for both the
 /// already-configured check and `add_backend`.
-pub(crate) async fn execute_backend_add(backend: String, yes: bool, _config: Config) -> Result<()> {
+pub(crate) async fn execute_backend_add(backend: String, yes: bool, config: Config) -> Result<()> {
+    guard_agent_backend_lifecycle(&config)?;
     execute_backend_add_inner(
         backend,
         yes,
-        _config,
+        config,
         crate::config::init::ConfigInitializer::new(),
     )
     .await
@@ -216,6 +229,7 @@ pub(crate) async fn execute_backend_rm(
     yes: bool,
     config: Config,
 ) -> Result<()> {
+    guard_agent_backend_lifecycle(&config)?;
     let backend: BackendType = backend.parse()?;
     let base = load_config_file_only().await.unwrap_or_default();
     let configured = configured_backends(&base);

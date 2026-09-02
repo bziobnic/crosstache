@@ -272,7 +272,15 @@ async fn execute_backend_audit(
     render_audit_rows(&rows, config)
 }
 
-pub(crate) async fn execute_init_command(_config: Config) -> Result<()> {
+pub(crate) async fn execute_init_command(config: Config) -> Result<()> {
+    if config.agent.as_ref().is_some_and(|agent| agent.enforce) {
+        return Err(CrosstacheError::config(
+            "agent policy enforcement is active; xv init cannot bind backend setup or \
+             configuration replacement to per-secret policy, so xv refused before \
+             inspecting or changing backend state"
+                .to_string(),
+        ));
+    }
     use crate::config::init::ConfigInitializer;
     use crate::config::settings::Config as SettingsConfig;
 

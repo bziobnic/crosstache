@@ -647,6 +647,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn migration_cannot_bypass_a_policy_wrapped_source() {
+        let source_tmp = TempDir::new().unwrap();
+        let target_tmp = TempDir::new().unwrap();
+        let local_config = |tmp: &TempDir| LocalConfig {
+            store_path: Some(tmp.path().join("store").to_string_lossy().to_string()),
+            key_file: Some(tmp.path().join("key.txt").to_string_lossy().to_string()),
+            default_vault: Some("default".into()),
+            encrypt_metadata: None,
+            opaque_filenames: None,
+            audit: None,
+            git: None,
+        };
+        let raw_source: Arc<dyn Backend> = Arc::new(
+            crate::backend::local::LocalBackend::new(Some(&local_config(&source_tmp))).unwrap(),
+        );
+        raw_source
+            .secrets()
+            .set_secret(
+                "default",
+                SecretRequest {
+                    name: "existing".into(),
+                    value: Zeroizing::new("would-leak-if-delegated".into()),
+                    content_type: None,
+                    enabled: Some(true),
+                    expires_on: None,
+                    not_before: None,
+                    tags: None,
+                    groups: None,
+                    note: None,
+                    folder: None,
+                },
+            )
+            .await
+            .unwrap();
+        let policy =
+            crate::agent::policy::CompiledPolicy::compile(&crate::config::settings::AgentConfig {
+                enforce: true,
+                ..Default::default()
+            })
+            .unwrap();
+        let source: Arc<dyn Backend> =
+            Arc::new(crate::agent::enforce::PolicyEnforcedBackend::for_test(
+                raw_source,
+                crate::agent::AgentIdentity::new(
+                    crate::agent::IdentitySource::EnvAssertion,
+                    "migration-agent",
+                ),
+                policy,
+                source_tmp.path().join("decisions.jsonl"),
+            ));
+        let target: Arc<dyn Backend> = Arc::new(
+            crate::backend::local::LocalBackend::new(Some(&local_config(&target_tmp))).unwrap(),
+        );
+
+        let error = migrate_one(
+            &source, &target, "default", "default", "existing", false, "local",
+        )
+        .await
+        .unwrap_err();
+        assert!(error.1.contains("agent policy denied"), "{error:?}");
+        assert!(!target
+            .secrets()
+            .secret_exists("default", "existing")
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
     async fn local_to_local_migration_roundtrip() {
         // Create two separate local backends with different store paths
         let source_tmp = TempDir::new().unwrap();
