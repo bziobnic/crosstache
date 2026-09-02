@@ -92,7 +92,14 @@ impl BackendRegistry {
     ///
     /// [`AzureBackend`]: super::azure::AzureBackend
     pub fn from_config(config: &Config) -> Result<Self, BackendError> {
-        let preflight = Self::agent_policy_preflight(config)?;
+        Self::from_config_with_preflight(config, Self::agent_policy_preflight)
+    }
+
+    fn from_config_with_preflight<F>(config: &Config, preflight_fn: F) -> Result<Self, BackendError>
+    where
+        F: FnOnce(&Config) -> Result<Option<AgentPolicyPreflight>, BackendError>,
+    {
+        let preflight = preflight_fn(config)?;
         let backend_name = config.effective_backend_name();
 
         // Resolve named-backend entry first if applicable
@@ -579,6 +586,36 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let result = BackendRegistry::from_config(&invalid_enforced_local_config(&tmp));
         assert!(matches!(result, Err(BackendError::InvalidArgument(_))));
+        assert_no_local_backend_state(&tmp);
+    }
+
+    #[test]
+    fn from_config_opens_decision_log_before_local_backend_construction() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = invalid_enforced_local_config(&tmp);
+        config.agent.as_mut().unwrap().default_decision = "deny".into();
+        let resolution = crate::agent::resolve::Resolution::Resolved(Box::new(
+            crate::agent::AgentIdentity::new(
+                crate::agent::IdentitySource::EnvAssertion,
+                "test-agent",
+            ),
+        ));
+
+        let result = BackendRegistry::from_config_with_preflight(&config, |config| {
+            BackendRegistry::agent_policy_preflight_with(
+                config,
+                || &resolution,
+                || {
+                    Err(BackendError::Internal(
+                        "injected decision-log failure".into(),
+                    ))
+                },
+            )
+        });
+
+        assert!(
+            matches!(result, Err(BackendError::Internal(ref message)) if message == "injected decision-log failure")
+        );
         assert_no_local_backend_state(&tmp);
     }
 

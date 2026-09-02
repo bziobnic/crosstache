@@ -437,51 +437,6 @@ fn enforced_secret_command_without_identity_leaves_fresh_local_config_untouched(
     );
 }
 
-#[test]
-fn enforced_secret_command_initializes_decision_log_before_local_backend() {
-    let env = TestEnv::new();
-    let key_file = env.tmp_path().join("key.txt");
-    std::fs::remove_dir(&env.store_dir).expect("remove pre-created empty store directory");
-
-    let config_path = env.config_dir.join("xv").join("xv.conf");
-    let mut config = std::fs::read_to_string(&config_path).expect("read config");
-    config.push_str("git = true\n\n[agent]\nenforce = true\n");
-    std::fs::write(&config_path, config).expect("enable enforcement");
-    let blocked_state_root = env.tmp_path().join("state-is-a-file");
-    std::fs::write(&blocked_state_root, b"not a directory").expect("create blocked state root");
-
-    let output = env
-        .xv()
-        .args(["get", "missing"])
-        .env("HOME", env.tmp_path())
-        .env("XDG_STATE_HOME", &blocked_state_root)
-        .env("LOCALAPPDATA", &blocked_state_root)
-        .env("XV_AGENT_ID", "test-agent")
-        .env_remove("ACTIONS_ID_TOKEN_REQUEST_URL")
-        .env_remove("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
-        .env_remove("AZURE_CLIENT_ID")
-        .env_remove("AZURE_TENANT_ID")
-        .env_remove("AZURE_FEDERATED_TOKEN_FILE")
-        .output()
-        .expect("execute enforced secret command");
-    let combined = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    assert!(!output.status.success());
-    assert!(combined.contains("agent state directory"), "{combined}");
-    assert!(
-        !key_file.exists(),
-        "decision-log failure created the local age key"
-    );
-    assert!(
-        !env.store_dir.exists(),
-        "decision-log failure created vault metadata, a git repo, or other store state"
-    );
-}
-
 // ===========================================================================
 // Secret CRUD
 // ===========================================================================
