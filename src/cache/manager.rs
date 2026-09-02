@@ -36,6 +36,13 @@ macro_rules! cache_log_failure {
 // ---------------------------------------------------------------------------
 
 /// Client-side disk cache for expensive listing operations.
+///
+/// The manager is always disabled while agent-policy enforcement is active.
+/// Secret-list entries contain resource names and can outlive the identity or
+/// policy that originally populated them; allowing any cache-only caller to
+/// consume those entries would bypass both authorization and the decision log.
+/// Centralizing the fail-safe here also covers completion and future cache
+/// consumers without relying on every call site to remember the rule.
 pub struct CacheManager {
     /// Root cache directory (contains one sub-directory per config
     /// fingerprint in the v5 layout).
@@ -85,7 +92,8 @@ impl CacheManager {
     /// [`CacheManager::from_config`], so cross-config isolation can be tested
     /// against a temp root.
     pub fn from_config_with_dir(config: &crate::config::Config, cache_dir: PathBuf) -> Self {
-        let enabled = config.cache_enabled && config.cache_ttl_secs > 0;
+        let enforcement_active = config.agent.as_ref().is_some_and(|agent| agent.enforce);
+        let enabled = config.cache_enabled && config.cache_ttl_secs > 0 && !enforcement_active;
         let mut manager = Self::new(cache_dir, enabled, config.cache_ttl_secs);
         manager.fingerprint = crate::cache::fingerprint::config_fingerprint(config);
         manager
@@ -1301,5 +1309,31 @@ mod tests {
         assert!(mgr.get::<Vec<String>>(&skey).is_some());
         mgr.clear(None);
         assert!(mgr.get::<Vec<String>>(&skey).is_none());
+    }
+
+    #[test]
+    fn enforcement_disables_manager_and_cannot_read_or_write_prepopulated_entries() {
+        let dir = tempdir().unwrap();
+        let mut config = azure_config("tenant-enforced");
+        let key = CacheKey::SecretsList {
+            backend: "azure".to_string(),
+            vault_name: "prod".to_string(),
+        };
+        let unenforced = CacheManager::from_config_with_dir(&config, dir.path().to_path_buf());
+        unenforced.set(&key, &vec!["restricted/admin".to_string()]);
+        assert!(unenforced.get::<Vec<String>>(&key).is_some());
+
+        config.agent = Some(crate::config::settings::AgentConfig {
+            enforce: true,
+            ..Default::default()
+        });
+        let enforced = CacheManager::from_config_with_dir(&config, dir.path().to_path_buf());
+        assert!(!enforced.is_enabled());
+        assert!(enforced.get::<Vec<String>>(&key).is_none());
+        enforced.set(&key, &vec!["new-name".to_string()]);
+        assert_eq!(
+            unenforced.get::<Vec<String>>(&key).unwrap(),
+            vec!["restricted/admin".to_string()]
+        );
     }
 }

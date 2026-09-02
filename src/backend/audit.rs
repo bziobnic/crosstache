@@ -31,6 +31,33 @@ pub struct AuditEvent {
     pub source_ip: Option<String>,
     /// Backend-assigned unique event ID.
     pub event_id: String,
+    /// Resolved agent id when agent-policy enforcement produced the event.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// Identity resolver source (for example `github-oidc`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity_source: Option<String>,
+    /// Whether the agent identity came from a verified source.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verified: Option<bool>,
+    /// Human/system principal on whose behalf the agent acted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub invoking_principal: Option<String>,
+    /// Agent session/task correlation id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Ordered delegation chain, outermost principal first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delegation_chain: Option<Vec<String>>,
+    /// Agent-stated purpose, recorded for audit only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
+    /// Version of the agent policy used for the decision.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_version: Option<String>,
+    /// Policy result associated with the backend operation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision: Option<String>,
 }
 
 /// Audit log operations for backends that support them.

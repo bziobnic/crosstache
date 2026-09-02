@@ -16,6 +16,18 @@ use std::sync::Arc;
 use tabled::Tabled;
 
 pub(crate) async fn execute_git_command(command: GitCommands, config: Config) -> Result<()> {
+    // Git maintenance operates on the whole local store outside SecretBackend,
+    // so it cannot bind reads, history transfer, or mutations to per-secret
+    // agent policy. Fail before opening the repository: even read-only log,
+    // status, and diff can enumerate secret names and metadata.
+    if config.agent.as_ref().is_some_and(|agent| agent.enforce) {
+        return Err(CrosstacheError::config(
+            "agent policy enforcement is active; `xv git` maintenance cannot bind repository \
+             reads or mutations to per-secret policy, so xv refused before opening the local store"
+                .to_string(),
+        ));
+    }
+
     let store = open_store(&config)?;
 
     match command {

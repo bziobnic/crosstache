@@ -7,6 +7,14 @@ use crate::error::{CrosstacheError, Result};
 use crate::utils::output;
 
 pub(crate) async fn execute_local_command(command: LocalCommands, config: Config) -> Result<()> {
+    if config.agent.as_ref().is_some_and(|agent| agent.enforce) {
+        return Err(CrosstacheError::config(
+            "agent policy enforcement is active; `xv local` maintenance cannot bind raw \
+             filesystem scans or rewrites to per-secret policy, so xv refused before opening \
+             or scanning the local store"
+                .to_string(),
+        ));
+    }
     match command {
         LocalCommands::EncryptMetadata { dry_run } => {
             execute_encrypt_metadata(dry_run, config).await

@@ -254,6 +254,15 @@ fn map_event(event: &Event, vault: &str, secret_filter: Option<&str>) -> Option<
         status,
         source_ip,
         event_id,
+        agent_id: None,
+        identity_source: None,
+        verified: None,
+        invoking_principal: None,
+        session_id: None,
+        delegation_chain: None,
+        purpose: None,
+        policy_version: None,
+        decision: None,
     })
 }
 

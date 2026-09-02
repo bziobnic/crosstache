@@ -7,6 +7,7 @@ use clap::Parser;
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+mod agent;
 mod auth;
 mod backend;
 #[cfg(feature = "file-ops")]
@@ -327,7 +328,12 @@ Rebuild with `cargo build --features aws` or install an AWS-enabled binary.",
             | crate::cli::Commands::Completion { .. }
             | crate::cli::Commands::Parse { .. }
             | crate::cli::Commands::Cache { .. }
+            // Local and Git maintenance construct their specialized local-store
+            // views only after their own enforcement guard. Building the
+            // generic registry first can create key/vault/git state before an
+            // enforced command gets a chance to fail closed.
             | crate::cli::Commands::Local { .. }
+            | crate::cli::Commands::Git { .. }
             | crate::cli::Commands::Type { .. }
             | crate::cli::Commands::Context { .. }
             // Env subcommands that only read/write `.xv.toml` need no backend.
@@ -361,24 +367,11 @@ Rebuild with `cargo build --features aws` or install an AWS-enabled binary.",
     }
 
     // Build the backend registry for commands that talk to a secrets backend.
-    // For commands that *may* need the backend we attempt construction but
-    // treat failure as non-fatal: the registry becomes `None` and individual
-    // command handlers reconstruct the backend on demand from config (the
-    // option-A rebuild) when they genuinely need it.
+    // Unenforced commands retain the legacy deferred-construction fallback.
+    // Enforced mode cannot: losing the registry would also lose the policy
+    // wrapper, so every construction failure is fatal before dispatch.
     let registry = if needs_backend {
-        match backend::BackendRegistry::from_config(&config) {
-            Ok(r) => Some(r),
-            Err(e) => {
-                // Log but don't block — commands that genuinely need the
-                // backend will fail with their own clear error when they
-                // reconstruct it from config.
-                tracing::debug!(
-                    "Backend '{}' init failed (non-fatal): {e}",
-                    config.effective_backend_name()
-                );
-                None
-            }
-        }
+        startup_registry_result(&config, backend::BackendRegistry::from_config(&config))?
     } else {
         None
     };
@@ -387,6 +380,29 @@ Rebuild with `cargo build --features aws` or install an AWS-enabled binary.",
     cli.execute(config, registry.as_ref()).await?;
 
     Ok(())
+}
+
+fn agent_enforcement_enabled(config: &crate::config::Config) -> bool {
+    config.agent.as_ref().is_some_and(|agent| agent.enforce)
+}
+
+fn startup_registry_result(
+    config: &crate::config::Config,
+    result: std::result::Result<backend::BackendRegistry, backend::BackendError>,
+) -> Result<Option<backend::BackendRegistry>> {
+    match result {
+        Ok(registry) => Ok(Some(registry)),
+        Err(error) if !agent_enforcement_enabled(config) => {
+            tracing::debug!(
+                "Backend '{}' init failed (non-fatal): {error}",
+                config.effective_backend_name()
+            );
+            Ok(None)
+        }
+        Err(error) => Err(CrosstacheError::config(format!(
+            "agent policy enforcement requires backend initialization to succeed; refusing an unenforced fallback: {error}"
+        ))),
+    }
 }
 
 async fn load_config_without_validation() -> Result<crate::config::Config> {
@@ -465,5 +481,31 @@ fn print_user_friendly_error(error: &CrosstacheError, format: crate::utils::form
         if let Some(hint) = hint_for(error.code()) {
             eprintln!("  hint: {hint}");
         }
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+
+    #[test]
+    fn enforced_registry_failure_is_fatal_and_unenforced_failure_can_defer() {
+        let failure = || backend::BackendError::Internal("construction failed".into());
+        let unenforced = crate::config::Config::default();
+        assert!(startup_registry_result(&unenforced, Err(failure()))
+            .unwrap()
+            .is_none());
+
+        let enforced = crate::config::Config {
+            agent: Some(crate::config::settings::AgentConfig {
+                enforce: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let error = startup_registry_result(&enforced, Err(failure()))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("refusing an unenforced fallback"), "{error}");
     }
 }

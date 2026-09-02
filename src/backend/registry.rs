@@ -51,6 +51,14 @@ pub struct BackendRegistry {
     lazy_cache: std::sync::Mutex<HashMap<String, Arc<dyn Backend>>>,
 }
 
+/// All fallible agent-policy work that must finish before a backend constructor
+/// is allowed to create credentials, repositories, metadata, or store state.
+struct AgentPolicyPreflight {
+    identity: crate::agent::AgentIdentity,
+    policy: crate::agent::policy::CompiledPolicy,
+    decisions: crate::agent::DecisionLog,
+}
+
 impl std::fmt::Debug for BackendRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BackendRegistry")
@@ -84,28 +92,38 @@ impl BackendRegistry {
     ///
     /// [`AzureBackend`]: super::azure::AzureBackend
     pub fn from_config(config: &Config) -> Result<Self, BackendError> {
+        Self::from_config_with_preflight(config, Self::agent_policy_preflight)
+    }
+
+    fn from_config_with_preflight<F>(config: &Config, preflight_fn: F) -> Result<Self, BackendError>
+    where
+        F: FnOnce(&Config) -> Result<Option<AgentPolicyPreflight>, BackendError>,
+    {
+        let preflight = preflight_fn(config)?;
         let backend_name = config.effective_backend_name();
 
         // Resolve named-backend entry first if applicable
         if let Some(entry) = config.named_backends.get(backend_name) {
-            return Self::from_named_entry(backend_name, entry);
+            let mut registry = Self::from_named_entry(backend_name, entry)?;
+            registry.apply_agent_policy(preflight);
+            return Ok(registry);
         }
 
         let kind: BackendKind = backend_name
             .parse()
             .map_err(|e: String| BackendError::Internal(e))?;
 
-        match kind {
+        let mut registry: Self = match kind {
             BackendKind::Azure => {
                 let auth_provider = Self::create_azure_auth_provider(config)?;
                 let backend = super::azure::AzureBackend::new(config, auth_provider.clone())?;
                 let mut registry = Self::new(Arc::new(backend));
                 registry.azure_auth = Some(auth_provider);
-                Ok(registry)
+                Ok::<Self, BackendError>(registry)
             }
             BackendKind::Local => {
                 let backend = super::local::LocalBackend::new(config.local.as_ref())?;
-                Ok(Self::new(Arc::new(backend)))
+                Ok::<Self, BackendError>(Self::new(Arc::new(backend)))
             }
             #[cfg(feature = "aws")]
             BackendKind::Aws => {
@@ -126,13 +144,15 @@ impl BackendRegistry {
                         aws_transfer_config(config),
                     ))
                 })?;
-                Ok(Self::new(Arc::new(backend)))
+                Ok::<Self, BackendError>(Self::new(Arc::new(backend)))
             }
             #[cfg(not(feature = "aws"))]
             BackendKind::Aws => Err(BackendError::Internal(
                 "AWS backend not compiled in: rebuild with --features aws".into(),
             )),
-        }
+        }?;
+        registry.apply_agent_policy(preflight);
+        Ok(registry)
     }
 
     fn from_named_entry(
@@ -253,9 +273,120 @@ impl BackendRegistry {
             )
         })?;
 
+        let preflight = Self::agent_policy_preflight(config)?;
         let backend = Self::construct_named(name, config)?;
+        let backend = Self::apply_preflight(backend, preflight);
         cache.insert(name.to_string(), backend.clone());
         Ok(backend)
+    }
+
+    fn apply_agent_policy(&mut self, preflight: Option<AgentPolicyPreflight>) {
+        if preflight.is_some() {
+            let backend = self.backends[self.default].clone();
+            self.backends
+                .insert(self.default, Self::apply_preflight(backend, preflight));
+        }
+    }
+
+    fn apply_preflight(
+        backend: Arc<dyn Backend>,
+        preflight: Option<AgentPolicyPreflight>,
+    ) -> Arc<dyn Backend> {
+        match preflight {
+            Some(preflight) => Arc::new(crate::agent::enforce::PolicyEnforcedBackend::new(
+                backend,
+                preflight.identity,
+                preflight.policy,
+                preflight.decisions,
+            )),
+            None => backend,
+        }
+    }
+
+    fn agent_policy_preflight(
+        config: &Config,
+    ) -> Result<Option<AgentPolicyPreflight>, BackendError> {
+        // Enforcement protects the whole invocation, not only whichever identity
+        // source wins resolution. A manually asserted identity can coexist with
+        // GitHub Actions variables later consumed by Azure authentication, so
+        // validate that bearer destination before any backend is constructed.
+        if config.agent.as_ref().is_some_and(|agent| agent.enforce) {
+            if let Ok(request_url) = std::env::var("ACTIONS_ID_TOKEN_REQUEST_URL") {
+                crate::backend::azure::oidc::validate_github_actions_token_url(&request_url)
+                    .map_err(|error| BackendError::AuthenticationFailed(error.to_string()))?;
+            }
+        }
+        Self::agent_policy_preflight_with(
+            config,
+            crate::agent::resolve::current_resolution,
+            crate::agent::DecisionLog::open_default,
+        )
+    }
+
+    fn agent_policy_preflight_with<'a, F, L>(
+        config: &Config,
+        resolve: F,
+        open_log: L,
+    ) -> Result<Option<AgentPolicyPreflight>, BackendError>
+    where
+        F: FnOnce() -> &'a crate::agent::resolve::Resolution,
+        L: FnOnce() -> Result<crate::agent::DecisionLog, BackendError>,
+    {
+        let Some(agent) = config.agent.as_ref().filter(|agent| agent.enforce) else {
+            return Ok(None);
+        };
+        let policy = crate::agent::policy::CompiledPolicy::compile(agent)
+            .map_err(BackendError::InvalidArgument)?;
+        let identity = match resolve() {
+            crate::agent::resolve::Resolution::Resolved(identity) => identity.as_ref().clone(),
+            crate::agent::resolve::Resolution::Unresolved(attempts) => {
+                return Err(BackendError::AuthenticationFailed(
+                    crate::agent::resolve::unresolved_diagnostic(attempts),
+                ));
+            }
+        };
+        identity.validate().map_err(|error| {
+            BackendError::InvalidArgument(format!("invalid agent identity: {error}"))
+        })?;
+        let decisions = open_log()?;
+        Ok(Some(AgentPolicyPreflight {
+            identity,
+            policy,
+            decisions,
+        }))
+    }
+
+    #[cfg(test)]
+    async fn create_for_kind_with_resolution(
+        kind: BackendKind,
+        config: &Config,
+        resolution: &crate::agent::resolve::Resolution,
+    ) -> Result<Arc<dyn Backend>, BackendError> {
+        let preflight = Self::agent_policy_preflight_with(
+            config,
+            || resolution,
+            || -> Result<crate::agent::DecisionLog, BackendError> {
+                panic!("unresolved identity must fail before opening the decision log")
+            },
+        )?;
+        let backend = Self::construct_for_kind(kind, config).await?;
+        Ok(Self::apply_preflight(backend, preflight))
+    }
+
+    #[cfg(test)]
+    async fn create_for_kind_with_resolution_and_log(
+        kind: BackendKind,
+        config: &Config,
+        resolution: &crate::agent::resolve::Resolution,
+        decision_path: std::path::PathBuf,
+    ) -> Result<Arc<dyn Backend>, BackendError> {
+        let preflight = Self::agent_policy_preflight_with(
+            config,
+            || resolution,
+            move || Ok(crate::agent::DecisionLog::for_test(decision_path)),
+        )?;
+        let backend = Self::construct_for_kind(kind, config).await?;
+        Ok(Self::apply_preflight(backend, preflight))
     }
 
     /// Construct a single backend instance by its registry name (either a
@@ -368,15 +499,24 @@ impl BackendRegistry {
         kind: BackendKind,
         config: &Config,
     ) -> std::result::Result<std::sync::Arc<dyn Backend>, BackendError> {
-        match kind {
+        let preflight = Self::agent_policy_preflight(config)?;
+        let backend = Self::construct_for_kind(kind, config).await?;
+        Ok(Self::apply_preflight(backend, preflight))
+    }
+
+    async fn construct_for_kind(
+        kind: BackendKind,
+        config: &Config,
+    ) -> Result<Arc<dyn Backend>, BackendError> {
+        let backend: Arc<dyn Backend> = match kind {
             BackendKind::Azure => {
                 let auth = Self::create_azure_auth_provider(config)?;
                 let backend = super::azure::AzureBackend::new(config, auth)?;
-                Ok(std::sync::Arc::new(backend))
+                std::sync::Arc::new(backend) as Arc<dyn Backend>
             }
             BackendKind::Local => {
                 let backend = super::local::LocalBackend::new(config.local.as_ref())?;
-                Ok(std::sync::Arc::new(backend))
+                std::sync::Arc::new(backend) as Arc<dyn Backend>
             }
             #[cfg(feature = "aws")]
             BackendKind::Aws => {
@@ -388,13 +528,16 @@ impl BackendRegistry {
                 let backend =
                     super::aws::AwsBackend::new(aws_cfg, None, None, aws_transfer_config(config))
                         .await?;
-                Ok(std::sync::Arc::new(backend))
+                std::sync::Arc::new(backend) as Arc<dyn Backend>
             }
             #[cfg(not(feature = "aws"))]
-            BackendKind::Aws => Err(BackendError::Internal(
-                "AWS backend not compiled in: rebuild with --features aws".into(),
-            )),
-        }
+            BackendKind::Aws => {
+                return Err(BackendError::Internal(
+                    "AWS backend not compiled in: rebuild with --features aws".into(),
+                ));
+            }
+        };
+        Ok(backend)
     }
 
     /// Try to extract the Azure auth provider from the active backend.
@@ -413,6 +556,90 @@ impl BackendRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn invalid_enforced_local_config(tmp: &tempfile::TempDir) -> Config {
+        Config {
+            backend: Some("local".into()),
+            local: Some(crate::config::settings::LocalConfig {
+                store_path: Some(tmp.path().join("store").to_string_lossy().to_string()),
+                key_file: Some(tmp.path().join("key.txt").to_string_lossy().to_string()),
+                default_vault: Some("default".into()),
+                git: Some(true),
+                ..Default::default()
+            }),
+            agent: Some(crate::config::settings::AgentConfig {
+                enforce: true,
+                default_decision: "allow".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn assert_no_local_backend_state(tmp: &tempfile::TempDir) {
+        assert!(!tmp.path().join("key.txt").exists());
+        assert!(!tmp.path().join("store").exists());
+    }
+
+    #[test]
+    fn from_config_compiles_enforced_policy_before_local_backend_construction() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let result = BackendRegistry::from_config(&invalid_enforced_local_config(&tmp));
+        assert!(matches!(result, Err(BackendError::InvalidArgument(_))));
+        assert_no_local_backend_state(&tmp);
+    }
+
+    #[test]
+    fn from_config_opens_decision_log_before_local_backend_construction() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = invalid_enforced_local_config(&tmp);
+        config.agent.as_mut().unwrap().default_decision = "deny".into();
+        let resolution = crate::agent::resolve::Resolution::Resolved(Box::new(
+            crate::agent::AgentIdentity::new(
+                crate::agent::IdentitySource::EnvAssertion,
+                "test-agent",
+            ),
+        ));
+
+        let result = BackendRegistry::from_config_with_preflight(&config, |config| {
+            BackendRegistry::agent_policy_preflight_with(
+                config,
+                || &resolution,
+                || {
+                    Err(BackendError::Internal(
+                        "injected decision-log failure".into(),
+                    ))
+                },
+            )
+        });
+
+        assert!(
+            matches!(result, Err(BackendError::Internal(ref message)) if message == "injected decision-log failure")
+        );
+        assert_no_local_backend_state(&tmp);
+    }
+
+    #[test]
+    fn lazy_materialize_compiles_enforced_policy_before_local_backend_construction() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = invalid_enforced_local_config(&tmp);
+        let registry = BackendRegistry::with_lazy(&config, &["local".to_string()]).unwrap();
+        let result = registry.materialize("local");
+        assert!(matches!(result, Err(BackendError::InvalidArgument(_))));
+        assert_no_local_backend_state(&tmp);
+    }
+
+    #[tokio::test]
+    async fn create_for_kind_compiles_enforced_policy_before_local_backend_construction() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let result = BackendRegistry::create_for_kind(
+            BackendKind::Local,
+            &invalid_enforced_local_config(&tmp),
+        )
+        .await;
+        assert!(matches!(result, Err(BackendError::InvalidArgument(_))));
+        assert_no_local_backend_state(&tmp);
+    }
 
     #[tokio::test]
     #[cfg(feature = "ui")]
@@ -609,9 +836,184 @@ mod tests {
             ..Default::default()
         };
         let registry = BackendRegistry::from_config(&config).expect("must build");
+        let original = registry.backends["local"].clone();
         let materialized = registry
             .materialize("local")
             .expect("eager backend must be materializable by name");
         assert_eq!(materialized.name(), "local");
+        assert!(
+            Arc::ptr_eq(&original, &materialized),
+            "unenforced materialize must return the exact original Arc"
+        );
+
+        let raw: Arc<dyn Backend> =
+            Arc::new(crate::backend::local::LocalBackend::new(config.local.as_ref()).unwrap());
+        let preflight = BackendRegistry::agent_policy_preflight_with(
+            &config,
+            || panic!("unenforced mode must not resolve identity"),
+            || panic!("unenforced mode must not initialize a decision log"),
+        )
+        .unwrap();
+        let unchanged = BackendRegistry::apply_preflight(raw.clone(), preflight);
+        assert!(
+            Arc::ptr_eq(&raw, &unchanged),
+            "unenforced policy application must not construct a wrapper"
+        );
+    }
+
+    #[test]
+    fn unenforced_policy_returns_original_backend_without_resolving_identity() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let local = crate::config::settings::LocalConfig {
+            store_path: Some(tmp.path().join("store").to_string_lossy().to_string()),
+            key_file: Some(tmp.path().join("key.txt").to_string_lossy().to_string()),
+            default_vault: Some("default".into()),
+            ..Default::default()
+        };
+        let raw: Arc<dyn Backend> =
+            Arc::new(crate::backend::local::LocalBackend::new(Some(&local)).unwrap());
+        for config in [
+            Config {
+                backend: Some("local".into()),
+                local: Some(local.clone()),
+                ..Default::default()
+            },
+            Config {
+                backend: Some("local".into()),
+                local: Some(local.clone()),
+                agent: Some(crate::config::settings::AgentConfig {
+                    enforce: false,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ] {
+            let preflight = BackendRegistry::agent_policy_preflight_with(
+                &config,
+                || panic!("identity resolution must not run while enforcement is disabled"),
+                || panic!("decision-log state must not open while enforcement is disabled"),
+            )
+            .unwrap();
+            let unchanged = BackendRegistry::apply_preflight(raw.clone(), preflight);
+            assert!(Arc::ptr_eq(&raw, &unchanged));
+        }
+    }
+
+    #[tokio::test]
+    async fn materialize_returns_enforcement_wrapper_and_denials_fire() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let raw_config = crate::config::settings::LocalConfig {
+            store_path: Some(tmp.path().join("store").to_string_lossy().to_string()),
+            key_file: Some(tmp.path().join("key.txt").to_string_lossy().to_string()),
+            default_vault: Some("default".into()),
+            encrypt_metadata: None,
+            opaque_filenames: None,
+            audit: None,
+            git: None,
+        };
+        let inner: Arc<dyn Backend> =
+            Arc::new(crate::backend::local::LocalBackend::new(Some(&raw_config)).unwrap());
+        let agent = crate::config::settings::AgentConfig {
+            enforce: true,
+            ..Default::default()
+        };
+        let policy = crate::agent::policy::CompiledPolicy::compile(&agent).unwrap();
+        let wrapped: Arc<dyn Backend> =
+            Arc::new(crate::agent::enforce::PolicyEnforcedBackend::for_test(
+                inner,
+                crate::agent::AgentIdentity::new(
+                    crate::agent::IdentitySource::EnvAssertion,
+                    "test-agent",
+                ),
+                policy,
+                tmp.path().join("decisions.jsonl"),
+            ));
+        let registry = BackendRegistry::new(wrapped);
+        let materialized = registry.materialize("local").unwrap();
+        let error = materialized
+            .secrets()
+            .get_secret("default", "anything", true)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, BackendError::PermissionDenied(_)));
+    }
+
+    #[tokio::test]
+    async fn migration_and_cross_backend_factory_returns_an_enforced_backend() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = Config {
+            backend: Some("local".into()),
+            local: Some(crate::config::settings::LocalConfig {
+                store_path: Some(tmp.path().join("store").to_string_lossy().to_string()),
+                key_file: Some(tmp.path().join("key.txt").to_string_lossy().to_string()),
+                default_vault: Some("default".into()),
+                ..Default::default()
+            }),
+            agent: Some(crate::config::settings::AgentConfig {
+                enforce: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let resolution = crate::agent::resolve::Resolution::Resolved(Box::new(
+            crate::agent::AgentIdentity::new(
+                crate::agent::IdentitySource::GithubOidc,
+                "github:o/r:.github/workflows/ci.yml@refs/heads/main",
+            ),
+        ));
+        let backend = BackendRegistry::create_for_kind_with_resolution_and_log(
+            BackendKind::Local,
+            &config,
+            &resolution,
+            tmp.path().join("decisions.jsonl"),
+        )
+        .await
+        .unwrap();
+
+        let error = backend
+            .secrets()
+            .get_secret("default", "existing", false)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, BackendError::PermissionDenied(_)));
+    }
+
+    #[tokio::test]
+    async fn enforced_create_for_kind_fails_closed_on_identity_resolution_failure() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = Config {
+            backend: Some("local".into()),
+            local: Some(crate::config::settings::LocalConfig {
+                store_path: Some(tmp.path().join("store").to_string_lossy().to_string()),
+                key_file: Some(tmp.path().join("key.txt").to_string_lossy().to_string()),
+                default_vault: Some("default".into()),
+                ..Default::default()
+            }),
+            agent: Some(crate::config::settings::AgentConfig {
+                enforce: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let resolution = crate::agent::resolve::Resolution::Unresolved(vec![
+            crate::agent::resolve::ResolverAttempt {
+                source: crate::agent::IdentitySource::GithubOidc,
+                reason: "test resolution failure".into(),
+            },
+        ]);
+        let result = BackendRegistry::create_for_kind_with_resolution(
+            BackendKind::Local,
+            &config,
+            &resolution,
+        )
+        .await;
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("enforced create_for_kind returned a raw backend"),
+        };
+        assert!(matches!(error, BackendError::AuthenticationFailed(_)));
+        assert!(error.to_string().contains("failing closed"));
+        assert!(!tmp.path().join("key.txt").exists());
+        assert!(!tmp.path().join("store").exists());
     }
 }
