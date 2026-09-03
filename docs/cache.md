@@ -10,11 +10,11 @@ configurable TTL and background refresh.
 - Location: `$XV_CACHE_DIR` if set, else the OS cache dir joined with `xv`
   (e.g. `~/.cache/xv` on Linux).
 
-Manage it with `xv cache status`, `xv cache clear [<vault>]`, and
+Manage it with `xv cache status`, `xv cache clear [--vault <name>]`, and
 `xv cache refresh --key <key>` (the last is normally spawned automatically as a
 background stale-while-revalidate refresh).
 
-`xv cache status` and `xv cache clear <vault>` are **scoped to the current
+`xv cache status` and `xv cache clear --vault <name>` are **scoped to the current
 identity** (see the fingerprint section below). `xv cache clear` with no vault
 is a **global reset**: it removes the entire cache directory — every identity's
 entries and any pre-v5 leftovers — not just the current identity's. Other
