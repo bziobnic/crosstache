@@ -47,16 +47,12 @@ and validate an explicit resolved target manifest. Define upgrade, missing-targe
 drift-reporting, and uninstall behavior and exercise the manifest on real
 scheduler runners where practical.
 
-### P1 — Harden cache storage and close stale issue [#337](https://github.com/bziobnic/crosstache/issues/337)
+### P1 — Finish cache invalidation on vault removal
 
-Current `main` resolves the backend embedded in a stale secrets-list key through
-`BackendRegistry::with_lazy` before refreshing, so the Azure-only poisoning path
-described by #337 is no longer present; close that stale issue after adding a
-focused regression test if coverage is missing. Remaining cache work is local
-filesystem and identity hardening: private/no-follow atomic writes, random
-exclusive temporary files, explicit config/account fingerprints in keys,
-centralized mutation invalidation, corruption diagnostics, and a strict mode for
-CI. Cache failures must not silently widen trust or return another target's data.
+Vault deletion and purge currently invalidate the vault list but leave that
+vault's cached secret/file listings behind. Wire the existing
+`cache::invalidation::on_vault_removed` seam into successful removal paths and
+cover both built-in and named backends.
 
 ### P1 — Split secret-domain types from provider/legacy manager types
 
@@ -71,11 +67,10 @@ flag-day rewrite.
 
 ### P2 — Workspace-wide UI views and TOTP surface parity
 
-- The current web/desktop UI can switch among resolved workspace entries across
+- The web/desktop UI can switch among resolved workspace entries across
   backends and routes each request to the selected `(alias, backend, vault)`.
-  It still has no CLI-style union `ls`/`find` view across every attached entry.
-  Re-scope or close stale issue [#353](https://github.com/bziobnic/crosstache/issues/353)
-  before tracking the remaining union-view work.
+  Remaining scope is an optional CLI-style union `ls`/`find` view across every
+  attached entry; per-entry switching is complete.
 - Bring the shipped CLI `xv totp` flow to the web/desktop UI and TUI with the same
   encrypted-field-only, no-accidental-stdout, clipboard-expiry, and redaction
   guarantees. Live/watch output, QR enrollment, and seed provisioning remain
@@ -100,8 +95,9 @@ surface; do not imply that updating the vault also updates consumers.
 
 ### P2 — Off-box audit durability
 
-The local hash chain is tamper-evident, not tamper-proof: a key holder can rewrite
-it and a writer can truncate it. Add an append-only off-box sink (for example
+The local-backend audit chain and agent policy decision chain are tamper-evident,
+not tamper-proof: a key holder can rewrite them and a writer can truncate them.
+Add an append-only off-box sink (for example
 syslog, an authenticated HTTP collector, or WORM/object-lock storage) with
 backpressure, retry, and fail-open/fail-closed policy made explicit. A manually
 pushed local Git remote is not a complete audit sink.
@@ -121,6 +117,27 @@ managed multi-instance path). Add lifecycle commands for named instances,
 including validation, workspace-reference safeguards, reconfiguration, and safe
 removal. Keep backend configuration distinct from `xv cx` workspace attachment.
 
+### P2 — Agent broker, bounded sessions, and approvals
+
+Build on the identity and deny-by-default secret-policy foundation shipped in
+PR #422:
+
+- Add an authenticated local channel (Unix socket on macOS/Linux, named pipe on
+  Windows) with peer identity verification and workload attestation.
+- Issue opaque, one-shot or usage-limited handles instead of reusable plaintext.
+- Make the parsed `max_duration` and `approval_tier` policy fields enforceable;
+  bind approvals to agent, purpose, target, operation, duration, and policy
+  version.
+- Add locked/zeroized in-memory key custody, idle timeout, session-wide
+  revocation, and an immediate kill switch.
+- Add verified AWS-role and SPIFFE identity resolvers.
+- Extend enforcement to vault/file and currently refused maintenance operations
+  only where every affected resource can be bound to policy fail-closed.
+
+Keep caches disabled during enforcement unless broker-managed cache-key custody
+is designed explicitly. Dynamic provider credentials and off-box audit durability
+remain separate follow-on capabilities.
+
 ### P3 — First-party CI integrations
 
 The GitHub Action is first-party; GitLab and CircleCI currently use documented
@@ -134,14 +151,6 @@ Candidate providers remain GCP Secret Manager, HashiCorp Vault KV v2, and a
 1Password CLI bridge. Each implementation must satisfy and extend
 [`backend-trait-checklist.md`](./docs/superpowers/specs/backend-trait-checklist.md),
 state unsupported capabilities honestly, and include hermetic contract tests.
-
-### P3 — Agent credential broker research
-
-Research a least-privilege broker for short-lived agent/tool access without
-handing long-lived vault credentials or unrestricted secret values to an agent
-process. Threat-model policy scope, approval/consent, process identity, TTL,
-revocation, audit, redaction, prompt-injection boundaries, and platform support
-before proposing commands or a daemon.
 
 ### P3 — P2P secret sharing (design-ready, unshipped)
 
