@@ -1107,7 +1107,8 @@ pub enum Commands {
     Whoami,
     /// Check for and install new versions
     Upgrade {
-        /// Only check if an update is available (exit code 0 = up-to-date, 1 = update available)
+        /// Report whether an update is available without installing. Up-to-date
+        /// and update-available results both exit 0; operational failures do not.
         #[arg(long)]
         check: bool,
         /// Skip confirmation prompt

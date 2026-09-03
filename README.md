@@ -2168,6 +2168,8 @@ minisign-signed binaries for all four platforms.
 - [`docs/env-profiles.md`](docs/env-profiles.md) — `.xv.toml` walk-up reference
 - [`docs/find.md`](docs/find.md) — `xv find` ranked search
 - [`docs/doctor.md`](docs/doctor.md) — bootstrap-safe `xv doctor` config recovery
+- [`docs/cache.md`](docs/cache.md) — listing-cache storage, isolation, and controls
+- [`docs/upgrade.md`](docs/upgrade.md) — signed `xv upgrade` self-update behavior
 - [`docs/keeper.md`](docs/keeper.md) — Keeper Security JSON import/export
 - [`docs/scan.md`](docs/scan.md) — pre-commit leak scanner
 - [`docs/tui.md`](docs/tui.md) — terminal UI keymap
@@ -2184,7 +2186,9 @@ Release archives are signed with [minisign](https://jedisct1.github.io/minisign/
 minisign -Vm xv-linux-x64.tar.gz -P RWRuXFh34rB613dgsXyAMmtKvYK0SFwxq4i44dhGFXVTrhAQ7hJXf6Ym
 ```
 
-The public key is also embedded in the `xv` binary — `xv upgrade` automatically verifies signatures.
+The public key is also embedded in the `xv` binary — `xv upgrade` automatically
+verifies signatures. See [`docs/upgrade.md`](docs/upgrade.md) for the complete
+verification and replacement contract.
 
 ---
 

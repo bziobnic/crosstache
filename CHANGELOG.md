@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Agent identity and policy enforcement foundation.** Optional `[agent]`
+  configuration resolves GitHub Actions OIDC, Entra workload identity, or an
+  explicitly unverified `XV_AGENT_ID`; applies deny-by-default, per-secret
+  operation and raw-disclosure rules above every backend; records pre-backend
+  decisions in a private hash chain; and binds allowed local operations into
+  versioned agent-aware audit records. Identity/policy/log initialization fails
+  closed before backend construction, while installations without enforcement
+  retain their previous behavior (#422).
+- **Operator guide for `xv upgrade`.** Documents supported release assets,
+  fail-closed minisign/checksum/version verification, replacement semantics,
+  `--check` exit behavior, and operational failure modes.
+
+### Changed
+
+- **Listing cache v5 hardens metadata storage and identity isolation.** Cache
+  directories/files use private modes and no-follow atomic replacement; entries
+  are scoped by config/account fingerprint; invalidation is centralized;
+  corruption is quarantined; and strict mode can surface failures. Agent-policy
+  enforcement disables the client cache entirely (#421).
+
 ## v0.38.0 — TOTP codes and UI connection monitoring (2026-08-15)
 
 ### Added
@@ -411,8 +435,10 @@ successes and 102 failures. The same file now imports 427 and refuses 7.
 - Added recoverable Trash and Undo workflows, typed secret editing, global
   command search, structured filters, managed upload queues, and persistent
   Settings and Help surfaces.
-- Added time-bounded reveal and clipboard protection, workspace-aware context,
-  hierarchical folders, and responsive stacked content layouts down to 390 px.
+- Added time-bounded reveal and clipboard protection, workspace-aware context
+  and per-request routing to the selected `(alias, backend, vault)` target,
+  hierarchical folders, and responsive stacked content layouts down to 390 px
+  (#353).
 
 ### Changed
 
@@ -655,6 +681,10 @@ successes and 102 failures. The same file now imports 427 and refuses 7.
   resolution, and vault lifecycle (create/list/delete/update/restore/purge)
   are now `Backend`-trait surface, which is what makes future non-Azure
   backends able to support `xv share`/`xv vault` without another manager.
+  - **Background cache refresh follows the backend encoded in its cache key.**
+    Named-backend entries are materialized through `BackendRegistry` rather than
+    refreshed through the startup/Azure backend, preventing cross-backend cache
+    poisoning (#337; regression coverage added in #423).
   - **New: `--vault` override on `xv run`/`xv inject`/`xv rotate`.** Explicit
     `--vault <name-or-alias>` overrides the workspace's (or degenerate
     workspace-of-one's) default entry for that invocation — an attached

@@ -204,8 +204,8 @@ to the previous warn-and-continue behavior.
 | `xv vault restore <name>` | Restore a soft-deleted vault |
 | `xv vault purge <name>` | Permanently purge a soft-deleted vault |
 | `xv vault update <name>` | Update vault properties and tags |
-| `xv vault export <name>` | Export secrets to JSON, ENV, or TXT |
-| `xv vault import <name>` | Import secrets from file (`--overwrite`, `--dry-run`) |
+| `xv vault export <name>` | Export secrets to JSON, ENV, TXT, or Keeper (`--fmt keeper` requires `--include-values`). See [keeper.md](keeper.md) |
+| `xv vault import <name>` | Import JSON, ENV, TXT, or Keeper data (`--overwrite`, `--dry-run`); Keeper dry runs exit nonzero when any record is unimportable |
 
 ### Access Control
 
@@ -316,6 +316,7 @@ JSON/YAML keep the full-fidelity serialization (etags, raw byte sizes, extra met
 | `xv parse <conn-string>` | Parse and display connection string components |
 | `xv completion <shell>` | Generate shell completions (bash, zsh, fish, powershell) |
 | `xv version` | Build info (version, git hash, target) |
+| `xv upgrade` | Install the latest signed GitHub release; a successful `--check` exits 0 whether current or update-available, while operational failures remain nonzero. See [upgrade.md](upgrade.md) |
 
 ## Git-native versioning (local backend)
 
@@ -405,6 +406,8 @@ See [migration.md](migration.md) for the full guide.
 | `xv config path` | Show config file location |
 | `xv config edit` | Open the config file in `$VISUAL`/`$EDITOR` (or a platform default) |
 | `xv doctor` | Bootstrap-safe repair of global `xv.conf` (dispatched before normal load). See [doctor.md](doctor.md) |
+| `xv cache status` | Show listing-cache location, TTL, entries, and quarantined corruption. See [cache.md](cache.md) |
+| `xv cache clear` | Clear all listing metadata or every backend entry for `--vault NAME` |
 
 ### Hierarchy
 
