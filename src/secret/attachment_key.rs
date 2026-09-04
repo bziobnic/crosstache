@@ -329,6 +329,55 @@ pub fn classify_reserved_name(canonical_name: &str) -> ReservedClass {
     }
 }
 
+/// A secret name paired with the provider-canonical identity that the eventual
+/// backend request will actually address (design §8).
+///
+/// Reserved-name matching MUST use `provider_identity`, never raw CLI/API
+/// input: Azure Key Vault is case-insensitive and the shared sanitizer folds
+/// underscores and repeated hyphens onto `-`, so several distinct logical
+/// inputs address one provider secret.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalSecretName {
+    /// The caller-supplied logical name, unchanged.
+    pub logical: String,
+    /// The name the provider request will address.
+    pub provider_identity: String,
+}
+
+/// Convert `logical` into the provider-canonical identity for `kind`.
+///
+/// Returns `None` when canonicalization is ambiguous or fails; the caller MUST
+/// fail closed before any provider mutation rather than fall back to the raw
+/// input (design §8).
+pub fn canonicalize_secret_name(
+    logical: &str,
+    kind: crate::backend::BackendKind,
+) -> Option<CanonicalSecretName> {
+    use crate::backend::BackendKind;
+
+    // The shared sanitizer performs the invalid-char -> '-' mapping, hyphen
+    // collapsing, and trimming that every provider request already applies.
+    let sanitized = crate::utils::sanitizer::sanitize_secret_name(logical).ok()?;
+    if sanitized.is_empty() {
+        return None;
+    }
+
+    let provider_identity = match kind {
+        // Key Vault names are case-insensitive; fold so case variants cannot
+        // address a reserved record without matching it.
+        BackendKind::Azure => sanitized.to_ascii_lowercase(),
+        // Local uses the same canonical logical/stem mapping as the sanitizer.
+        BackendKind::Local => sanitized,
+        // AWS names are case-sensitive, so the sanitized form is the identity.
+        BackendKind::Aws => sanitized,
+    };
+
+    Some(CanonicalSecretName {
+        logical: logical.to_string(),
+        provider_identity,
+    })
+}
+
 /// True if a *generic* (non-custody) mutation of `canonical_name` must be
 /// blocked before any provider I/O: the exact pointer and every strict-format
 /// retained record are immutable through ordinary paths (design §8, task §E).
@@ -504,6 +553,7 @@ impl AttachmentKeyMaterial {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::BackendKind;
 
     /// A fixed canonical recipient string, used to pin the exact derivation.
     const RECIPIENT: &str = "age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p";
@@ -933,5 +983,35 @@ mod tests {
             !dbg.contains("AGE-SECRET-KEY"),
             "reference Debug leaked identity"
         );
+    }
+
+    #[test]
+    fn alias_inputs_must_not_bypass_the_reserved_guard() {
+        // Azure Key Vault is case-insensitive and the shared sanitizer maps
+        // underscores and repeated hyphens onto '-'. Each of these therefore
+        // addresses the SAME provider secret as the exact reserved pointer,
+        // so the guard must classify them identically.
+        for alias in [
+            "xv-attachment-key",
+            "XV-ATTACHMENT-KEY",
+            "Xv-Attachment-Key",
+            "xv_attachment_key",
+            "xv--attachment--key",
+        ] {
+            let canon = canonicalize_secret_name(alias, BackendKind::Azure)
+                .unwrap_or_else(|| panic!("canonicalization failed for {alias}"));
+            assert_eq!(
+                canon.provider_identity, ACTIVE_POINTER_SECRET,
+                "{alias} must canonicalize onto the reserved pointer"
+            );
+            assert!(
+                generic_mutation_blocked(&canon.provider_identity),
+                "{alias} must be mutation-blocked"
+            );
+            assert!(
+                hidden_from_generic_listing(&canon.provider_identity, ""),
+                "{alias} must be hidden"
+            );
+        }
     }
 }
