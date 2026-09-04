@@ -378,6 +378,41 @@ pub fn canonicalize_secret_name(
     })
 }
 
+/// Every provider-canonical identity `logical` could address.
+///
+/// CLI and Web guard call sites do not know which backend will serve the
+/// request, so the guard must consider every provider mapping and fail closed
+/// if *any* of them lands on a protected name.
+fn canonical_identities(logical: &str) -> Vec<String> {
+    use crate::backend::BackendKind;
+
+    let mut out = vec![logical.to_string()];
+    for kind in [BackendKind::Azure, BackendKind::Local, BackendKind::Aws] {
+        if let Some(c) = canonicalize_secret_name(logical, kind) {
+            if !out.contains(&c.provider_identity) {
+                out.push(c.provider_identity);
+            }
+        }
+    }
+    out
+}
+
+/// Provider-agnostic [`generic_mutation_blocked`]: blocks when the raw name or
+/// any provider canonicalization of it is a protected custody resource
+/// (design §8).
+pub fn generic_mutation_blocked_canonical(logical: &str) -> bool {
+    canonical_identities(logical)
+        .iter()
+        .any(|n| generic_mutation_blocked(n))
+}
+
+/// Provider-agnostic [`hidden_from_generic_listing`].
+pub fn hidden_from_generic_listing_canonical(logical: &str, content_type: &str) -> bool {
+    canonical_identities(logical)
+        .iter()
+        .any(|n| hidden_from_generic_listing(n, content_type))
+}
+
 /// True if a *generic* (non-custody) mutation of `canonical_name` must be
 /// blocked before any provider I/O: the exact pointer and every strict-format
 /// retained record are immutable through ordinary paths (design §8, task §E).
@@ -1013,5 +1048,41 @@ mod tests {
                 "{alias} must be hidden"
             );
         }
+    }
+
+    #[test]
+    fn guard_entrypoints_block_alias_spellings_without_a_backend_kind() {
+        // CLI/Web guard call sites do not know the target provider, so the
+        // guard must fail closed across every provider canonicalization.
+        for alias in [
+            "xv-attachment-key",
+            "XV-ATTACHMENT-KEY",
+            "xv_attachment_key",
+            "xv--attachment--key",
+            "  xv-attachment-key  ",
+            "xv attachment key",
+        ] {
+            assert!(
+                generic_mutation_blocked_canonical(alias),
+                "{alias} must be mutation-blocked"
+            );
+            assert!(
+                hidden_from_generic_listing_canonical(alias, ""),
+                "{alias} must be hidden"
+            );
+        }
+        // Ordinary names, and unmarked strict-format user collisions, are
+        // unaffected.
+        assert!(!generic_mutation_blocked_canonical("my-secret"));
+        assert!(!generic_mutation_blocked_canonical(
+            "xv-attachment-key-notes"
+        ));
+        assert!(!hidden_from_generic_listing_canonical("my-secret", ""));
+        let strict = format!("xv-attachment-key-ak1-{HEX64}");
+        assert!(!hidden_from_generic_listing_canonical(&strict, ""));
+        assert!(hidden_from_generic_listing_canonical(
+            &strict,
+            KEY_RECORD_CONTENT_TYPE
+        ));
     }
 }

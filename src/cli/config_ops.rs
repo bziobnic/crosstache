@@ -2648,7 +2648,7 @@ async fn execute_env_push(
     for (key, value) in secrets {
         // Never let a `.env` key silently clobber the reserved attachment
         // encryption key — same convention as bulk `xv set`.
-        if crate::secret::attachment_key::generic_mutation_blocked(&key) {
+        if crate::secret::attachment_key::generic_mutation_blocked_canonical(&key) {
             output::warn(&format!(
                 "  Skipping '{key}': protected attachment key custody resource; the key ring is \
                  managed automatically and cannot be modified through ordinary secret operations"

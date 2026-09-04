@@ -1307,7 +1307,7 @@ async fn execute_vault_import(
 
         // Never let an imported entry silently clobber the reserved
         // attachment encryption key — same convention as bulk `xv set`.
-        if crate::secret::attachment_key::generic_mutation_blocked(&secret_name) {
+        if crate::secret::attachment_key::generic_mutation_blocked_canonical(&secret_name) {
             output::warn(&format!(
                 "Skipping '{secret_name}': protected attachment key custody resource; the key ring \
                  is managed automatically and cannot be modified through ordinary secret operations"

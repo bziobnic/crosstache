@@ -1088,7 +1088,7 @@ pub(crate) fn invalidate_trait_secret_cache(config: &Config, backend_name: &str,
 /// has no per-item confirmation flow, so it uses this to refuse outright
 /// instead of going through [`confirm_reserved_key_write`]'s prompt.
 fn is_reserved_attachment_key(name: &str) -> bool {
-    crate::secret::attachment_key::generic_mutation_blocked(name)
+    crate::secret::attachment_key::generic_mutation_blocked_canonical(name)
 }
 
 /// Structurally refuse a generic mutation of a protected attachment-key custody
@@ -1103,7 +1103,7 @@ pub(crate) fn confirm_reserved_key_write(
     action: &str,
     _flag_hint: &str,
 ) -> Result<bool> {
-    if crate::secret::attachment_key::generic_mutation_blocked(name) {
+    if crate::secret::attachment_key::generic_mutation_blocked_canonical(name) {
         return Err(CrosstacheError::invalid_argument(format!(
             "{action} '{name}' is refused: it is a protected attachment key custody resource. \
              The attachment encryption key ring is managed automatically and cannot be created, \
@@ -1121,7 +1121,10 @@ fn filter_secret_summaries_for_display(
     // Hide the active pointer and marked key-custody records; an unmarked
     // strict-format user collision stays visible (design §E).
     secrets.retain(|s| {
-        !crate::secret::attachment_key::hidden_from_generic_listing(&s.name, &s.content_type)
+        !crate::secret::attachment_key::hidden_from_generic_listing_canonical(
+            &s.name,
+            &s.content_type,
+        )
     });
     if !all {
         secrets.retain(|s| s.enabled);
