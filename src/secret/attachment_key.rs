@@ -332,8 +332,17 @@ pub fn classify_reserved_name(canonical_name: &str) -> ReservedClass {
 /// True if a *generic* (non-custody) mutation of `canonical_name` must be
 /// blocked before any provider I/O: the exact pointer and every strict-format
 /// retained record are immutable through ordinary paths (design §8, task §E).
+/// True if `name` must be hidden from ordinary list/read/export paths given its
+/// `content_type` (design §8 / task §E): the exact active pointer is always
+/// hidden, and a strict-format retained record is hidden only when it is a
+/// *marked* key-custody record. An unmarked strict-format user collision stays
+/// listable, readable, and exportable until offline migration.
+pub fn hidden_from_generic_listing(name: &str, content_type: &str) -> bool {
+    is_active_pointer_name(name)
+        || (is_strict_retained_record_name(name) && is_marked_key_record(content_type))
+}
+
 // Consumed by the generic-facade reserved-guard slice (PR 1).
-#[allow(dead_code)]
 pub fn generic_mutation_blocked(canonical_name: &str) -> bool {
     !matches!(
         classify_reserved_name(canonical_name),
@@ -760,6 +769,31 @@ mod tests {
         );
         assert!(generic_mutation_blocked(&name));
         assert!(is_strict_retained_record_name(&name));
+    }
+
+    #[test]
+    fn hidden_from_listing_hides_pointer_and_marked_records_only() {
+        let strict = format!("xv-attachment-key-ak1-{HEX64}");
+        // Exact pointer is always hidden, regardless of content type.
+        assert!(hidden_from_generic_listing("xv-attachment-key", ""));
+        assert!(hidden_from_generic_listing("xv-attachment-key", "anything"));
+        // Strict record hidden only when marked.
+        assert!(hidden_from_generic_listing(
+            &strict,
+            KEY_RECORD_CONTENT_TYPE
+        ));
+        assert!(!hidden_from_generic_listing(&strict, ""));
+        assert!(!hidden_from_generic_listing(
+            &strict,
+            "application/x-age-identity"
+        ));
+        // Broad-prefix / ordinary names are never hidden.
+        assert!(!hidden_from_generic_listing("xv-attachment-key-notes", ""));
+        assert!(!hidden_from_generic_listing(
+            "xv-attachment-key-notes",
+            KEY_RECORD_CONTENT_TYPE
+        ));
+        assert!(!hidden_from_generic_listing("my-secret", ""));
     }
 
     #[test]

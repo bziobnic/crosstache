@@ -4,7 +4,7 @@ use crate::backend::BackendCapabilities;
 use crate::backend::{BackendKind, BackendRef, BackendRegistry};
 use crate::cli::commands::{CharsetType, SecretWriteArgs, ShareCommands};
 use crate::cli::helpers::{
-    confirm_destructive, confirm_proceed, copy_to_clipboard, generate_random_value, mask_secrets,
+    confirm_destructive, copy_to_clipboard, generate_random_value, mask_secrets,
     resolve_vault_for_trait, schedule_clipboard_clear, share_unsupported_error, use_trait_path,
 };
 use crate::config::Config;
@@ -633,8 +633,8 @@ pub(crate) async fn execute_secret_set_direct(
                 // is refused outright rather than prompted for.
                 if is_reserved_attachment_key(&resolved_key) {
                     output::warn(&format!(
-                        "  ✗ {resolved_key}: reserved for attachment encryption; use 'xv set {resolved_key}' \
-                         (single-secret form) to overwrite it interactively"
+                        "  ✗ {resolved_key}: protected attachment key custody resource; the key ring \
+                         is managed automatically and cannot be modified through ordinary secret operations"
                     ));
                     error_count += 1;
                     continue;
@@ -1088,26 +1088,29 @@ pub(crate) fn invalidate_trait_secret_cache(config: &Config, backend_name: &str,
 /// has no per-item confirmation flow, so it uses this to refuse outright
 /// instead of going through [`confirm_reserved_key_write`]'s prompt.
 fn is_reserved_attachment_key(name: &str) -> bool {
-    name == crate::secret::attachments::ATTACHMENT_KEY_SECRET
+    crate::secret::attachment_key::generic_mutation_blocked(name)
 }
 
+/// Structurally refuse a generic mutation of a protected attachment-key custody
+/// resource (the exact active pointer or any strict-format retained record).
+/// This is a hard block, not a confirmable prompt: the key ring is managed
+/// automatically and cannot be modified through ordinary secret operations
+/// (design §8/§E, invariant I3). `_force`/`_flag_hint` are retained for
+/// call-site compatibility but cannot override the refusal.
 pub(crate) fn confirm_reserved_key_write(
     name: &str,
-    force: bool,
+    _force: bool,
     action: &str,
-    flag_hint: &str,
+    _flag_hint: &str,
 ) -> Result<bool> {
-    if name != crate::secret::attachments::ATTACHMENT_KEY_SECRET {
-        return Ok(true);
+    if crate::secret::attachment_key::generic_mutation_blocked(name) {
+        return Err(CrosstacheError::invalid_argument(format!(
+            "{action} '{name}' is refused: it is a protected attachment key custody resource. \
+             The attachment encryption key ring is managed automatically and cannot be created, \
+             modified, renamed, or deleted through ordinary secret operations."
+        )));
     }
-    confirm_proceed(
-        force,
-        &format!(
-            "{action} '{name}' — the attachment encryption key for this vault — will make ALL \
-             attachments in this vault unreadable. Continue?"
-        ),
-        flag_hint,
-    )
+    Ok(true)
 }
 
 fn filter_secret_summaries_for_display(
@@ -1115,8 +1118,11 @@ fn filter_secret_summaries_for_display(
     group: Option<&str>,
     all: bool,
 ) -> Vec<crate::secret::manager::SecretSummary> {
-    // The attachment key is infrastructure, not a user secret.
-    secrets.retain(|s| s.name != crate::secret::attachments::ATTACHMENT_KEY_SECRET);
+    // Hide the active pointer and marked key-custody records; an unmarked
+    // strict-format user collision stays visible (design §E).
+    secrets.retain(|s| {
+        !crate::secret::attachment_key::hidden_from_generic_listing(&s.name, &s.content_type)
+    });
     if !all {
         secrets.retain(|s| s.enabled);
     }
@@ -2793,6 +2799,10 @@ pub(crate) async fn execute_secret_delete_direct(
                     crate::workspace::TargetMode::Write,
                 )
                 .await?;
+            // Protected attachment-key custody resources cannot be deleted
+            // through generic ops (design §E, invariant I3) — hard block before
+            // any cascade counting or prompt.
+            confirm_reserved_key_write(&resolved_name, force, "Deleting", "--force")?;
             // Attachments cascade: count first so the confirmation is honest.
             // A resolved name containing a path separator can't safely
             // address the attachments/<name>/ prefix (risk of cross-secret
@@ -2828,12 +2838,7 @@ pub(crate) async fn execute_secret_delete_direct(
             };
             #[cfg(not(feature = "file-ops"))]
             let attachment_count = 0;
-            let prompt = if resolved_name == crate::secret::attachments::ATTACHMENT_KEY_SECRET {
-                format!(
-                    "'{resolved_name}' is the attachment encryption key for vault '{vault_name}'. \
-                     Deleting it makes ALL attachments in this vault permanently unreadable. Delete anyway?"
-                )
-            } else if attachment_count > 0 {
+            let prompt = if attachment_count > 0 {
                 format!("Delete secret '{resolved_name}' and its {attachment_count} attachment(s)?")
             } else {
                 format!("Delete secret '{resolved_name}'?")
@@ -9046,7 +9051,7 @@ mod tests {
 
     #[test]
     fn reserved_attachment_key_is_hidden_from_listings() {
-        fn summary(name: &str) -> crate::secret::manager::SecretSummary {
+        fn summary(name: &str, content_type: &str) -> crate::secret::manager::SecretSummary {
             crate::secret::manager::SecretSummary {
                 name: name.to_string(),
                 original_name: name.to_string(),
@@ -9056,17 +9061,36 @@ mod tests {
                 updated_on: String::new(),
                 enabled: true,
                 expires_on: None,
-                content_type: String::new(),
+                content_type: content_type.to_string(),
                 tags: std::collections::HashMap::new(),
             }
         }
+        let strict = format!(
+            "xv-attachment-key-ak1-{}",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        );
+        let marker = crate::secret::attachment_key::KEY_RECORD_CONTENT_TYPE;
         let secrets = vec![
-            summary("normal"),
-            summary(crate::secret::attachments::ATTACHMENT_KEY_SECRET),
+            summary("normal", ""),
+            // Active pointer: always hidden.
+            summary(crate::secret::attachments::ATTACHMENT_KEY_SECRET, ""),
+            // Marked key-custody record: hidden.
+            summary(&strict, marker),
+            // Unmarked strict-format user collision: stays visible (§E).
+            summary("xv-attachment-key-ak1-deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef", ""),
+            // Broad-prefix ordinary secret: visible.
+            summary("xv-attachment-key-notes", ""),
         ];
         let out = filter_secret_summaries_for_display(secrets, None, true);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].name, "normal");
+        let names: Vec<_> = out.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "normal",
+                "xv-attachment-key-ak1-deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                "xv-attachment-key-notes",
+            ]
+        );
     }
 
     #[test]
@@ -9074,6 +9098,14 @@ mod tests {
         assert!(is_reserved_attachment_key(
             crate::secret::attachments::ATTACHMENT_KEY_SECRET
         ));
+        // Strict-format retained key records are also refused (design §E).
+        let strict = format!(
+            "xv-attachment-key-ak1-{}",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        );
+        assert!(is_reserved_attachment_key(&strict));
+        // Broad-prefix and ordinary names remain mutable.
+        assert!(!is_reserved_attachment_key("xv-attachment-key-notes"));
         assert!(!is_reserved_attachment_key("normal-secret"));
     }
 
@@ -9088,30 +9120,40 @@ mod tests {
     }
 
     #[test]
-    fn confirm_reserved_key_write_skips_prompt_when_forced() {
-        assert!(confirm_reserved_key_write(
-            crate::secret::attachments::ATTACHMENT_KEY_SECRET,
-            true,
-            "Overwriting",
-            "--force"
-        )
-        .unwrap());
-    }
-
-    #[test]
-    fn confirm_reserved_key_write_refuses_unattended_without_force() {
-        // Not a TTY here, so `confirm_proceed(false, ..)` can't prompt — it
-        // must refuse loudly rather than silently defaulting either way.
+    fn confirm_reserved_key_write_hard_blocks_pointer_even_with_force() {
+        // The reserved pointer cannot be written through generic ops — not even
+        // with --force (design §E, invariant I3).
         let err = confirm_reserved_key_write(
             crate::secret::attachments::ATTACHMENT_KEY_SECRET,
-            false,
+            true,
             "Overwriting",
             "--force",
         )
         .unwrap_err();
         assert!(
-            err.to_string().contains("attachment encryption key"),
+            err.to_string().contains("protected attachment key"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn confirm_reserved_key_write_hard_blocks_strict_records() {
+        let strict = format!(
+            "xv-attachment-key-ak1-{}",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        );
+        let err = confirm_reserved_key_write(&strict, true, "Deleting", "--force").unwrap_err();
+        assert!(
+            err.to_string().contains("protected attachment key"),
+            "{err}"
+        );
+        // A broad-prefix (non-strict) name is still writable.
+        assert!(confirm_reserved_key_write(
+            "xv-attachment-key-notes",
+            false,
+            "Overwriting",
+            "--force"
+        )
+        .unwrap());
     }
 }

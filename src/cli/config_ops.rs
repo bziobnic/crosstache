@@ -2648,10 +2648,10 @@ async fn execute_env_push(
     for (key, value) in secrets {
         // Never let a `.env` key silently clobber the reserved attachment
         // encryption key — same convention as bulk `xv set`.
-        if key == crate::secret::attachments::ATTACHMENT_KEY_SECRET {
+        if crate::secret::attachment_key::generic_mutation_blocked(&key) {
             output::warn(&format!(
-                "  Skipping '{key}': reserved for attachment encryption; use 'xv set {key}' \
-                 (single-secret form) to overwrite it interactively"
+                "  Skipping '{key}': protected attachment key custody resource; the key ring is \
+                 managed automatically and cannot be modified through ordinary secret operations"
             ));
             skipped_reserved_count += 1;
             continue;

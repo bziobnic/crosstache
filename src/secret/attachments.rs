@@ -617,17 +617,6 @@ mod tests {
                 .push((value.to_string(), String::new()));
         }
 
-        /// Append `value` as a new version of `name` with a content type (test
-        /// helper for seeding marked key records / typed collisions).
-        pub fn put_typed(&self, name: &str, value: &str, content_type: &str) {
-            self.secrets
-                .lock()
-                .unwrap()
-                .entry(name.to_string())
-                .or_default()
-                .push((value.to_string(), content_type.to_string()));
-        }
-
         /// Latest value of `name`, if any (test helper).
         pub fn latest(&self, name: &str) -> Option<String> {
             self.secrets

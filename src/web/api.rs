@@ -312,7 +312,7 @@ pub(crate) async fn delete_secret(
 /// prompts), so writing, deleting, or renaming it from here is rejected
 /// outright.
 pub(crate) fn reject_reserved_attachment_key(name: &str) -> Result<(), ApiError> {
-    if name == crate::secret::attachments::ATTACHMENT_KEY_SECRET {
+    if crate::secret::attachment_key::generic_mutation_blocked(name) {
         return Err(validation_error(
             StatusCode::BAD_REQUEST,
             "The attachment encryption key cannot be changed from the web interface.",

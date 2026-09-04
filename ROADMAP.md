@@ -49,16 +49,25 @@ binding). Staged as PR 1 (integrity foundation) → PR 2 (lifecycle) → PR 3
   §4.1 loss is closed on the read path). Broken/unknown references never fall
   back (I7). Two-initializer concurrency (§10.3) is proven: distinct generations
   each yield a decryptable blob regardless of which pointer wins.
+- Structural reserved-guard adoption across generic surfaces (§8/§E): the exact
+  active pointer **and** every strict-format retained record (`xv-attachment-key-
+  ak1-<hash>`) are now hard-blocked (no `--force`) from generic mutation — CLI
+  `set`/`mv`/rename/rollback/update/rotate/copy/`delete`/bulk-set, web
+  PUT/PATCH/DELETE, `.env` import, and vault import. List/display hides the
+  pointer and *marked* key records while keeping unmarked strict-format user
+  collisions visible; generic migration skips marked custody records. The broad
+  `xv-attachment-key-*` prefix stays fully usable for ordinary secrets.
 
 **PR 1 — still open:**
 
-- The structural custody boundary as a live facade: registry-constructed guarded
-  generic `SecretBackend` + narrow policy-enforced `AttachmentKeyStore`, no
+- The structural custody boundary as a *registry-level* facade: guarded generic
+  `SecretBackend` + narrow policy-enforced `AttachmentKeyStore`, no
   handler-visible raw backend, provider-canonical name mapping before
-  classification, and `restore_from_backup` disabled pre-I/O (§8, `enforce.rs`).
-  (The pure classifier and pointer/marker contracts exist and are tested; the
-  facade wiring does not.)
-- Adoption of the reserved guard across CLI/Web/TUI/import/export/migration.
+  classification (case-insensitive Azure, underscore/repeated-hyphen aliases,
+  AWS encoding), and `restore_from_backup` disabled pre-I/O (§8, `enforce.rs`).
+  Guard *policy* is adopted at the CLI/Web handler layer above; pushing it below
+  the facade (so no handler can obtain a raw backend, and aliases are canonically
+  mapped) is the remaining structural step.
 - Single-generation `download_file_snapshot` for Local/AWS/Azure (§11, I4) — the
   download path still reads content and metadata separately.
 - Durable journaled Local key-pair commit + crash recovery/fault injection (§12,

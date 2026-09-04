@@ -1307,10 +1307,10 @@ async fn execute_vault_import(
 
         // Never let an imported entry silently clobber the reserved
         // attachment encryption key — same convention as bulk `xv set`.
-        if secret_name == crate::secret::attachments::ATTACHMENT_KEY_SECRET {
+        if crate::secret::attachment_key::generic_mutation_blocked(&secret_name) {
             output::warn(&format!(
-                "Skipping '{secret_name}': reserved for attachment encryption; use 'xv set {secret_name}' \
-                 (single-secret form) to overwrite it interactively"
+                "Skipping '{secret_name}': protected attachment key custody resource; the key ring \
+                 is managed automatically and cannot be modified through ordinary secret operations"
             ));
             skipped_count += 1;
             continue;

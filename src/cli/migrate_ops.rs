@@ -169,6 +169,21 @@ async fn migrate_one(
         .await
         .map_err(|e| (name.to_string(), format!("get_secret: {e}")))?;
 
+    // Marked attachment-key custody records are managed by the key ring and
+    // are not migrated through generic migration (design §E): a portable copy
+    // needs its provider-version hints rewritten, which is a dedicated custody
+    // operation, not a blind secret copy. An unmarked strict-format user
+    // collision is an ordinary secret and migrates normally.
+    if crate::secret::attachment_key::is_strict_retained_record_name(name)
+        && crate::secret::attachment_key::is_marked_key_record(&props.content_type)
+    {
+        output::warn(&format!(
+            "skipping '{name}': attachment key custody record, managed by the key ring \
+             and not migrated through generic migration"
+        ));
+        return Ok(MigrateOutcome::Skipped(name.to_string()));
+    }
+
     // Idempotency check
     if !force_replace {
         match target.secrets().get_secret(target_vault, name, false).await {
