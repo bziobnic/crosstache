@@ -38,11 +38,13 @@ missing name fails early rather than creating an orphan blob.
 
 | Piece | Behavior |
 |-------|----------|
-| Key | One age x25519 identity per vault, stored as secret `xv-attachment-key`. Created automatically on first attach / `--encrypt` upload; concurrent creates re-read the stored value so races converge on one key. |
+| Key | An age x25519 identity per vault. A new vault initializes a **V2 key ring** on first attach / `--encrypt`: the private identity lives in an immutable, marked record `xv-attachment-key-ak1-<hash>`, and the reserved `xv-attachment-key` secret holds a non-secret pointer to the active key. Existing vaults created before V2 keep a raw identity directly in `xv-attachment-key` (V1) and continue to work. |
 | Ciphertext location | Ordinary file storage under `attachments/<secret-name>/<filename>`. Association is the naming convention — no secret tags are consumed. |
-| Metadata flag | Uploaded blobs carry `xv_encrypted=age`. Underscore is required: Azure Blob rejects hyphenated metadata keys (`xv-encrypted` fails with 400). |
+| Metadata | Uploaded blobs carry the reserved crypto metadata `xv_encrypted=age`, `xv_crypto_schema=1`, `xv_key_id=ak1-<hash>`, `xv_key_version=<exact provider version>`, and `xv_key_slot=legacy`. Underscore keys are required: Azure Blob rejects hyphenated metadata keys. These five keys are owned by the encryption path — any caller-supplied value for them is overwritten. |
+| Key ID | `ak1-` + SHA-256 of a domain tag and the public age recipient. Portable and backend-independent; identifies the exact key that encrypted a blob. |
+| Version pinning | Each blob records the **exact provider version** of the key record it was encrypted with. Downloads read that exact version and re-derive its key ID to verify it before decrypting, so replacing or rotating the current attachment key does **not** make existing attachments unreadable. |
 | Listings | `xv list` / `xv ls` hide `xv-attachment-key`. Treat it as infrastructure, not a user secret. |
-| Download | `xv attachments --get` and `xv file download` decrypt when content is age-shaped **and** carries `xv_encrypted=age`. Unflagged / foreign `.age` files pass through untouched. |
+| Download | `xv attachments --get` and `xv file download` classify each object before returning bytes: a managed attachment (under `attachments/` or flagged `xv_encrypted=age`) whose bytes are **not** age ciphertext fails closed rather than returning plaintext; a schema-1 blob is decrypted only through its pinned key version after ID verification, and a missing/malformed key reference is an error — never a silent fall back to another key. Unflagged / foreign `.age` files pass through untouched. |
 
 On the local backend, files are already age-encrypted at rest; attachments
 still use the vault key so the same CLI and web paths work on every backend.
@@ -127,7 +129,10 @@ same decrypt path as `xv file download`. See [`web-ui.md`](web-ui.md).
 | Symptom | Cause / fix |
 |---------|-------------|
 | `attachment key not found in vault '…'` | No attachments were ever created, or `xv-attachment-key` was deleted. Re-attach / re-upload with `--encrypt` to mint a new key — old ciphertext stays unreadable. |
-| `wrong or rotated attachment key` | Ciphertext was encrypted under a different identity than the one currently in the vault. Restoring the original key secret is the only recovery. |
+| `…key generation for 'ak1-…' is missing …` | The exact key version a schema-1 blob pins no longer exists (the key record/version was deleted). Restoring that key record/version is the only recovery — the pinned reference is never silently replaced with the current key. |
+| `…is a managed attachment but its bytes are not age ciphertext` | A file under `attachments/` (or flagged `xv_encrypted=age`) is not valid ciphertext. Download fails closed rather than leak it as plaintext; investigate how an unencrypted object landed in the managed namespace. |
+| `…key reference is missing or malformed …` | A schema-1 blob's `xv_key_*` metadata is incomplete or invalid. Fix the metadata to the exact committed reference; the download will not fall back to another key. |
+| `wrong or rotated attachment key` | A pre-schema (legacy) attachment cannot be decrypted by the current key. New uploads pin their exact key version and are immune; legacy blobs predate that binding. |
 | Azure upload 400 / InvalidMetadata | Must use metadata key `xv_encrypted` (underscore). Fixed in v0.27.1; older docs or scripts saying `xv-encrypted` are wrong. |
 | `--encrypt currently supports single-file uploads only` | Drop `--recursive` / extra paths; encrypt one file at a time. |
 | File storage unsupported | Backend/config has no file store (e.g. AWS without `[aws].s3_bucket`). Configure storage, or use a backend that has it. |

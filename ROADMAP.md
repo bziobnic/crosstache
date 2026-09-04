@@ -16,15 +16,62 @@ Priority is a risk/order signal, not a release commitment:
 
 ## Safety and correctness
 
-### P0 — Make attachment-key creation race-free
+### P0 — Race-free attachment-key lifecycle
 
-`get_or_create_identity` currently performs get → unconditional set → re-read.
-Two first attachments can therefore encrypt with different keys while the
-reserved `xv-attachment-key` secret is being overwritten; re-reading makes a
-client converge for subsequent work but cannot repair ciphertext already written
-with the losing key. Add an atomic create-if-absent/conditional-write path, cover
-all providers, and test the real two-writer outcome before treating first use as
-safe.
+Design: `2026-09-03-xv-race-free-attachment-key-lifecycle-design.md`
+(immutable per-key records + non-secret active pointer + exact-version blob
+binding). Staged as PR 1 (integrity foundation) → PR 2 (lifecycle) → PR 3
+(rewrap/retirement).
+
+**PR 1 — landed so far (integrity data contracts + V1 exact-version path):**
+
+- `src/secret/attachment_key.rs`: portable `ak1-` key IDs derived from the
+  public recipient (§7.1); reserved schema-1 crypto metadata that overwrites
+  caller-supplied reserved keys (§7.3); V1/V2 active-pointer model and strict
+  `ak1-` parsing with no fallback on malformed values (§10.1); non-`Debug`,
+  non-`Serialize` `AttachmentKeyMaterial` that derives its ID from the parsed
+  identity and verifies it (§7.4, I6/I9); the pure download-classification
+  decision table (§11 / §D order 1–7); and the structural reserved-name
+  classifier (exact pointer vs. strict record vs. ordinary — the broad prefix
+  stays unreserved) (§8 / §E).
+- `src/secret/attachments.rs`: uploads dispatch on the vault's mode — an empty
+  vault **initializes directly to V2** (generate candidate → inspect the exact
+  strict record name → commit a *marked* immutable retained record → re-read the
+  exact version and verify the derived key ID → publish and confirm the
+  non-secret V2 pointer), an existing raw V1 vault stays V1 (legacy slot), and a
+  valid V2 pointer resolves the active retained record. Uploads bind the key
+  identity **and** exact provider version from one response and stamp schema-1
+  metadata; an unmarked user secret colliding with a strict record name is never
+  modified. Downloads route through the classifier — managed-namespace
+  non-ciphertext fails closed, foreign/ordinary bytes pass through, and a
+  schema-1 blob is decrypted through its **pinned exact version** with derived-ID
+  verification, so replacing the active key no longer orphans existing blobs (the
+  §4.1 loss is closed on the read path). Broken/unknown references never fall
+  back (I7). Two-initializer concurrency (§10.3) is proven: distinct generations
+  each yield a decryptable blob regardless of which pointer wins.
+
+**PR 1 — still open:**
+
+- The structural custody boundary as a live facade: registry-constructed guarded
+  generic `SecretBackend` + narrow policy-enforced `AttachmentKeyStore`, no
+  handler-visible raw backend, provider-canonical name mapping before
+  classification, and `restore_from_backup` disabled pre-I/O (§8, `enforce.rs`).
+  (The pure classifier and pointer/marker contracts exist and are tested; the
+  facade wiring does not.)
+- Adoption of the reserved guard across CLI/Web/TUI/import/export/migration.
+- Single-generation `download_file_snapshot` for Local/AWS/Azure (§11, I4) — the
+  download path still reads content and metadata separately.
+- Durable journaled Local key-pair commit + crash recovery/fault injection (§12,
+  I5).
+- Provider-specific generation commit (§13): the V2 protocol is implemented and
+  verified against the `SecretBackend` trait (in-memory), but Local/AWS still
+  need create-only records and Azure needs its versioned Set path exercised
+  against real provider request/response seams, with barrier-based concurrency
+  tests per provider.
+- Structured error variants (§20).
+
+**PR 2 / PR 3:** status/inventory, offline V1→V2 upgrade, encrypted
+export/import/recovery, rotation, rewrap, and logical retirement — none started.
 
 ### P1 — Make rename and migration attachment-aware
 
