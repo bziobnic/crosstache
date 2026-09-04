@@ -23,6 +23,7 @@ pub mod azure;
 pub mod error;
 #[cfg(feature = "file-ops")]
 pub mod file;
+pub mod guard;
 pub mod local;
 pub mod registry;
 pub mod secret;
@@ -250,7 +251,24 @@ pub trait Backend: Send + Sync {
     fn capabilities(&self) -> BackendCapabilities;
 
     /// Access to secret operations (required — every backend manages secrets).
+    ///
+    /// This is the RAW handle: it performs no reserved-resource guarding. The
+    /// attachment-key custody path uses it directly (it legitimately reads and
+    /// writes the reserved key records). Generic callers should prefer
+    /// [`Backend::guarded_secrets`], which enforces the custody boundary.
     fn secrets(&self) -> &dyn SecretBackend;
+
+    /// Access to secret operations through the generic custody guard
+    /// ([`guard::GuardedSecretBackend`]): reserved-record mutations are refused
+    /// before provider I/O, `restore_from_backup` is disabled, and the active
+    /// pointer plus marked key records are hidden from listings (design §8).
+    ///
+    /// Generic secret CRUD (CLI/Web/import/migration) should route through this
+    /// rather than [`Backend::secrets`]. It borrows the raw handle, so it costs
+    /// nothing beyond the wrapper.
+    fn guarded_secrets(&self) -> guard::GuardedSecretBackend<'_> {
+        guard::GuardedSecretBackend::new(self.secrets())
+    }
 
     /// Access to vault/namespace operations (optional).
     fn vaults(&self) -> Option<&dyn VaultBackend> {

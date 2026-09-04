@@ -461,12 +461,14 @@ pub(crate) mod stub {
 
         async fn get_secret_version(
             &self,
-            _vault: &str,
-            _name: &str,
+            vault: &str,
+            name: &str,
             _version: &str,
-            _include_value: bool,
+            include_value: bool,
         ) -> Result<SecretProperties, BackendError> {
-            Err(BackendError::Unsupported("versions".into()))
+            // The stub keeps a single generation per name (version "v1"), so an
+            // exact-version read resolves to the current value.
+            self.get_secret(vault, name, include_value).await
         }
 
         async fn list_secrets(

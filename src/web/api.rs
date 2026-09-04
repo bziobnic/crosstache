@@ -13,6 +13,7 @@ use serde_json::json;
 use zeroize::Zeroizing;
 
 use crate::backend::error::BackendError;
+use crate::backend::secret::SecretBackend;
 use crate::error::CrosstacheError;
 use crate::secret::manager::{
     FieldUpdate, SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest,
@@ -140,9 +141,12 @@ pub(crate) async fn list_secrets(
 ) -> Result<Json<Vec<SecretSummary>>, ApiError> {
     let target =
         state.scoped_target(q.alias.as_deref(), q.backend.as_deref(), q.vault.as_deref())?;
+    // Route listing through the generic custody guard so the active pointer
+    // and marked key-custody records are hidden from the web UI (design §E),
+    // while unmarked strict-format user collisions stay visible.
     let secrets = target
         .backend
-        .secrets()
+        .guarded_secrets()
         .list_secrets(&target.context.vault, q.group.as_deref())
         .await?;
     Ok(Json(secrets))

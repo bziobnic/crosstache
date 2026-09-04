@@ -58,16 +58,29 @@ binding). Staged as PR 1 (integrity foundation) → PR 2 (lifecycle) → PR 3
   collisions visible; generic migration skips marked custody records. The broad
   `xv-attachment-key-*` prefix stays fully usable for ordinary secrets.
 
+- Provider-canonical name mapping (`CanonicalSecretName`, `canonicalize_secret_name`)
+  runs before reserved classification, so alias spellings — `xv_attachment_key`,
+  `xv--attachment--key`, `XV-ATTACHMENT-KEY` — that address the same provider
+  secret cannot bypass the guard; the CLI/Web guard sites use the
+  `*_canonical` variants (§8).
+- The guarded generic facade component exists: `backend::guard::GuardedSecretBackend`
+  wraps a raw `SecretBackend` and structurally refuses every generic mutation of
+  the pointer / strict-format records (canonical-matched) before provider I/O
+  (zero inner calls), disables `restore_from_backup` entirely (Decision F), and
+  hides the pointer + marked records from listings. `Backend::guarded_secrets()`
+  exposes it; the web list handler already routes through it.
+
 **PR 1 — still open:**
 
-- The structural custody boundary as a *registry-level* facade: guarded generic
-  `SecretBackend` + narrow policy-enforced `AttachmentKeyStore`, no
-  handler-visible raw backend, provider-canonical name mapping before
-  classification (case-insensitive Azure, underscore/repeated-hyphen aliases,
-  AWS encoding), and `restore_from_backup` disabled pre-I/O (§8, `enforce.rs`).
-  Guard *policy* is adopted at the CLI/Web handler layer above; pushing it below
-  the facade (so no handler can obtain a raw backend, and aliases are canonically
-  mapped) is the remaining structural step.
+- Making the facade *mandatory*: route generic secret CRUD (CLI/Web/import/
+  migration) through `guarded_secrets()` and split the custody path onto a
+  separate raw handle so no handler can obtain an unguarded backend (§8). This is
+  the registry-level wiring — it must resolve per-surface contract points (e.g.
+  the web folder-move-of-reserved exception, error-status mapping) and is why the
+  facade is a component today rather than the default `secrets()`. The
+  handler-layer guards (canonical-matched) hold the boundary meanwhile.
+- The narrow policy-enforced `AttachmentKeyStore` in `enforce.rs` (agent policy /
+  raw-disclosure checks / redacted audit before provider access).
 - Single-generation `download_file_snapshot` for Local/AWS/Azure (§11, I4) — the
   download path still reads content and metadata separately.
 - Durable journaled Local key-pair commit + crash recovery/fault injection (§12,
