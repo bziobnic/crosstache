@@ -10,6 +10,13 @@ use crate::utils::progress::ProgressReporter;
 
 use super::error::BackendError;
 
+/// File bytes and object metadata from one committed provider generation.
+/// Deliberately not Debug/Serialize: bytes may contain confidential plaintext.
+pub struct FileDownloadSnapshot {
+    pub content: Vec<u8>,
+    pub metadata: std::collections::HashMap<String, String>,
+}
+
 /// Trait for file/blob storage operations.
 ///
 /// The five lifecycle methods are required — if a backend exposes `files()`,
@@ -63,12 +70,27 @@ pub trait FileBackend: Send + Sync {
     }
 
     /// Download a file's contents by name.
+    #[allow(dead_code)] // Retained public byte-only API; attachment reads use snapshots.
     async fn download_file(
         &self,
         vault: &str,
         name: &str,
         reporter: Option<&dyn ProgressReporter>,
     ) -> Result<Vec<u8>, BackendError>;
+
+    /// Read bytes and metadata from the same generation. Implementations must
+    /// use a single response, provider preconditions, or a shared storage lock.
+    /// Never emulate this with independent download and metadata calls.
+    async fn download_file_snapshot(
+        &self,
+        _vault: &str,
+        _name: &str,
+        _reporter: Option<&dyn ProgressReporter>,
+    ) -> Result<FileDownloadSnapshot, BackendError> {
+        Err(BackendError::Unsupported(
+            "consistent file download snapshot".into(),
+        ))
+    }
 
     /// List files matching the request criteria.
     async fn list_files(
@@ -248,6 +270,15 @@ mod default_hierarchical_tests {
                 fi("img/p.png"),
             ],
         }
+    }
+
+    #[tokio::test]
+    async fn default_snapshot_refuses_without_calling_split_read_methods() {
+        // The split methods on FlatStub panic if called.
+        assert!(matches!(
+            stub().download_file_snapshot("v", "a.txt", None).await,
+            Err(BackendError::Unsupported(_))
+        ));
     }
 
     #[tokio::test]

@@ -65,6 +65,19 @@ impl FileBackend for AzureFileBackend {
             .map_err(map_error)
     }
 
+    async fn download_file_snapshot(
+        &self,
+        _vault: &str,
+        name: &str,
+        reporter: Option<&dyn ProgressReporter>,
+    ) -> Result<crate::backend::file::FileDownloadSnapshot, BackendError> {
+        let null = NoopReporter;
+        self.inner
+            .download_file_snapshot(name, reporter.unwrap_or(&null))
+            .await
+            .map_err(map_error)
+    }
+
     async fn list_files(
         &self,
         _vault: &str,

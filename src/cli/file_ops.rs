@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 /// so routing through the trait needs no handler-body changes.
 pub(crate) struct FileOps<'a> {
     files: &'a dyn FileBackend,
-    secrets: &'a dyn crate::backend::secret::SecretBackend,
+    secrets: Box<dyn crate::backend::attachment_keys::AttachmentKeyStore + 'a>,
     vault: &'a str,
     /// Registry name of the backend that owns `vault` — the cache-key
     /// identifier (`CacheKey::FileList { backend, .. }`).
@@ -37,7 +37,7 @@ pub(crate) struct FileOps<'a> {
 impl<'a> FileOps<'a> {
     fn new(
         files: &'a dyn FileBackend,
-        secrets: &'a dyn crate::backend::secret::SecretBackend,
+        secrets: Box<dyn crate::backend::attachment_keys::AttachmentKeyStore + 'a>,
         vault: &'a str,
         backend_name: &'a str,
         kind: BackendKind,
@@ -68,7 +68,7 @@ impl<'a> FileOps<'a> {
         reporter: &dyn ProgressReporter,
     ) -> Result<Vec<u8>> {
         crate::secret::attachments::download_decrypted(
-            self.secrets,
+            self.secrets.as_ref(),
             self.files,
             self.vault,
             &request.name,
@@ -83,7 +83,7 @@ impl<'a> FileOps<'a> {
         reporter: &dyn ProgressReporter,
     ) -> Result<FileInfo> {
         crate::secret::attachments::upload_encrypted(
-            self.secrets,
+            self.secrets.as_ref(),
             self.files,
             self.vault,
             request,
@@ -174,7 +174,7 @@ pub(crate) async fn execute_file_command(command: FileCommands, config: Config) 
         .expect("resolve_file_backend guarantees files() is Some");
     let blob_manager = FileOps::new(
         files,
-        backend.secrets(),
+        backend.attachment_keys(),
         &vault,
         &backend_name,
         backend.kind(),
@@ -433,7 +433,7 @@ pub(crate) async fn execute_file_info_from_root(file_name: &str, config: &Config
         .expect("resolve_file_backend guarantees file storage");
     let blob_manager = FileOps::new(
         files,
-        backend.secrets(),
+        backend.attachment_keys(),
         &vault,
         &backend_name,
         backend.kind(),
@@ -2517,7 +2517,7 @@ pub(crate) async fn execute_file_upload_quick(
         .expect("resolve_file_backend guarantees file storage");
     let blob_manager = FileOps::new(
         files,
-        backend.secrets(),
+        backend.attachment_keys(),
         &vault,
         &backend_name,
         backend.kind(),
@@ -2566,7 +2566,7 @@ pub(crate) async fn execute_file_download_quick(
         .expect("resolve_file_backend guarantees file storage");
     let blob_manager = FileOps::new(
         files,
-        backend.secrets(),
+        backend.attachment_keys(),
         &vault,
         &backend_name,
         backend.kind(),

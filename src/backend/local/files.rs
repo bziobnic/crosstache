@@ -1408,6 +1408,41 @@ impl FileBackend for LocalFileBackend {
         Ok(output)
     }
 
+    async fn download_file_snapshot(
+        &self,
+        vault: &str,
+        name: &str,
+        _reporter: Option<&dyn ProgressReporter>,
+    ) -> Result<crate::backend::file::FileDownloadSnapshot, BackendError> {
+        self.validate_file_name(name)?;
+        let missing = || BackendError::NotFound {
+            name: name.into(),
+            suggestion: None,
+        };
+        let chain = existing_local_file_chain(&self.store_path, vault)?.ok_or_else(missing)?;
+        let _lock = lock_local_file_chain(&self.store_path, vault, &chain)?;
+        self.recover_all_locked(&chain)?;
+        let stem = storage_stem(name)?;
+        let metadata = chain
+            .files
+            .read_file(&format!("{stem}.meta.json"))?
+            .ok_or_else(missing)?;
+        let info: FileInfo = serde_json::from_slice(&metadata)
+            .map_err(|error| BackendError::Internal(format!("parse file metadata: {error}")))?;
+        // The lock spans both reads and the handles retain the same directory
+        // even if its pathname is replaced between metadata and body reads.
+        self.file_swap_barrier("snapshot-after-metadata", &chain.files_dir)?;
+        let ciphertext = chain
+            .files
+            .open_file(&format!("{stem}.age"))?
+            .ok_or_else(missing)?;
+        let mut plaintext = crypto::decrypt_from_reader(ciphertext, &self.identity)?;
+        Ok(crate::backend::file::FileDownloadSnapshot {
+            content: crypto::take_plaintext_allocation(&mut plaintext),
+            metadata: info.metadata,
+        })
+    }
+
     async fn list_files(
         &self,
         vault: &str,
@@ -1736,6 +1771,109 @@ mod tests {
         let mut snapshot = BTreeMap::new();
         walk(root, root, &mut snapshot);
         snapshot
+    }
+
+    fn snapshot_request(generation: &str) -> FileUploadRequest {
+        FileUploadRequest {
+            name: "snapshot.bin".into(),
+            content: generation.as_bytes().to_vec(),
+            content_type: None,
+            groups: Vec::new(),
+            metadata: HashMap::from([("generation".into(), generation.into())]),
+            tags: HashMap::new(),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn snapshots_remain_coherent_during_concurrent_replacement() {
+        let (backend, _tmp) = test_file_backend();
+        backend
+            .upload_file("default", snapshot_request("initial"), None)
+            .await
+            .unwrap();
+        let backend = std::sync::Arc::new(backend);
+        let writer = backend.clone();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let other_barrier = barrier.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            let runtime = tokio::runtime::Handle::current();
+            other_barrier.wait();
+            for i in 0..32 {
+                runtime
+                    .block_on(writer.upload_file("default", snapshot_request(&i.to_string()), None))
+                    .unwrap();
+            }
+        });
+        // Run on a blocking worker since local store locking is synchronous.
+        tokio::task::spawn_blocking(move || {
+            let runtime = tokio::runtime::Handle::current();
+            barrier.wait();
+            for _ in 0..32 {
+                let snapshot = runtime
+                    .block_on(backend.download_file_snapshot("default", "snapshot.bin", None))
+                    .unwrap();
+                assert_eq!(snapshot.content, snapshot.metadata["generation"].as_bytes());
+            }
+        })
+        .await
+        .unwrap();
+        task.await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn snapshot_retains_directory_generation_between_metadata_and_body() {
+        let (backend, tmp) = test_file_backend();
+        backend
+            .upload_file("default", snapshot_request("original"), None)
+            .await
+            .unwrap();
+        let external = tmp.path().join("outside");
+        fs::create_dir(&external).unwrap();
+        fs::write(external.join("sentinel"), b"untouched").unwrap();
+        let before = tree_snapshot(&external);
+        install_file_swap(
+            tmp.path(),
+            "snapshot-after-metadata",
+            &external,
+            &tmp.path().join("parked-files"),
+        );
+        let snapshot = backend
+            .download_file_snapshot("default", "snapshot.bin", None)
+            .await
+            .unwrap();
+        assert_eq!(snapshot.content, b"original");
+        assert_eq!(snapshot.metadata["generation"], "original");
+        assert_eq!(tree_snapshot(&external), before);
+        assert!(backend
+            .download_file_snapshot("../../outside", "snapshot.bin", None)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn snapshot_refuses_missing_and_corrupt_metadata_even_when_body_exists() {
+        let (backend, tmp) = test_file_backend();
+        backend
+            .upload_file("default", snapshot_request("original"), None)
+            .await
+            .unwrap();
+        let metadata = tmp.path().join("vaults/default/files").join(format!(
+            "{}.meta.json",
+            storage_stem("snapshot.bin").unwrap()
+        ));
+        fs::write(&metadata, b"invalid json").unwrap();
+        assert!(backend
+            .download_file_snapshot("default", "snapshot.bin", None)
+            .await
+            .is_err());
+        fs::remove_file(metadata).unwrap();
+        assert!(matches!(
+            backend
+                .download_file_snapshot("default", "snapshot.bin", None)
+                .await,
+            Err(BackendError::NotFound { .. })
+        ));
     }
 
     #[tokio::test]

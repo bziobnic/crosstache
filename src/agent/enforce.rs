@@ -191,6 +191,10 @@ impl Backend for PolicyEnforcedBackend {
         self
     }
 
+    fn attachment_keys(&self) -> Box<dyn crate::backend::attachment_keys::AttachmentKeyStore + '_> {
+        Box::new(self)
+    }
+
     fn vaults(&self) -> Option<&dyn VaultBackend> {
         self.inner.vaults()
     }
@@ -206,6 +210,64 @@ impl Backend for PolicyEnforcedBackend {
 
     async fn health_check(&self) -> Result<(), BackendError> {
         self.inner.health_check().await
+    }
+}
+
+// Custody is separate from generic secret mutation, but never separate from
+// policy. Record the decision before constructing/polling a provider operation
+// and carry the same redacted audit context into the local backend.
+#[async_trait]
+impl crate::backend::attachment_keys::AttachmentKeyStore for &PolicyEnforcedBackend {
+    async fn get_secret(
+        &self,
+        vault: &str,
+        name: &str,
+        include_value: bool,
+    ) -> Result<SecretProperties, BackendError> {
+        crate::backend::attachment_keys::validate_name(name)?;
+        let context = self.authorize(vault, name, Operation::Get, include_value)?;
+        AUDIT_CONTEXT
+            .scope(context, async {
+                self.inner
+                    .attachment_keys()
+                    .get_secret(vault, name, include_value)
+                    .await
+            })
+            .await
+    }
+    async fn get_secret_version(
+        &self,
+        vault: &str,
+        name: &str,
+        version: &str,
+        include_value: bool,
+    ) -> Result<SecretProperties, BackendError> {
+        crate::backend::attachment_keys::validate_name(name)?;
+        let context = self.authorize(vault, name, Operation::Get, include_value)?;
+        AUDIT_CONTEXT
+            .scope(context, async {
+                self.inner
+                    .attachment_keys()
+                    .get_secret_version(vault, name, version, include_value)
+                    .await
+            })
+            .await
+    }
+    async fn set_secret(
+        &self,
+        vault: &str,
+        request: SecretRequest,
+    ) -> Result<SecretProperties, BackendError> {
+        crate::backend::attachment_keys::validate_name(&request.name)?;
+        let context = self.authorize(vault, &request.name, Operation::Set, false)?;
+        AUDIT_CONTEXT
+            .scope(context, async {
+                self.inner
+                    .attachment_keys()
+                    .set_secret(vault, request)
+                    .await
+            })
+            .await
     }
 }
 
@@ -705,6 +767,176 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(test_properties("restored"))
         }
+    }
+
+    #[tokio::test]
+    async fn attachment_key_denials_are_logged_before_provider_access() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("decisions.jsonl");
+        let (inner, wrapped) = denied_wrapper(&path);
+        let keys = wrapped.attachment_keys();
+        for include_value in [false, true] {
+            assert!(matches!(
+                keys.get_secret("prod", "xv-attachment-key", include_value)
+                    .await,
+                Err(BackendError::PermissionDenied(_))
+            ));
+        }
+        assert!(matches!(
+            keys.get_secret_version("prod", "xv-attachment-key", "v1", true)
+                .await,
+            Err(BackendError::PermissionDenied(_))
+        ));
+        let request = SecretRequest {
+            name: "xv-attachment-key".into(),
+            value: zeroize::Zeroizing::new("DO-NOT-LOG-KEY".into()),
+            content_type: None,
+            enabled: None,
+            expires_on: None,
+            not_before: None,
+            tags: None,
+            groups: None,
+            note: None,
+            folder: None,
+        };
+        assert!(matches!(
+            keys.set_secret("prod", request).await,
+            Err(BackendError::PermissionDenied(_))
+        ));
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 0);
+        let log = std::fs::read_to_string(path).unwrap();
+        assert_eq!(log.lines().count(), 4);
+        assert!(!log.contains("DO-NOT-LOG-KEY"));
+    }
+
+    #[cfg(feature = "file-ops")]
+    #[tokio::test]
+    async fn attachment_custody_preserves_policy_disclosure_and_local_audit() {
+        use crate::backend::local::LocalBackend;
+        use crate::config::settings::{AgentPolicyRule, LocalConfig};
+        use crate::secret::attachments::{download_decrypted, upload_encrypted};
+        let tmp = tempfile::tempdir().unwrap();
+        let config = LocalConfig {
+            store_path: Some(tmp.path().join("store").display().to_string()),
+            key_file: Some(tmp.path().join("identity").display().to_string()),
+            default_vault: Some("default".into()),
+            audit: Some(true),
+            ..Default::default()
+        };
+        let raw = Arc::new(LocalBackend::new(Some(&config)).unwrap());
+        raw.secrets()
+            .set_secret(
+                "default",
+                crate::secret::manager::SecretRequest {
+                    name: "db".into(),
+                    value: zeroize::Zeroizing::new("database password".into()),
+                    content_type: None,
+                    enabled: None,
+                    expires_on: None,
+                    not_before: None,
+                    tags: None,
+                    groups: None,
+                    note: None,
+                    folder: None,
+                },
+            )
+            .await
+            .unwrap();
+        for disclosure in [false, true] {
+            let path = tmp.path().join(format!("decisions-{disclosure}.jsonl"));
+            let policy = CompiledPolicy::compile(&AgentConfig {
+                enforce: true,
+                policy: vec![AgentPolicyRule {
+                    name: "attachment-custody".into(),
+                    identity: "github:o/r:*".into(),
+                    identity_source: "github-oidc".into(),
+                    workspace: "default".into(),
+                    secrets: vec!["xv-attachment-key".into(), "xv-attachment-key-ak1-*".into()],
+                    operations: vec!["get".into(), "set".into()],
+                    raw_disclosure: disclosure,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+            // Policy must survive either wrapping order, including a guarded
+            // registry backend reused beneath the policy wrapper.
+            let wrapped = PolicyEnforcedBackend::for_test(
+                crate::backend::guard::GuardedBackend::wrap(raw.clone()),
+                AgentIdentity::new(super::super::IdentitySource::GithubOidc, "github:o/r:ci"),
+                policy,
+                path.clone(),
+            );
+            let registry = crate::backend::BackendRegistry::new(Arc::new(wrapped));
+            let backend = registry.active();
+            let keys = backend.attachment_keys();
+            let result = upload_encrypted(
+                keys.as_ref(),
+                backend.files().unwrap(),
+                "default",
+                crate::blob::models::FileUploadRequest {
+                    name: "attachments/db/key.pem".into(),
+                    content: b"attachment plaintext".to_vec(),
+                    content_type: None,
+                    groups: Vec::new(),
+                    metadata: Default::default(),
+                    tags: Default::default(),
+                },
+                None,
+            )
+            .await;
+            if !disclosure {
+                assert!(result.is_err());
+                assert!(!raw
+                    .secrets()
+                    .secret_exists("default", "xv-attachment-key")
+                    .await
+                    .unwrap());
+            } else {
+                result.unwrap();
+                let bytes = download_decrypted(
+                    keys.as_ref(),
+                    backend.files().unwrap(),
+                    "default",
+                    "attachments/db/key.pem",
+                    None,
+                )
+                .await
+                .unwrap();
+                assert_eq!(bytes.as_slice(), b"attachment plaintext");
+                assert!(matches!(
+                    backend
+                        .secrets()
+                        .delete_secret("default", "xv-attachment-key")
+                        .await,
+                    Err(BackendError::PermissionDenied(_))
+                ));
+            }
+            let log = std::fs::read_to_string(path).unwrap();
+            assert!(!log.contains("AGE-SECRET-KEY-"));
+            assert!(!log.contains("attachment plaintext"));
+            assert!(log.contains("github:o/r:ci"));
+        }
+        let events = raw
+            .audit()
+            .unwrap()
+            .get_vault_events("default", None, 1)
+            .await
+            .unwrap();
+        let custody: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                event.resource_name.starts_with("xv-attachment-key") && event.status == "Succeeded"
+            })
+            .collect();
+        assert!(!custody.is_empty());
+        assert!(custody
+            .iter()
+            .all(|event| event.agent_id.as_deref() == Some("github:o/r:ci")));
+        assert!(matches!(
+            raw.audit_log().unwrap().verify_chain("default").unwrap(),
+            crate::backend::local::audit::ChainStatus::Intact { .. }
+        ));
     }
 
     fn test_properties(name: &str) -> SecretProperties {

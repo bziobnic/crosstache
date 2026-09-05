@@ -101,7 +101,14 @@ pub(crate) async fn execute_attach(
         tags: std::collections::HashMap::new(),
     };
     let files = backend.files().expect("resolve gated on files()");
-    attachments::upload_encrypted(backend.secrets(), files, &vault, request, None).await?;
+    attachments::upload_encrypted(
+        backend.attachment_keys().as_ref(),
+        files,
+        &vault,
+        request,
+        None,
+    )
+    .await?;
     output::success(&format!(
         "Attached '{attachment_name}' ({}) to secret '{secret_name}' (encrypted)",
         format_size(size)
@@ -121,9 +128,14 @@ pub(crate) async fn execute_attachments(
     if let Some(attachment_name) = get {
         validate_attachment_name(&attachment_name)?;
         let blob_name = attachments::attachment_blob_name(&secret_name, &attachment_name);
-        let content =
-            attachments::download_decrypted(backend.secrets(), files, &vault, &blob_name, None)
-                .await?;
+        let content = attachments::download_decrypted(
+            backend.attachment_keys().as_ref(),
+            files,
+            &vault,
+            &blob_name,
+            None,
+        )
+        .await?;
         let out = output_path.unwrap_or_else(|| attachment_name.clone());
         if Path::new(&out).exists() {
             return Err(CrosstacheError::config(format!(

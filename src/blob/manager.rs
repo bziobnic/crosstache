@@ -351,6 +351,7 @@ impl BlobManager {
     }
 
     /// Download a file from blob storage
+    #[allow(dead_code)] // Retained public byte-only API; attachment reads use snapshots.
     pub async fn download_file(
         &self,
         request: FileDownloadRequest,
@@ -400,6 +401,32 @@ impl BlobManager {
         reporter.finish_clear();
 
         Ok(blob_content)
+    }
+
+    /// Generation-bound bytes and metadata for attachment classification.
+    pub async fn download_file_snapshot(
+        &self,
+        name: &str,
+        reporter: &dyn ProgressReporter,
+    ) -> Result<crate::backend::file::FileDownloadSnapshot> {
+        if name.trim().is_empty() {
+            return Err(CrosstacheError::config(
+                "File name cannot be empty".to_string(),
+            ));
+        }
+        let service = BlobServiceClient::new(
+            &self.storage_account,
+            self.auth_provider.get_token_credential(),
+        );
+        let client = service
+            .container_client(&self.container_name)
+            .blob_client(name);
+        download_snapshot_from_client(
+            &client,
+            download_chunk_size_bytes(self.chunk_size_mb),
+            reporter,
+        )
+        .await
     }
 
     /// Delete a file from blob storage
@@ -847,6 +874,81 @@ async fn read_chunk<R: tokio::io::AsyncRead + Unpin>(
     chunk.truncate(bytes_read);
     Ok(chunk)
 }
+
+/// Pin all pages to the properties generation. Kept separate from credential
+/// construction so transport tests exercise the exact production SDK path.
+async fn download_snapshot_from_client(
+    client: &BlobClient,
+    chunk_size: u64,
+    reporter: &dyn ProgressReporter,
+) -> Result<crate::backend::file::FileDownloadSnapshot> {
+    let properties = client.get_properties().await.map_err(|error| {
+        if matches!(
+            error.kind(),
+            azure_core::error::ErrorKind::HttpResponse { status, .. }
+                if *status == azure_core::StatusCode::NotFound
+        ) {
+            CrosstacheError::vault_not_found(format!("File '{}' not found", client.blob_name()))
+        } else {
+            CrosstacheError::azure_api(format!("Failed to read blob snapshot properties: {error}"))
+        }
+    })?;
+    let length = properties.blob.properties.content_length;
+    validate_download_size(length, MAX_DOWNLOAD_SIZE_BYTES)?;
+    let etag = properties.blob.properties.etag.to_string();
+    if etag.is_empty() {
+        return Err(CrosstacheError::azure_api(
+            "Blob snapshot has no ETag".to_string(),
+        ));
+    }
+    let metadata = properties.blob.metadata.unwrap_or_default();
+    reporter.set_total(length);
+    let mut content = Vec::new();
+    if length != 0 {
+        let mut pages = client
+            .get()
+            .chunk_size(chunk_size)
+            .if_match(azure_core::prelude::IfMatchCondition::Match(etag.clone()))
+            .into_stream();
+        while let Some(page) = pages.try_next().await.map_err(|error| {
+            CrosstacheError::azure_api(format!("Failed to read pinned blob snapshot: {error}"))
+        })? {
+            if page.blob.properties.etag.to_string() != etag {
+                return Err(CrosstacheError::azure_api(
+                    "Blob snapshot generation changed".to_string(),
+                ));
+            }
+            let mut body = page.data;
+            while let Some(bytes) = body.try_next().await.map_err(|error| {
+                CrosstacheError::azure_api(format!("Failed to read blob snapshot body: {error}"))
+            })? {
+                let next = (content.len() as u64)
+                    .checked_add(bytes.len() as u64)
+                    .ok_or_else(|| {
+                        CrosstacheError::azure_api("Blob snapshot size overflow".to_string())
+                    })?;
+                if next > length || next > MAX_DOWNLOAD_SIZE_BYTES {
+                    return Err(CrosstacheError::azure_api(
+                        "Blob snapshot exceeds declared length".to_string(),
+                    ));
+                }
+                content.extend_from_slice(&bytes);
+                reporter.advance(bytes.len() as u64);
+            }
+        }
+    }
+    if content.len() as u64 != length {
+        return Err(CrosstacheError::azure_api(
+            "Blob snapshot body was truncated".to_string(),
+        ));
+    }
+    reporter.finish_clear();
+    Ok(crate::backend::file::FileDownloadSnapshot { content, metadata })
+}
+
+#[cfg(test)]
+#[path = "snapshot_tests.rs"]
+mod snapshot_tests;
 
 #[cfg(test)]
 mod tests {

@@ -75,7 +75,10 @@ impl BackendRegistry {
         backends: Vec<(&'static str, Arc<dyn Backend>)>,
     ) -> Self {
         Self {
-            backends: backends.into_iter().collect(),
+            backends: backends
+                .into_iter()
+                .map(|(name, backend)| (name, super::guard::GuardedBackend::wrap(backend)))
+                .collect(),
             default,
             azure_auth: None,
             lazy_config: None,
@@ -117,13 +120,13 @@ impl BackendRegistry {
             BackendKind::Azure => {
                 let auth_provider = Self::create_azure_auth_provider(config)?;
                 let backend = super::azure::AzureBackend::new(config, auth_provider.clone())?;
-                let mut registry = Self::new(Arc::new(backend));
+                let mut registry = Self::raw_registry(Arc::new(backend));
                 registry.azure_auth = Some(auth_provider);
                 Ok::<Self, BackendError>(registry)
             }
             BackendKind::Local => {
                 let backend = super::local::LocalBackend::new(config.local.as_ref())?;
-                Ok::<Self, BackendError>(Self::new(Arc::new(backend)))
+                Ok::<Self, BackendError>(Self::raw_registry(Arc::new(backend)))
             }
             #[cfg(feature = "aws")]
             BackendKind::Aws => {
@@ -144,7 +147,7 @@ impl BackendRegistry {
                         aws_transfer_config(config),
                     ))
                 })?;
-                Ok::<Self, BackendError>(Self::new(Arc::new(backend)))
+                Ok::<Self, BackendError>(Self::raw_registry(Arc::new(backend)))
             }
             #[cfg(not(feature = "aws"))]
             BackendKind::Aws => Err(BackendError::Internal(
@@ -176,7 +179,7 @@ impl BackendRegistry {
                         super::aws::TransferConfig::default(),
                     ))
                 })?;
-                Ok(Self::new(Arc::new(backend)))
+                Ok(Self::raw_registry(Arc::new(backend)))
             }
             #[cfg(not(feature = "aws"))]
             NBE::Aws(_) => Err(BackendError::Internal(format!(
@@ -184,7 +187,7 @@ impl BackendRegistry {
             ))),
             NBE::Local(local_cfg) => {
                 let backend = super::local::LocalBackend::new(Some(local_cfg))?;
-                Ok(Self::new(Arc::new(backend)))
+                Ok(Self::raw_registry(Arc::new(backend)))
             }
         }
     }
@@ -204,6 +207,10 @@ impl BackendRegistry {
 
     /// Create a new registry with a single backend.
     pub fn new(backend: Arc<dyn Backend>) -> Self {
+        Self::raw_registry(super::guard::GuardedBackend::wrap(backend))
+    }
+
+    fn raw_registry(backend: Arc<dyn Backend>) -> Self {
         let name = backend.name();
         let mut backends = HashMap::new();
         backends.insert(name, backend);
@@ -281,18 +288,16 @@ impl BackendRegistry {
     }
 
     fn apply_agent_policy(&mut self, preflight: Option<AgentPolicyPreflight>) {
-        if preflight.is_some() {
-            let backend = self.backends[self.default].clone();
-            self.backends
-                .insert(self.default, Self::apply_preflight(backend, preflight));
-        }
+        let backend = self.backends[self.default].clone();
+        self.backends
+            .insert(self.default, Self::apply_preflight(backend, preflight));
     }
 
     fn apply_preflight(
         backend: Arc<dyn Backend>,
         preflight: Option<AgentPolicyPreflight>,
     ) -> Arc<dyn Backend> {
-        match preflight {
+        let backend: Arc<dyn Backend> = match preflight {
             Some(preflight) => Arc::new(crate::agent::enforce::PolicyEnforcedBackend::new(
                 backend,
                 preflight.identity,
@@ -300,7 +305,8 @@ impl BackendRegistry {
                 preflight.decisions,
             )),
             None => backend,
-        }
+        };
+        super::guard::GuardedBackend::wrap(backend)
     }
 
     fn agent_policy_preflight(
@@ -755,6 +761,113 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "file-ops")]
+    #[tokio::test]
+    async fn guarded_registry_preserves_attachment_round_trip() {
+        use crate::secret::attachments::{download_decrypted, upload_encrypted};
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = two_local_backends_config(&tmp);
+        config.backend = Some("local-a".into());
+        let registry = BackendRegistry::from_config(&config).unwrap();
+        let backend = registry.active();
+        backend
+            .secrets()
+            .set_secret(
+                "default",
+                crate::secret::manager::SecretRequest {
+                    name: "db".into(),
+                    value: zeroize::Zeroizing::new("database password".into()),
+                    content_type: None,
+                    enabled: None,
+                    expires_on: None,
+                    not_before: None,
+                    tags: None,
+                    groups: None,
+                    note: None,
+                    folder: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            backend
+                .secrets()
+                .get_secret("default", "db", true)
+                .await
+                .unwrap()
+                .value
+                .unwrap()
+                .as_str(),
+            "database password"
+        );
+        let keys = backend.attachment_keys();
+        let files = backend.files().unwrap();
+        upload_encrypted(
+            keys.as_ref(),
+            files,
+            "default",
+            crate::blob::models::FileUploadRequest {
+                name: "attachments/db/cert.pem".into(),
+                content: b"private certificate".to_vec(),
+                content_type: None,
+                groups: Vec::new(),
+                metadata: Default::default(),
+                tags: Default::default(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let content = download_decrypted(
+            keys.as_ref(),
+            files,
+            "default",
+            "attachments/db/cert.pem",
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(content.as_slice(), b"private certificate");
+        assert_eq!(
+            backend
+                .secrets()
+                .list_secrets("default", None)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(matches!(
+            keys.get_secret("default", "ordinary-secret", true).await,
+            Err(BackendError::PermissionDenied(_))
+        ));
+    }
+
+    // Removing the registry guard must make these operations reach the local
+    // store and fail this test, even if every CLI handler keeps its own checks.
+    #[tokio::test]
+    async fn registry_blocks_reserved_mutations_on_every_resolution_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = two_local_backends_config(&tmp);
+        config.backend = Some("local-a".into());
+        let eager = BackendRegistry::from_config(&config).unwrap();
+        let lazy = BackendRegistry::with_lazy(&config, &["local-b".into()]).unwrap();
+        let lazy_backend = lazy.materialize("local-b").unwrap();
+        let active_arc = eager.active_arc();
+        for backend in [
+            eager.active(),
+            eager.get("local").unwrap(),
+            active_arc.as_ref(),
+            lazy_backend.as_ref(),
+        ] {
+            for name in ["xv-attachment-key", "XV-ATTACHMENT-KEY", "xv_attachment_key",
+                "xv-attachment-key-ak1-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"] {
+                let error = backend.secrets().delete_secret("default", name).await.unwrap_err();
+                assert!(matches!(error, BackendError::PermissionDenied(_)), "unguarded {name}: {error}");
+            }
+        }
+    }
+
     #[test]
     fn materialize_constructs_once() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -815,8 +928,8 @@ mod tests {
         // separate steps, so it is never even attempted here.
     }
 
-    #[test]
-    fn materialize_falls_back_to_eager_backend_map() {
+    #[tokio::test]
+    async fn materialize_falls_back_to_eager_backend_map() {
         // A registry built the eager way (`new`/`from_config`) should still
         // answer `materialize` for its single active backend name, since
         // callers of the workspace resolver shouldn't need to special-case
@@ -855,14 +968,17 @@ mod tests {
         )
         .unwrap();
         let unchanged = BackendRegistry::apply_preflight(raw.clone(), preflight);
-        assert!(
-            Arc::ptr_eq(&raw, &unchanged),
-            "unenforced policy application must not construct a wrapper"
-        );
+        assert!(matches!(
+            unchanged
+                .secrets()
+                .delete_secret("default", "xv-attachment-key")
+                .await,
+            Err(BackendError::PermissionDenied(_))
+        ));
     }
 
-    #[test]
-    fn unenforced_policy_returns_original_backend_without_resolving_identity() {
+    #[tokio::test]
+    async fn unenforced_policy_keeps_custody_guard_without_resolving_identity() {
         let tmp = tempfile::TempDir::new().unwrap();
         let local = crate::config::settings::LocalConfig {
             store_path: Some(tmp.path().join("store").to_string_lossy().to_string()),
@@ -895,7 +1011,13 @@ mod tests {
             )
             .unwrap();
             let unchanged = BackendRegistry::apply_preflight(raw.clone(), preflight);
-            assert!(Arc::ptr_eq(&raw, &unchanged));
+            assert!(matches!(
+                unchanged
+                    .secrets()
+                    .delete_secret("default", "xv-attachment-key")
+                    .await,
+                Err(BackendError::PermissionDenied(_))
+            ));
         }
     }
 

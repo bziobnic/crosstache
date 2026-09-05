@@ -461,12 +461,14 @@ pub(crate) mod stub {
 
         async fn get_secret_version(
             &self,
-            _vault: &str,
-            _name: &str,
+            vault: &str,
+            name: &str,
             _version: &str,
-            _include_value: bool,
+            include_value: bool,
         ) -> Result<SecretProperties, BackendError> {
-            Err(BackendError::Unsupported("versions".into()))
+            // The stub keeps a single generation per name (version "v1"), so an
+            // exact-version read resolves to the current value.
+            self.get_secret(vault, name, include_value).await
         }
 
         async fn list_secrets(
@@ -851,6 +853,24 @@ pub(crate) mod stub {
                     name: name.to_string(),
                     suggestion: None,
                 })
+        }
+
+        async fn download_file_snapshot(
+            &self,
+            _vault: &str,
+            name: &str,
+            _reporter: Option<&dyn crate::utils::progress::ProgressReporter>,
+        ) -> Result<crate::backend::file::FileDownloadSnapshot, BackendError> {
+            self.download_file_calls.fetch_add(1, Ordering::SeqCst);
+            let files = self.files.lock().unwrap();
+            let (content, _, metadata) = files.get(name).ok_or_else(|| BackendError::NotFound {
+                name: name.into(),
+                suggestion: None,
+            })?;
+            Ok(crate::backend::file::FileDownloadSnapshot {
+                content: content.clone(),
+                metadata: metadata.clone(),
+            })
         }
 
         async fn list_files(

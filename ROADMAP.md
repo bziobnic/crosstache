@@ -16,15 +16,83 @@ Priority is a risk/order signal, not a release commitment:
 
 ## Safety and correctness
 
-### P0 — Make attachment-key creation race-free
+### P0 — Race-free attachment-key lifecycle
 
-`get_or_create_identity` currently performs get → unconditional set → re-read.
-Two first attachments can therefore encrypt with different keys while the
-reserved `xv-attachment-key` secret is being overwritten; re-reading makes a
-client converge for subsequent work but cannot repair ciphertext already written
-with the losing key. Add an atomic create-if-absent/conditional-write path, cover
-all providers, and test the real two-writer outcome before treating first use as
-safe.
+Design: `2026-09-03-xv-race-free-attachment-key-lifecycle-design.md`
+(immutable per-key records + non-secret active pointer + exact-version blob
+binding). Staged as PR 1 (integrity foundation) → PR 2 (lifecycle) → PR 3
+(rewrap/retirement).
+
+**PR 1 — implemented on this branch (not yet merged):**
+
+- `src/secret/attachment_key.rs`: portable `ak1-` key IDs derived from the
+  public recipient (§7.1); reserved schema-1 crypto metadata that overwrites
+  caller-supplied reserved keys (§7.3); V1/V2 active-pointer model and strict
+  `ak1-` parsing with no fallback on malformed values (§10.1); non-`Debug`,
+  non-`Serialize` `AttachmentKeyMaterial` that derives its ID from the parsed
+  identity and verifies it (§7.4, I6/I9); the pure download-classification
+  decision table (§11 / §D order 1–7); and the structural reserved-name
+  classifier (exact pointer vs. strict record vs. ordinary — the broad prefix
+  stays unreserved) (§8 / §E).
+- `src/secret/attachments.rs`: uploads dispatch on the vault's mode — an empty
+  vault **initializes directly to V2** (generate candidate → inspect the exact
+  strict record name → commit a *marked* immutable retained record → re-read the
+  exact version and verify the derived key ID → publish and confirm the
+  non-secret V2 pointer), an existing raw V1 vault stays V1 (legacy slot), and a
+  valid V2 pointer resolves the active retained record. Uploads bind the key
+  identity **and** exact provider version from one response and stamp schema-1
+  metadata; an unmarked user secret colliding with a strict record name is never
+  modified. Downloads route through the classifier — managed-namespace
+  non-ciphertext fails closed, foreign/ordinary bytes pass through, and a
+  schema-1 blob is decrypted through its **pinned exact version** with derived-ID
+  verification, so replacing the active key no longer orphans existing blobs (the
+  §4.1 loss is closed on the read path). Broken/unknown references never fall
+  back (I7). Two-initializer concurrency (§10.3) is proven: distinct generations
+  each yield a decryptable blob regardless of which pointer wins.
+- Structural reserved-guard adoption across generic surfaces (§8/§E): the exact
+  active pointer **and** every strict-format retained record (`xv-attachment-key-
+  ak1-<hash>`) are now hard-blocked (no `--force`) from generic mutation — CLI
+  `set`/`mv`/rename/rollback/update/rotate/copy/`delete`/bulk-set, web
+  PUT/PATCH/DELETE, `.env` import, and vault import. List/display hides the
+  pointer and *marked* key records while keeping unmarked strict-format user
+  collisions visible; generic migration skips marked custody records. The broad
+  `xv-attachment-key-*` prefix stays fully usable for ordinary secrets.
+
+- Provider-canonical name mapping (`CanonicalSecretName`, `canonicalize_secret_name`)
+  runs before reserved classification, so alias spellings — `xv_attachment_key`,
+  `xv--attachment--key`, `XV-ATTACHMENT-KEY` — that address the same provider
+  secret cannot bypass the guard; the CLI/Web guard sites use the
+  `*_canonical` variants (§8).
+- The generic facade is mandatory at registry construction: eager/default,
+  lazy/named, cloned, and cross-backend factory handles all expose guarded
+  secret operations. Generic CLI/Web/import/migration callers cannot obtain
+  the raw provider handle through the registry. Folder-only Web moves of
+  reserved records are refused too; ordinary CRUD remains available.
+- Attachment encryption uses a separate `AttachmentKeyStore` with only
+  canonical custody reads, exact-version reads, and writes. It exposes no raw
+  backend handle. The agent wrapper applies policy, raw-disclosure checks, and
+  redacted decision/audit context before provider access, including when policy
+  and guard wrappers are nested in either order. The unused legacy first-use
+  upsert helper has been removed; existing legacy attachment reads remain.
+- Attachment downloads now consume a single-generation `download_file_snapshot`
+  (§11, I4). Local reads retain the file lock and directory handles across both
+  metadata and ciphertext; AWS reads one GetObject response; Azure pins every
+  download page to the properties ETag. Missing snapshot support is refused,
+  and cloud downloads reject oversized or truncated bodies.
+
+**PR 1 — still open:**
+
+- Durable journaled Local key-pair commit + crash recovery/fault injection (§12,
+  I5).
+- Provider-specific generation commit (§13): the V2 protocol is implemented and
+  verified against the `SecretBackend` trait (in-memory), but Local/AWS still
+  need create-only records and Azure needs its versioned Set path exercised
+  against real provider request/response seams, with barrier-based concurrency
+  tests per provider.
+- Structured error variants (§20).
+
+**PR 2 / PR 3:** status/inventory, offline V1→V2 upgrade, encrypted
+export/import/recovery, rotation, rewrap, and logical retirement — none started.
 
 ### P1 — Make rename and migration attachment-aware
 

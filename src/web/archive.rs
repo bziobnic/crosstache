@@ -215,7 +215,7 @@ pub(crate) async fn download(
     let mut actual_total = 0;
     for name in request.files {
         let bytes = attachments::download_decrypted(
-            target.backend.secrets(),
+            target.backend.attachment_keys().as_ref(),
             files,
             &target.context.vault,
             &name,
@@ -473,7 +473,7 @@ mod tests {
         let state = testutil::test_state();
         let backend = state.base_backend();
         attachments::upload_encrypted(
-            backend.secrets(),
+            backend.attachment_keys().as_ref(),
             backend.files().unwrap(),
             "default",
             file_request("private/secret.txt", b"plaintext"),

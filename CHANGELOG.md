@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Fixed
+
+- Attachment downloads now read ciphertext and crypto metadata from one file
+  generation: locked local reads, a single S3 GetObject response, or ETag-pinned
+  Azure chunks. Concurrent Azure replacement, unsupported snapshot backends,
+  and oversized or truncated cloud responses fail without returning mixed data.
+
+- Generic secret access from the backend registry now always protects reserved
+  attachment-key records, including named backends, imports, migration, and
+  Web folder moves. Attachment encryption uses a narrow key-store interface
+  that retains agent policy, disclosure checks, and redacted audit logging.
+  Generic opaque backup restore is refused because its destination cannot be
+  checked before mutation.
+
 ### Added
 
 - **Agent identity and policy enforcement foundation.** Optional `[agent]`

@@ -16,6 +16,7 @@
 //! [`BackendRegistry`] for runtime backend resolution.
 
 pub mod addressing;
+pub mod attachment_keys;
 pub mod audit;
 #[cfg(feature = "aws")]
 pub mod aws;
@@ -23,6 +24,7 @@ pub mod azure;
 pub mod error;
 #[cfg(feature = "file-ops")]
 pub mod file;
+pub mod guard;
 pub mod local;
 pub mod registry;
 pub mod secret;
@@ -250,7 +252,28 @@ pub trait Backend: Send + Sync {
     fn capabilities(&self) -> BackendCapabilities;
 
     /// Access to secret operations (required — every backend manages secrets).
+    ///
+    /// Registry backends always return the guarded generic facade. Concrete
+    /// provider implementations supply raw operations only to internal wrappers.
+    /// Attachment encryption uses [`Backend::attachment_keys`] instead.
     fn secrets(&self) -> &dyn SecretBackend;
+
+    /// Access to secret operations through the generic custody guard
+    /// ([`guard::GuardedSecretBackend`]): reserved-record mutations are refused
+    /// before provider I/O, `restore_from_backup` is disabled, and the active
+    /// pointer plus marked key records are hidden from listings (design §8).
+    ///
+    /// An explicit borrowed guard for callers outside registry construction.
+    /// Registry `secrets()` handles already enforce this boundary.
+    fn guarded_secrets(&self) -> guard::GuardedSecretBackend<'_> {
+        guard::GuardedSecretBackend::new(self.secrets())
+    }
+
+    /// Restricted attachment custody operations. Generic secret commands must
+    /// use `secrets()`; this interface cannot access ordinary secrets.
+    fn attachment_keys(&self) -> Box<dyn attachment_keys::AttachmentKeyStore + '_> {
+        Box::new(attachment_keys::RawAttachmentKeyStore::new(self.secrets()))
+    }
 
     /// Access to vault/namespace operations (optional).
     fn vaults(&self) -> Option<&dyn VaultBackend> {
