@@ -14,10 +14,9 @@
 //!   while leaving unmarked strict-format user collisions visible (§E).
 //!
 //! The custody path (`crate::secret::attachments`) must NOT go through this
-//! facade: it legitimately reads and writes the reserved records, so it uses a
-//! raw [`SecretBackend`] handle. Registry-level wiring that makes this the
-//! default handle for generic callers and hands custody a separate raw handle
-//! is the remaining structural step (see `ROADMAP.md`).
+//! facade: it legitimately reads and writes the reserved records through
+//! `AttachmentKeyStore`. Registry construction installs the owned guard on
+//! every generic handle; custody delegation preserves any agent policy layer.
 //!
 //! Read-hiding of the reserved records (denying `get_secret` on the pointer and
 //! marked records) is intentionally deferred: it needs a metadata pre-fetch to
@@ -25,7 +24,9 @@
 //! this decorator closes first. `list_secrets` hiding is applied here because it
 //! is free (the summaries already carry `content_type`).
 
+use super::{AuditBackend, Backend, BackendCapabilities, BackendKind, VaultBackend};
 use async_trait::async_trait;
+use std::sync::Arc;
 
 use crate::secret::attachment_key::{
     generic_mutation_blocked_canonical, hidden_from_generic_listing_canonical,
@@ -40,13 +41,79 @@ use super::secret::{SecretBackend, SecretSnapshot};
 /// A generic-facade wrapper around a raw [`SecretBackend`] that enforces the
 /// reserved attachment-key custody boundary structurally.
 pub struct GuardedSecretBackend<'a> {
-    inner: &'a dyn SecretBackend,
+    inner: SecretSource<'a>,
+}
+
+enum SecretSource<'a> {
+    Borrowed(&'a dyn SecretBackend),
+    Owned(Arc<dyn Backend>),
+}
+
+impl SecretSource<'_> {
+    fn secrets(&self) -> &dyn SecretBackend {
+        match self {
+            Self::Borrowed(secrets) => *secrets,
+            Self::Owned(backend) => backend.secrets(),
+        }
+    }
+}
+
+/// Registry-owned boundary. The raw backend is private; generic callers only
+/// obtain the guarded secret facade, including through cloned/lazy handles.
+pub(crate) struct GuardedBackend {
+    inner: Arc<dyn Backend>,
+    secrets: GuardedSecretBackend<'static>,
+}
+
+impl GuardedBackend {
+    pub(crate) fn wrap(inner: Arc<dyn Backend>) -> Arc<dyn Backend> {
+        Arc::new(Self {
+            secrets: GuardedSecretBackend {
+                inner: SecretSource::Owned(inner.clone()),
+            },
+            inner,
+        })
+    }
+}
+
+#[async_trait]
+impl Backend for GuardedBackend {
+    fn name(&self) -> &'static str {
+        self.inner.name()
+    }
+    fn kind(&self) -> BackendKind {
+        self.inner.kind()
+    }
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+    fn secrets(&self) -> &dyn SecretBackend {
+        &self.secrets
+    }
+    fn attachment_keys(&self) -> Box<dyn super::attachment_keys::AttachmentKeyStore + '_> {
+        self.inner.attachment_keys()
+    }
+    fn vaults(&self) -> Option<&dyn VaultBackend> {
+        self.inner.vaults()
+    }
+    fn audit(&self) -> Option<&dyn AuditBackend> {
+        self.inner.audit()
+    }
+    #[cfg(feature = "file-ops")]
+    fn files(&self) -> Option<&dyn super::FileBackend> {
+        self.inner.files()
+    }
+    async fn health_check(&self) -> Result<(), BackendError> {
+        self.inner.health_check().await
+    }
 }
 
 impl<'a> GuardedSecretBackend<'a> {
     /// Wrap a raw secret backend in the generic guard.
     pub fn new(inner: &'a dyn SecretBackend) -> Self {
-        Self { inner }
+        Self {
+            inner: SecretSource::Borrowed(inner),
+        }
     }
 
     /// Refuse a generic mutation of a protected custody resource before any
@@ -72,12 +139,12 @@ impl SecretBackend for GuardedSecretBackend<'_> {
         request: SecretRequest,
     ) -> Result<SecretProperties, BackendError> {
         self.ensure_mutable(&request.name)?;
-        self.inner.set_secret(vault, request).await
+        self.inner.secrets().set_secret(vault, request).await
     }
 
     async fn delete_secret(&self, vault: &str, name: &str) -> Result<(), BackendError> {
         self.ensure_mutable(name)?;
-        self.inner.delete_secret(vault, name).await
+        self.inner.secrets().delete_secret(vault, name).await
     }
 
     async fn update_secret(
@@ -87,7 +154,10 @@ impl SecretBackend for GuardedSecretBackend<'_> {
         request: SecretUpdateRequest,
     ) -> Result<SecretProperties, BackendError> {
         self.ensure_mutable(name)?;
-        self.inner.update_secret(vault, name, request).await
+        self.inner
+            .secrets()
+            .update_secret(vault, name, request)
+            .await
     }
 
     async fn create_secret_if_absent(
@@ -96,7 +166,10 @@ impl SecretBackend for GuardedSecretBackend<'_> {
         request: SecretRequest,
     ) -> Result<SecretProperties, BackendError> {
         self.ensure_mutable(&request.name)?;
-        self.inner.create_secret_if_absent(vault, request).await
+        self.inner
+            .secrets()
+            .create_secret_if_absent(vault, request)
+            .await
     }
 
     async fn update_secret_if_revision(
@@ -108,6 +181,7 @@ impl SecretBackend for GuardedSecretBackend<'_> {
     ) -> Result<SecretProperties, BackendError> {
         self.ensure_mutable(name)?;
         self.inner
+            .secrets()
             .update_secret_if_revision(vault, name, expected_revision, request)
             .await
     }
@@ -120,7 +194,10 @@ impl SecretBackend for GuardedSecretBackend<'_> {
     ) -> Result<SecretProperties, BackendError> {
         self.ensure_mutable(name)?;
         self.ensure_mutable(new_name)?;
-        self.inner.rename_secret(vault, name, new_name).await
+        self.inner
+            .secrets()
+            .rename_secret(vault, name, new_name)
+            .await
     }
 
     async fn rename_secret_if_revision(
@@ -133,6 +210,7 @@ impl SecretBackend for GuardedSecretBackend<'_> {
         self.ensure_mutable(name)?;
         self.ensure_mutable(new_name)?;
         self.inner
+            .secrets()
             .rename_secret_if_revision(vault, name, new_name, expected_revision)
             .await
     }
@@ -144,7 +222,7 @@ impl SecretBackend for GuardedSecretBackend<'_> {
         version: &str,
     ) -> Result<SecretProperties, BackendError> {
         self.ensure_mutable(name)?;
-        self.inner.rollback(vault, name, version).await
+        self.inner.secrets().rollback(vault, name, version).await
     }
 
     async fn restore_secret(
@@ -153,17 +231,17 @@ impl SecretBackend for GuardedSecretBackend<'_> {
         name: &str,
     ) -> Result<SecretProperties, BackendError> {
         self.ensure_mutable(name)?;
-        self.inner.restore_secret(vault, name).await
+        self.inner.secrets().restore_secret(vault, name).await
     }
 
     async fn purge_secret(&self, vault: &str, name: &str) -> Result<(), BackendError> {
         self.ensure_mutable(name)?;
-        self.inner.purge_secret(vault, name).await
+        self.inner.secrets().purge_secret(vault, name).await
     }
 
     async fn native_rotate(&self, vault: &str, name: &str) -> Result<(), BackendError> {
         self.ensure_mutable(name)?;
-        self.inner.native_rotate(vault, name).await
+        self.inner.secrets().native_rotate(vault, name).await
     }
 
     /// Disabled entirely: an opaque backup blob names its own destination, so
@@ -188,7 +266,11 @@ impl SecretBackend for GuardedSecretBackend<'_> {
         vault: &str,
         group_filter: Option<&str>,
     ) -> Result<Vec<SecretSummary>, BackendError> {
-        let mut out = self.inner.list_secrets(vault, group_filter).await?;
+        let mut out = self
+            .inner
+            .secrets()
+            .list_secrets(vault, group_filter)
+            .await?;
         out.retain(|s| !hidden_from_generic_listing_canonical(&s.name, &s.content_type));
         Ok(out)
     }
@@ -201,7 +283,10 @@ impl SecretBackend for GuardedSecretBackend<'_> {
         name: &str,
         include_value: bool,
     ) -> Result<SecretProperties, BackendError> {
-        self.inner.get_secret(vault, name, include_value).await
+        self.inner
+            .secrets()
+            .get_secret(vault, name, include_value)
+            .await
     }
 
     async fn get_secret_version(
@@ -212,6 +297,7 @@ impl SecretBackend for GuardedSecretBackend<'_> {
         include_value: bool,
     ) -> Result<SecretProperties, BackendError> {
         self.inner
+            .secrets()
             .get_secret_version(vault, name, version, include_value)
             .await
     }
@@ -223,6 +309,7 @@ impl SecretBackend for GuardedSecretBackend<'_> {
         include_value: bool,
     ) -> Result<SecretSnapshot, BackendError> {
         self.inner
+            .secrets()
             .get_secret_snapshot(vault, name, include_value)
             .await
     }
@@ -234,6 +321,7 @@ impl SecretBackend for GuardedSecretBackend<'_> {
         expected_revision: &str,
     ) -> Result<SecretProperties, BackendError> {
         self.inner
+            .secrets()
             .validate_secret_revision(vault, name, expected_revision)
             .await
     }
@@ -243,36 +331,36 @@ impl SecretBackend for GuardedSecretBackend<'_> {
         vault: &str,
         name: &str,
     ) -> Result<Vec<SecretProperties>, BackendError> {
-        self.inner.list_versions(vault, name).await
+        self.inner.secrets().list_versions(vault, name).await
     }
 
     async fn secret_exists(&self, vault: &str, name: &str) -> Result<bool, BackendError> {
-        self.inner.secret_exists(vault, name).await
+        self.inner.secrets().secret_exists(vault, name).await
     }
 
     async fn list_deleted_secrets(
         &self,
         vault: &str,
     ) -> Result<Vec<DeletedSecretSummary>, BackendError> {
-        self.inner.list_deleted_secrets(vault).await
+        self.inner.secrets().list_deleted_secrets(vault).await
     }
 
     async fn backup_secret(&self, vault: &str, name: &str) -> Result<Vec<u8>, BackendError> {
-        self.inner.backup_secret(vault, name).await
+        self.inner.secrets().backup_secret(vault, name).await
     }
 
     // -- Capability passthrough --------------------------------------------
 
     fn supports_conditional_update(&self) -> bool {
-        self.inner.supports_conditional_update()
+        self.inner.secrets().supports_conditional_update()
     }
 
     fn supports_revision_validation(&self) -> bool {
-        self.inner.supports_revision_validation()
+        self.inner.secrets().supports_revision_validation()
     }
 
     fn supports_atomic_rename(&self) -> bool {
-        self.inner.supports_atomic_rename()
+        self.inner.secrets().supports_atomic_rename()
     }
 }
 

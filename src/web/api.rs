@@ -351,6 +351,7 @@ pub(crate) async fn move_secret(
             Ok(Json(props))
         }
         (None, Some(folder)) => {
+            reject_reserved_attachment_key(&name)?;
             let request = SecretUpdateRequest {
                 name: name.clone(),
                 expected_revision: None,
@@ -473,7 +474,7 @@ pub(crate) mod files {
         // is decrypted with the vault's attachment key; everything else passes
         // through untouched.
         let bytes = crate::secret::attachments::download_decrypted(
-            target.backend.secrets(),
+            target.backend.attachment_keys().as_ref(),
             backend,
             vault,
             &name,
@@ -662,7 +663,7 @@ pub(crate) mod tests {
         // One encrypted attachment for db-cert + an unrelated plain file that
         // must not leak into the attachment listing.
         attachments::upload_encrypted(
-            state.backend.secrets(),
+            state.backend.attachment_keys().as_ref(),
             files,
             "default",
             crate::blob::models::FileUploadRequest {
@@ -778,7 +779,7 @@ pub(crate) mod tests {
             registry,
         ));
         attachments::upload_encrypted(
-            stage.secrets(),
+            stage.attachment_keys().as_ref(),
             stage.files().unwrap(),
             "sandbox",
             crate::blob::models::FileUploadRequest {
@@ -1039,7 +1040,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn reserved_attachment_key_rejects_delete_and_rename_but_allows_folder_move() {
+    async fn reserved_attachment_key_rejects_delete_rename_and_folder_move() {
         let state = testutil::test_state();
         let reserved = crate::secret::attachments::ATTACHMENT_KEY_SECRET;
         // Seed the reserved key directly through the backend trait, since
@@ -1087,7 +1088,7 @@ pub(crate) mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
 
-        // A folder-only move doesn't displace the key, so it's still allowed.
+        // Folder-only changes are generic mutations and cannot alter custody metadata.
         let (status, _) = get_json(
             app.clone(),
             "POST",
@@ -1095,7 +1096,7 @@ pub(crate) mod tests {
             Some(json!({"folder": "infra"})),
         )
         .await;
-        assert_eq!(status, StatusCode::OK);
+        assert_eq!(status, StatusCode::BAD_REQUEST);
 
         // The key is untouched under its reserved name.
         let (status, _) = get_json(

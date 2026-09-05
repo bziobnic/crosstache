@@ -23,7 +23,7 @@ Design: `2026-09-03-xv-race-free-attachment-key-lifecycle-design.md`
 binding). Staged as PR 1 (integrity foundation) → PR 2 (lifecycle) → PR 3
 (rewrap/retirement).
 
-**PR 1 — landed so far (integrity data contracts + V1 exact-version path):**
+**PR 1 — implemented on this branch (not yet merged):**
 
 - `src/secret/attachment_key.rs`: portable `ak1-` key IDs derived from the
   public recipient (§7.1); reserved schema-1 crypto metadata that overwrites
@@ -63,24 +63,20 @@ binding). Staged as PR 1 (integrity foundation) → PR 2 (lifecycle) → PR 3
   `xv--attachment--key`, `XV-ATTACHMENT-KEY` — that address the same provider
   secret cannot bypass the guard; the CLI/Web guard sites use the
   `*_canonical` variants (§8).
-- The guarded generic facade component exists: `backend::guard::GuardedSecretBackend`
-  wraps a raw `SecretBackend` and structurally refuses every generic mutation of
-  the pointer / strict-format records (canonical-matched) before provider I/O
-  (zero inner calls), disables `restore_from_backup` entirely (Decision F), and
-  hides the pointer + marked records from listings. `Backend::guarded_secrets()`
-  exposes it; the web list handler already routes through it.
+- The generic facade is mandatory at registry construction: eager/default,
+  lazy/named, cloned, and cross-backend factory handles all expose guarded
+  secret operations. Generic CLI/Web/import/migration callers cannot obtain
+  the raw provider handle through the registry. Folder-only Web moves of
+  reserved records are refused too; ordinary CRUD remains available.
+- Attachment encryption uses a separate `AttachmentKeyStore` with only
+  canonical custody reads, exact-version reads, and writes. It exposes no raw
+  backend handle. The agent wrapper applies policy, raw-disclosure checks, and
+  redacted decision/audit context before provider access, including when policy
+  and guard wrappers are nested in either order. The unused legacy first-use
+  upsert helper has been removed; existing legacy attachment reads remain.
 
 **PR 1 — still open:**
 
-- Making the facade *mandatory*: route generic secret CRUD (CLI/Web/import/
-  migration) through `guarded_secrets()` and split the custody path onto a
-  separate raw handle so no handler can obtain an unguarded backend (§8). This is
-  the registry-level wiring — it must resolve per-surface contract points (e.g.
-  the web folder-move-of-reserved exception, error-status mapping) and is why the
-  facade is a component today rather than the default `secrets()`. The
-  handler-layer guards (canonical-matched) hold the boundary meanwhile.
-- The narrow policy-enforced `AttachmentKeyStore` in `enforce.rs` (agent policy /
-  raw-disclosure checks / redacted audit before provider access).
 - Single-generation `download_file_snapshot` for Local/AWS/Azure (§11, I4) — the
   download path still reads content and metadata separately.
 - Durable journaled Local key-pair commit + crash recovery/fault injection (§12,

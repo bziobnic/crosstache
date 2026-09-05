@@ -8,16 +8,22 @@
 //! is the naming convention. See
 //! `docs/superpowers/specs/2026-07-21-secret-file-attachments-design.md`.
 
+#[cfg(any(test, feature = "file-ops"))]
 use age::secrecy::ExposeSecret;
+#[cfg(any(test, feature = "file-ops"))]
 use zeroize::Zeroizing;
 
+use crate::backend::attachment_keys::AttachmentKeyStore;
 use crate::backend::error::BackendError;
+#[cfg(test)]
 use crate::backend::secret::SecretBackend;
 use crate::error::{CrosstacheError, Result};
+#[cfg(feature = "file-ops")]
 use crate::secret::attachment_key::{
     self, AttachmentKeyId, AttachmentKeyMaterial, AttachmentKeyRef, KeySlot, PointerKind,
     SecretVersion,
 };
+#[cfg(any(test, feature = "file-ops"))]
 use crate::secret::manager::SecretRequest;
 
 /// Reserved per-vault secret holding the age identity for attachments.
@@ -84,7 +90,7 @@ fn parse_identity(value: &str, vault: &str) -> Result<age::x25519::Identity> {
 /// Fetch the vault's attachment identity. Errors (actionably) if absent.
 #[allow(dead_code)] // Consumed by attachment CLI/encryption tasks (Tasks 2-4)
 pub async fn get_identity(
-    secrets: &dyn SecretBackend,
+    secrets: &dyn AttachmentKeyStore,
     vault: &str,
 ) -> Result<age::x25519::Identity> {
     match secrets.get_secret(vault, ATTACHMENT_KEY_SECRET, true).await {
@@ -99,59 +105,6 @@ pub async fn get_identity(
         Err(BackendError::NotFound { .. }) => Err(CrosstacheError::invalid_argument(format!(
             "attachment key not found in vault '{vault}' — no attachments have been created here, or the '{ATTACHMENT_KEY_SECRET}' secret was deleted"
         ))),
-        Err(e) => Err(e.into()),
-    }
-}
-
-/// Fetch the vault's attachment identity, generating and storing it on first
-/// use. After a create, the stored value is re-read and used, so a concurrent
-/// create race converges on a single key.
-#[allow(dead_code)] // Consumed by attachment CLI/encryption tasks (Tasks 2-4)
-pub async fn get_or_create_identity(
-    secrets: &dyn SecretBackend,
-    vault: &str,
-) -> Result<age::x25519::Identity> {
-    match secrets.get_secret(vault, ATTACHMENT_KEY_SECRET, true).await {
-        Ok(props) => {
-            let value = props.value.ok_or_else(|| {
-                CrosstacheError::invalid_argument(format!(
-                    "secret '{ATTACHMENT_KEY_SECRET}' in vault '{vault}' has no value"
-                ))
-            })?;
-            parse_identity(&value, vault)
-        }
-        Err(BackendError::NotFound { .. }) => {
-            let identity = age::x25519::Identity::generate();
-            let request = SecretRequest {
-                name: ATTACHMENT_KEY_SECRET.to_string(),
-                value: Zeroizing::new(identity.to_string().expose_secret().to_string()),
-                content_type: Some("application/x-age-identity".to_string()),
-                enabled: Some(true),
-                expires_on: None,
-                not_before: None,
-                tags: None,
-                groups: None,
-                note: Some(
-                    "crosstache attachment encryption key — deleting this makes all \
-                     attachments in this vault unreadable"
-                        .to_string(),
-                ),
-                folder: None,
-            };
-            secrets.set_secret(vault, request).await?;
-            // Re-read: under a concurrent first-create, whichever write landed
-            // last is authoritative; using the stored value converges all
-            // clients on one key.
-            let props = secrets
-                .get_secret(vault, ATTACHMENT_KEY_SECRET, true)
-                .await?;
-            let value = props.value.ok_or_else(|| {
-                CrosstacheError::invalid_argument(format!(
-                    "secret '{ATTACHMENT_KEY_SECRET}' in vault '{vault}' has no value"
-                ))
-            })?;
-            parse_identity(&value, vault)
-        }
         Err(e) => Err(e.into()),
     }
 }
@@ -179,7 +132,7 @@ const MAX_INIT_ATTEMPTS: usize = 8;
 /// - malformed value   → error; never replaced (invariant I7)
 #[cfg(feature = "file-ops")]
 async fn resolve_upload_material(
-    secrets: &dyn SecretBackend,
+    secrets: &dyn AttachmentKeyStore,
     vault: &str,
 ) -> Result<AttachmentKeyMaterial> {
     match secrets.get_secret(vault, ATTACHMENT_KEY_SECRET, true).await {
@@ -239,7 +192,7 @@ fn material_from_identity_value(
 /// one response) and verify its derived key ID (design §10.4, invariant I6).
 #[cfg(feature = "file-ops")]
 async fn resolve_active_retained(
-    secrets: &dyn SecretBackend,
+    secrets: &dyn AttachmentKeyStore,
     vault: &str,
     active_id: &AttachmentKeyId,
 ) -> Result<AttachmentKeyMaterial> {
@@ -276,7 +229,7 @@ async fn resolve_active_retained(
 /// back and require a confirmed V2 pointer response (design §10.2 steps 9–10).
 #[cfg(feature = "file-ops")]
 async fn publish_v2_pointer(
-    secrets: &dyn SecretBackend,
+    secrets: &dyn AttachmentKeyStore,
     vault: &str,
     active_id: &AttachmentKeyId,
 ) -> Result<()> {
@@ -313,7 +266,7 @@ async fn publish_v2_pointer(
 /// the user secret is never modified.
 #[cfg(feature = "file-ops")]
 async fn initialize_v2(
-    secrets: &dyn SecretBackend,
+    secrets: &dyn AttachmentKeyStore,
     vault: &str,
     generate: &mut dyn FnMut() -> Zeroizing<String>,
 ) -> Result<AttachmentKeyMaterial> {
@@ -402,7 +355,7 @@ async fn initialize_v2(
 /// Never falls back to a current key or scans keys.
 #[cfg(feature = "file-ops")]
 async fn resolve_referenced_material(
-    secrets: &dyn SecretBackend,
+    secrets: &dyn AttachmentKeyStore,
     vault: &str,
     key_ref: &AttachmentKeyRef,
 ) -> Result<AttachmentKeyMaterial> {
@@ -451,7 +404,7 @@ async fn resolve_referenced_material(
 /// are overwritten.
 #[cfg(feature = "file-ops")]
 pub async fn upload_encrypted(
-    secrets: &dyn SecretBackend,
+    secrets: &dyn AttachmentKeyStore,
     files: &dyn FileBackend,
     vault: &str,
     mut request: FileUploadRequest,
@@ -471,7 +424,7 @@ pub async fn upload_encrypted(
 /// `.age` files encrypted with foreign keys) pass through untouched.
 #[cfg(feature = "file-ops")]
 pub async fn download_decrypted(
-    secrets: &dyn SecretBackend,
+    secrets: &dyn AttachmentKeyStore,
     files: &dyn FileBackend,
     vault: &str,
     name: &str,
@@ -909,7 +862,7 @@ mod tests {
         let plaintext = b"-----BEGIN CERT-----\x00\xffbinary ok";
 
         upload_encrypted(
-            &secrets,
+            &crate::backend::attachment_keys::RawAttachmentKeyStore::new(&secrets),
             &files,
             "v",
             upload_req("attachments/db/cert.pem", plaintext),
@@ -930,9 +883,15 @@ mod tests {
             );
         }
 
-        let roundtrip = download_decrypted(&secrets, &files, "v", "attachments/db/cert.pem", None)
-            .await
-            .unwrap();
+        let roundtrip = download_decrypted(
+            &crate::backend::attachment_keys::RawAttachmentKeyStore::new(&secrets),
+            &files,
+            "v",
+            "attachments/db/cert.pem",
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(roundtrip.as_slice(), plaintext);
     }
 
@@ -945,9 +904,15 @@ mod tests {
             .upload_file("v", upload_req("plain.txt", b"hello"), None)
             .await
             .unwrap();
-        let content = download_decrypted(&secrets, &files, "v", "plain.txt", None)
-            .await
-            .unwrap();
+        let content = download_decrypted(
+            &crate::backend::attachment_keys::RawAttachmentKeyStore::new(&secrets),
+            &files,
+            "v",
+            "plain.txt",
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(content, b"hello");
     }
 
@@ -957,7 +922,7 @@ mod tests {
         let secrets = StubSecrets::new();
         let files = StubFiles::new();
         upload_encrypted(
-            &secrets,
+            &crate::backend::attachment_keys::RawAttachmentKeyStore::new(&secrets),
             &files,
             "v",
             upload_req("attachments/s/f", b"x"),
@@ -967,9 +932,15 @@ mod tests {
         .unwrap();
         // Simulate custody loss: the pinned key record no longer resolves.
         secrets.secrets.lock().unwrap().clear();
-        let err = download_decrypted(&secrets, &files, "v", "attachments/s/f", None)
-            .await
-            .unwrap_err();
+        let err = download_decrypted(
+            &crate::backend::attachment_keys::RawAttachmentKeyStore::new(&secrets),
+            &files,
+            "v",
+            "attachments/s/f",
+            None,
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("is missing in vault 'v'"), "{err}");
     }
 
@@ -982,7 +953,7 @@ mod tests {
         let secrets = StubSecrets::new();
         let files = StubFiles::new();
         upload_encrypted(
-            &secrets,
+            &crate::backend::attachment_keys::RawAttachmentKeyStore::new(&secrets),
             &files,
             "v",
             upload_req("attachments/s/f", b"payload"),
@@ -994,9 +965,15 @@ mod tests {
         let other = age::x25519::Identity::generate();
         secrets.put(ATTACHMENT_KEY_SECRET, other.to_string().expose_secret());
         // The blob still decrypts because its metadata pins the prior version.
-        let out = download_decrypted(&secrets, &files, "v", "attachments/s/f", None)
-            .await
-            .unwrap();
+        let out = download_decrypted(
+            &crate::backend::attachment_keys::RawAttachmentKeyStore::new(&secrets),
+            &files,
+            "v",
+            "attachments/s/f",
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(out.as_slice(), b"payload");
     }
 
@@ -1016,9 +993,15 @@ mod tests {
             )
             .await
             .unwrap();
-        let err = download_decrypted(&secrets, &files, "v", "attachments/s/leak.txt", None)
-            .await
-            .unwrap_err();
+        let err = download_decrypted(
+            &crate::backend::attachment_keys::RawAttachmentKeyStore::new(&secrets),
+            &files,
+            "v",
+            "attachments/s/leak.txt",
+            None,
+        )
+        .await
+        .unwrap_err();
         assert!(
             err.to_string()
                 .contains("refusing to return it as plaintext"),
@@ -1040,7 +1023,7 @@ mod tests {
         let v1 = age::x25519::Identity::generate();
         secrets.put(ATTACHMENT_KEY_SECRET, v1.to_string().expose_secret());
         upload_encrypted(
-            &secrets,
+            &crate::backend::attachment_keys::RawAttachmentKeyStore::new(&secrets),
             &files,
             "v",
             upload_req("attachments/s/f", b"x"),
@@ -1057,9 +1040,15 @@ mod tests {
             );
             meta.insert(META_KEY_ID.to_string(), forged.as_str().to_string());
         }
-        let err = download_decrypted(&secrets, &files, "v", "attachments/s/f", None)
-            .await
-            .unwrap_err();
+        let err = download_decrypted(
+            &crate::backend::attachment_keys::RawAttachmentKeyStore::new(&secrets),
+            &files,
+            "v",
+            "attachments/s/f",
+            None,
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("mismatch"), "{err}");
     }
 
@@ -1072,7 +1061,7 @@ mod tests {
         let files = StubFiles::new();
         // V2 init produces a real private identity behind the pointer.
         upload_encrypted(
-            &secrets,
+            &crate::backend::attachment_keys::RawAttachmentKeyStore::new(&secrets),
             &files,
             "v",
             upload_req("attachments/s/f", b"x"),
@@ -1096,7 +1085,7 @@ mod tests {
         let v1 = age::x25519::Identity::generate();
         secrets2.put(ATTACHMENT_KEY_SECRET, v1.to_string().expose_secret());
         upload_encrypted(
-            &secrets2,
+            &crate::backend::attachment_keys::RawAttachmentKeyStore::new(&secrets2),
             &files2,
             "v",
             upload_req("attachments/s/f", b"x"),
@@ -1112,17 +1101,29 @@ mod tests {
                 AttachmentKeyId::derive("age1zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz");
             meta.insert(META_KEY_ID.to_string(), forged.as_str().to_string());
         }
-        let mismatch = download_decrypted(&secrets2, &files2, "v", "attachments/s/f", None)
-            .await
-            .unwrap_err()
-            .to_string();
+        let mismatch = download_decrypted(
+            &crate::backend::attachment_keys::RawAttachmentKeyStore::new(&secrets2),
+            &files2,
+            "v",
+            "attachments/s/f",
+            None,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
 
         // Missing-generation error path.
         secrets.secrets.lock().unwrap().clear();
-        let missing = download_decrypted(&secrets, &files, "v", "attachments/s/f", None)
-            .await
-            .unwrap_err()
-            .to_string();
+        let missing = download_decrypted(
+            &crate::backend::attachment_keys::RawAttachmentKeyStore::new(&secrets),
+            &files,
+            "v",
+            "attachments/s/f",
+            None,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
 
         for err in [&mismatch, &missing] {
             assert!(!err.contains("AGE-SECRET-KEY"), "leaked key marker: {err}");
@@ -1150,7 +1151,7 @@ mod tests {
         let v1 = age::x25519::Identity::generate();
         secrets.put(ATTACHMENT_KEY_SECRET, v1.to_string().expose_secret());
         upload_encrypted(
-            &secrets,
+            &crate::backend::attachment_keys::RawAttachmentKeyStore::new(&secrets),
             &files,
             "v",
             upload_req("attachments/s/f", b"x"),
@@ -1191,7 +1192,7 @@ mod tests {
         let secrets = StubSecrets::new();
         let files = StubFiles::new();
         upload_encrypted(
-            &secrets,
+            &crate::backend::attachment_keys::RawAttachmentKeyStore::new(&secrets),
             &files,
             "v",
             upload_req("attachments/s/f", b"x"),
@@ -1244,7 +1245,7 @@ mod tests {
         let files = StubFiles::new();
         let plaintext = b"top secret bytes";
         upload_encrypted(
-            &secrets,
+            &crate::backend::attachment_keys::RawAttachmentKeyStore::new(&secrets),
             &files,
             "v",
             upload_req("attachments/s/f", plaintext),
@@ -1252,9 +1253,15 @@ mod tests {
         )
         .await
         .unwrap();
-        let out = download_decrypted(&secrets, &files, "v", "attachments/s/f", None)
-            .await
-            .unwrap();
+        let out = download_decrypted(
+            &crate::backend::attachment_keys::RawAttachmentKeyStore::new(&secrets),
+            &files,
+            "v",
+            "attachments/s/f",
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(out.as_slice(), plaintext);
     }
 
@@ -1275,12 +1282,24 @@ mod tests {
 
         // A commits its generation and publishes the pointer.
         let mut gen_a = || Zeroizing::new(raw_a.clone());
-        let mat_a = initialize_v2(&secrets, "v", &mut gen_a).await.unwrap();
+        let mat_a = initialize_v2(
+            &crate::backend::attachment_keys::RawAttachmentKeyStore::new(&secrets),
+            "v",
+            &mut gen_a,
+        )
+        .await
+        .unwrap();
         upload_with_material(&files, "v", "attachments/s/a", b"aaa", &mat_a).await;
 
         // B commits a different generation and re-publishes the pointer last.
         let mut gen_b = || Zeroizing::new(raw_b.clone());
-        let mat_b = initialize_v2(&secrets, "v", &mut gen_b).await.unwrap();
+        let mat_b = initialize_v2(
+            &crate::backend::attachment_keys::RawAttachmentKeyStore::new(&secrets),
+            "v",
+            &mut gen_b,
+        )
+        .await
+        .unwrap();
         upload_with_material(&files, "v", "attachments/s/b", b"bbb", &mat_b).await;
 
         assert_ne!(
@@ -1291,12 +1310,24 @@ mod tests {
 
         // Both blobs decrypt through their own pinned key, though the pointer
         // now names B.
-        let out_a = download_decrypted(&secrets, &files, "v", "attachments/s/a", None)
-            .await
-            .unwrap();
-        let out_b = download_decrypted(&secrets, &files, "v", "attachments/s/b", None)
-            .await
-            .unwrap();
+        let out_a = download_decrypted(
+            &crate::backend::attachment_keys::RawAttachmentKeyStore::new(&secrets),
+            &files,
+            "v",
+            "attachments/s/a",
+            None,
+        )
+        .await
+        .unwrap();
+        let out_b = download_decrypted(
+            &crate::backend::attachment_keys::RawAttachmentKeyStore::new(&secrets),
+            &files,
+            "v",
+            "attachments/s/b",
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(out_a.as_slice(), b"aaa");
         assert_eq!(out_b.as_slice(), b"bbb");
     }
@@ -1320,7 +1351,13 @@ mod tests {
         // A generator that always yields the colliding candidate can never make
         // progress, so init must give up rather than touch the user secret.
         let mut gen = || Zeroizing::new(raw.clone());
-        let err = match initialize_v2(&secrets, "v", &mut gen).await {
+        let err = match initialize_v2(
+            &crate::backend::attachment_keys::RawAttachmentKeyStore::new(&secrets),
+            "v",
+            &mut gen,
+        )
+        .await
+        {
             Ok(_) => panic!("init must not succeed over an unmarked collision"),
             Err(e) => e,
         };
@@ -1344,9 +1381,15 @@ mod tests {
             "attachments/db/key.pem",
             "attachments/other/f.txt",
         ] {
-            upload_encrypted(&secrets, &files, "v", upload_req(name, b"x"), None)
-                .await
-                .unwrap();
+            upload_encrypted(
+                &crate::backend::attachment_keys::RawAttachmentKeyStore::new(&secrets),
+                &files,
+                "v",
+                upload_req(name, b"x"),
+                None,
+            )
+            .await
+            .unwrap();
         }
         files
             .upload_file("v", upload_req("normal.txt", b"y"), None)
@@ -1427,21 +1470,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_or_create_generates_once_and_reuses() {
-        let stub = StubSecrets::new();
-        let id1 = get_or_create_identity(&stub, "v").await.unwrap();
-        let id2 = get_or_create_identity(&stub, "v").await.unwrap();
-        assert_eq!(*stub.set_count.lock().unwrap(), 1, "second call must reuse");
-        assert_eq!(id1.to_public().to_string(), id2.to_public().to_string());
-        // Stored value is a valid age identity string.
-        let stored = stub.latest(ATTACHMENT_KEY_SECRET).unwrap();
-        assert!(stored.starts_with("AGE-SECRET-KEY-1"), "{stored}");
-    }
-
-    #[tokio::test]
     async fn get_identity_missing_key_is_actionable() {
         let stub = StubSecrets::new();
-        match get_identity(&stub, "prod").await {
+        match get_identity(
+            &crate::backend::attachment_keys::RawAttachmentKeyStore::new(&stub),
+            "prod",
+        )
+        .await
+        {
             Err(err) => {
                 let msg = err.to_string();
                 assert!(
@@ -1457,6 +1493,11 @@ mod tests {
     async fn get_identity_garbage_value_is_an_error() {
         let stub = StubSecrets::new();
         stub.put(ATTACHMENT_KEY_SECRET, "not-a-key");
-        assert!(get_identity(&stub, "v").await.is_err());
+        assert!(get_identity(
+            &crate::backend::attachment_keys::RawAttachmentKeyStore::new(&stub),
+            "v"
+        )
+        .await
+        .is_err());
     }
 }

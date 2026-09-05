@@ -5,8 +5,8 @@ standalone confidential uploads — on every backend that has file storage
 (Azure Blob, AWS S3, local).
 
 Storage-layer access alone is not enough to read plaintext: the age identity
-lives in the vault's secret store as the reserved secret `xv-attachment-key`,
-so attachment access is gated by vault permissions.
+lives in reserved key records in the vault's secret store, so attachment access
+is gated by vault permissions and, when enabled, agent policy.
 
 Requires the `file-ops` feature (on by default in release builds).
 
@@ -40,10 +40,10 @@ missing name fails early rather than creating an orphan blob.
 |-------|----------|
 | Key | An age x25519 identity per vault. A new vault initializes a **V2 key ring** on first attach / `--encrypt`: the private identity lives in an immutable, marked record `xv-attachment-key-ak1-<hash>`, and the reserved `xv-attachment-key` secret holds a non-secret pointer to the active key. Existing vaults created before V2 keep a raw identity directly in `xv-attachment-key` (V1) and continue to work. |
 | Ciphertext location | Ordinary file storage under `attachments/<secret-name>/<filename>`. Association is the naming convention — no secret tags are consumed. |
-| Metadata | Uploaded blobs carry the reserved crypto metadata `xv_encrypted=age`, `xv_crypto_schema=1`, `xv_key_id=ak1-<hash>`, `xv_key_version=<exact provider version>`, and `xv_key_slot=legacy`. Underscore keys are required: Azure Blob rejects hyphenated metadata keys. These five keys are owned by the encryption path — any caller-supplied value for them is overwritten. |
+| Metadata | Uploaded blobs carry the reserved crypto metadata `xv_encrypted=age`, `xv_crypto_schema=1`, `xv_key_id=ak1-<hash>`, `xv_key_version=<exact provider version>`, and `xv_key_slot=legacy` (V1) or `retained` (V2). Underscore keys are required: Azure Blob rejects hyphenated metadata keys. These five keys are owned by the encryption path — any caller-supplied value for them is overwritten. |
 | Key ID | `ak1-` + SHA-256 of a domain tag and the public age recipient. Portable and backend-independent; identifies the exact key that encrypted a blob. |
 | Version pinning | Each blob records the **exact provider version** of the key record it was encrypted with. Downloads read that exact version and re-derive its key ID to verify it before decrypting, so replacing or rotating the current attachment key does **not** make existing attachments unreadable. |
-| Listings | `xv list` / `xv ls` hide `xv-attachment-key`. Treat it as infrastructure, not a user secret. |
+| Listings | Generic listings hide `xv-attachment-key` and marked retained key records. Unmarked strict-name collisions remain visible as user secrets. |
 | Download | `xv attachments --get` and `xv file download` classify each object before returning bytes: a managed attachment (under `attachments/` or flagged `xv_encrypted=age`) whose bytes are **not** age ciphertext fails closed rather than returning plaintext; a schema-1 blob is decrypted only through its pinned key version after ID verification, and a missing/malformed key reference is an error — never a silent fall back to another key. Unflagged / foreign `.age` files pass through untouched. |
 
 On the local backend, files are already age-encrypted at rest; attachments
@@ -88,10 +88,12 @@ Quick aliases `xv upload` / `xv download` do not expose `--encrypt`; use
 confirmation prompt includes the count (`Delete secret 'X' and its N
 attachment(s)?`), then removes those blobs after the secret delete commits.
 
-Deleting `xv-attachment-key` itself prompts that **all** attachments in the
-vault become permanently unreadable. Group deletes refuse the reserved key
-silently skipping it with a warning — use the single-secret form if you
-really mean to destroy the key.
+Generic secret commands refuse mutations of `xv-attachment-key` and every
+strict-format retained key-record name, including provider-equivalent alias
+spellings. `--force` cannot override this protection. The same boundary applies
+to Web edits and folder moves, imports, and migration targets. Generic opaque
+backup restore is disabled because its destination cannot be checked before
+provider mutation. Key recovery and retirement commands remain future work.
 
 ### Sync skips ciphertext
 
@@ -117,6 +119,17 @@ ciphertext between backends. If the target vault already has its own
 `xv-attachment-key`, migrate **preserves** that key rather than overwriting it
 (even under `--force-replace`) — overwriting would brick existing attachments
 on the target.
+
+## Agent policy
+
+With agent enforcement enabled, attachment key reads and writes use the same
+policy and decision logging as secret operations. Policies must authorize
+`get` on the pointer and referenced retained records; first use also needs
+`set`. Reads that return key material require `raw_disclosure = true`, including
+internal reads for encryption/decryption. No raw provider handle bypasses those
+checks. Decision records contain resource names and outcomes, never private
+keys or file contents. File operations themselves are not yet covered by the
+secret policy; see [agent identity and policy](agent-identity.md).
 
 ## Web UI
 

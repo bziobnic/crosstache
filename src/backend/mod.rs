@@ -16,6 +16,7 @@
 //! [`BackendRegistry`] for runtime backend resolution.
 
 pub mod addressing;
+pub mod attachment_keys;
 pub mod audit;
 #[cfg(feature = "aws")]
 pub mod aws;
@@ -252,10 +253,9 @@ pub trait Backend: Send + Sync {
 
     /// Access to secret operations (required — every backend manages secrets).
     ///
-    /// This is the RAW handle: it performs no reserved-resource guarding. The
-    /// attachment-key custody path uses it directly (it legitimately reads and
-    /// writes the reserved key records). Generic callers should prefer
-    /// [`Backend::guarded_secrets`], which enforces the custody boundary.
+    /// Registry backends always return the guarded generic facade. Concrete
+    /// provider implementations supply raw operations only to internal wrappers.
+    /// Attachment encryption uses [`Backend::attachment_keys`] instead.
     fn secrets(&self) -> &dyn SecretBackend;
 
     /// Access to secret operations through the generic custody guard
@@ -263,11 +263,16 @@ pub trait Backend: Send + Sync {
     /// before provider I/O, `restore_from_backup` is disabled, and the active
     /// pointer plus marked key records are hidden from listings (design §8).
     ///
-    /// Generic secret CRUD (CLI/Web/import/migration) should route through this
-    /// rather than [`Backend::secrets`]. It borrows the raw handle, so it costs
-    /// nothing beyond the wrapper.
+    /// An explicit borrowed guard for callers outside registry construction.
+    /// Registry `secrets()` handles already enforce this boundary.
     fn guarded_secrets(&self) -> guard::GuardedSecretBackend<'_> {
         guard::GuardedSecretBackend::new(self.secrets())
+    }
+
+    /// Restricted attachment custody operations. Generic secret commands must
+    /// use `secrets()`; this interface cannot access ordinary secrets.
+    fn attachment_keys(&self) -> Box<dyn attachment_keys::AttachmentKeyStore + '_> {
+        Box::new(attachment_keys::RawAttachmentKeyStore::new(self.secrets()))
     }
 
     /// Access to vault/namespace operations (optional).
