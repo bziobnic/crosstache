@@ -39,3 +39,6 @@ spikes/
 # Clean-room integration-test state and credentials — machine-specific
 .cleanroom/
 .cleanroom/azure.env
+
+# gjc (Gajae Code) session state
+.gjc/
