@@ -74,11 +74,14 @@ binding). Staged as PR 1 (integrity foundation) → PR 2 (lifecycle) → PR 3
   redacted decision/audit context before provider access, including when policy
   and guard wrappers are nested in either order. The unused legacy first-use
   upsert helper has been removed; existing legacy attachment reads remain.
+- Attachment downloads now consume a single-generation `download_file_snapshot`
+  (§11, I4). Local reads retain the file lock and directory handles across both
+  metadata and ciphertext; AWS reads one GetObject response; Azure pins every
+  download page to the properties ETag. Missing snapshot support is refused,
+  and cloud downloads reject oversized or truncated bodies.
 
 **PR 1 — still open:**
 
-- Single-generation `download_file_snapshot` for Local/AWS/Azure (§11, I4) — the
-  download path still reads content and metadata separately.
 - Durable journaled Local key-pair commit + crash recovery/fault injection (§12,
   I5).
 - Provider-specific generation commit (§13): the V2 protocol is implemented and

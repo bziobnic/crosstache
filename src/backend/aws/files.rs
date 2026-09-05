@@ -596,6 +596,7 @@ impl AwsFileBackend {
     /// Stream a file's contents to `writer`, enforcing the 5 GiB download
     /// cap. At most one body frame is buffered at a time. Returns the
     /// object's size in bytes.
+    #[allow(dead_code)] // Retained public byte-only API; attachment reads use snapshots.
     pub async fn download_file_to_writer<W: AsyncWrite + Unpin>(
         &self,
         vault: &str,
@@ -833,6 +834,61 @@ impl FileBackend for AwsFileBackend {
         self.download_file_to_writer(vault, name, &mut buf, reporter)
             .await?;
         Ok(buf)
+    }
+
+    async fn download_file_snapshot(
+        &self,
+        vault: &str,
+        name: &str,
+        reporter: Option<&dyn ProgressReporter>,
+    ) -> Result<crate::backend::file::FileDownloadSnapshot, BackendError> {
+        let key = validated_key(vault, name)?;
+        let null = NoopReporter;
+        let reporter = reporter.unwrap_or(&null);
+        // GetObject supplies metadata and bytes for one generation. No HEAD
+        // or independent tagging request can introduce a different version.
+        let out = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await
+            .map_err(|error| errors::from_s3_get_object(name, error))?;
+        let length = out
+            .content_length()
+            .and_then(|n| u64::try_from(n).ok())
+            .ok_or_else(|| {
+                BackendError::Network("S3 snapshot has no valid content length".into())
+            })?;
+        validate_download_size(length, MAX_DOWNLOAD_SIZE_BYTES)?;
+        reporter.set_total(length);
+        let metadata = out.metadata().cloned().unwrap_or_default();
+        let mut content = Vec::new();
+        let mut body = out.body;
+        while let Some(bytes) = body
+            .try_next()
+            .await
+            .map_err(|error| BackendError::Network(format!("S3 snapshot body: {error}")))?
+        {
+            let next = (content.len() as u64)
+                .checked_add(bytes.len() as u64)
+                .ok_or_else(|| BackendError::Network("S3 snapshot size overflow".into()))?;
+            if next > length || next > MAX_DOWNLOAD_SIZE_BYTES {
+                return Err(BackendError::Network(
+                    "S3 snapshot exceeds declared length".into(),
+                ));
+            }
+            content.extend_from_slice(&bytes);
+            reporter.advance(bytes.len() as u64);
+        }
+        if content.len() as u64 != length {
+            return Err(BackendError::Network(
+                "S3 snapshot body was truncated".into(),
+            ));
+        }
+        reporter.finish_clear();
+        Ok(crate::backend::file::FileDownloadSnapshot { content, metadata })
     }
 
     async fn list_files(
@@ -1244,3 +1300,7 @@ mod tests {
         assert_eq!(chunks[2], &data[200..]);
     }
 }
+
+#[cfg(test)]
+#[path = "files_snapshot_tests.rs"]
+mod snapshot_tests;

@@ -855,6 +855,24 @@ pub(crate) mod stub {
                 })
         }
 
+        async fn download_file_snapshot(
+            &self,
+            _vault: &str,
+            name: &str,
+            _reporter: Option<&dyn crate::utils::progress::ProgressReporter>,
+        ) -> Result<crate::backend::file::FileDownloadSnapshot, BackendError> {
+            self.download_file_calls.fetch_add(1, Ordering::SeqCst);
+            let files = self.files.lock().unwrap();
+            let (content, _, metadata) = files.get(name).ok_or_else(|| BackendError::NotFound {
+                name: name.into(),
+                suggestion: None,
+            })?;
+            Ok(crate::backend::file::FileDownloadSnapshot {
+                content: content.clone(),
+                metadata: metadata.clone(),
+            })
+        }
+
         async fn list_files(
             &self,
             _vault: &str,

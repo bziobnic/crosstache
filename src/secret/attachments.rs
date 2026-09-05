@@ -432,20 +432,11 @@ pub async fn download_decrypted(
 ) -> Result<Vec<u8>> {
     use attachment_key::DownloadPlan;
 
-    let data = files
-        .download_file(vault, name, reporter)
-        .await
-        .map_err(CrosstacheError::from)?;
-    // NOTE: content and metadata are still read separately here; a single
-    // provider-generation `download_file_snapshot` (design §11, invariant I4)
-    // is a later slice. The classification *order* below is applied now.
-    let info = files
-        .get_file_info(vault, name)
-        .await
-        .map_err(CrosstacheError::from)?;
+    let snapshot = files.download_file_snapshot(vault, name, reporter).await?;
+    let data = snapshot.content;
     let is_age = crypto::is_age_encrypted(&data);
 
-    match attachment_key::classify_download(name, &info.metadata, is_age) {
+    match attachment_key::classify_download(name, &snapshot.metadata, is_age) {
         DownloadPlan::Passthrough => Ok(data),
         DownloadPlan::FailClosedNonCiphertext => Err(CrosstacheError::invalid_argument(format!(
             "attachment '{name}' in vault '{vault}' is a managed attachment but its bytes are not \
@@ -706,6 +697,7 @@ mod tests {
     #[cfg(feature = "file-ops")]
     #[allow(clippy::type_complexity)]
     pub(super) struct StubFiles {
+        reject_split_reads: std::sync::atomic::AtomicBool,
         pub files: Mutex<HashMap<String, (Vec<u8>, HashMap<String, String>)>>,
     }
 
@@ -713,6 +705,7 @@ mod tests {
     impl StubFiles {
         pub fn new() -> Self {
             Self {
+                reject_split_reads: std::sync::atomic::AtomicBool::new(false),
                 files: Mutex::new(HashMap::new()),
             }
         }
@@ -759,6 +752,14 @@ mod tests {
             name: &str,
             _reporter: Option<&dyn ProgressReporter>,
         ) -> std::result::Result<Vec<u8>, BackendError> {
+            if self
+                .reject_split_reads
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(BackendError::Conflict(
+                    "separate body read is no longer this generation".into(),
+                ));
+            }
             self.files
                 .lock()
                 .unwrap()
@@ -768,6 +769,23 @@ mod tests {
                     name: name.to_string(),
                     suggestion: None,
                 })
+        }
+
+        async fn download_file_snapshot(
+            &self,
+            _vault: &str,
+            name: &str,
+            _reporter: Option<&dyn ProgressReporter>,
+        ) -> std::result::Result<crate::backend::file::FileDownloadSnapshot, BackendError> {
+            let files = self.files.lock().unwrap();
+            let (content, metadata) = files.get(name).ok_or_else(|| BackendError::NotFound {
+                name: name.into(),
+                suggestion: None,
+            })?;
+            Ok(crate::backend::file::FileDownloadSnapshot {
+                content: content.clone(),
+                metadata: metadata.clone(),
+            })
         }
 
         async fn list_files(
@@ -852,6 +870,30 @@ mod tests {
                 .unwrap();
         attachment_key::apply_crypto_metadata(&mut request.metadata, material.reference());
         files.upload_file(vault, request, None).await.unwrap();
+    }
+
+    #[cfg(feature = "file-ops")]
+    #[tokio::test]
+    async fn decrypt_uses_one_generation_instead_of_independent_body_and_metadata_reads() {
+        let secrets = StubSecrets::new();
+        let keys = crate::backend::attachment_keys::RawAttachmentKeyStore::new(&secrets);
+        let files = StubFiles::new();
+        upload_encrypted(
+            &keys,
+            &files,
+            "v",
+            upload_req("attachments/db/cert", b"certificate"),
+            None,
+        )
+        .await
+        .unwrap();
+        files
+            .reject_split_reads
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let bytes = download_decrypted(&keys, &files, "v", "attachments/db/cert", None)
+            .await
+            .unwrap();
+        assert_eq!(bytes, b"certificate");
     }
 
     #[cfg(feature = "file-ops")]

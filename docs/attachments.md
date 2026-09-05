@@ -46,6 +46,14 @@ missing name fails early rather than creating an orphan blob.
 | Listings | Generic listings hide `xv-attachment-key` and marked retained key records. Unmarked strict-name collisions remain visible as user secrets. |
 | Download | `xv attachments --get` and `xv file download` classify each object before returning bytes: a managed attachment (under `attachments/` or flagged `xv_encrypted=age`) whose bytes are **not** age ciphertext fails closed rather than returning plaintext; a schema-1 blob is decrypted only through its pinned key version after ID verification, and a missing/malformed key reference is an error — never a silent fall back to another key. Unflagged / foreign `.age` files pass through untouched. |
 
+Attachment classification reads file bytes and crypto metadata from the same
+committed generation. Local storage holds its file lock across both reads;
+S3 supplies both in one GetObject response; Azure conditions every download
+chunk on the original ETag. If an Azure blob changes during download, the
+operation fails instead of mixing generations. Cloud snapshots enforce the
+5 GiB transfer cap and reject incomplete responses. Third-party backends must
+implement consistent snapshots; there is no fallback to separate reads.
+
 On the local backend, files are already age-encrypted at rest; attachments
 still use the vault key so the same CLI and web paths work on every backend.
 
