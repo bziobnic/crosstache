@@ -80,15 +80,19 @@ binding). Staged as PR 1 (integrity foundation) → PR 2 (lifecycle) → PR 3
   download page to the properties ETag. Missing snapshot support is refused,
   and cloud downloads reject oversized or truncated bodies.
 
+- Retained key commits now use a dedicated custody operation: Local/AWS use
+  atomic create-only writes; Azure uses versioned Set and exact-version
+  verification. Racing create conflicts retry without overwriting the occupant.
+  Policy and audit enforcement cover commits as well as pointer publication.
+- Local key ciphertext/metadata pairs now use durable journaled transactions
+  for initial creation and pointer replacement. Reads recover interrupted writes
+  before returning data; retained history is preserved, and unexplained half-pairs
+  are refused. Fault-injection tests cover write and recovery interruptions.
+- Provider tests exercise concurrent AWS creates and Azure interleaved versioned
+  writes/readback using hermetic transport seams.
+
 **PR 1 — still open:**
 
-- Durable journaled Local key-pair commit + crash recovery/fault injection (§12,
-  I5).
-- Provider-specific generation commit (§13): the V2 protocol is implemented and
-  verified against the `SecretBackend` trait (in-memory), but Local/AWS still
-  need create-only records and Azure needs its versioned Set path exercised
-  against real provider request/response seams, with barrier-based concurrency
-  tests per provider.
 - Structured error variants (§20).
 
 **PR 2 / PR 3:** status/inventory, offline V1→V2 upgrade, encrypted

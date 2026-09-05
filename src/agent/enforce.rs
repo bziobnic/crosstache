@@ -253,6 +253,22 @@ impl crate::backend::attachment_keys::AttachmentKeyStore for &PolicyEnforcedBack
             })
             .await
     }
+    async fn commit_retained_key(
+        &self,
+        vault: &str,
+        request: SecretRequest,
+    ) -> Result<SecretProperties, BackendError> {
+        crate::backend::attachment_keys::validate_retained_request(&request)?;
+        let context = self.authorize(vault, &request.name, Operation::Set, false)?;
+        AUDIT_CONTEXT
+            .scope(context, async {
+                self.inner
+                    .attachment_keys()
+                    .commit_retained_key(vault, request)
+                    .await
+            })
+            .await
+    }
     async fn set_secret(
         &self,
         vault: &str,
@@ -799,13 +815,21 @@ mod tests {
             note: None,
             folder: None,
         };
+        let mut retained_request = request.clone();
+        retained_request.name = format!("xv-attachment-key-ak1-{}", "a".repeat(64));
+        retained_request.content_type =
+            Some(crate::secret::attachment_key::KEY_RECORD_CONTENT_TYPE.into());
+        assert!(matches!(
+            keys.commit_retained_key("prod", retained_request).await,
+            Err(BackendError::PermissionDenied(_))
+        ));
         assert!(matches!(
             keys.set_secret("prod", request).await,
             Err(BackendError::PermissionDenied(_))
         ));
         assert_eq!(inner.calls.load(Ordering::SeqCst), 0);
         let log = std::fs::read_to_string(path).unwrap();
-        assert_eq!(log.lines().count(), 4);
+        assert_eq!(log.lines().count(), 5);
         assert!(!log.contains("DO-NOT-LOG-KEY"));
     }
 

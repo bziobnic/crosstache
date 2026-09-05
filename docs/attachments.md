@@ -54,6 +54,18 @@ operation fails instead of mixing generations. Cloud snapshots enforce the
 5 GiB transfer cap and reject incomplete responses. Third-party backends must
 implement consistent snapshots; there is no fallback to separate reads.
 
+New retained keys are committed before the active pointer is published. Local
+and AWS create the retained record only if its name is absent; a concurrent
+collision is retried without overwriting that record. Azure Set returns a new
+provider version. Initialization reads back the exact committed version and
+verifies its key ID before using it for encryption.
+
+Local key records and pointer updates journal their encrypted value/metadata
+pair. An interrupted write is recovered under the vault lock before a read or
+mutation proceeds. Existing unexplained half-pairs are refused; recovery does
+not guess which half is authoritative. Retained versions remain available for
+attachments that already reference them.
+
 On the local backend, files are already age-encrypted at rest; attachments
 still use the vault key so the same CLI and web paths work on every backend.
 
