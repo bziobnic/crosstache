@@ -64,6 +64,12 @@ the destination, including ciphertext verification, but performs no provider
 writes. Apply requires both --apply and --offline. Both modes use the existing
 backend/workspace resolver and policy-wrapped custody/file interfaces.
 
+An additional --repair-pointer flag explicitly permits replacing a malformed
+destination pointer with the bundle's verified bindings. Use it in preview and
+again when applying the repair. It does not authorize replacing a valid V1 or
+conflicting V2 pointer, bypassing provider/policy errors, or overwriting retained
+key collisions. No separate recover command is needed when restoring lost keys.
+
 JSON/YAML/human reports contain operation, outcome, source context, destination
 context, counts, key IDs, per-file outcomes, and source/destination version
 mappings. They never serialize private material or decrypted file contents.
@@ -146,10 +152,20 @@ Before any mutation, check every destination retained-key name. An unmarked
 collision, different identity, disabled key, or invalid existing record fails.
 An existing marked record with the expected identity is reusable after an exact
 version read. Destination pointers may be absent or already carry the identical
-V2 active/legacy bindings. Refuse a V1 pointer (upgrade it first), a conflicting
-healthy V2 ring, a malformed pointer, or conflicting known legacy binding; use
-the existing explicit recover workflow for pointer repair before retrying where
-necessary. This first restore operation never implicitly rotates a destination.
+V2 active/legacy bindings. Refuse a V1 pointer (upgrade it first) or any parsed
+V2 pointer with different active/legacy bindings, even if its keys are missing.
+This first restore operation never implicitly rotates a destination or changes
+a known legacy binding.
+
+A malformed pointer fails by default with guidance to preview using
+--repair-pointer. With that flag, accept the malformed pointer as a repair target
+and capture its exact preflight version and value privately. Classify a pointer
+as malformed only after a successful value read and parse failure; an omitted
+value or provider/policy failure is an error, not permission to repair. The
+validated bundle supplies the replacement bindings. Missing retained records
+are imported by restore before pointer publication, so repair remains possible
+when neither recover nor generic reserved-record mutation can help. Preview
+reports the planned pointer repair without exposing its original value.
 
 Preview reports records to create/reuse and files to rebind/already verified.
 New provider versions cannot be known in preview and are reported only after
@@ -173,10 +189,15 @@ commit; do not invent a preview mapping.
    ciphertext, expected metadata, and normal exact-key decryption. Report an
    unconfirmed write as failure. Repeating restore safely recognizes verified
    retained records and already rebound files.
-6. Recheck the destination pointer against its preflight state, then publish the
-   bundle's V2 active/legacy pointer after all file references are usable. Verify
-   its readback. An interruption leaves retained keys and independently readable
-   rebound files; a retry completes the remaining work without deleting keys.
+6. Recheck the destination pointer against its preflight state (absence, or exact
+   version and value), including an explicitly authorized malformed-pointer
+   repair. Any observed change aborts publication. Publish the bundle's V2
+   active/legacy pointer only after all retained keys and file references are
+   verified, then verify its readback. Skip publication if the pointer already
+   has the required bindings. An interruption leaves retained keys and
+   independently readable rebound files; a retry completes the remaining work
+   without deleting keys. Retrying after repair recognizes the valid matching
+   pointer even if --repair-pointer is still supplied.
 7. Run a final manifest/readability verification before reporting success.
 
 FileBackend currently has coherent snapshots but no portable conditional
@@ -214,6 +235,14 @@ Lifecycle tests: V1 raw identity, schema-1 legacy pins, V2 retained pins, distin
 active/legacy identities, unreferenced retained keys, historical references,
 missing/disabled keys, collision preflight with zero writes, unrelated destination
 managed files, preview with zero writes, and policy denial before mutation.
+
+Malformed-pointer recovery tests: remove the retained records and corrupt the
+pointer after creating a valid bundle. Default restore must refuse with zero
+writes; --repair-pointer preview must validate without mutation; explicit offline
+apply must import keys, rebind files, and finally publish a working pointer. Cover
+empty manifests, pointer drift before publication, interruption before/after
+publication, idempotent retry, denied/omitted pointer values, and continued refusal
+of valid V1 or conflicting parsed V2 pointers even with the repair flag.
 
 Cross-vault tests must use different source and destination version tokens. Copy
 the original ciphertext and metadata separately, restore, and prove ordinary
