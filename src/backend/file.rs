@@ -33,6 +33,16 @@ pub struct FileDownloadSnapshot {
 /// [`list_files_hierarchical`]: FileBackend::list_files_hierarchical
 #[async_trait]
 pub trait FileBackend: Send + Sync {
+    /// Read-only preparation of the exact metadata persisted at the destination.
+    /// Reject nonrepresentable inputs before any transfer mutation.
+    fn prepare_transfer_metadata(
+        &self,
+        _groups: &[String],
+        metadata: &std::collections::HashMap<String, String>,
+    ) -> Result<std::collections::HashMap<String, String>, BackendError> {
+        Ok(metadata.clone())
+    }
+
     /// Full metadata for offline restore. Unlike display-oriented info reads,
     /// errors reading tags must propagate; missing permissions are not empty tags.
     async fn get_file_restore_info(

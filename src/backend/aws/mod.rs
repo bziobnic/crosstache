@@ -383,12 +383,22 @@ fn canonical_transfer_endpoint(endpoint: &str) -> Result<String, BackendError> {
     if url.path().is_empty() {
         url.set_path("/");
     }
+    if url.host_str().is_some_and(|host| {
+        host.ends_with(".amazonaws.com")
+            || host.ends_with(".amazonaws.com.cn")
+            || host.ends_with(".api.aws")
+            || host.ends_with(".api.amazonwebservices.com.cn")
+    }) {
+        return Err(BackendError::Unsupported(
+            "unrecognized AWS service endpoint alias has unproven physical identity".into(),
+        ));
+    }
     Ok(url.to_string())
 }
 
 fn standard_transfer_endpoint(endpoint: &str, service: &str) -> Option<&'static str> {
     let url = url::Url::parse(endpoint).ok()?;
-    if url.scheme() != "https"
+    if !(url.scheme() == "https" || (service == "s3" && url.scheme() == "http"))
         || url.port().is_some()
         || url.path() != "/"
         || !url.username().is_empty()
@@ -405,10 +415,14 @@ fn standard_transfer_endpoint(endpoint: &str, service: &str) -> Option<&'static 
         (host.strip_suffix(".amazonaws.com")?, false)
     };
     let mut components = prefix.split('.');
-    if components.next()? != service {
+    let endpoint_service = components.next()?;
+    if endpoint_service != service && !(service == "s3" && endpoint_service == "s3-fips") {
         return None;
     }
-    let region = components.next();
+    let mut region = components.next();
+    if service == "s3" && region == Some("dualstack") {
+        region = components.next();
+    }
     if components.next().is_some() {
         return None;
     }

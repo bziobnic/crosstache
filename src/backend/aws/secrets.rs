@@ -18,6 +18,79 @@ fn preserves_request_tag(key: &str) -> bool {
     !key.starts_with("xv:") || key == TAG_MIGRATED_FROM || key == TAG_MIGRATED_AT
 }
 
+/// Single encoding shared by transfer preflight and the actual CreateSecret.
+fn request_tags(request: &SecretRequest) -> Vec<aws_sdk_secretsmanager::types::Tag> {
+    use super::metadata::{
+        encode_groups, TAG_CONTENT_TYPE, TAG_EXPIRES_AT, TAG_FOLDER, TAG_GROUPS, TAG_ORIGINAL_NAME,
+    };
+    use aws_sdk_secretsmanager::types::Tag;
+    let mut tags = vec![Tag::builder()
+        .key(TAG_ORIGINAL_NAME)
+        .value(&request.name)
+        .build()];
+    if let Some(groups) = &request.groups {
+        let encoded = encode_groups(groups);
+        if !encoded.is_empty() {
+            tags.push(Tag::builder().key(TAG_GROUPS).value(encoded).build());
+        }
+    }
+    if let Some(folder) = &request.folder {
+        tags.push(Tag::builder().key(TAG_FOLDER).value(folder).build());
+    }
+    if let Some(content_type) = &request.content_type {
+        tags.push(
+            Tag::builder()
+                .key(TAG_CONTENT_TYPE)
+                .value(content_type)
+                .build(),
+        );
+    }
+    if let Some(expiry) = &request.expires_on {
+        tags.push(
+            Tag::builder()
+                .key(TAG_EXPIRES_AT)
+                .value(expiry.to_rfc3339())
+                .build(),
+        );
+    }
+    if let Some(user_tags) = &request.tags {
+        tags.extend(
+            user_tags
+                .iter()
+                .filter(|(key, _)| preserves_request_tag(key))
+                .map(|(key, value)| Tag::builder().key(key).value(value).build()),
+        );
+    }
+    tags
+}
+
+fn validate_generated_transfer_tags(request: &SecretRequest) -> Result<(), BackendError> {
+    static CHARACTERS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    // Common AWS tag alphabet includes ':' used by existing xv:* tags and dates.
+    let allowed = CHARACTERS.get_or_init(|| {
+        regex::Regex::new(r"^[\p{L}\p{N}\p{Z}_.:/=+\-@]*$").expect("static tag character pattern")
+    });
+    let tags = request_tags(request);
+    if tags.len() > 50
+        || tags.iter().any(|tag| {
+            let key = tag.key().unwrap_or_default();
+            let value = tag.value().unwrap_or_default();
+            key.is_empty()
+                || key.chars().count() > 128
+                || value.chars().count() > 256
+                || key.to_ascii_lowercase().starts_with("aws:")
+                || !allowed.is_match(key)
+                || !allowed.is_match(value)
+        })
+    {
+        return Err(BackendError::InvalidArgument(
+            "AWS transfer generated tags violate provider character, prefix, or count limits"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 fn update_after_create_conflict(
     update_existing: bool,
     error: BackendError,
@@ -65,7 +138,6 @@ impl AwsSecretBackend {
             TAG_CONTENT_TYPE, TAG_EXPIRES_AT, TAG_FOLDER, TAG_GROUPS, TAG_ORIGINAL_NAME,
         };
         use aws_sdk_secretsmanager::types::Tag;
-
         // Step 1: Put new value as new version.
         let put_out = self
             .client
@@ -405,48 +477,11 @@ impl AwsSecretBackend {
         update_existing: bool,
     ) -> Result<SecretProperties, BackendError> {
         use crate::backend::aws::encoding::{aws_name, validate_full_secret_name};
-        use crate::backend::aws::metadata::{
-            TAG_CONTENT_TYPE, TAG_EXPIRES_AT, TAG_FOLDER, TAG_GROUPS, TAG_ORIGINAL_NAME,
-        };
-        use aws_sdk_secretsmanager::types::Tag;
 
         validate_full_secret_name(vault, &request.name)?;
         let aws_full_name = aws_name(vault, &request.name);
 
-        let mut tags: Vec<Tag> = Vec::new();
-        tags.push(
-            Tag::builder()
-                .key(TAG_ORIGINAL_NAME)
-                .value(&request.name)
-                .build(),
-        );
-        if let Some(ref groups) = request.groups {
-            let encoded = crate::backend::aws::metadata::encode_groups(groups);
-            if !encoded.is_empty() {
-                tags.push(Tag::builder().key(TAG_GROUPS).value(encoded).build());
-            }
-        }
-        if let Some(ref f) = request.folder {
-            tags.push(Tag::builder().key(TAG_FOLDER).value(f).build());
-        }
-        if let Some(ref ct) = request.content_type {
-            tags.push(Tag::builder().key(TAG_CONTENT_TYPE).value(ct).build());
-        }
-        if let Some(ref e) = request.expires_on {
-            tags.push(
-                Tag::builder()
-                    .key(TAG_EXPIRES_AT)
-                    .value(e.to_rfc3339())
-                    .build(),
-            );
-        }
-        if let Some(ref user_tags) = request.tags {
-            for (k, v) in user_tags {
-                if preserves_request_tag(k) {
-                    tags.push(Tag::builder().key(k).value(v).build());
-                }
-            }
-        }
+        let tags = request_tags(&request);
 
         let mut create_builder = self
             .client
@@ -501,6 +536,7 @@ impl SecretBackend for AwsSecretBackend {
         request: &SecretRequest,
     ) -> Result<(), BackendError> {
         super::encoding::validate_full_secret_name(vault, &request.name)?;
+        validate_generated_transfer_tags(request)?;
         // CreateSecret and Tag service constraints, including generated tags.
         // Reject rather than truncate; errors deliberately contain no values.
         if request.value.is_empty() || request.value.len() > 65_536 {

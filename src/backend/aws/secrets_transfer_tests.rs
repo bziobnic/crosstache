@@ -198,3 +198,65 @@ async fn aws_transfer_metadata_preflight_checks_provider_limits() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn aws_transfer_metadata_preflight_rejects_invalid_generated_tags_before_io() {
+    let backend = backend(false);
+    let base = SecretRequest {
+        name: "destination".into(),
+        value: zeroize::Zeroizing::new("value".into()),
+        content_type: None,
+        enabled: Some(true),
+        expires_on: None,
+        not_before: None,
+        tags: None,
+        groups: None,
+        note: None,
+        folder: None,
+    };
+    let mut cases = Vec::new();
+    for (key, value) in [
+        ("key", "a,b"),
+        ("aws:reserved", "value"),
+        ("AWS:reserved", "value"),
+        ("key!", "value"),
+    ] {
+        let mut request = base.clone();
+        request.tags = Some(HashMap::from([(key.into(), value.into())]));
+        cases.push(request);
+    }
+    let mut request = base.clone();
+    request.groups = Some(vec!["team!".into()]);
+    cases.push(request);
+    let mut request = base.clone();
+    request.content_type = Some("text/plain;charset=utf8".into());
+    cases.push(request);
+    let mut request = base.clone();
+    request.tags = Some(
+        (0..48)
+            .map(|i| (format!("key{i}"), "value".into()))
+            .collect(),
+    );
+    request.content_type = Some("text/plain".into());
+    request.expires_on = Some(chrono::Utc::now());
+    cases.push(request);
+    for request in cases {
+        assert!(
+            backend
+                .validate_transfer_metadata("prod", &request)
+                .await
+                .is_err(),
+            "accepted invalid generated AWS tags"
+        );
+    }
+    let mut valid = base;
+    valid.tags = Some(
+        (0..49)
+            .map(|i| (format!("key{i}"), "value".into()))
+            .collect(),
+    );
+    backend
+        .validate_transfer_metadata("prod", &valid)
+        .await
+        .unwrap();
+}

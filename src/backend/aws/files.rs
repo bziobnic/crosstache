@@ -938,6 +938,65 @@ fn ensure_folder_prefix(full_prefix: String, user_prefix: &str, delimiter: &str)
 
 #[async_trait]
 impl FileBackend for AwsFileBackend {
+    fn prepare_transfer_metadata(
+        &self,
+        groups: &[String],
+        metadata: &HashMap<String, String>,
+    ) -> Result<HashMap<String, String>, BackendError> {
+        let invalid = || {
+            BackendError::Unsupported(
+                "S3 transfer metadata cannot be represented losslessly within provider limits"
+                    .into(),
+            )
+        };
+        let mut prepared = metadata.clone();
+        let encoded = groups.join(",");
+        if groups.iter().any(|group| group.is_empty())
+            || (!groups.is_empty()
+                && encoded
+                    .split(',')
+                    .map(str::trim)
+                    .ne(groups.iter().map(String::as_str)))
+        {
+            return Err(invalid());
+        }
+        if let Some(existing) = prepared.get(METADATA_KEY_GROUPS) {
+            if existing
+                .split(',')
+                .map(str::trim)
+                .ne(groups.iter().map(String::as_str))
+            {
+                return Err(invalid());
+            }
+        } else if !groups.is_empty() {
+            prepared.insert(METADATA_KEY_GROUPS.into(), encoded);
+        }
+        // REST readback lowercases names and may omit control characters or
+        // MIME-encode non-ASCII values. Refuse changes to exact metadata evidence.
+        let mut bytes = 0usize;
+        for (key, value) in &prepared {
+            if key.is_empty()
+                || key.bytes().any(|b| {
+                    !(b.is_ascii_lowercase()
+                        || b.is_ascii_digit()
+                        || b"!#$%&'*+-.^_`|~".contains(&b))
+                })
+                || value.bytes().any(|b| !(0x20..=0x7e).contains(&b))
+                || value.trim() != value
+            {
+                return Err(invalid());
+            }
+            bytes = bytes
+                .checked_add(key.len())
+                .and_then(|n| n.checked_add(value.len()))
+                .ok_or_else(invalid)?;
+        }
+        if bytes > 2048 {
+            return Err(invalid());
+        }
+        Ok(prepared)
+    }
+
     fn validate_file_name(&self, name: &str) -> Result<(), BackendError> {
         validate_file_name(name)
     }
@@ -961,10 +1020,11 @@ impl FileBackend for AwsFileBackend {
                 .to_string()
         });
         let tagging = encode_tagging(&request.tags)?;
+        let metadata = self.prepare_transfer_metadata(&request.groups, &request.metadata)?;
         let output = self.client.put_object()
             .bucket(&self.bucket).key(key).if_none_match("*")
             .content_type(&content_type)
-            .set_metadata(Some(request.metadata.clone()))
+            .set_metadata(Some(metadata.clone()))
             .set_tagging(tagging)
             .body(ByteStream::from(request.content))
             .send().await.map_err(|error| {
@@ -984,7 +1044,7 @@ impl FileBackend for AwsFileBackend {
             last_modified: Utc::now(),
             etag: output.e_tag().unwrap_or_default().to_string(),
             groups: request.groups,
-            metadata: request.metadata,
+            metadata,
             tags: request.tags,
         })
     }

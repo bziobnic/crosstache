@@ -11,13 +11,46 @@ use std::sync::Mutex;
 struct ConditionalTransport {
     put_status: u16,
     puts: Mutex<usize>,
+    persisted_metadata: Mutex<HashMap<String, String>>,
 }
 #[derive(Clone, Debug)]
 struct TestClient(Arc<ConditionalTransport>);
 impl HttpConnector for TestClient {
     fn call(&self, request: HttpRequest) -> HttpConnectorFuture {
+        if request.method() == "HEAD" {
+            let mut response =
+                HttpResponse::new(StatusCode::try_from(200).unwrap(), Vec::<u8>::new().into());
+            response.headers_mut().insert("content-length", "10");
+            response
+                .headers_mut()
+                .insert("content-type", "application/x-ciphertext");
+            for (key, value) in self.0.persisted_metadata.lock().unwrap().iter() {
+                response
+                    .headers_mut()
+                    .insert(format!("x-amz-meta-{key}"), value.clone());
+            }
+            return HttpConnectorFuture::ready(Ok(response));
+        }
+        if request.method() == "GET" {
+            let body =
+                b"<Tagging><TagSet><Tag><Key>env</Key><Value>prod</Value></Tag></TagSet></Tagging>"
+                    .to_vec();
+            return HttpConnectorFuture::ready(Ok(HttpResponse::new(
+                StatusCode::try_from(200).unwrap(),
+                body.into(),
+            )));
+        }
         assert_eq!(request.method(), "PUT");
         *self.0.puts.lock().unwrap() += 1;
+        *self.0.persisted_metadata.lock().unwrap() = ["groups", "custom", "uploaded_at"]
+            .into_iter()
+            .filter_map(|key| {
+                request
+                    .headers()
+                    .get(format!("x-amz-meta-{key}"))
+                    .map(|value| (key.to_string(), value.to_string()))
+            })
+            .collect();
         assert_eq!(request.headers().get("if-none-match"), Some("*"));
         assert_eq!(
             request.headers().get("x-amz-meta-uploaded_at"),
@@ -53,6 +86,7 @@ fn backend(status: u16) -> (AwsFileBackend, Arc<ConditionalTransport>) {
     let transport = Arc::new(ConditionalTransport {
         put_status: status,
         puts: Mutex::new(0),
+        persisted_metadata: Mutex::new(HashMap::new()),
     });
     let config = aws_sdk_s3::Config::builder()
         .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
@@ -85,11 +119,16 @@ fn request() -> FileUploadRequest {
 async fn s3_conditional_create_preserves_request_and_sends_condition() {
     let (backend, transport) = backend(200);
     assert!(backend.supports_atomic_create());
-    let expected = request();
+    let mut expected = request();
+    expected.metadata.insert("groups".into(), "one".into());
     let info = backend
         .upload_file_if_absent("prod", request(), None)
         .await
         .unwrap();
+    let readback = backend.get_file_info("prod", "file").await.unwrap();
+    assert_eq!(readback.groups, expected.groups);
+    assert_eq!(readback.metadata, expected.metadata);
+    assert_eq!(readback.tags, expected.tags);
     assert_eq!(info.metadata, expected.metadata);
     assert_eq!(info.tags, expected.tags);
     assert_eq!(info.groups, expected.groups);
@@ -134,6 +173,63 @@ fn s3_transfer_namespace_normalizes_standard_endpoint_and_pins_custom_origin() {
     assert_eq!(default, explicit.transfer_namespace("prod").unwrap());
     let custom = explicit.with_service_endpoint(Some("https://s3.example.test/".into()));
     assert_ne!(default, custom.transfer_namespace("prod").unwrap());
+}
+
+#[test]
+fn s3_transfer_namespace_service_aliases_share_physical_identity() {
+    for endpoint in [
+        "https://s3.dualstack.us-east-1.amazonaws.com/",
+        "https://s3-fips.us-east-1.amazonaws.com/",
+        "https://s3-fips.dualstack.us-east-1.amazonaws.com/",
+        "http://s3.us-east-1.amazonaws.com/",
+    ] {
+        let (backend, _) = backend(200);
+        let expected = backend.transfer_namespace("prod").unwrap();
+        assert_eq!(
+            expected,
+            backend
+                .with_service_endpoint(Some(endpoint.into()))
+                .transfer_namespace("prod")
+                .unwrap(),
+            "{endpoint}"
+        );
+    }
+    let (backend, _) = backend(200);
+    assert!(backend
+        .with_service_endpoint(Some("https://unproven.s3.amazonaws.com/".into()))
+        .transfer_namespace("prod")
+        .is_err());
+}
+
+#[test]
+fn s3_transfer_metadata_preflight_rejects_loss_and_header_limits() {
+    let (backend, _) = backend(200);
+    assert_eq!(
+        backend
+            .prepare_transfer_metadata(&["infra".into()], &HashMap::new())
+            .unwrap()
+            .get("groups")
+            .map(String::as_str),
+        Some("infra")
+    );
+    for (groups, metadata) in [
+        (vec!["a,b".into()], HashMap::new()),
+        (vec![" a".into()], HashMap::new()),
+        (
+            vec!["infra".into()],
+            HashMap::from([("groups".into(), "other".into())]),
+        ),
+        (vec![], HashMap::from([("UPPER".into(), "value".into())])),
+        (vec![], HashMap::from([("custom".into(), "x".repeat(2048))])),
+        (
+            vec![],
+            HashMap::from([("custom".into(), "not\nroundtrip".into())]),
+        ),
+    ] {
+        assert!(backend
+            .prepare_transfer_metadata(&groups, &metadata)
+            .is_err());
+    }
 }
 
 #[test]
