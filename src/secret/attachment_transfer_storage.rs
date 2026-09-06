@@ -18,11 +18,37 @@ pub(super) struct Session {
     #[cfg(unix)]
     directory: File,
     #[cfg(unix)]
-    _lock: File,
+    _lock: RecoveryLock,
     #[cfg(windows)]
     windows: crate::utils::helpers::WindowsRecoveryDirectory,
     pub identity: age::x25519::Identity,
 }
+// flock ownership follows the open-file description, including transient fork
+// or dup copies. Closing only our File can leave a departed session's lock held.
+#[cfg(unix)]
+struct RecoveryLock {
+    file: File,
+}
+#[cfg(unix)]
+impl RecoveryLock {
+    fn acquire(file: File) -> Result<Self> {
+        file.try_lock_exclusive().map_err(|_| {
+            crate::error::CrosstacheError::conflict(
+                "Another attachment transfer recovery session is active",
+            )
+        })?;
+        // Install the guard immediately: subsequent constructor failures must
+        // unlock just as a successfully constructed Session does on drop.
+        Ok(Self { file })
+    }
+}
+#[cfg(unix)]
+impl Drop for RecoveryLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
+}
+
 #[cfg(unix)]
 fn private(meta: &std::fs::Metadata, directory: bool) -> Result<()> {
     if if directory {
@@ -130,11 +156,7 @@ impl Session {
                     .map_err(|_| invalid())?
             };
             private(&lock.metadata().map_err(|_| invalid())?, false)?;
-            lock.try_lock_exclusive().map_err(|_| {
-                crate::error::CrosstacheError::conflict(
-                    "Another attachment transfer recovery session is active",
-                )
-            })?;
+            let lock = RecoveryLock::acquire(lock)?;
             let directory = open_root(root)?;
             private(&directory.metadata().map_err(|_| invalid())?, true)?;
             let session = Self {
@@ -147,7 +169,7 @@ impl Session {
                 .open_child("lock", false)?
                 .metadata()
                 .map_err(|_| invalid())?;
-            let held_lock = session._lock.metadata().map_err(|_| invalid())?;
+            let held_lock = session._lock.file.metadata().map_err(|_| invalid())?;
             if anchored_lock.dev() != held_lock.dev() || anchored_lock.ino() != held_lock.ino() {
                 return Err(invalid());
             }
@@ -321,5 +343,54 @@ impl Session {
         {
             self.windows.names()
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod lock_tests {
+    use super::*;
+
+    #[test]
+    fn session_drop_releases_lock_with_a_duplicated_descriptor() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("recovery");
+        let session = Session::open(&root, true).unwrap();
+        // dup retains the same open-file description as a transient fork, without
+        // invoking fork in the multithreaded test runner.
+        let inherited = session._lock.file.try_clone().unwrap();
+        assert!(
+            Session::open(&root, false).is_err(),
+            "live session excludes another owner"
+        );
+        drop(session);
+        let next = Session::open(&root, false).expect("session drop releases its lock despite dup");
+        drop(inherited);
+        assert!(
+            Session::open(&root, false).is_err(),
+            "closing the old duplicate must not unlock the new owner"
+        );
+        drop(next);
+        Session::open(&root, false).unwrap();
+    }
+
+    #[test]
+    fn failed_setup_releases_acquired_lock_with_a_duplicated_descriptor() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("recovery");
+        drop(Session::open(&root, true).unwrap());
+        let file = File::open(root.join("lock")).unwrap();
+        let inherited = file.try_clone().unwrap();
+        let setup: Result<()> = (|| {
+            let _lock = RecoveryLock::acquire(file)?;
+            assert!(Session::open(&root, false).is_err());
+            // Model a failing directory/identity validation before the guard
+            // can be transferred into a successfully returned Session.
+            Err(invalid())
+        })();
+        assert!(setup.is_err());
+        let next = Session::open(&root, false).expect("failed setup releases its acquired lock");
+        drop(inherited);
+        assert!(Session::open(&root, false).is_err());
+        drop(next);
     }
 }
