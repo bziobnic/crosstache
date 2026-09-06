@@ -167,3 +167,51 @@ async fn azure_retained_key_interleaved_sets_preserve_exact_versions_over_http()
         .unwrap()
         .unwrap();
 }
+
+#[tokio::test]
+async fn azure_retained_key_missing_exact_version_maps_to_backend_not_found() {
+    let name = "xv-attachment-key-ak1-missing";
+    let version = "missing-version";
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let (line, _) = receive_request(&mut stream).await;
+        assert_eq!(
+            line,
+            format!("GET /secrets/{name}/{version}?api-version=7.4 HTTP/1.1")
+        );
+        let body =
+            r#"{"error":{"code":"SecretNotFound","message":"Secret version was not found"}}"#;
+        let header = format!(
+            "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(header.as_bytes()).await.unwrap();
+        stream.write_all(body.as_bytes()).await.unwrap();
+    });
+    let ops = AzureSecretOperations::new(Arc::new(
+        crate::auth::provider::DefaultAzureCredentialProvider::new().unwrap(),
+    ));
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let url = loopback_url(&ops, address, &["secrets", name, version]);
+    let error = get_secret_version_http(client.get(&url), &url, name, version, true)
+        .await
+        .unwrap_err();
+    let backend_error = crate::backend::azure::map_error(error);
+    assert!(
+        matches!(
+            &backend_error,
+            crate::backend::BackendError::NotFound { name: actual, suggestion: None } if actual == name
+        ),
+        "Expected missing version to preserve NotFound, got {backend_error:?}"
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(5), server)
+        .await
+        .unwrap()
+        .unwrap();
+}

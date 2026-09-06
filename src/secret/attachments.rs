@@ -17,7 +17,7 @@ use crate::backend::attachment_keys::AttachmentKeyStore;
 use crate::backend::error::BackendError;
 #[cfg(test)]
 use crate::backend::secret::SecretBackend;
-use crate::error::{CrosstacheError, Result};
+use crate::error::{AttachmentError, CrosstacheError, Result};
 #[cfg(feature = "file-ops")]
 use crate::secret::attachment_key::{
     self, AttachmentKeyId, AttachmentKeyMaterial, AttachmentKeyRef, KeySlot, PointerKind,
@@ -79,12 +79,11 @@ pub fn is_encrypted_attachment(
 
 /// Parse an age identity out of a stored secret value.
 #[allow(dead_code)] // Consumed by attachment CLI/encryption tasks (Tasks 2-4)
-fn parse_identity(value: &str, vault: &str) -> Result<age::x25519::Identity> {
-    value.trim().parse::<age::x25519::Identity>().map_err(|e| {
-        CrosstacheError::invalid_argument(format!(
-            "secret '{ATTACHMENT_KEY_SECRET}' in vault '{vault}' does not hold a valid age identity: {e}"
-        ))
-    })
+fn parse_identity(value: &str) -> Result<age::x25519::Identity> {
+    value
+        .trim()
+        .parse::<age::x25519::Identity>()
+        .map_err(|_| CrosstacheError::from(AttachmentError::KeyInvalid))
 }
 
 /// Fetch the vault's attachment identity. Errors (actionably) if absent.
@@ -95,16 +94,14 @@ pub async fn get_identity(
 ) -> Result<age::x25519::Identity> {
     match secrets.get_secret(vault, ATTACHMENT_KEY_SECRET, true).await {
         Ok(props) => {
-            let value = props.value.ok_or_else(|| {
-                CrosstacheError::invalid_argument(format!(
-                    "secret '{ATTACHMENT_KEY_SECRET}' in vault '{vault}' has no value"
-                ))
-            })?;
-            parse_identity(&value, vault)
+            let value = props
+                .value
+                .ok_or(CrosstacheError::from(AttachmentError::KeyInvalid))?;
+            parse_identity(&value)
         }
-        Err(BackendError::NotFound { .. }) => Err(CrosstacheError::invalid_argument(format!(
-            "attachment key not found in vault '{vault}' — no attachments have been created here, or the '{ATTACHMENT_KEY_SECRET}' secret was deleted"
-        ))),
+        Err(BackendError::NotFound { .. }) => {
+            Err(CrosstacheError::from(AttachmentError::KeyMissing))
+        }
         Err(e) => Err(e.into()),
     }
 }
@@ -138,21 +135,17 @@ async fn resolve_upload_material(
     match secrets.get_secret(vault, ATTACHMENT_KEY_SECRET, true).await {
         Ok(props) => {
             let version = props.version.clone();
-            let value = props.value.ok_or_else(|| {
-                CrosstacheError::invalid_argument(format!(
-                    "secret '{ATTACHMENT_KEY_SECRET}' in vault '{vault}' has no value"
-                ))
-            })?;
+            let value = props
+                .value
+                .ok_or(CrosstacheError::from(AttachmentError::PointerInvalid))?;
             match attachment_key::parse_pointer_value(&value) {
                 Some(PointerKind::V1RawIdentity) => {
-                    material_from_identity_value(KeySlot::Legacy, value, version, vault)
+                    material_from_identity_value(KeySlot::Legacy, value, version)
                 }
                 Some(PointerKind::V2 { active, .. }) => {
                     resolve_active_retained(secrets, vault, &active).await
                 }
-                None => Err(CrosstacheError::invalid_argument(format!(
-                    "attachment key pointer in vault '{vault}' is malformed; refusing to replace it"
-                ))),
+                None => Err(CrosstacheError::from(AttachmentError::PointerInvalid)),
             }
         }
         Err(BackendError::NotFound { .. }) => {
@@ -177,15 +170,9 @@ fn material_from_identity_value(
     slot: KeySlot,
     value: Zeroizing<String>,
     version: String,
-    vault: &str,
 ) -> Result<AttachmentKeyMaterial> {
-    AttachmentKeyMaterial::from_identity(slot, SecretVersion::new(version), value).ok_or_else(
-        || {
-            CrosstacheError::invalid_argument(format!(
-                "attachment key record in vault '{vault}' does not hold a valid age identity"
-            ))
-        },
-    )
+    AttachmentKeyMaterial::from_identity(slot, SecretVersion::new(version), value)
+        .ok_or(CrosstacheError::from(AttachmentError::KeyInvalid))
 }
 
 /// Read the current active retained record for `active_id` (value + version in
@@ -201,26 +188,16 @@ async fn resolve_active_retained(
         .get_secret(vault, &name, true)
         .await
         .map_err(|e| match e {
-            BackendError::NotFound { .. } => CrosstacheError::invalid_argument(format!(
-                "active attachment key '{}' is missing in vault '{vault}'",
-                active_id.as_str()
-            )),
+            BackendError::NotFound { .. } => CrosstacheError::from(AttachmentError::KeyMissing),
             other => other.into(),
         })?;
     let version = props.version.clone();
-    let value = props.value.ok_or_else(|| {
-        CrosstacheError::invalid_argument(format!(
-            "active attachment key '{}' in vault '{vault}' has no value",
-            active_id.as_str()
-        ))
-    })?;
-    let material = material_from_identity_value(KeySlot::Retained, value, version, vault)?;
+    let value = props
+        .value
+        .ok_or(CrosstacheError::from(AttachmentError::KeyInvalid))?;
+    let material = material_from_identity_value(KeySlot::Retained, value, version)?;
     if !material.verify_id(active_id) {
-        return Err(CrosstacheError::invalid_argument(format!(
-            "attachment key mismatch for '{}' in vault '{vault}': the stored record does not \
-             derive the active key ID",
-            active_id.as_str()
-        )));
+        return Err(CrosstacheError::from(AttachmentError::KeyMismatch));
     }
     Ok(material)
 }
@@ -248,13 +225,17 @@ async fn publish_v2_pointer(
     secrets.set_secret(vault, request).await?;
     let props = secrets
         .get_secret(vault, ATTACHMENT_KEY_SECRET, true)
-        .await?;
+        .await
+        .map_err(|error| match error {
+            BackendError::NotFound { .. } => {
+                CrosstacheError::from(AttachmentError::CommitUnconfirmed)
+            }
+            other => other.into(),
+        })?;
     let value = props.value.unwrap_or_default();
     match attachment_key::parse_pointer_value(&value) {
         Some(PointerKind::V2 { .. }) => Ok(()),
-        _ => Err(CrosstacheError::invalid_argument(format!(
-            "attachment key pointer publish in vault '{vault}' was not confirmed"
-        ))),
+        _ => Err(CrosstacheError::from(AttachmentError::CommitUnconfirmed)),
     }
 }
 
@@ -275,11 +256,7 @@ async fn initialize_v2(
         let parsed = candidate
             .trim()
             .parse::<age::x25519::Identity>()
-            .map_err(|e| {
-                CrosstacheError::invalid_argument(format!(
-                    "generated attachment key is invalid: {e}"
-                ))
-            })?;
+            .map_err(|_| CrosstacheError::from(AttachmentError::KeyInvalid))?;
         let key_id = AttachmentKeyId::derive(&parsed.to_public().to_string());
         let retained_name = attachment_key::retained_record_name(&key_id);
 
@@ -319,34 +296,31 @@ async fn initialize_v2(
                     Err(error) => return Err(error.into()),
                 };
                 if committed.version.is_empty() {
-                    return Err(CrosstacheError::invalid_argument(format!(
-                        "attachment key commit in vault '{vault}' returned no version"
-                    )));
+                    return Err(CrosstacheError::from(AttachmentError::KeyVersionInvalid));
                 }
                 // Re-read the exact committed version and verify the derived ID.
                 let reread = secrets
                     .get_secret_version(vault, &retained_name, &committed.version, true)
-                    .await?;
+                    .await
+                    .map_err(|error| match error {
+                        BackendError::NotFound { .. } => {
+                            CrosstacheError::from(AttachmentError::KeyMissing)
+                        }
+                        other => other.into(),
+                    })?;
                 if reread.version != committed.version {
-                    return Err(CrosstacheError::invalid_argument(format!(
-                        "attachment key commit in vault '{vault}' returned a different version on verification"
-                    )));
+                    return Err(CrosstacheError::from(AttachmentError::KeyVersionInvalid));
                 }
-                let value = reread.value.ok_or_else(|| {
-                    CrosstacheError::invalid_argument(format!(
-                        "attachment key record in vault '{vault}' has no value after commit"
-                    ))
-                })?;
+                let value = reread
+                    .value
+                    .ok_or(CrosstacheError::from(AttachmentError::KeyInvalid))?;
                 let material = material_from_identity_value(
                     KeySlot::Retained,
                     value,
                     committed.version.clone(),
-                    vault,
                 )?;
                 if !material.verify_id(&key_id) {
-                    return Err(CrosstacheError::invalid_argument(format!(
-                        "attachment key commit in vault '{vault}' did not verify"
-                    )));
+                    return Err(CrosstacheError::from(AttachmentError::KeyMismatch));
                 }
                 publish_v2_pointer(secrets, vault, &key_id).await?;
                 return Ok(material);
@@ -354,10 +328,9 @@ async fn initialize_v2(
             Err(e) => return Err(e.into()),
         }
     }
-    Err(CrosstacheError::invalid_argument(format!(
-        "could not initialize the attachment key ring in vault '{vault}' after \
-         {MAX_INIT_ATTEMPTS} attempts (persistent strict-name collisions)"
-    )))
+    Err(CrosstacheError::from(
+        AttachmentError::InitializationConflict,
+    ))
 }
 
 /// Resolve the key material a schema-1 blob references: read the exact provider
@@ -378,33 +351,17 @@ async fn resolve_referenced_material(
         .get_secret_version(vault, &record_name, key_ref.provider_version.as_str(), true)
         .await
         .map_err(|e| match e {
-            BackendError::NotFound { .. } => CrosstacheError::invalid_argument(format!(
-                "attachment key generation for '{}' is missing in vault '{vault}'; \
-                 the referenced key record/version no longer exists",
-                key_ref.key_id.as_str()
-            )),
+            BackendError::NotFound { .. } => CrosstacheError::from(AttachmentError::KeyMissing),
             other => other.into(),
         })?;
-    let value = props.value.ok_or_else(|| {
-        CrosstacheError::invalid_argument(format!(
-            "attachment key record for '{}' in vault '{vault}' has no value",
-            key_ref.key_id.as_str()
-        ))
-    })?;
+    let value = props
+        .value
+        .ok_or(CrosstacheError::from(AttachmentError::KeyInvalid))?;
     let material =
         AttachmentKeyMaterial::from_identity(key_ref.slot, key_ref.provider_version.clone(), value)
-            .ok_or_else(|| {
-                CrosstacheError::invalid_argument(format!(
-                    "attachment key record for '{}' in vault '{vault}' is not a valid identity",
-                    key_ref.key_id.as_str()
-                ))
-            })?;
+            .ok_or(CrosstacheError::from(AttachmentError::KeyInvalid))?;
     if !material.verify_id(&key_ref.key_id) {
-        return Err(CrosstacheError::invalid_argument(format!(
-            "attachment key mismatch for '{}' in vault '{vault}': the stored record does not \
-             derive the referenced key ID",
-            key_ref.key_id.as_str()
-        )));
+        return Err(CrosstacheError::from(AttachmentError::KeyMismatch));
     }
     Ok(material)
 }
@@ -443,24 +400,28 @@ pub async fn download_decrypted(
 ) -> Result<Vec<u8>> {
     use attachment_key::DownloadPlan;
 
-    let snapshot = files.download_file_snapshot(vault, name, reporter).await?;
+    let snapshot = files
+        .download_file_snapshot(vault, name, reporter)
+        .await
+        .map_err(|error| match error {
+            BackendError::Unsupported(_) => {
+                CrosstacheError::from(AttachmentError::SnapshotUnsupported)
+            }
+            other => other.into(),
+        })?;
     let data = snapshot.content;
     let is_age = crypto::is_age_encrypted(&data);
 
     match attachment_key::classify_download(name, &snapshot.metadata, is_age) {
         DownloadPlan::Passthrough => Ok(data),
-        DownloadPlan::FailClosedNonCiphertext => Err(CrosstacheError::invalid_argument(format!(
-            "attachment '{name}' in vault '{vault}' is a managed attachment but its bytes are not \
-             age ciphertext; refusing to return it as plaintext"
-        ))),
+        DownloadPlan::FailClosedNonCiphertext => {
+            Err(CrosstacheError::from(AttachmentError::NotCiphertext))
+        }
         DownloadPlan::LegacyNoSchema => {
             // Pre-schema V1 attachment: decrypt with the current V1 key.
             let identity = get_identity(secrets, vault).await?;
-            let plaintext = crypto::decrypt_bytes(&data, &identity).map_err(|e| {
-                CrosstacheError::invalid_argument(format!(
-                    "failed to decrypt '{name}' in vault '{vault}': wrong or rotated attachment key ({e})"
-                ))
-            })?;
+            let plaintext = crypto::decrypt_bytes(&data, &identity)
+                .map_err(|_| CrosstacheError::from(AttachmentError::DecryptionFailed))?;
             Ok(plaintext.to_vec())
         }
         DownloadPlan::Schema1 { key_ref } => {
@@ -468,23 +429,14 @@ pub async fn download_decrypted(
             let identity = material
                 .expose_identity()
                 .parse::<age::x25519::Identity>()
-                .map_err(|e| {
-                    CrosstacheError::invalid_argument(format!(
-                        "attachment key for '{name}' in vault '{vault}' is unusable: {e}"
-                    ))
-                })?;
-            let plaintext = crypto::decrypt_bytes(&data, &identity).map_err(|e| {
-                CrosstacheError::invalid_argument(format!(
-                    "failed to decrypt '{name}' in vault '{vault}': the pinned attachment key \
-                     could not decrypt this blob ({e})"
-                ))
-            })?;
+                .map_err(|_| CrosstacheError::from(AttachmentError::KeyInvalid))?;
+            let plaintext = crypto::decrypt_bytes(&data, &identity)
+                .map_err(|_| CrosstacheError::from(AttachmentError::DecryptionFailed))?;
             Ok(plaintext.to_vec())
         }
-        DownloadPlan::ReferenceInvalid => Err(CrosstacheError::invalid_argument(format!(
-            "attachment '{name}' in vault '{vault}' declares the schema-1 key envelope but its \
-             key reference is missing or malformed; refusing to fall back to another key"
-        ))),
+        DownloadPlan::ReferenceInvalid => {
+            Err(CrosstacheError::from(AttachmentError::ReferenceInvalid))
+        }
     }
 }
 
@@ -553,6 +505,8 @@ mod tests {
         pub set_count: Mutex<usize>,
         create_collision: Mutex<Option<(String, String)>>,
         read_version_override: Mutex<Option<String>>,
+        missing_version: bool,
+        missing_pointer: bool,
     }
 
     impl StubSecrets {
@@ -562,6 +516,8 @@ mod tests {
                 set_count: Mutex::new(0),
                 create_collision: Mutex::new(None),
                 read_version_override: Mutex::new(None),
+                missing_version: false,
+                missing_pointer: false,
             }
         }
 
@@ -654,6 +610,12 @@ mod tests {
             name: &str,
             include_value: bool,
         ) -> std::result::Result<SecretProperties, BackendError> {
+            if self.missing_pointer && name == ATTACHMENT_KEY_SECRET {
+                return Err(BackendError::NotFound {
+                    name: name.into(),
+                    suggestion: None,
+                });
+            }
             let map = self.secrets.lock().unwrap();
             match map.get(name) {
                 Some(v) if !v.is_empty() => {
@@ -680,6 +642,12 @@ mod tests {
             version: &str,
             include_value: bool,
         ) -> std::result::Result<SecretProperties, BackendError> {
+            if self.missing_version {
+                return Err(BackendError::NotFound {
+                    name: name.into(),
+                    suggestion: None,
+                });
+            }
             let map = self.secrets.lock().unwrap();
             let versions = map.get(name).ok_or_else(|| BackendError::NotFound {
                 name: name.to_string(),
@@ -739,6 +707,7 @@ mod tests {
     #[allow(clippy::type_complexity)]
     pub(super) struct StubFiles {
         reject_split_reads: std::sync::atomic::AtomicBool,
+        snapshot_failure: Mutex<Option<BackendError>>,
         pub files: Mutex<HashMap<String, (Vec<u8>, HashMap<String, String>)>>,
     }
 
@@ -747,6 +716,7 @@ mod tests {
         pub fn new() -> Self {
             Self {
                 reject_split_reads: std::sync::atomic::AtomicBool::new(false),
+                snapshot_failure: Mutex::new(None),
                 files: Mutex::new(HashMap::new()),
             }
         }
@@ -818,6 +788,9 @@ mod tests {
             name: &str,
             _reporter: Option<&dyn ProgressReporter>,
         ) -> std::result::Result<crate::backend::file::FileDownloadSnapshot, BackendError> {
+            if let Some(error) = self.snapshot_failure.lock().unwrap().take() {
+                return Err(error);
+            }
             let files = self.files.lock().unwrap();
             let (content, metadata) = files.get(name).ok_or_else(|| BackendError::NotFound {
                 name: name.into(),
@@ -1024,7 +997,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(err.to_string().contains("is missing in vault 'v'"), "{err}");
+        assert_eq!(err.code(), "xv-attachment-key-missing");
     }
 
     /// The race fix (design §4.1 / invariant I1): a schema-1 blob pins the exact
@@ -1132,7 +1105,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(err.to_string().contains("mismatch"), "{err}");
+        assert_eq!(err.code(), "xv-attachment-key-mismatch");
     }
 
     /// Error paths never leak private key material (design §22.1, invariant I9):
@@ -1444,7 +1417,7 @@ mod tests {
             Ok(_) => panic!("init must not succeed over an unmarked collision"),
             Err(e) => e,
         };
-        assert!(err.to_string().contains("could not initialize"), "{err}");
+        assert_eq!(err.code(), "xv-attachment-initialization-conflict");
 
         // The user secret is untouched: one unmarked version, original value.
         let versions = secrets.secrets.lock().unwrap();
@@ -1562,11 +1535,8 @@ mod tests {
         .await
         {
             Err(err) => {
-                let msg = err.to_string();
-                assert!(
-                    msg.contains("attachment key not found in vault 'prod'"),
-                    "{msg}"
-                );
+                assert_eq!(err.code(), "xv-attachment-key-missing");
+                assert_eq!(err.exit_code(), 2);
             }
             Ok(_) => panic!("expected error"),
         }
@@ -1638,10 +1608,118 @@ mod tests {
             },
         )
         .await;
-        assert!(
-            result.is_err(),
-            "a mismatched provider version must fail verification"
+        assert_eq!(
+            result.err().unwrap().code(),
+            "xv-attachment-key-version-invalid"
         );
         assert!(secrets.latest(ATTACHMENT_KEY_SECRET).is_none());
+    }
+    #[cfg(feature = "file-ops")]
+    #[tokio::test]
+    async fn structured_attachment_errors_distinguish_bad_reference_and_ciphertext() {
+        for (damage, expected) in [
+            ("reference", "xv-attachment-reference-invalid"),
+            ("ciphertext", "xv-attachment-decryption-failed"),
+        ] {
+            let secrets = StubSecrets::new();
+            let files = StubFiles::new();
+            let keys = crate::backend::attachment_keys::RawAttachmentKeyStore::new(&secrets);
+            upload_encrypted(
+                &keys,
+                &files,
+                "v",
+                upload_req("attachments/s/f", b"private-payload"),
+                None,
+            )
+            .await
+            .unwrap();
+            {
+                let mut stored = files.files.lock().unwrap();
+                let (bytes, metadata) = stored.get_mut("attachments/s/f").unwrap();
+                if damage == "reference" {
+                    metadata.remove(attachment_key::META_KEY_VERSION);
+                } else {
+                    bytes.truncate(b"age-encryption.org/v1\n".len());
+                }
+            }
+            let error = download_decrypted(&keys, &files, "v", "attachments/s/f", None)
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), expected);
+            assert!(!format!("{error:?}").contains("private-payload"));
+        }
+    }
+
+    #[cfg(feature = "file-ops")]
+    #[tokio::test]
+    async fn structured_attachment_pointer_failure_does_not_overwrite_record() {
+        let secrets = StubSecrets::new();
+        secrets.put(ATTACHMENT_KEY_SECRET, "untrusted-pointer-contents");
+        let keys = crate::backend::attachment_keys::RawAttachmentKeyStore::new(&secrets);
+        let error = resolve_upload_material(&keys, "v").await.err().unwrap();
+        assert_eq!(error.code(), "xv-attachment-pointer-invalid");
+        assert_eq!(*secrets.set_count.lock().unwrap(), 0);
+        assert!(!format!("{error:?}").contains("untrusted-pointer-contents"));
+    }
+    #[cfg(feature = "file-ops")]
+    #[tokio::test]
+    async fn structured_attachment_snapshot_errors_preserve_provider_failures() {
+        for (failure, code) in [
+            (
+                BackendError::Unsupported("snapshots".into()),
+                "xv-attachment-snapshot-unsupported",
+            ),
+            (
+                BackendError::PermissionDenied("denied".into()),
+                "xv-permission-denied",
+            ),
+            (BackendError::Network("offline".into()), "xv-network"),
+            (
+                BackendError::AuthenticationFailed("expired".into()),
+                "xv-auth-failed",
+            ),
+        ] {
+            let secrets = StubSecrets::new();
+            let files = StubFiles::new();
+            *files.snapshot_failure.lock().unwrap() = Some(failure);
+            let keys = crate::backend::attachment_keys::RawAttachmentKeyStore::new(&secrets);
+            let error = download_decrypted(&keys, &files, "v", "attachments/s/f", None)
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), code);
+            assert_eq!(*secrets.set_count.lock().unwrap(), 0);
+        }
+    }
+    #[cfg(feature = "file-ops")]
+    #[tokio::test]
+    async fn structured_attachment_commit_races_report_missing_key_or_unconfirmed_pointer() {
+        for missing_version in [true, false] {
+            let mut secrets = StubSecrets::new();
+            secrets.missing_version = missing_version;
+            secrets.missing_pointer = !missing_version;
+            let keys = crate::backend::attachment_keys::RawAttachmentKeyStore::new(&secrets);
+            let error = initialize_v2(&keys, "v", &mut || {
+                Zeroizing::new(
+                    age::x25519::Identity::generate()
+                        .to_string()
+                        .expose_secret()
+                        .to_string(),
+                )
+            })
+            .await
+            .err()
+            .unwrap();
+            assert_eq!(
+                error.code(),
+                if missing_version {
+                    "xv-attachment-key-missing"
+                } else {
+                    "xv-attachment-commit-unconfirmed"
+                }
+            );
+            if missing_version {
+                assert!(secrets.latest(ATTACHMENT_KEY_SECRET).is_none());
+            }
+        }
     }
 }

@@ -797,9 +797,7 @@ async fn get_secret_version_http(
     if !response.status().is_success() {
         let status = response.status();
         if status == 404 {
-            return Err(CrosstacheError::azure_api(format!(
-                "Secret version '{version}' not found for secret '{secret_name}'"
-            )));
+            return Err(CrosstacheError::secret_not_found(secret_name));
         }
         let error_text = read_error_body(response).await;
         return Err(CrosstacheError::azure_api(format!(

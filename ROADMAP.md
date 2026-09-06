@@ -23,7 +23,7 @@ Design: `2026-09-03-xv-race-free-attachment-key-lifecycle-design.md`
 binding). Staged as PR 1 (integrity foundation) → PR 2 (lifecycle) → PR 3
 (rewrap/retirement).
 
-**PR 1 — implemented on this branch (not yet merged):**
+**PR 1 — implemented (earlier chunks merged):**
 
 - `src/secret/attachment_key.rs`: portable `ak1-` key IDs derived from the
   public recipient (§7.1); reserved schema-1 crypto metadata that overwrites
@@ -91,9 +91,13 @@ binding). Staged as PR 1 (integrity foundation) → PR 2 (lifecycle) → PR 3
 - Provider tests exercise concurrent AWS creates and Azure interleaved versioned
   writes/readback using hermetic transport seams.
 
-**PR 1 — still open:**
+- Attachment domain failures use typed, data-free error variants (§20), stable
+  `xv-attachment-*` codes and safe recovery hints across CLI and Web. Existing
+  exit/status behavior is preserved; provider authentication and network errors
+  retain their own classifications. Azure missing exact versions remain typed
+  not-found failures before attachment classification.
 
-- Structured error variants (§20).
+**PR 1 scope is implemented on this branch; final review and merge remain.**
 
 **PR 2 / PR 3:** status/inventory, offline V1→V2 upgrade, encrypted
 export/import/recovery, rotation, rewrap, and logical retirement — none started.

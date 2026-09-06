@@ -567,7 +567,7 @@ async fn execute_file_upload(
     let threshold = progress_threshold_bytes(config);
     let tty = is_tty();
     if !tty {
-        println!("Uploading file '{file_path}' as '{remote_name}'...");
+        eprintln!("Uploading file '{file_path}' as '{remote_name}'...");
     }
     let reporter = progress::create_file_reporter(file_size, threshold, tty);
     reporter.set_message(format!("Uploading '{remote_name}'..."));
@@ -628,7 +628,7 @@ async fn execute_file_download_to_path(
     let threshold = progress_threshold_bytes(config);
     let tty = is_tty();
     if !tty {
-        println!("Downloading file '{name}' to '{output_path}'...");
+        eprintln!("Downloading file '{name}' to '{output_path}'...");
     }
     let file_size = if tty {
         blob_manager
