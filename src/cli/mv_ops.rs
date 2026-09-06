@@ -521,6 +521,11 @@ async fn execute_cross_vault_alias_mv(
         )));
     };
 
+    crate::backend::ensure_no_attachments(src_backend.as_ref(), &src_entry.vault, &found.name)
+        .await?;
+    crate::backend::ensure_no_attachments(dst_backend.as_ref(), &dst_entry.vault, &dest_name)
+        .await?;
+
     // Destination collision pre-check — before any mutation, mirroring
     // `execute_secret_mv`'s same-vault ordering. `xv mv` has no `--force`
     // anywhere (same-vault renames refuse collisions too), so cross-vault
@@ -661,6 +666,8 @@ async fn execute_secret_mv(
 
     if dest_name != src_name {
         validate_atomic_rename_backend(backend.as_ref())?;
+        crate::backend::ensure_no_attachments(backend.as_ref(), vault_name, &found.name).await?;
+        crate::backend::ensure_no_attachments(backend.as_ref(), vault_name, &dest_name).await?;
     }
 
     // Collision pre-check — before any mutation — only relevant when the
@@ -1347,6 +1354,8 @@ mod tests {
     struct PartialFailBackend {
         fail_name: String,
         calls: Mutex<Vec<String>>,
+        attached: bool,
+        atomic_rename: bool,
     }
 
     impl PartialFailBackend {
@@ -1354,16 +1363,28 @@ mod tests {
             Self {
                 fail_name: fail_name.to_string(),
                 calls: Mutex::new(Vec::new()),
+                attached: false,
+                atomic_rename: false,
             }
         }
 
         fn called_names(&self) -> Vec<String> {
             self.calls.lock().unwrap().clone()
         }
+
+        fn with_attachment(mut self) -> Self {
+            self.attached = true;
+            self.atomic_rename = true;
+            self
+        }
     }
 
     #[async_trait::async_trait]
     impl SecretBackend for PartialFailBackend {
+        fn supports_atomic_rename(&self) -> bool {
+            self.atomic_rename
+        }
+
         async fn set_secret(
             &self,
             _vault: &str,
@@ -1438,7 +1459,7 @@ mod tests {
             BackendCapabilities {
                 has_atomic_record_conversion: false,
                 has_conditional_record_conversion: false,
-                has_atomic_rename: false,
+                has_atomic_rename: self.atomic_rename,
                 has_atomic_file_create: false,
                 has_enable_disable: false,
                 has_vaults: true,
@@ -1465,6 +1486,18 @@ mod tests {
 
         fn secrets(&self) -> &dyn SecretBackend {
             self
+        }
+
+        async fn attachment_names(
+            &self,
+            _vault: &str,
+            name: &str,
+        ) -> std::result::Result<Vec<String>, BackendError> {
+            Ok(if self.attached {
+                vec![format!("attachments/{name}/proof.txt")]
+            } else {
+                Vec::new()
+            })
         }
 
         async fn health_check(&self) -> std::result::Result<(), BackendError> {
@@ -1550,6 +1583,34 @@ mod tests {
             backend.called_names().is_empty(),
             "no metadata update may run before an unsupported rename"
         );
+    }
+
+    #[tokio::test]
+    async fn attached_rename_dry_run_is_rejected_before_folder_update() {
+        let backend = Arc::new(PartialFailBackend::new("never").with_attachment());
+        let backend_dyn: Arc<dyn Backend> = backend.clone();
+        let config = Config::default();
+
+        let error = execute_secret_mv(
+            &backend_dyn,
+            "local",
+            &config,
+            "test-vault",
+            vec![folder_summary("source", "old")],
+            "old/source",
+            "new/destination",
+            Some("old".to_string()),
+            "source".to_string(),
+            Some("new".to_string()),
+            "destination".to_string(),
+            true,
+            true,
+        )
+        .await
+        .expect_err("generic rename cannot transfer attached objects");
+
+        assert!(error.to_string().contains("attachments"), "{error}");
+        assert!(backend.called_names().is_empty());
     }
 
     // -----------------------------------------------------------------

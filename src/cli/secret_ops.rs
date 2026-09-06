@@ -4345,8 +4345,10 @@ pub(crate) async fn execute_secret_update_direct(
         }
         let local_registry = BackendRegistry::new(resolved_backend);
         let reg = &local_registry;
-        if rename.is_some() {
+        if let Some(new_name) = rename.as_deref() {
             crate::cli::mv_ops::validate_atomic_rename_backend(reg.active())?;
+            crate::backend::ensure_no_attachments(reg.active(), &vault_name, name).await?;
+            crate::backend::ensure_no_attachments(reg.active(), &vault_name, new_name).await?;
         }
 
         // A bare `xv update NAME` — no value, no --stdin, and no other
@@ -7242,6 +7244,11 @@ async fn execute_secret_copy(
             reg,
             config,
         )
+        .await?;
+
+    crate::backend::ensure_no_attachments(from_backend.as_ref(), &from_vault_resolved, name)
+        .await?;
+    crate::backend::ensure_no_attachments(to_backend.as_ref(), &to_vault_resolved, target_name)
         .await?;
 
     let source_secret = from_backend

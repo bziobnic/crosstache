@@ -94,6 +94,29 @@ fn ensure_child_path(base: &Path, candidate: &Path, name: &str) -> Result<(), Ba
     }
 }
 
+pub(super) const PLATFORM_SAFE_NAME_MAX: usize = 255;
+pub(super) const LONGEST_ACTIVE_SUFFIX_BYTES: usize = ".meta.json".len();
+
+pub(super) fn validate_logical_file_name(name: &str) -> Result<(), BackendError> {
+    if name.is_empty() || name.len() > PLATFORM_SAFE_NAME_MAX {
+        return Err(BackendError::InvalidArgument(
+            "local file key must contain 1 to 255 UTF-8 bytes".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn file_storage_stem(name: &str) -> Result<String, BackendError> {
+    validate_logical_file_name(name)?;
+    let encoded: String = url::form_urlencoded::byte_serialize(name.as_bytes()).collect();
+    if encoded.len() + LONGEST_ACTIVE_SUFFIX_BYTES <= PLATFORM_SAFE_NAME_MAX {
+        return Ok(encoded);
+    }
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(name.as_bytes());
+    Ok(format!("h-{digest:x}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

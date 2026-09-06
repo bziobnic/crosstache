@@ -125,21 +125,45 @@ use `xv attach` / `xv attachments --get` / `xv file upload --encrypt` instead.
 
 ### Rename and move
 
-Attachment association is the blob path `attachments/<old-name>/…`. Renaming
-or moving the secret does **not** rewrite those paths.
+Attachment association is the blob path `attachments/<old-name>/…`.
+The web UI and generic CLI rename, copy and move commands refuse attached sources
+or destination prefixes before changing secrets. `xv update --rename` and `xv mv`
+also check before applying accompanying metadata or folder changes. Folder-only
+moves keep the same secret name and attachment prefix.
 
-- **Web UI** refuses rename when attachments exist (`xv-attachments-block-rename`).
-- **CLI** `xv update --rename` / `xv mv` can leave ciphertext under the old
-  prefix. Detach (or re-attach under the new name) before renaming if you need
-  the association to stay intact.
+Azure checks the entire attachment namespace because Key Vault resolves sanitized,
+case-insensitive secret names while blob paths retain the spelling used at upload.
+If an equivalent name owns objects under a different spelling (for example,
+`my_secret`, `my-secret`, or `MY--SECRET`), generic operations and transfer preview
+refuse with an attachment alias error. Preview currently requires an unambiguous
+exact owner prefix; it cannot combine or rename those alias prefixes. Listing errors
+also block the operation. AWS retains exact, case-sensitive ownership.
+
+Local checks the store's actual filename resolution. If a requested secret spelling
+resolves to metadata with a different name, transfer and rename refuse it. Orphaned
+attachment paths are checked the same way, including on case-insensitive filesystems.
+Use the exact stored spelling. Distinct names remain valid on case-sensitive stores;
+Local does not universally fold names to lowercase.
+
+Inspect a proposed transfer without changing data:
+
+```bash
+xv transfer cert --from work --to work --new-name certificate --move
+xv transfer cert --from work --to stage --to-key-id DESTINATION_ACTIVE_ID
+```
+
+The JSON preview lists endpoints, attachment counts/bytes and verified key bindings,
+without secret values or file contents. Cross-vault attachments require a healthy
+destination V2 key ring and its explicit active key ID. This release provides the
+preview and encrypted recovery-manifest foundation; applying attached transfers is
+not yet enabled.
 
 ### Migration
 
-`xv migrate` copies **secrets**, not file blobs. It will not move attachment
-ciphertext between backends. If the target vault already has its own
-`xv-attachment-key`, migrate **preserves** that key rather than overwriting it
-(even under `--force-replace`) — overwriting would brick existing attachments
-on the target.
+`xv migrate` copies secrets, not file blobs. It preflights attachment prefixes for
+the selected batch and refuses attached transfers before writing secrets, including
+with `--force-replace`. An unavailable inventory is an error, not evidence of an
+empty prefix. Key custody records remain excluded from generic migration.
 
 ## Agent policy
 
@@ -148,7 +172,8 @@ policy and decision logging as secret operations. Policies must authorize
 `get` on the pointer and referenced retained records; first use also needs
 `set`. Reads that return key material require `raw_disclosure = true`, including
 internal reads for encryption/decryption. No raw provider handle bypasses those
-checks. Decision records contain resource names and outcomes, never private
+checks. Transfer preflight also requires `list` permission for each source and
+destination secret's attachment inventory. Decision records contain resource names and outcomes, never private
 keys or file contents. File operations themselves are not yet covered by the
 secret policy; see [agent identity and policy](agent-identity.md).
 

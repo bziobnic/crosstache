@@ -318,6 +318,47 @@ impl Backend for LocalBackend {
         &self.secret_backend
     }
 
+    async fn attachment_names(&self, vault: &str, name: &str) -> Result<Vec<String>, BackendError> {
+        let vault_directory = paths::vault_dir(&self.config.store_path, vault)?;
+        match fs::symlink_metadata(&vault_directory) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(BackendError::Internal(format!(
+                    "inspect attachment vault directory: {error}"
+                )))
+            }
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => {
+                return Err(BackendError::Internal(
+                    "unsafe attachment vault directory".into(),
+                ))
+            }
+        }
+        match self.secret_backend.get_secret(vault, name, false).await {
+            Ok(properties) => ensure_exact_attachment_owner(name, &properties.name)?,
+            Err(BackendError::NotFound { .. }) => {}
+            Err(error) => return Err(error),
+        }
+        #[cfg(feature = "file-ops")]
+        {
+            // Recover interrupted file transactions through the normal local
+            // file path first. The direct metadata scan below is still needed
+            // in every build and rejects malformed entries user listing skips.
+            self.file_backend
+                .list_files(
+                    vault,
+                    crate::blob::models::FileListRequest {
+                        prefix: Some(format!("attachments/{name}/")),
+                        groups: None,
+                        limit: None,
+                        delimiter: None,
+                    },
+                )
+                .await?;
+        }
+        persisted_attachment_names(&self.config.store_path, vault, name)
+    }
+
     fn vaults(&self) -> Option<&dyn VaultBackend> {
         Some(&self.vault_backend)
     }
@@ -352,6 +393,171 @@ impl Backend for LocalBackend {
 
         Ok(())
     }
+}
+
+/// Reject a physical secret alias only when this store actually resolves it.
+fn ensure_exact_attachment_owner(requested: &str, actual: &str) -> Result<(), BackendError> {
+    if requested != actual {
+        return Err(BackendError::InvalidArgument(format!(
+            "attachment ownership is ambiguous: local name '{requested}' resolves to stored secret '{actual}'; use the exact stored name"
+        )));
+    }
+    Ok(())
+}
+
+/// Read-only persisted inventory, also usable while atomic rename owns the vault
+/// lock. Physical metadata probes preserve case-sensitive filesystem semantics.
+fn persisted_attachment_names(
+    store_path: &std::path::Path,
+    vault: &str,
+    name: &str,
+) -> Result<Vec<String>, BackendError> {
+    let directory = paths::files_dir(store_path, vault)?;
+    match fs::symlink_metadata(&directory) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            return Err(BackendError::Internal(format!(
+                "refusing unsafe local file metadata directory {}",
+                directory.display()
+            )))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(BackendError::Internal(format!(
+                "inspect local file metadata directory {}: {error}",
+                directory.display()
+            )))
+        }
+    };
+    let entries = fs::read_dir(&directory)
+        .map_err(|error| {
+            BackendError::Internal(format!(
+                "read local file metadata directory {}: {error}",
+                directory.display()
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| {
+            BackendError::Internal(format!("read local file metadata entry: {error}"))
+        })?;
+    let entry_names = entries
+        .iter()
+        .map(|entry| entry.file_name())
+        .collect::<std::collections::HashSet<_>>();
+
+    for entry in &entries {
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            return Err(BackendError::Internal(
+                "local file metadata entry name is not valid UTF-8".into(),
+            ));
+        };
+        if let Some(stem) = file_name.strip_suffix(".age") {
+            if !entry_names.contains(&std::ffi::OsString::from(format!("{stem}.meta.json"))) {
+                return Err(BackendError::Internal(format!(
+                    "local file body '{}' has no matching metadata",
+                    entry.path().display()
+                )));
+            }
+        }
+        if file_name == ".transactions" {
+            let mut transactions = fs::read_dir(entry.path()).map_err(|error| {
+                BackendError::Internal(format!("inspect local file transactions: {error}"))
+            })?;
+            if transactions
+                .next()
+                .transpose()
+                .map_err(|error| {
+                    BackendError::Internal(format!("inspect local file transaction: {error}"))
+                })?
+                .is_some()
+            {
+                return Err(BackendError::Internal(
+                    "local file storage has an unrecovered transaction; attachment visibility is ambiguous"
+                        .into(),
+                ));
+            }
+        }
+    }
+
+    let mut persisted = Vec::new();
+    for entry in entries {
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            return Err(BackendError::Internal(
+                "local file metadata entry name is not valid UTF-8".into(),
+            ));
+        };
+        if !file_name.ends_with(".meta.json") {
+            continue;
+        }
+        if !entry
+            .file_type()
+            .map_err(|error| BackendError::Internal(format!("inspect file metadata: {error}")))?
+            .is_file()
+        {
+            return Err(BackendError::Internal(format!(
+                "local file metadata entry is not a regular file: {}",
+                entry.path().display()
+            )));
+        }
+        let bytes = fs::read(entry.path()).map_err(|error| {
+            BackendError::Internal(format!("read local file metadata: {error}"))
+        })?;
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
+            BackendError::Internal(format!("parse local file metadata: {error}"))
+        })?;
+        let persisted_name = parsed
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                BackendError::Internal("local file metadata has no valid name".into())
+            })?;
+        let prefix = format!("attachments/{name}/");
+        if persisted_name.starts_with(&prefix) {
+            persisted.push(persisted_name.to_string());
+        } else if let Some(rest) = persisted_name.strip_prefix("attachments/") {
+            // Historical logical owners may contain slashes. Check each possible
+            // boundary without assuming the filesystem's case/Unicode rules.
+            for (boundary, _) in rest.match_indices('/') {
+                let candidate = format!("attachments/{name}/{}", &rest[boundary + 1..]);
+                if candidate.len() > paths::PLATFORM_SAFE_NAME_MAX {
+                    continue; // This cannot be a supported local object key.
+                }
+                let stem = paths::file_storage_stem(&candidate)?;
+                let candidate_path = directory.join(format!("{stem}.meta.json"));
+                match fs::symlink_metadata(&candidate_path) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => {
+                        return Err(BackendError::Internal(format!(
+                            "inspect attachment alias metadata: {error}"
+                        )))
+                    }
+                    Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {}
+                    Ok(_) => {
+                        return Err(BackendError::Internal(
+                            "unsafe attachment alias metadata".into(),
+                        ))
+                    }
+                }
+                let bytes = fs::read(&candidate_path).map_err(|error| {
+                    BackendError::Internal(format!("read attachment alias metadata: {error}"))
+                })?;
+                let metadata: serde_json::Value =
+                    serde_json::from_slice(&bytes).map_err(|error| {
+                        BackendError::Internal(format!("parse attachment alias metadata: {error}"))
+                    })?;
+                if metadata.get("name").and_then(serde_json::Value::as_str)
+                    != Some(candidate.as_str())
+                {
+                    return Err(BackendError::InvalidArgument(format!(
+                        "attachment ownership is ambiguous: local object '{candidate}' resolves to metadata with a different stored name"
+                    )));
+                }
+            }
+        }
+    }
+    super::validate_attachment_names(name, persisted)
 }
 
 #[cfg(test)]
@@ -417,6 +623,97 @@ mod tests {
         let backend = LocalBackend::new(Some(&raw)).unwrap();
 
         backend.health_check().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn attachment_names_reads_persisted_metadata_without_file_operations() {
+        let tmp = TempDir::new().unwrap();
+        let backend = LocalBackend::new(Some(&make_config(&tmp))).unwrap();
+        let files = tmp.path().join("store/vaults/default/files");
+        std::fs::create_dir_all(&files).unwrap();
+        std::fs::write(
+            files.join("source.meta.json"),
+            br#"{"name":"attachments/source/proof.txt"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            files.join("sibling.meta.json"),
+            br#"{"name":"attachments/source-copy/proof.txt"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            backend.attachment_names("default", "source").await.unwrap(),
+            vec!["attachments/source/proof.txt"]
+        );
+    }
+
+    #[tokio::test]
+    async fn local_missing_vault_attachment_inventory_remains_empty() {
+        let tmp = TempDir::new().unwrap();
+        let backend = LocalBackend::new(Some(&make_config(&tmp))).unwrap();
+        assert!(backend
+            .attachment_names("missing", "source")
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(!tmp.path().join("store/vaults/missing").exists());
+    }
+
+    #[tokio::test]
+    async fn local_case_alias_orphan_inventory_follows_actual_filesystem_lookup() {
+        let tmp = TempDir::new().unwrap();
+        let backend = LocalBackend::new(Some(&make_config(&tmp))).unwrap();
+        let files = tmp.path().join("store/vaults/default/files");
+        fs::create_dir_all(&files).unwrap();
+        let original = files.join("attachments%2Fsource%2Fproof.txt.meta.json");
+        let alias = files.join("attachments%2FSOURCE%2Fproof.txt.meta.json");
+        fs::write(&original, br#"{"name":"attachments/source/proof.txt"}"#).unwrap();
+        if !alias.exists() {
+            // Distinct case is safe on a case-sensitive store, until an alias
+            // actually resolves to the original object's metadata.
+            assert!(backend
+                .attachment_names("default", "SOURCE")
+                .await
+                .unwrap()
+                .is_empty());
+            fs::hard_link(&original, &alias).unwrap();
+        }
+        let error = backend
+            .attachment_names("default", "SOURCE")
+            .await
+            .expect_err("orphan attachment alias must not imply absence");
+        assert!(error.to_string().contains("attachment"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn attachment_names_fails_closed_on_malformed_persisted_metadata() {
+        let tmp = TempDir::new().unwrap();
+        let backend = LocalBackend::new(Some(&make_config(&tmp))).unwrap();
+        let files = tmp.path().join("store/vaults/default/files");
+        std::fs::create_dir_all(&files).unwrap();
+        std::fs::write(files.join("broken.meta.json"), b"not-json").unwrap();
+
+        let error = backend
+            .attachment_names("default", "source")
+            .await
+            .expect_err("unknown persisted file metadata cannot imply absence");
+        assert!(error.to_string().contains("file metadata"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn attachment_names_fails_closed_on_body_without_metadata() {
+        let tmp = TempDir::new().unwrap();
+        let backend = LocalBackend::new(Some(&make_config(&tmp))).unwrap();
+        let files = tmp.path().join("store/vaults/default/files");
+        std::fs::create_dir_all(&files).unwrap();
+        std::fs::write(files.join("unknown.age"), b"ciphertext").unwrap();
+
+        let error = backend
+            .attachment_names("default", "source")
+            .await
+            .expect_err("an unclassifiable persisted object cannot imply absence");
+        assert!(error.to_string().contains("matching metadata"), "{error}");
     }
 
     #[tokio::test]

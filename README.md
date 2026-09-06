@@ -1371,6 +1371,11 @@ verified completed files. Keep old keys for historical ciphertext and backups.
 mark; apply with `--apply --offline`. Active, legacy-bound, or currently referenced
 keys are refused. The mark never deletes keys or disables historical reads.
 
+`xv transfer NAME --from VAULT --to VAULT --new-name NEW --move` previews a
+secret-and-attachment transfer without changing data. Generic rename, copy, move
+and migration refuse attached prefixes until the recoverable transfer is applied
+through a supported workflow; this preview does not yet execute transfers.
+
 `xv list` hides `xv-attachment-key`. Full workflow, sync/rename/migrate
 pitfalls, and Azure's `xv_encrypted` metadata key:
 [`docs/attachments.md`](docs/attachments.md).

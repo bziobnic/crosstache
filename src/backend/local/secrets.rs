@@ -66,11 +66,6 @@ pub struct SecretMeta {
     pub revision: String,
 }
 
-#[derive(Deserialize)]
-struct PersistedFileMetadata {
-    name: String,
-}
-
 // ---------------------------------------------------------------------------
 // Path helpers
 // ---------------------------------------------------------------------------
@@ -2338,6 +2333,21 @@ impl LocalSecretBackend {
         }
         let _lock = lock_vault(&vault_dir)?;
         self.recover_all_update_artifacts_locked(vault)?;
+        // Resolve aliases before any rename-specific layout/revision writes.
+        // These helpers do not acquire another vault lock.
+        let current_stem = self.resolve_active_stem(vault, name)?;
+        let current_path = meta_path(&self.store_path, vault, &current_stem)?;
+        if current_path.exists() {
+            let current = read_meta(&current_path, &self.identity)?;
+            super::ensure_exact_attachment_owner(name, &current.name)?;
+        }
+        for attachment_name in [name, new_name] {
+            if self.has_attachments_locked(vault, attachment_name)? {
+                return Err(BackendError::AttachmentsPresent {
+                    name: attachment_name.to_string(),
+                });
+            }
+        }
         self.ensure_opaque_layout(vault, name)?;
         self.ensure_opaque_layout(vault, new_name)?;
 
@@ -2376,14 +2386,6 @@ impl LocalSecretBackend {
             return Err(BackendError::DestinationExists {
                 name: new_name.to_string(),
             });
-        }
-
-        for attachment_name in [name, new_name] {
-            if self.has_attachments_locked(vault, attachment_name)? {
-                return Err(BackendError::AttachmentsPresent {
-                    name: attachment_name.to_string(),
-                });
-            }
         }
 
         let mut deleted_at_millis = SystemTime::now()
@@ -2533,37 +2535,7 @@ impl LocalSecretBackend {
     }
 
     fn has_attachments_locked(&self, vault: &str, name: &str) -> Result<bool, BackendError> {
-        let files = paths::files_dir(&self.store_path, vault)?;
-        if !files.exists() {
-            return Ok(false);
-        }
-        let prefix = crate::secret::attachments::attachment_prefix(name);
-        for entry in fs::read_dir(&files)
-            .map_err(|e| BackendError::Internal(format!("read files dir: {e}")))?
-            .flatten()
-        {
-            let path = entry.path();
-            if !path
-                .file_name()
-                .and_then(|file| file.to_str())
-                .is_some_and(|file| file.ends_with(".meta.json"))
-            {
-                continue;
-            }
-            let bytes = fs::read(&path).map_err(|e| {
-                BackendError::Internal(format!("read file metadata {}: {e}", path.display()))
-            })?;
-            let info: PersistedFileMetadata = serde_json::from_slice(&bytes).map_err(|e| {
-                BackendError::Internal(format!(
-                    "parse file metadata {} while checking attachments: {e}",
-                    path.display()
-                ))
-            })?;
-            if info.name.starts_with(&prefix) {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        Ok(!super::persisted_attachment_names(&self.store_path, vault, name)?.is_empty())
     }
 }
 
@@ -7003,6 +6975,63 @@ mod tests {
             Some("concurrent-value")
         );
         assert!(backend.secret_exists("default", "source").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn local_case_alias_atomic_rename_refuses_source_and_orphan_destination() {
+        for source_alias in [true, false] {
+            let (backend, tmp) = test_backend();
+            backend
+                .set_secret("default", make_request("source", "fixture"))
+                .await
+                .unwrap();
+            let secrets = tmp.path().join("vaults/default/secrets");
+            if source_alias {
+                for suffix in ["meta.json", "age"] {
+                    let alias = secrets.join(format!("SOURCE.{suffix}"));
+                    if !alias.exists() {
+                        fs::hard_link(secrets.join(format!("source.{suffix}")), alias).unwrap();
+                    }
+                }
+            }
+            let owner = if source_alias {
+                "source"
+            } else {
+                "destination"
+            };
+            let files = tmp.path().join("vaults/default/files");
+            fs::create_dir_all(&files).unwrap();
+            let original = files.join(format!("attachments%2F{owner}%2Fproof.txt.meta.json"));
+            fs::write(
+                &original,
+                format!(r#"{{"name":"attachments/{owner}/proof.txt"}}"#),
+            )
+            .unwrap();
+            if !source_alias {
+                let alias = files.join("attachments%2FDESTINATION%2Fproof.txt.meta.json");
+                if !alias.exists() {
+                    fs::hard_link(&original, alias).unwrap();
+                }
+            }
+            let requested = if source_alias { "SOURCE" } else { "source" };
+            let destination = if source_alias {
+                "destination"
+            } else {
+                "DESTINATION"
+            };
+            let snapshot = backend
+                .get_secret_snapshot("default", requested, false)
+                .await
+                .unwrap();
+            let before = fs::read(secrets.join("source.meta.json")).unwrap();
+            let error = backend
+                .rename_secret_if_revision("default", requested, destination, &snapshot.revision)
+                .await
+                .expect_err("atomic rename must reject physical attachment aliases");
+            assert!(error.to_string().contains("attachment"), "{error}");
+            assert_eq!(before, fs::read(secrets.join("source.meta.json")).unwrap());
+            assert!(original.exists());
+        }
     }
 
     #[cfg(not(feature = "file-ops"))]

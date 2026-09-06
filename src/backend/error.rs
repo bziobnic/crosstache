@@ -58,8 +58,8 @@ pub enum BackendError {
     #[error("destination secret '{name}' already exists")]
     DestinationExists { name: String },
 
-    /// A rename was blocked because the source has attached files.
-    #[error("secret '{name}' has attachments and cannot be renamed")]
+    /// A generic mutation was blocked because the name owns attached files.
+    #[error("secret '{name}' has attachments; use the attachment-aware transfer workflow")]
     AttachmentsPresent { name: String },
 
     /// The backend rate-limited the request.
@@ -136,7 +136,7 @@ impl From<BackendError> for CrosstacheError {
                 CrosstacheError::Conflict(format!("destination secret '{name}' already exists"))
             }
             BackendError::AttachmentsPresent { name } => CrosstacheError::Conflict(format!(
-                "secret '{name}' has attachments and cannot be renamed"
+                "secret '{name}' has attachments; use the attachment-aware transfer workflow"
             )),
             BackendError::RateLimited { retry_after_secs } => {
                 let detail = match retry_after_secs {

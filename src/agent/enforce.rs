@@ -195,6 +195,17 @@ impl Backend for PolicyEnforcedBackend {
         Box::new(self)
     }
 
+    async fn attachment_names(&self, vault: &str, name: &str) -> Result<Vec<String>, BackendError> {
+        self.checked(
+            vault,
+            name,
+            Operation::List,
+            false,
+            self.inner.attachment_names(vault, name),
+        )
+        .await
+    }
+
     fn vaults(&self) -> Option<&dyn VaultBackend> {
         self.inner.vaults()
     }
@@ -762,9 +773,54 @@ mod tests {
         fn secrets(&self) -> &dyn SecretBackend {
             self
         }
+        async fn attachment_names(&self, _: &str, name: &str) -> Result<Vec<String>, BackendError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![format!("attachments/{name}/proof.txt")])
+        }
         async fn health_check(&self) -> Result<(), BackendError> {
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn attachment_visibility_is_policy_checked_then_forwarded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inner = Arc::new(CountingBackend {
+            calls: AtomicUsize::new(0),
+            list_results: Vec::new(),
+            deleted_list_results: Vec::new(),
+        });
+        let policy = CompiledPolicy::compile(&AgentConfig {
+            enforce: true,
+            policy: vec![crate::config::settings::AgentPolicyRule {
+                name: "attachments".into(),
+                identity: "github:o/r:*".into(),
+                identity_source: "github-oidc".into(),
+                workspace: "prod".into(),
+                secrets: vec!["db".into()],
+                operations: vec!["list".into()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+        let wrapped = PolicyEnforcedBackend::for_test(
+            inner.clone(),
+            AgentIdentity::new(super::super::IdentitySource::GithubOidc, "github:o/r:ci"),
+            policy,
+            tmp.path().join("decisions.jsonl"),
+        );
+
+        assert_eq!(
+            wrapped.attachment_names("prod", "db").await.unwrap(),
+            vec!["attachments/db/proof.txt"]
+        );
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            wrapped.attachment_names("prod", "other").await,
+            Err(BackendError::PermissionDenied(_))
+        ));
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 1);
     }
 
     #[async_trait]
