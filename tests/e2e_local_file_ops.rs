@@ -803,3 +803,128 @@ fn attachment_key_status_reports_broken_pointer_without_exposing_or_replacing_it
     assert_eq!(after.version, original.version);
     assert_eq!(after.value.unwrap().as_str(), "PRIVATE-BROKEN-POINTER");
 }
+
+#[test]
+fn attachment_key_lifecycle_cli_previews_applies_and_recovers_without_losing_files() {
+    use age::secrecy::ExposeSecret;
+    use crosstache::backend::{local::LocalBackend, Backend};
+    use crosstache::config::settings::LocalConfig;
+    use crosstache::secret::{attachment_key as key, manager::SecretRequest};
+    let env = FileEnv::new();
+    let backend = LocalBackend::new(Some(&LocalConfig {
+        store_path: Some(env.path().join("store").display().to_string()),
+        key_file: Some(env.path().join("key.txt").display().to_string()),
+        default_vault: Some("default".into()),
+        ..Default::default()
+    }))
+    .unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let identity = age::x25519::Identity::generate();
+    let id = key::AttachmentKeyId::derive(&identity.to_public().to_string());
+    let req = |value: &str| SecretRequest {
+        name: key::ACTIVE_POINTER_SECRET.into(),
+        value: zeroize::Zeroizing::new(value.into()),
+        content_type: None,
+        enabled: Some(true),
+        expires_on: None,
+        not_before: None,
+        tags: None,
+        groups: None,
+        note: None,
+        folder: None,
+    };
+    runtime
+        .block_on(
+            backend
+                .attachment_keys()
+                .set_secret("default", req(identity.to_string().expose_secret())),
+        )
+        .unwrap();
+    let json = |args: &[&str]| -> serde_json::Value {
+        let text = env.ok(args);
+        assert!(!text.contains("AGE-SECRET-KEY"));
+        assert!(!text.contains("PRIVATE-LIFECYCLE-POINTER"));
+        serde_json::from_str(&text).unwrap()
+    };
+    std::fs::write(env.path().join("old.bin"), b"pinned-before-upgrade").unwrap();
+    env.ok(&["file", "upload", "old.bin", "--encrypt"]);
+    assert_eq!(
+        json(&["attachment-key", "keys", "--format", "json"])["report"]["keys"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        json(&["attachment-key", "upgrade", "--format", "json"])["report"]["outcome"],
+        "ready"
+    );
+    assert_eq!(
+        json(&["attachment-key", "status", "--format", "json"])["report"]["mode"],
+        "v1"
+    );
+    assert_eq!(
+        env.run(&["attachment-key", "upgrade", "--apply"])
+            .status
+            .code(),
+        Some(2)
+    );
+    assert_eq!(
+        json(&[
+            "attachment-key",
+            "upgrade",
+            "--apply",
+            "--offline",
+            "--format",
+            "json"
+        ])["report"]["outcome"],
+        "applied"
+    );
+    let enumerated = json(&["attachment-key", "keys", "--format", "json"]);
+    assert_eq!(
+        enumerated["report"]["observation"],
+        "visible_retained_records"
+    );
+    assert_eq!(enumerated["report"]["keys"].as_array().unwrap().len(), 1);
+    assert_eq!(enumerated["report"]["keys"][0]["key_id"], id.as_str());
+    env.ok(&["file", "download", "old.bin", "-o", "after-upgrade.bin"]);
+    assert_eq!(
+        std::fs::read(env.path().join("after-upgrade.bin")).unwrap(),
+        b"pinned-before-upgrade"
+    );
+
+    runtime
+        .block_on(
+            backend
+                .attachment_keys()
+                .set_secret("default", req("PRIVATE-LIFECYCLE-POINTER")),
+        )
+        .unwrap();
+    let base = [
+        "attachment-key",
+        "recover",
+        "--key-id",
+        id.as_str(),
+        "--legacy-key-id",
+        id.as_str(),
+        "--format",
+        "json",
+    ];
+    assert_eq!(json(&base)["report"]["outcome"], "ready");
+    assert_eq!(
+        json(&["attachment-key", "status", "--format", "json"])["report"]["mode"],
+        "invalid"
+    );
+    let mut apply = base.to_vec();
+    apply.extend(["--apply", "--offline"]);
+    assert_eq!(json(&apply)["report"]["outcome"], "applied");
+    assert_eq!(json(&apply)["report"]["outcome"], "unchanged");
+    env.ok(&["file", "download", "old.bin", "-o", "after-recovery.bin"]);
+    assert_eq!(
+        std::fs::read(env.path().join("after-recovery.bin")).unwrap(),
+        b"pinned-before-upgrade"
+    );
+    assert_eq!(
+        env.run(&["attachment-key", "recover", "--key-id", id.as_str()])
+            .status
+            .code(),
+        Some(2)
+    );
+}

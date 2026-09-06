@@ -26,6 +26,7 @@ const VAULT: &str = "attachment-test";
 struct ServiceState {
     records: HashMap<String, (String, String)>,
     operations: Vec<String>,
+    list_pages: Vec<Value>,
 }
 
 #[derive(Clone, Debug)]
@@ -65,6 +66,22 @@ impl HttpConnector for RetainedKeyTransport {
             let mut state = transport.state.lock().unwrap();
             state.operations.push(operation.clone());
             let result = match operation.as_str() {
+                "ListSecrets" => {
+                    assert_eq!(body["Filters"][0]["Values"][0], format!("{VAULT}/"));
+                    let page = match body.get("NextToken").and_then(Value::as_str) {
+                        None => 0,
+                        Some("page-2") => 1,
+                        other => panic!("unexpected continuation token: {other:?}"),
+                    };
+                    response(
+                        200,
+                        state
+                            .list_pages
+                            .get(page)
+                            .expect("configured list page")
+                            .clone(),
+                    )
+                }
                 "CreateSecret" => {
                     let name = body["Name"].as_str().unwrap().to_owned();
                     let value = body["SecretString"].as_str().unwrap().to_owned();
@@ -235,5 +252,88 @@ async fn concurrent_distinct_retained_keys_remain_independently_exact_version_re
             "GetSecretValue",
             "GetSecretValue"
         ]
+    );
+}
+
+#[tokio::test]
+async fn aws_retained_listing_preserves_content_type_and_generic_custody_hiding() {
+    use crate::backend::guard::GuardedSecretBackend;
+    use crate::backend::SecretBackend;
+
+    let (backend, state) = backend(1);
+    let first = format!("xv-attachment-key-ak1-{}", "a".repeat(64));
+    let last = format!("xv-attachment-key-ak1-{}", "f".repeat(64));
+    let collision = format!("xv-attachment-key-ak1-{}", "c".repeat(64));
+    let entry = |name: &str, content_type: Option<&str>| {
+        let tags: Vec<Value> = content_type
+            .into_iter()
+            .map(|ct| json!({"Key": "xv:content_type", "Value": ct}))
+            .collect();
+        json!({"Name": format!("{VAULT}/{name}"), "Tags": tags})
+    };
+    state.lock().unwrap().list_pages = vec![
+        json!({"SecretList": [
+            entry(&last, Some(KEY_RECORD_CONTENT_TYPE)),
+            entry(&collision, None),
+            entry("ordinary", Some("text/plain")),
+        ], "NextToken": "page-2"}),
+        json!({"SecretList": [
+            entry(&first, Some(KEY_RECORD_CONTENT_TYPE)),
+            entry("xv-attachment-key", Some(KEY_RECORD_CONTENT_TYPE)),
+            entry("xv-attachment-key-notes", Some(KEY_RECORD_CONTENT_TYPE)),
+            {"Name": format!("another-vault/{first}"),
+             "Tags": [{"Key": "xv:content_type", "Value": KEY_RECORD_CONTENT_TYPE}]}
+        ]}),
+    ];
+
+    let keys = RawAttachmentKeyStore::new(&backend)
+        .list_retained_keys(VAULT)
+        .await
+        .unwrap();
+    assert_eq!(
+        keys.iter().map(|key| key.name.as_str()).collect::<Vec<_>>(),
+        vec![first.as_str(), last.as_str()],
+        "AWS tags must identify both retained records"
+    );
+    assert_eq!(keys[0].key_id, format!("ak1-{}", "a".repeat(64)));
+
+    let raw = backend.list_secrets(VAULT, None).await.unwrap();
+    assert_eq!(
+        raw.iter()
+            .find(|s| s.name == "ordinary")
+            .unwrap()
+            .content_type,
+        "text/plain"
+    );
+    assert_eq!(
+        raw.iter()
+            .find(|s| s.name == collision)
+            .unwrap()
+            .content_type,
+        ""
+    );
+    let visible = GuardedSecretBackend::new(&backend)
+        .list_secrets(VAULT, None)
+        .await
+        .unwrap();
+    let names: Vec<&str> = visible.iter().map(|s| s.name.as_str()).collect();
+    assert!(
+        names.contains(&collision.as_str()),
+        "unmarked strict-name collisions stay visible"
+    );
+    assert!(names.contains(&"ordinary"));
+    assert!(
+        names.contains(&"xv-attachment-key-notes"),
+        "broad prefix remains ordinary"
+    );
+    assert_eq!(
+        names.len(),
+        3,
+        "generic lists hide only pointer and marked retained records"
+    );
+    assert_eq!(
+        state.lock().unwrap().operations,
+        vec!["ListSecrets"; 6],
+        "all three reads must paginate without fetching values or extra metadata"
     );
 }

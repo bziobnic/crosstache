@@ -113,7 +113,7 @@ strict-format retained key-record name, including provider-equivalent alias
 spellings. `--force` cannot override this protection. The same boundary applies
 to Web edits and folder moves, imports, and migration targets. Generic opaque
 backup restore is disabled because its destination cannot be checked before
-provider mutation. Key recovery and retirement commands remain future work.
+provider mutation. Dedicated pointer recovery is described below; encrypted key backup/restore and retirement remain future work.
 
 ### Sync skips ciphertext
 
@@ -256,3 +256,80 @@ classification, so an optional tag-read failure does not invalidate it. S3
 listings alone omit user metadata.
 Stop concurrent writers and use a future verified migration/retirement
 workflow before making custody changes.
+
+## Retained keys, offline upgrade, and pointer recovery
+
+```sh
+xv attachment-key keys --format json
+xv attachment-key upgrade --vault production --format json
+# After stopping writers and upgrading all clients:
+xv attachment-key upgrade --vault production --apply --offline
+```
+
+`keys` lists the current marked retained records visible to the caller, sorted
+by canonical name. Its report contains `schema_version: 1`,
+`observation: visible_retained_records`, and a `keys` array with `name`,
+`key_id`, and `enabled`. It reads no private values and excludes unmarked
+user-secret collisions, the active pointer, and ordinary secrets. It does not
+enumerate all historical provider versions or verify the listed identities.
+Agent enforcement checks list scope before provider access and filters each
+record by policy; an empty list is not proof that the vault has no retained keys.
+
+`upgrade` previews a V1-to-V2 conversion by default. It retains the **same**
+identity under its deterministic marked key name, verifies the exact retained
+version, then publishes a V2 pointer with that key as both active and permanent
+legacy fallback. It verifies that the original V1 provider version remains
+readable. Pre-schema attachments use the explicit legacy fallback; schema-1
+legacy attachments continue to use their original pinned versions; new uploads
+use the retained record. No blobs are rewritten and no new identity is generated.
+A valid V2 ring returns `outcome: unchanged`.
+
+Both upgrade and recovery require `--apply --offline` to write. `--offline`
+is an acknowledgment that all writers and old clients are stopped; it does not
+acquire a distributed lock. These operations recheck the pointer before writing
+and confirm it afterward, but the providers do not offer one portable atomic
+compare-and-swap. Keep writers stopped throughout the operation, and upgrade
+all clients before resuming. Preview and apply independently validate current
+state; a preview is not a saved transaction.
+
+If upgrade stops after retaining the key but before publishing the pointer,
+retry it while writers remain stopped. It reuses and verifies the marked
+retained record. Committed keys are kept on every failure. An unmarked record
+at the required name is refused and never overwritten.
+
+### Repair a missing or broken active pointer
+
+First inspect `status`, `keys`, and the file-reference `inventory`. Select
+existing retained key IDs based on trusted records of the original ring.
+Recovery requires an explicit legacy choice:
+
+```sh
+# ACTIVE_KEY_ID and LEGACY_KEY_ID are IDs chosen from your trusted ring records.
+xv attachment-key recover --key-id "$ACTIVE_KEY_ID" --legacy-key-id "$LEGACY_KEY_ID"
+# Apply only with writers stopped:
+xv attachment-key recover --key-id "$ACTIVE_KEY_ID" --legacy-key-id "$LEGACY_KEY_ID" --apply --offline
+# For a ring originally created directly in V2 with no legacy attachments:
+xv attachment-key recover --key-id "$ACTIVE_KEY_ID" --no-legacy
+```
+
+Recovery verifies the selected marked identities and their exact versions
+before publishing a pointer. It refuses to replace a V1 identity (use upgrade),
+rotate a healthy V2 pointer to another active key, or change a known V2 legacy
+binding. Recovering an already matching valid pointer is a no-op. When the
+pointer is missing or malformed, the original legacy binding cannot be inferred:
+`--no-legacy` deliberately disables pre-schema decryption, even if the selected
+active key could decrypt those files.
+
+Lifecycle reports use `operation` (`upgrade` or `recover`), `outcome`
+(`ready`, `applied`, or `unchanged`), public active/legacy IDs, and the
+verified `retained_version` (null in an upgrade preview when the record is not
+yet created). JSON/YAML and `--vault` alias/literal selection follow the
+observation commands. No private key is printed.
+
+This recovery repairs the pointer using keys already present. It cannot restore
+deleted key material, recreate a missing provider version, recover attachments
+already unreadable before upgrade, or restore a ring into another vault.
+Encrypted key export/import, rotation, rewrap, and retirement remain future work.
+Provider soft-deleted records may need restoration through the provider's
+recovery tooling before these commands can access or write them. Existing
+Local read-time journal recovery applies to these commands as well.

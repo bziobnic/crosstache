@@ -600,7 +600,9 @@ impl SecretBackend for AwsSecretBackend {
         group_filter: Option<&str>,
     ) -> Result<Vec<SecretSummary>, BackendError> {
         use crate::backend::aws::encoding::{is_marker, strip_prefix};
-        use crate::backend::aws::metadata::{TAG_FOLDER, TAG_GROUPS, TAG_ORIGINAL_NAME};
+        use crate::backend::aws::metadata::{
+            TAG_CONTENT_TYPE, TAG_FOLDER, TAG_GROUPS, TAG_ORIGINAL_NAME,
+        };
         use aws_sdk_secretsmanager::types::{Filter, FilterNameStringType};
 
         let prefix = format!("{vault}/");
@@ -697,7 +699,7 @@ impl SecretBackend for AwsSecretBackend {
                     updated_on: String::new(),
                     enabled: true,
                     expires_on: None,
-                    content_type: String::new(),
+                    content_type: tags_val.get(TAG_CONTENT_TYPE).cloned().unwrap_or_default(),
                     tags: tags_val,
                 });
             }

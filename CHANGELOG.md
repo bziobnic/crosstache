@@ -4,11 +4,20 @@
 
 ### Added
 
+- `xv attachment-key keys` enumerates visible marked retained-key records.
+  Offline `upgrade` preserves the V1 identity and old attachment reads when
+  converting to V2; `recover` repairs missing/broken pointers from existing
+  verified retained keys. Both preview by default and require `--apply --offline`
+  to write. Cross-vault key backup/restore is not included.
+
 - Read-only `xv attachment-key status` and `inventory` reports with JSON/YAML
   output, backend/vault context, safe key diagnostics, and file metadata
   references. Inventory does not download payloads or establish retirement safety.
 
 ### Fixed
+
+- AWS secret listings preserve content-type metadata so retained attachment keys
+  appear in `attachment-key keys` and stay hidden from generic secret listings.
 
 - Attachment integrity failures now expose specific `xv-attachment-*` error
   codes and safe recovery hints in CLI/Web responses. Azure missing key versions
