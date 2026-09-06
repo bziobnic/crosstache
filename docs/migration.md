@@ -31,6 +31,11 @@ xv migrate --from azure --to aws --vault myproj-kv --concurrency 4
 
 ## Prerequisites
 
+Both endpoints must expose a readable attachment inventory. Configure the blob
+container or S3 bucket even for a secret-only migration; missing storage
+configuration or listing permission cannot establish that attachments are absent.
+Local storage can inspect its persisted attachment metadata without `file-ops`.
+
 ### Azure source / target
 
 You need:

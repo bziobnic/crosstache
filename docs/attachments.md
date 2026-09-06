@@ -158,7 +158,8 @@ policy and decision logging as secret operations. Policies must authorize
 `get` on the pointer and referenced retained records; first use also needs
 `set`. Reads that return key material require `raw_disclosure = true`, including
 internal reads for encryption/decryption. No raw provider handle bypasses those
-checks. Decision records contain resource names and outcomes, never private
+checks. Transfer preflight also requires `list` permission for each source and
+destination secret's attachment inventory. Decision records contain resource names and outcomes, never private
 keys or file contents. File operations themselves are not yet covered by the
 secret policy; see [agent identity and policy](agent-identity.md).
 
