@@ -413,6 +413,14 @@ pub(crate) async fn execute_migrate(
         dry_run,
     );
 
+    // Generic migration cannot transfer attachment objects. Preflight every
+    // selected name on both endpoints before dry-run returns, idempotency can
+    // skip an item, or any secret write begins.
+    for name in diff.to_migrate.iter().chain(&diff.conflicts) {
+        crate::backend::ensure_no_attachments(source.as_ref(), &source_vault, name).await?;
+        crate::backend::ensure_no_attachments(target.as_ref(), &target_vault, name).await?;
+    }
+
     if dry_run {
         return Ok(());
     }
@@ -864,6 +872,78 @@ mod tests {
                 .unwrap();
             assert_eq!(src.value, tgt.value);
         }
+    }
+
+    #[tokio::test]
+    async fn forced_bulk_migration_preflights_all_attachments_before_first_secret_write() {
+        let tmp = TempDir::new().unwrap();
+        let local = LocalConfig {
+            store_path: Some(tmp.path().join("store").to_string_lossy().to_string()),
+            key_file: Some(tmp.path().join("key.txt").to_string_lossy().to_string()),
+            default_vault: Some("source".into()),
+            encrypt_metadata: None,
+            opaque_filenames: None,
+            audit: None,
+            git: None,
+        };
+        let config = Config {
+            backend: Some("local".into()),
+            local: Some(local.clone()),
+            ..Default::default()
+        };
+        let source = crate::backend::local::LocalBackend::new(Some(&local)).unwrap();
+        for name in ["a-clean", "z-attached"] {
+            source
+                .secrets()
+                .set_secret(
+                    "source",
+                    SecretRequest {
+                        name: name.into(),
+                        value: Zeroizing::new("value".into()),
+                        content_type: None,
+                        enabled: None,
+                        expires_on: None,
+                        not_before: None,
+                        tags: None,
+                        groups: None,
+                        note: None,
+                        folder: None,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let files = tmp.path().join("store/vaults/source/files");
+        std::fs::create_dir_all(&files).unwrap();
+        std::fs::write(
+            files.join("attached.meta.json"),
+            br#"{"name":"attachments/z-attached/proof.txt"}"#,
+        )
+        .unwrap();
+
+        let error = execute_migrate(
+            "local:source".into(),
+            "local:target".into(),
+            None,
+            None,
+            false,
+            crate::cli::commands::OnConflict::Replace,
+            true,
+            2,
+            config,
+        )
+        .await
+        .expect_err("--force-replace cannot bypass attachment preflight");
+        assert!(error.to_string().contains("attachments"), "{error}");
+
+        let reopened = crate::backend::local::LocalBackend::new(Some(&local)).unwrap();
+        assert!(matches!(
+            reopened
+                .secrets()
+                .get_secret("target", "a-clean", false)
+                .await,
+            Err(BackendError::NotFound { .. })
+        ));
     }
 
     #[tokio::test]

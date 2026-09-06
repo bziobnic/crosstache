@@ -275,6 +275,41 @@ pub trait Backend: Send + Sync {
         Box::new(attachment_keys::RawAttachmentKeyStore::new(self.secrets()))
     }
 
+    /// List the persisted attachment objects owned by one secret.
+    ///
+    /// Implementations must provide complete visibility or return an error;
+    /// an unsupported or unconfigured object store must never imply absence.
+    async fn attachment_names(&self, vault: &str, name: &str) -> Result<Vec<String>, BackendError> {
+        #[cfg(feature = "file-ops")]
+        {
+            let files = self.files().ok_or_else(|| {
+                BackendError::Unsupported(
+                    "attachment visibility is unavailable for this backend configuration".into(),
+                )
+            })?;
+            let prefix = attachment_prefix(name)?;
+            let listed = files
+                .list_files(
+                    vault,
+                    crate::blob::models::FileListRequest {
+                        prefix: Some(prefix.clone()),
+                        groups: None,
+                        limit: None,
+                        delimiter: None,
+                    },
+                )
+                .await?;
+            return validate_attachment_names(name, listed.into_iter().map(|file| file.name));
+        }
+        #[cfg(not(feature = "file-ops"))]
+        {
+            let _ = (vault, name);
+            Err(BackendError::Unsupported(
+                "attachment visibility requires backend-specific persisted metadata support".into(),
+            ))
+        }
+    }
+
     /// Access to vault/namespace operations (optional).
     fn vaults(&self) -> Option<&dyn VaultBackend> {
         None
@@ -297,6 +332,51 @@ pub trait Backend: Send + Sync {
 
     /// Validate configuration and connectivity. Called once at startup.
     async fn health_check(&self) -> Result<(), BackendError>;
+}
+
+fn attachment_prefix(name: &str) -> Result<String, BackendError> {
+    if name.is_empty() || name.contains('\0') {
+        return Err(BackendError::InvalidArgument(
+            "attachment owner name must not be empty or contain NUL".into(),
+        ));
+    }
+    Ok(format!("attachments/{name}/"))
+}
+
+pub(crate) fn validate_attachment_names(
+    owner: &str,
+    names: impl IntoIterator<Item = String>,
+) -> Result<Vec<String>, BackendError> {
+    let prefix = attachment_prefix(owner)?;
+    let mut names: Vec<String> = names.into_iter().collect();
+    if let Some(invalid) = names.iter().find(|name| !name.starts_with(&prefix)) {
+        return Err(BackendError::Internal(format!(
+            "attachment listing returned out-of-prefix object '{invalid}' for secret '{owner}'"
+        )));
+    }
+    names.sort();
+    if names.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(BackendError::Internal(format!(
+            "attachment listing returned duplicate objects for secret '{owner}'"
+        )));
+    }
+    Ok(names)
+}
+
+/// Refuse a generic secret mutation when the source or destination owns
+/// attachment objects. Listing failures propagate so callers fail closed.
+pub(crate) async fn ensure_no_attachments(
+    backend: &dyn Backend,
+    vault: &str,
+    name: &str,
+) -> Result<(), BackendError> {
+    if backend.attachment_names(vault, name).await?.is_empty() {
+        Ok(())
+    } else {
+        Err(BackendError::AttachmentsPresent {
+            name: name.to_string(),
+        })
+    }
 }
 
 /// Whether web record conversion has every advertised and implemented
@@ -359,5 +439,23 @@ mod tests {
         assert!(!cs.is_valid("has space"));
         assert!(!cs.is_valid("has*star"));
         assert!(!cs.is_valid("has(paren)"));
+    }
+
+    #[test]
+    fn attachment_listing_rejects_sibling_or_duplicate_objects() {
+        let sibling =
+            validate_attachment_names("db", vec!["attachments/db-copy/proof.txt".to_string()])
+                .expect_err("a provider prefix match is not proof of exact ownership");
+        assert!(sibling.to_string().contains("out-of-prefix"));
+
+        let duplicate = validate_attachment_names(
+            "db",
+            vec![
+                "attachments/db/proof.txt".to_string(),
+                "attachments/db/proof.txt".to_string(),
+            ],
+        )
+        .expect_err("duplicate storage objects are ambiguous");
+        assert!(duplicate.to_string().contains("duplicate"));
     }
 }

@@ -93,6 +93,9 @@ impl Backend for GuardedBackend {
     fn attachment_keys(&self) -> Box<dyn super::attachment_keys::AttachmentKeyStore + '_> {
         self.inner.attachment_keys()
     }
+    async fn attachment_names(&self, vault: &str, name: &str) -> Result<Vec<String>, BackendError> {
+        self.inner.attachment_names(vault, name).await
+    }
     fn vaults(&self) -> Option<&dyn VaultBackend> {
         self.inner.vaults()
     }
@@ -492,6 +495,38 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl Backend for SpyBackend {
+        fn name(&self) -> &'static str {
+            "spy"
+        }
+
+        fn kind(&self) -> BackendKind {
+            BackendKind::Local
+        }
+
+        fn capabilities(&self) -> BackendCapabilities {
+            BackendCapabilities::default()
+        }
+
+        fn secrets(&self) -> &dyn SecretBackend {
+            self
+        }
+
+        async fn attachment_names(
+            &self,
+            vault: &str,
+            name: &str,
+        ) -> Result<Vec<String>, BackendError> {
+            self.record(&format!("attachment_names:{vault}:{name}"));
+            Ok(vec![format!("attachments/{name}/proof.txt")])
+        }
+
+        async fn health_check(&self) -> Result<(), BackendError> {
+            Ok(())
+        }
+    }
+
     fn req(name: &str) -> SecretRequest {
         SecretRequest {
             name: name.to_string(),
@@ -633,5 +668,17 @@ mod tests {
                 "get_secret:normal".to_string(),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn owned_guard_forwards_attachment_visibility_to_inner_backend() {
+        let spy = Arc::new(SpyBackend::new());
+        let guarded = GuardedBackend::wrap(spy.clone());
+
+        assert_eq!(
+            guarded.attachment_names("prod", "db").await.unwrap(),
+            vec!["attachments/db/proof.txt"]
+        );
+        assert_eq!(spy.calls(), vec!["attachment_names:prod:db"]);
     }
 }
