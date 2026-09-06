@@ -28,6 +28,13 @@ pub struct ApplyOptions {
 
 #[derive(Debug, Subcommand)]
 pub enum AttachmentKeyCommands {
+    /// Preview initialization of an empty V2 ring without uploading a dummy file
+    Initialize {
+        #[arg(long)]
+        vault: Option<String>,
+        #[command(flatten)]
+        action: ApplyOptions,
+    },
     /// Preview advisory retirement of an unused retained key without deleting it
     Retire {
         #[arg(long)]
@@ -143,7 +150,8 @@ pub(crate) async fn execute(command: AttachmentKeyCommands, config: Config) -> R
         ));
     }
     match &command {
-        AttachmentKeyCommands::Upgrade { action, .. }
+        AttachmentKeyCommands::Initialize { action, .. }
+        | AttachmentKeyCommands::Upgrade { action, .. }
         | AttachmentKeyCommands::Recover { action, .. }
         | AttachmentKeyCommands::Restore { action, .. }
         | AttachmentKeyCommands::Rotate { action, .. }
@@ -239,6 +247,7 @@ pub(crate) async fn execute(command: AttachmentKeyCommands, config: Config) -> R
         AttachmentKeyCommands::Status { vault }
         | AttachmentKeyCommands::Inventory { vault }
         | AttachmentKeyCommands::Keys { vault }
+        | AttachmentKeyCommands::Initialize { vault, .. }
         | AttachmentKeyCommands::Upgrade { vault, .. }
         | AttachmentKeyCommands::Recover { vault, .. }
         | AttachmentKeyCommands::Export { vault, .. }
@@ -260,6 +269,26 @@ pub(crate) async fn execute(command: AttachmentKeyCommands, config: Config) -> R
         }
     };
     match command {
+        AttachmentKeyCommands::Initialize { action, .. } => {
+            let files = backend.files().ok_or_else(|| {
+                crate::cli::file_ops::file_storage_unsupported_error(backend.as_ref())
+            })?;
+            let report = attachment_lifecycle::initialize(
+                backend.attachment_keys().as_ref(),
+                files,
+                &vault,
+                action.apply,
+            )
+            .await?;
+            render(
+                &Envelope {
+                    backend: &backend_name,
+                    vault: &vault,
+                    report,
+                },
+                format,
+            )
+        }
         AttachmentKeyCommands::Retire { action, .. } => {
             let files = backend.files().ok_or_else(|| {
                 crate::cli::file_ops::file_storage_unsupported_error(backend.as_ref())
@@ -572,6 +601,14 @@ mod backup_cli_tests {
     use super::{read_recovery_identity, write_backup};
     use crate::cli::commands::Cli;
     use clap::Parser;
+
+    #[test]
+    fn initialize_cli_requires_offline_apply() {
+        let args = ["xv", "attachment-key", "initialize"];
+        assert!(Cli::try_parse_from(args).is_ok());
+        assert!(Cli::try_parse_from(args.into_iter().chain(["--apply"])).is_err());
+        assert!(Cli::try_parse_from(args.into_iter().chain(["--apply", "--offline"])).is_ok());
+    }
 
     #[test]
     fn retirement_cli_requires_candidate_and_offline_apply() {

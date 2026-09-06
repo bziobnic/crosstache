@@ -102,6 +102,7 @@ fn attachment_rename_intent(
         destination_name,
         operation: TransferOperation::Move,
         destination_key_id: None,
+        destination_folder: None,
     }
 }
 
