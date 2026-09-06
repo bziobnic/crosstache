@@ -2148,12 +2148,15 @@ impl LocalSecretBackend {
         let stem = self.resolve_active_stem(vault, &name)?;
         let ap = age_path(&store, vault, &stem)?;
         let mp = meta_path(&store, vault, &stem)?;
+        let attachment_key = crate::secret::attachment_key::is_active_pointer_name(&name)
+            || crate::secret::attachment_key::is_strict_retained_record_name(&name);
         if require_absent {
-            // Opaque read fallback resolves by metadata, so checking only that
-            // stem would miss an orphan ciphertext in the other layout.
+            // Ordinary creates become visible with metadata and may retry an
+            // interrupted ciphertext-only write. Custody records instead refuse
+            // either unexplained half, including in the other filename layout.
             for candidate in self.transaction_stems_for_name(&name) {
-                if age_path(&store, vault, &candidate)?.exists()
-                    || meta_path(&store, vault, &candidate)?.exists()
+                if meta_path(&store, vault, &candidate)?.exists()
+                    || (attachment_key && age_path(&store, vault, &candidate)?.exists())
                 {
                     return Err(BackendError::Conflict(format!(
                         "secret '{name}' already exists in vault '{vault}'"
@@ -2161,8 +2164,6 @@ impl LocalSecretBackend {
                 }
             }
         }
-        let attachment_key = crate::secret::attachment_key::is_active_pointer_name(&name)
-            || crate::secret::attachment_key::is_strict_retained_record_name(&name);
         if attachment_key {
             for candidate in self.transaction_stems_for_name(&name) {
                 if age_path(&store, vault, &candidate)?.exists()
@@ -7392,6 +7393,41 @@ mod tests {
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_create_retries_after_ciphertext_activation_without_metadata() {
+        for opaque in [false, true] {
+            for encrypted in [false, true] {
+                for name in ["ordinary-secret", "xv-attachment-key-notes"] {
+                    let (backend, _tmp) = if opaque {
+                        test_backend_opaque_opts(encrypted)
+                    } else {
+                        test_backend_opts(encrypted)
+                    };
+                    let stem = backend.active_stem(name);
+                    let ap = age_path(&backend.store_path, "default", &stem).unwrap();
+                    let mp = meta_path(&backend.store_path, "default", &stem).unwrap();
+                    // Persist precisely the state left by a stopped ordinary
+                    // create after the value rename and before metadata rename.
+                    crypto::encrypt_to_file(&ap, b"interrupted-value", &backend.recipients)
+                        .unwrap();
+                    assert!(!mp.exists());
+                    backend
+                        .create_secret_if_absent("default", make_request(name, "retry-value"))
+                        .await
+                        .expect("ordinary creation must be retryable");
+                    assert!(matches!(
+                        backend
+                            .create_secret_if_absent("default", make_request(name, "replacement"))
+                            .await,
+                        Err(BackendError::Conflict(_))
+                    ));
+                    let stored = backend.get_secret("default", name, true).await.unwrap();
+                    assert_eq!(stored.value.unwrap().as_str(), "retry-value");
                 }
             }
         }
