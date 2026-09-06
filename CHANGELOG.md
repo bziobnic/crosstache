@@ -16,6 +16,9 @@
 
 ### Fixed
 
+- AWS secret listings preserve content-type metadata so retained attachment keys
+  appear in `attachment-key keys` and stay hidden from generic secret listings.
+
 - Attachment integrity failures now expose specific `xv-attachment-*` error
   codes and safe recovery hints in CLI/Web responses. Azure missing key versions
   retain their not-found classification. Attachment domain failures continue to
