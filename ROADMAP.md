@@ -99,14 +99,21 @@ binding). Staged as PR 1 (integrity foundation) → PR 2 (lifecycle) → PR 3
 
 **PR 1 integrity foundation is merged through PR #428.**
 
-**PR 2 — status/file-reference inventory implemented on this branch:** read-only
+**PR 2 — status/file-reference inventory merged in PR #429:** read-only
 `xv attachment-key status` diagnoses the pointer and active identity;
 `xv attachment-key inventory` reports per-file metadata references. Inventory
 does not verify ciphertext, enumerate unreferenced retained keys, or authorize
-retirement. Final review and merge remain.
+retirement.
 
-**Remaining PR 2 / PR 3:** retained-key enumeration, offline V1→V2 upgrade,
-encrypted export/import/recovery, rotation, rewrap, and logical retirement.
+**PR 2 — implemented on this branch:** marked retained-key enumeration
+(`attachment-key keys`), offline V1→V2 upgrade preserving the original identity
+and pinned versions, explicit V2 legacy fallback reads, and pointer recovery
+from existing verified retained keys. Upgrade/recovery preview by default;
+application requires stopped writers and `--apply --offline`. Final review
+and merge remain.
+
+**Remaining PR 2 / PR 3:** encrypted key export/import and cross-vault recovery,
+rotation, rewrap, and logical retirement.
 
 ### P1 — Make rename and migration attachment-aware
 

@@ -6,6 +6,8 @@
 #[cfg(feature = "file-ops")]
 pub mod attachment_inventory;
 pub mod attachment_key;
+#[cfg(feature = "file-ops")]
+pub mod attachment_lifecycle;
 pub mod attachments;
 pub mod manager;
 pub mod models;

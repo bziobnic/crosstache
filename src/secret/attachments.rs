@@ -366,6 +366,34 @@ async fn resolve_referenced_material(
     Ok(material)
 }
 
+/// Resolve only the permanently designated legacy identity for pre-schema blobs.
+/// Direct V2 rings have no fallback; never try the active key or scan retained keys.
+#[cfg(feature = "file-ops")]
+async fn legacy_download_identity(
+    secrets: &dyn AttachmentKeyStore,
+    vault: &str,
+) -> Result<age::x25519::Identity> {
+    let props = secrets
+        .get_secret(vault, ATTACHMENT_KEY_SECRET, true)
+        .await
+        .map_err(|error| match error {
+            BackendError::NotFound { .. } => CrosstacheError::from(AttachmentError::KeyMissing),
+            other => other.into(),
+        })?;
+    let value = props.value.ok_or(AttachmentError::PointerInvalid)?;
+    match attachment_key::parse_pointer_value(&value) {
+        Some(PointerKind::V1RawIdentity) => parse_identity(&value),
+        Some(PointerKind::V2 {
+            legacy: Some(id), ..
+        }) => {
+            let material = resolve_active_retained(secrets, vault, &id).await?;
+            parse_identity(material.expose_identity())
+        }
+        Some(PointerKind::V2 { legacy: None, .. }) => Err(AttachmentError::KeyMissing.into()),
+        None => Err(AttachmentError::PointerInvalid.into()),
+    }
+}
+
 /// Age-encrypt `request.content` with the vault's attachment key and upload the
 /// ciphertext, stamping the reserved schema-1 crypto metadata bound to the
 /// exact key generation (design §10.5). Caller-supplied reserved metadata keys
@@ -418,8 +446,8 @@ pub async fn download_decrypted(
             Err(CrosstacheError::from(AttachmentError::NotCiphertext))
         }
         DownloadPlan::LegacyNoSchema => {
-            // Pre-schema V1 attachment: decrypt with the current V1 key.
-            let identity = get_identity(secrets, vault).await?;
+            // Pre-schema attachment: use only the V1 key or explicit V2 legacy binding.
+            let identity = legacy_download_identity(secrets, vault).await?;
             let plaintext = crypto::decrypt_bytes(&data, &identity)
                 .map_err(|_| CrosstacheError::from(AttachmentError::DecryptionFailed))?;
             Ok(plaintext.to_vec())
