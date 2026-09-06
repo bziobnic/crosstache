@@ -1,15 +1,35 @@
 //! Narrow custody access for attachment encryption. This is deliberately not a
-//! `SecretBackend`: it cannot list, delete, rename, restore, or access arbitrary
-//! secrets, and it never exposes the underlying provider handle.
+//! `SecretBackend`: it cannot delete, rename, restore, or access arbitrary
+//! secrets. Enumeration exposes only marked retained-record metadata, never
+//! values or the underlying provider handle.
 
 use super::{BackendError, SecretBackend};
 use crate::secret::attachment_key::{classify_reserved_name, ReservedClass};
 use crate::secret::manager::{SecretProperties, SecretRequest};
 use async_trait::async_trait;
+use serde::Serialize;
+
+/// Metadata-only view of a retained attachment key custody record.
+#[derive(Debug, Clone, Serialize)]
+pub struct RetainedKeySummary {
+    pub name: String,
+    pub key_id: String,
+    pub enabled: bool,
+}
 
 #[cfg_attr(not(feature = "file-ops"), allow(dead_code))] // Encryption consumers are feature-gated.
 #[async_trait]
 pub trait AttachmentKeyStore: Send + Sync {
+    /// List visible current retained custody records without reading values or
+    /// historical versions.
+    async fn list_retained_keys(
+        &self,
+        _vault: &str,
+    ) -> Result<Vec<RetainedKeySummary>, BackendError> {
+        Err(BackendError::Unsupported(
+            "retained attachment key enumeration".into(),
+        ))
+    }
     async fn get_secret(
         &self,
         vault: &str,
@@ -91,6 +111,39 @@ impl<'a> RawAttachmentKeyStore<'a> {
 
 #[async_trait]
 impl AttachmentKeyStore for RawAttachmentKeyStore<'_> {
+    async fn list_retained_keys(
+        &self,
+        vault: &str,
+    ) -> Result<Vec<RetainedKeySummary>, BackendError> {
+        let mut retained = self
+            .secrets
+            .list_secrets(vault, None)
+            .await?
+            .into_iter()
+            .filter_map(|summary| {
+                if !matches!(
+                    classify_reserved_name(&summary.name),
+                    ReservedClass::StrictRetainedRecord
+                ) || summary.content_type
+                    != crate::secret::attachment_key::KEY_RECORD_CONTENT_TYPE
+                {
+                    return None;
+                }
+                let key_id = summary
+                    .name
+                    .strip_prefix(crate::secret::attachment_key::RETAINED_RECORD_PREFIX)?
+                    .to_owned();
+                Some(RetainedKeySummary {
+                    name: summary.name,
+                    key_id,
+                    enabled: summary.enabled,
+                })
+            })
+            .collect::<Vec<_>>();
+        retained.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(retained)
+    }
+
     async fn get_secret(
         &self,
         vault: &str,
@@ -161,6 +214,150 @@ mod tests {
             note: None,
             folder: None,
         }
+    }
+
+    #[tokio::test]
+    async fn retained_enumeration_returns_only_exact_marked_records_in_name_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let raw = LocalBackend::new(Some(&LocalConfig {
+            store_path: Some(tmp.path().join("store").display().to_string()),
+            key_file: Some(tmp.path().join("identity").display().to_string()),
+            default_vault: Some("default".into()),
+            ..Default::default()
+        }))
+        .unwrap();
+        let key_a = format!("ak1-{}", "a".repeat(64));
+        let key_b = format!("ak1-{}", "b".repeat(64));
+        let name_a = format!("xv-attachment-key-{key_a}");
+        let name_b = format!("xv-attachment-key-{key_b}");
+        let fixtures: [(&str, Option<&str>, bool); 6] = [
+            (name_b.as_str(), Some(crate::secret::attachment_key::KEY_RECORD_CONTENT_TYPE), false),
+            (name_a.as_str(), Some(crate::secret::attachment_key::KEY_RECORD_CONTENT_TYPE), true),
+            ("xv-attachment-key-ak1-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", None, true),
+            ("xv-attachment-key-notes", Some(crate::secret::attachment_key::KEY_RECORD_CONTENT_TYPE), true),
+            ("xv-attachment-key", Some(crate::secret::attachment_key::KEY_RECORD_CONTENT_TYPE), true),
+            ("ordinary", None, true),
+        ];
+        for (name, content_type, enabled) in fixtures {
+            let mut req = request(name, "must-not-be-returned");
+            req.content_type = content_type.map(str::to_owned);
+            req.enabled = Some(enabled);
+            raw.secrets().set_secret("default", req).await.unwrap();
+        }
+
+        let retained = raw
+            .attachment_keys()
+            .list_retained_keys("default")
+            .await
+            .unwrap();
+
+        assert_eq!(retained.len(), 2);
+        assert_eq!(retained[0].name, name_a);
+        assert_eq!(retained[0].key_id, key_a);
+        assert!(retained[0].enabled);
+        assert_eq!(retained[1].name, name_b);
+        assert_eq!(retained[1].key_id, key_b);
+        assert!(!retained[1].enabled);
+    }
+
+    struct ErrorListBackend;
+
+    #[async_trait]
+    impl SecretBackend for ErrorListBackend {
+        async fn set_secret(
+            &self,
+            _: &str,
+            _: SecretRequest,
+        ) -> Result<SecretProperties, BackendError> {
+            unimplemented!()
+        }
+        async fn get_secret(
+            &self,
+            _: &str,
+            _: &str,
+            _: bool,
+        ) -> Result<SecretProperties, BackendError> {
+            unimplemented!()
+        }
+        async fn get_secret_version(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: bool,
+        ) -> Result<SecretProperties, BackendError> {
+            unimplemented!()
+        }
+        async fn list_secrets(
+            &self,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<Vec<crate::secret::manager::SecretSummary>, BackendError> {
+            Err(BackendError::AuthenticationFailed(
+                "provider list failed".into(),
+            ))
+        }
+        async fn delete_secret(&self, _: &str, _: &str) -> Result<(), BackendError> {
+            unimplemented!()
+        }
+        async fn update_secret(
+            &self,
+            _: &str,
+            _: &str,
+            _: crate::secret::manager::SecretUpdateRequest,
+        ) -> Result<SecretProperties, BackendError> {
+            unimplemented!()
+        }
+    }
+
+    struct LegacyKeyStore;
+
+    #[async_trait]
+    impl AttachmentKeyStore for LegacyKeyStore {
+        async fn get_secret(
+            &self,
+            _: &str,
+            _: &str,
+            _: bool,
+        ) -> Result<SecretProperties, BackendError> {
+            unimplemented!()
+        }
+        async fn get_secret_version(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: bool,
+        ) -> Result<SecretProperties, BackendError> {
+            unimplemented!()
+        }
+        async fn set_secret(
+            &self,
+            _: &str,
+            _: SecretRequest,
+        ) -> Result<SecretProperties, BackendError> {
+            unimplemented!()
+        }
+    }
+
+    #[tokio::test]
+    async fn retained_enumeration_propagates_provider_list_errors() {
+        let error = RawAttachmentKeyStore::new(&ErrorListBackend)
+            .list_retained_keys("default")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, BackendError::AuthenticationFailed(message) if message == "provider list failed")
+        );
+    }
+
+    #[tokio::test]
+    async fn stores_without_enumeration_support_return_unsupported() {
+        let error = LegacyKeyStore
+            .list_retained_keys("default")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, BackendError::Unsupported(_)));
     }
 
     #[tokio::test]

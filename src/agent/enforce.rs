@@ -218,6 +218,26 @@ impl Backend for PolicyEnforcedBackend {
 // and carry the same redacted audit context into the local backend.
 #[async_trait]
 impl crate::backend::attachment_keys::AttachmentKeyStore for &PolicyEnforcedBackend {
+    async fn list_retained_keys(
+        &self,
+        vault: &str,
+    ) -> Result<Vec<crate::backend::attachment_keys::RetainedKeySummary>, BackendError> {
+        let scope_context = self.authorize_list_scope(vault)?;
+        let summaries = AUDIT_CONTEXT
+            .scope(
+                scope_context,
+                self.inner.attachment_keys().list_retained_keys(vault),
+            )
+            .await?;
+        let mut visible = Vec::with_capacity(summaries.len());
+        for (index, summary) in summaries.into_iter().enumerate() {
+            if self.list_item_allowed(vault, &summary.name, index)? {
+                visible.push(summary);
+            }
+        }
+        Ok(visible)
+    }
+
     async fn get_secret(
         &self,
         vault: &str,
@@ -1097,6 +1117,38 @@ mod tests {
         (inner, wrapped)
     }
 
+    fn retained_list_wrapper(
+        path: &std::path::Path,
+        list_results: Vec<SecretSummary>,
+    ) -> (Arc<CountingBackend>, PolicyEnforcedBackend) {
+        let inner = Arc::new(CountingBackend {
+            calls: AtomicUsize::new(0),
+            list_results,
+            deleted_list_results: Vec::new(),
+        });
+        let policy = CompiledPolicy::compile(&AgentConfig {
+            enforce: true,
+            policy: vec![crate::config::settings::AgentPolicyRule {
+                name: "retained-list".into(),
+                identity: "github:o/r:*".into(),
+                identity_source: "github-oidc".into(),
+                workspace: "prod".into(),
+                secrets: vec![format!("xv-attachment-key-ak1-{}", "a".repeat(64))],
+                operations: vec!["list".into()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+        let wrapped = PolicyEnforcedBackend::new(
+            inner.clone(),
+            AgentIdentity::new(super::super::IdentitySource::GithubOidc, "github:o/r:ci"),
+            policy,
+            DecisionLog::for_test(path.to_path_buf()),
+        );
+        (inner, wrapped)
+    }
+
     fn deleted_list_wrapper(
         path: &std::path::Path,
         deleted_list_results: Vec<DeletedSecretSummary>,
@@ -1197,6 +1249,52 @@ mod tests {
         assert_eq!(records[1].decision.as_deref(), Some("allow"));
         assert_eq!(records[2].decision.as_deref(), Some("deny"));
         assert_eq!(records[3].decision.as_deref(), Some("deny"));
+    }
+
+    #[tokio::test]
+    async fn retained_list_authorizes_scope_then_filters_each_returned_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut allowed = test_summary(&format!("xv-attachment-key-ak1-{}", "a".repeat(64)));
+        allowed.content_type = crate::secret::attachment_key::KEY_RECORD_CONTENT_TYPE.into();
+        let mut denied = test_summary(&format!("xv-attachment-key-ak1-{}", "b".repeat(64)));
+        denied.content_type = crate::secret::attachment_key::KEY_RECORD_CONTENT_TYPE.into();
+        let (inner, wrapped) =
+            retained_list_wrapper(&temp.path().join("decisions.jsonl"), vec![denied, allowed]);
+
+        let visible = wrapped
+            .attachment_keys()
+            .list_retained_keys("prod")
+            .await
+            .unwrap();
+
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].key_id, format!("ak1-{}", "a".repeat(64)));
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 1);
+        let records = wrapped.decisions.read_all().unwrap();
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0].resource_name, "prod/<list-scope>");
+        assert_eq!(records[0].decision.as_deref(), Some("allow"));
+        assert_eq!(records[1].decision.as_deref(), Some("allow"));
+        assert_eq!(records[2].decision.as_deref(), Some("deny"));
+    }
+
+    #[tokio::test]
+    async fn denied_retained_list_never_calls_backend() {
+        let temp = tempfile::tempdir().unwrap();
+        let (inner, wrapped) = denied_wrapper(&temp.path().join("decisions.jsonl"));
+
+        let error = wrapped
+            .attachment_keys()
+            .list_retained_keys("prod")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, BackendError::PermissionDenied(_)));
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 0);
+        let records = wrapped.decisions.read_all().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].resource_name, "prod/<list-scope>");
+        assert_eq!(records[0].decision.as_deref(), Some("deny"));
     }
 
     #[tokio::test]
