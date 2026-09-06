@@ -28,6 +28,7 @@ pub(crate) mod system_ops;
 pub(crate) mod totp_ops;
 #[cfg(feature = "file-ops")]
 pub(crate) mod transfer_ops;
+pub(crate) mod transfer_support;
 pub(crate) mod type_ops;
 pub(crate) mod upgrade_ops;
 pub(crate) mod vault_ops;

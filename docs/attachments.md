@@ -126,9 +126,10 @@ use `xv attach` / `xv attachments --get` / `xv file upload --encrypt` instead.
 ### Rename and move
 
 Attachment association is the blob path `attachments/<old-name>/…`.
-Generic CLI rename, copy and move commands refuse attached sources
-or destination prefixes before changing secrets. `xv update --rename` and `xv mv`
-also check before applying accompanying metadata or folder changes. Folder-only
+Generic CLI copy, move, and `mv` require `--with-attachments` to transfer attached
+sources. Existing destination secrets or attachment prefixes cannot be overwritten
+by an attached transfer, even with force. `xv update --rename` retains its attachment
+guard before accompanying metadata changes. Folder-only
 moves keep the same secret name and attachment prefix.
 
 Azure checks the entire attachment namespace because Key Vault resolves sanitized,
@@ -155,8 +156,45 @@ xv transfer cert --from work --to stage --to-key-id DESTINATION_ACTIVE_ID
 The JSON preview lists endpoints, attachment counts/bytes and verified key bindings,
 without secret values or file contents. Cross-vault attachments require a healthy
 destination V2 key ring and its explicit active key ID. The preview reports whether
-execution is supported. Same-vault local rename supports apply and recovery;
-cross-vault and cloud transfers remain preview-only in this release.
+execution is supported. Initialize an empty destination key ring explicitly before
+transferring: `xv attachment-key initialize --vault stage` previews initialization;
+add `--apply --offline` to initialize and obtain the active ID. Transfers never
+initialize or replace destination keys implicitly. See the
+[initialization walkthrough](attachment-key-initialize.md).
+
+| Source → destination | Copy | Move |
+| --- | --- | --- |
+| Local → Local | Supported | Supported |
+| Local → AWS with S3 attachments | Supported | Supported |
+| AWS → Local / AWS | Supported | Refused |
+| Azure → Local / AWS | Supported when exact ownership and snapshots are verifiable | Refused |
+| Any → Azure | Refused | Refused |
+
+AWS/Azure cannot conditionally delete source secrets. Azure cannot atomically
+create destination secrets. Unsupported capabilities, ambiguous ownership, key
+drift, unrepresentable secret metadata, and shared physical storage are refused
+during preflight. AWS destinations refuse disabled secrets and `not_before` values
+because Secrets Manager cannot preserve those properties. Same resolved
+endpoint copies use a different exact name and preserve ciphertext without a key
+ID. Distinct logical endpoints sharing the same key namespace are refused: use
+the same resolved endpoint instead. Physical self-copy/move is refused even for
+plain secrets.
+
+Generic commands use the same engine:
+
+```bash
+xv copy cert --from work --to stage --with-attachments --to-key-id DESTINATION_ACTIVE_ID --dry-run
+xv copy cert --from work --to stage --with-attachments --to-key-id DESTINATION_ACTIVE_ID --offline
+xv move cert --from work --to stage --with-attachments --to-key-id DESTINATION_ACTIVE_ID --offline --force
+xv mv work:cert stage:archive/ --with-attachments --to-key-id DESTINATION_ACTIVE_ID --offline
+```
+
+Dry runs require no offline assertion and perform no planned provisioning, key
+generation, or secret/file/vault data mutations. Existing read auditing, operational
+locking, and recovery of prior backend transactions may still occur. Transfer
+preview creates no transfer recovery files. Workspace `mv` saves its destination folder in the durable
+intent. To resume that operation, pass `--to-folder archive`; a move to root uses
+`--to-folder /`. Ordinary copy preserves the source folder.
 
 Stop other writers, then apply a local rename explicitly:
 
@@ -165,8 +203,10 @@ xv transfer cert --from work --to work --new-name certificate --move --apply --o
 ```
 
 The destination secret and every attachment are created without overwriting existing
-data. The transfer preserves attachment ciphertext and metadata, verifies the complete
-destination, then removes the original attachments and finally the original secret.
+data. Same-endpoint transfers preserve ciphertext; cross-vault transfers authenticate
+the source and reencrypt for the verified destination key, preserving non-crypto
+metadata. Move verifies the complete destination, then removes source attachments
+and finally the source secret. Copy verifies both endpoints and retains the source.
 `--offline` asserts that other writers have stopped; this is a recoverable operation,
 not a transaction spanning the secret and attachment stores.
 
@@ -175,6 +215,10 @@ The result includes a transfer ID. If interrupted, repeat the same intent with t
 ```bash
 xv transfer cert --from work --to work --new-name certificate --move --resume TRANSFER_ID --offline
 ```
+
+For cross-vault recovery, repeat `--to-key-id` and any `--to-folder` exactly. Copy
+recovery omits `--move`; move recovery includes it. Generic commands report the same
+operation IDs and resume through `xv transfer --resume`, with the same recovery directory.
 
 Recovery rechecks the saved source and destination evidence before proceeding. It
 never deletes the destination as rollback. Unexpected changes cause a conflict for
@@ -201,10 +245,32 @@ server.
 
 ### Migration
 
-`xv migrate` copies secrets, not file blobs. It preflights attachment prefixes for
-the selected batch and refuses attached transfers before writing secrets, including
-with `--force-replace`. An unavailable inventory is an error, not evidence of an
-empty prefix. Key custody records remain excluded from generic migration.
+`xv migrate --from local:work --to local:stage --with-attachments
+--to-key-id DESTINATION_ACTIVE_ID --offline` includes attachments. Omit `--offline`
+and add `--dry-run` for read-only preflight. Migration resolves one source and one
+destination vault, so a single destination key ID is sufficient.
+
+Every selected operation is strictly preflighted before planned destination vault
+creation or any transfer secret/object/recovery-directory write. Ordinary backend
+read audit, locking, and prior transaction recovery semantics still apply. Attached destinations
+must already exist with a healthy initialized key ring. Conflicts, unsupported
+capabilities, unreadable inventories, and metadata budgets fail the batch before
+writes; force does not bypass these checks. Custody records remain excluded and
+an existing destination attachment key is preserved.
+
+Attached entries execute sequentially with individual recovery IDs; plain secrets
+retain ordinary migration behavior. This is not an atomic batch: a later runtime
+failure can leave earlier entries complete. Resume the failed attachment operation
+with its reported `xv transfer` intent. Attached entries preserve source metadata;
+ordinary entries retain migration bookkeeping tags.
+
+Transfers hold one attachment in memory at a time and reject source ciphertext
+larger than 256 MiB during preflight. Source ciphertext, decrypted bytes, and
+reencrypted output coexist, plus provider buffers; this is not streaming. No
+plaintext files or plaintext hashes are persisted. A fresh Local destination's
+files directory is created only after strict preflight and a durable pending journal.
+Recovery can adopt a safe empty directory under the unchanged parent if interrupted
+before its inode was saved; after pinning, replacement is detected.
 
 ## Agent policy
 
@@ -228,7 +294,7 @@ same decrypt path as `xv file download`. See [`web-ui.md`](web-ui.md).
 
 | Symptom | Cause / fix |
 |---------|-------------|
-| `attachment key not found in vault '…'` | No attachments were ever created, or `xv-attachment-key` was deleted. Re-attach / re-upload with `--encrypt` to mint a new key — old ciphertext stays unreadable. |
+| `attachment key not found in vault '…'` | For an empty vault, use `xv attachment-key initialize`. If attachments already exist, restore the missing custody record/version; a new key cannot recover existing ciphertext. |
 | `…key generation for 'ak1-…' is missing …` | The exact key version a schema-1 blob pins no longer exists (the key record/version was deleted). Restoring that key record/version is the only recovery — the pinned reference is never silently replaced with the current key. |
 | `…is a managed attachment but its bytes are not age ciphertext` | A file under `attachments/` (or flagged `xv_encrypted=age`) is not valid ciphertext. Download fails closed rather than leak it as plaintext; investigate how an unencrypted object landed in the managed namespace. |
 | `…key reference is missing or malformed …` | A schema-1 blob's `xv_key_*` metadata is incomplete or invalid. Fix the metadata to the exact committed reference; the download will not fall back to another key. |
@@ -237,7 +303,7 @@ same decrypt path as `xv file download`. See [`web-ui.md`](web-ui.md).
 | `--encrypt currently supports single-file uploads only` | Drop `--recursive` / extra paths; encrypt one file at a time. |
 | File storage unsupported | Backend/config has no file store (e.g. AWS without `[aws].s3_bucket`). Configure storage, or use a backend that has it. |
 | Sync “skipped N encrypted attachment blob(s)” | Expected. Use attach/download commands for those objects. |
-| Attachments missing after rename | Path still under the old secret name. Re-attach or use the web UI rename guard. |
+| Attachments missing after an interrupted transfer | Preserve both endpoints and the recovery directory. Inspect the reported operation ID and resume with `xv transfer --resume ID --offline`, repeating the saved endpoints, names, operation, key ID, and folder override. Do not delete old files to force completion. |
 | Secret name with `/` rejected for attachments | Path separators would break prefix isolation; rename the secret first. |
 
 ## Related

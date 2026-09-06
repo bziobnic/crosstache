@@ -35,6 +35,7 @@ async fn compute_diff(
     source_vault: &str,
     target_vault: &str,
     filter: Option<&str>,
+    target_missing: bool,
 ) -> Result<MigrationDiff> {
     let source_secrets = source
         .secrets()
@@ -67,9 +68,13 @@ async fn compute_diff(
     let mut conflicts = Vec::new();
 
     for name in filtered {
+        if target_missing {
+            to_migrate.push(name);
+            continue;
+        }
         match target.secrets().secret_exists(target_vault, &name).await {
             Ok(true) => conflicts.push(name),
-            Ok(false) => to_migrate.push(name),
+            Ok(false) | Err(BackendError::VaultNotFound { .. }) => to_migrate.push(name),
             Err(e) => {
                 return Err(CrosstacheError::Unknown(format!(
                     "Failed to determine whether target secret '{name}' exists: {e}"
@@ -233,6 +238,13 @@ async fn migrate_one(
     }
 
     let request = build_request_from_props(&props, source_name_for_tag, source_vault);
+    crate::backend::secret::validate_transfer_request(target.as_ref(), &request)
+        .map_err(|error| (name.to_string(), format!("destination request: {error}")))?;
+    target
+        .secrets()
+        .validate_transfer_metadata(target_vault, &request)
+        .await
+        .map_err(|error| (name.to_string(), format!("destination metadata: {error}")))?;
 
     // Retry with exponential backoff on RateLimited
     let mut attempt = 0u32;
@@ -296,6 +308,7 @@ pub(crate) async fn execute_migrate(
     on_conflict: crate::cli::commands::OnConflict,
     force_replace: bool,
     concurrency: usize,
+    attachments: crate::cli::transfer_support::AttachmentTransferOptions,
     config: Config,
 ) -> Result<()> {
     if concurrency == 0 {
@@ -352,6 +365,189 @@ pub(crate) async fn execute_migrate(
         output::info("DRY RUN — no changes will be made");
     }
 
+    let target_missing = if let Some(vaults) = target.vaults() {
+        match vaults.get_vault(&target_vault, None).await {
+            Ok(_) => false,
+            Err(BackendError::VaultNotFound { .. }) => true,
+            Err(error) => return Err(error.into()),
+        }
+    } else {
+        false
+    };
+
+    // 5. Compute diff (list + filter + conflict detection)
+    let diff = compute_diff(
+        &source,
+        &target,
+        &source_vault,
+        &target_vault,
+        filter.as_deref(),
+        target_missing,
+    )
+    .await?;
+    print_diff_summary(
+        &diff,
+        source.name(),
+        target.name(),
+        &source_vault,
+        &target_vault,
+        &on_conflict,
+        dry_run,
+    );
+
+    if !diff.conflicts.is_empty() && on_conflict == crate::cli::commands::OnConflict::Fail {
+        return Err(CrosstacheError::conflict(format!(
+            "{} conflict(s) detected; aborting (--on-conflict fail)",
+            diff.conflicts.len()
+        )));
+    }
+    let mut selected = diff.to_migrate.clone();
+    if on_conflict == crate::cli::commands::OnConflict::Replace {
+        selected.extend(diff.conflicts.clone());
+    }
+    let mut names_to_process = Vec::new();
+    let mut preflight_skipped = 0usize;
+    let mut destination_names = std::collections::HashSet::new();
+    #[cfg(feature = "file-ops")]
+    let mut attached_intents = Vec::new();
+    // Complete read-only preflight. Even an error in the last selected item
+    // precedes vault creation, recovery directories, and the first secret write.
+    for name in selected {
+        let props = source
+            .secrets()
+            .get_secret(&source_vault, &name, true)
+            .await?;
+        if crate::secret::attachment_key::is_strict_retained_record_name(&name)
+            && crate::secret::attachment_key::is_marked_key_record(&props.content_type)
+        {
+            output::warn(&format!("skipping '{name}': attachment key custody record"));
+            preflight_skipped += 1;
+            continue;
+        }
+        let existing = if target_missing {
+            None
+        } else {
+            match target
+                .secrets()
+                .get_secret(&target_vault, &name, false)
+                .await
+            {
+                Ok(props) => Some(props),
+                Err(BackendError::NotFound { .. } | BackendError::VaultNotFound { .. }) => None,
+                Err(error) => return Err(error.into()),
+            }
+        };
+        if name == crate::secret::attachments::ATTACHMENT_KEY_SECRET && existing.is_some() {
+            output::warn(&format!(
+                "skipping '{name}': preserving target attachment key"
+            ));
+            preflight_skipped += 1;
+            continue;
+        }
+        if !force_replace
+            && existing.as_ref().is_some_and(|p| {
+                p.tags.get(TAG_MIGRATED_FROM)
+                    == Some(&format!(
+                        "{}:{}:{}",
+                        source.name(),
+                        source_vault,
+                        props.version
+                    ))
+            })
+        {
+            preflight_skipped += 1;
+            continue;
+        }
+        let canonical_name = if target.kind() == crate::backend::BackendKind::Azure {
+            crate::utils::sanitizer::sanitize_secret_name(&name)?.to_ascii_lowercase()
+        } else {
+            name.clone()
+        };
+        if !destination_names.insert(canonical_name) {
+            return Err(CrosstacheError::conflict(
+                "selected migration entries collide in the destination namespace",
+            ));
+        }
+        if !target_missing {
+            crate::cli::transfer_support::reject_self_target(
+                source.as_ref(),
+                &source_vault,
+                &name,
+                target.as_ref(),
+                &target_vault,
+                &name,
+            )
+            .await?;
+            crate::backend::ensure_no_attachments(target.as_ref(), &target_vault, &name).await?;
+        }
+        let attached = !source
+            .attachment_names(&source_vault, &name)
+            .await?
+            .is_empty();
+        if attached {
+            if !attachments.with_attachments {
+                return Err(BackendError::AttachmentsPresent { name }.into());
+            }
+            if target_missing {
+                return Err(CrosstacheError::config(format!("attachment destination vault '{target_vault}' must already exist with a healthy key; create it and run xv attachment-key initialize --vault {target_vault} --apply --offline, then supply --to-key-id")));
+            }
+            #[cfg(feature = "file-ops")]
+            {
+                use crate::secret::attachment_transfer::{
+                    TransferEndpoint, TransferIntent, TransferOperation,
+                };
+                let intent = TransferIntent {
+                    source: TransferEndpoint {
+                        identity: source.name().into(),
+                        vault: source_vault.clone(),
+                    },
+                    destination: TransferEndpoint {
+                        identity: target.name().into(),
+                        vault: target_vault.clone(),
+                    },
+                    source_name: name.clone(),
+                    destination_name: name,
+                    operation: TransferOperation::Copy,
+                    destination_key_id: attachments.to_key_id.clone(),
+                    destination_folder: None,
+                };
+                let preview = crate::secret::attachment_transfer_execution::preflight(
+                    source.as_ref(),
+                    target.as_ref(),
+                    intent.clone(),
+                )
+                .await?;
+                if !dry_run && !attachments.offline {
+                    return Err(CrosstacheError::invalid_argument(
+                        "attached migration requires --offline after stopping other writers",
+                    ));
+                }
+                if dry_run {
+                    println!("{}", serde_json::to_string_pretty(&preview)?);
+                }
+                attached_intents.push(intent);
+            }
+            #[cfg(not(feature = "file-ops"))]
+            return Err(CrosstacheError::config(
+                "attachment transfers require a build with file-ops",
+            ));
+        } else {
+            if crate::secret::attachment_key::generic_mutation_blocked_canonical(&name) {
+                return Err(CrosstacheError::conflict(format!("migration destination name '{name}' is reserved for attachment custody; no changes were written")));
+            }
+            let request = build_request_from_props(&props, source.name(), &source_vault);
+            crate::backend::secret::validate_transfer_request(target.as_ref(), &request)?;
+            target
+                .secrets()
+                .validate_transfer_metadata(&target_vault, &request)
+                .await?;
+            names_to_process.push(name);
+        }
+    }
+    if dry_run {
+        return Ok(());
+    }
+
     // 4. Ensure target vault exists
     if !dry_run {
         if let Some(target_vaults) = target.vaults() {
@@ -394,54 +590,20 @@ pub(crate) async fn execute_migrate(
         }
     }
 
-    // 5. Compute diff (list + filter + conflict detection)
-    let diff = compute_diff(
-        &source,
-        &target,
-        &source_vault,
-        &target_vault,
-        filter.as_deref(),
-    )
-    .await?;
-    print_diff_summary(
-        &diff,
-        source.name(),
-        target.name(),
-        &source_vault,
-        &target_vault,
-        &on_conflict,
-        dry_run,
-    );
-
-    // Generic migration cannot transfer attachment objects. Preflight every
-    // selected name on both endpoints before dry-run returns, idempotency can
-    // skip an item, or any secret write begins.
-    for name in diff.to_migrate.iter().chain(&diff.conflicts) {
-        crate::backend::ensure_no_attachments(source.as_ref(), &source_vault, name).await?;
-        crate::backend::ensure_no_attachments(target.as_ref(), &target_vault, name).await?;
-    }
-
-    if dry_run {
-        return Ok(());
-    }
-
-    // Honor --on-conflict fail
-    if !diff.conflicts.is_empty() && on_conflict == crate::cli::commands::OnConflict::Fail {
-        return Err(CrosstacheError::Unknown(format!(
-            "{} conflict(s) detected; aborting (--on-conflict fail)",
-            diff.conflicts.len()
-        )));
-    }
-
-    // Build list of names to process
-    let mut names_to_process: Vec<String> = diff.to_migrate.clone();
-    if on_conflict == crate::cli::commands::OnConflict::Replace {
-        names_to_process.extend(diff.conflicts.clone());
-    }
-
-    if names_to_process.is_empty() {
-        output::info("No secrets to migrate.");
-        return Ok(());
+    #[cfg(feature = "file-ops")]
+    let attached_count = attached_intents.len();
+    #[cfg(not(feature = "file-ops"))]
+    let attached_count = 0;
+    #[cfg(feature = "file-ops")]
+    for intent in attached_intents {
+        crate::cli::transfer_support::run_attached(
+            source.as_ref(),
+            target.as_ref(),
+            intent,
+            &attachments,
+            false,
+        )
+        .await?;
     }
 
     // 6. Migrate secrets concurrently with backoff retry
@@ -469,8 +631,8 @@ pub(crate) async fn execute_migrate(
         .collect()
         .await;
 
-    let mut migrated = 0usize;
-    let mut skipped = 0usize;
+    let mut migrated = attached_count;
+    let mut skipped = preflight_skipped;
     let mut errors: Vec<(String, String)> = Vec::new();
 
     for r in results {
@@ -661,6 +823,7 @@ mod tests {
             crate::cli::commands::OnConflict::Skip,
             false,
             0,
+            Default::default(),
             Config::default(),
         )
         .await;
@@ -930,20 +1093,17 @@ mod tests {
             crate::cli::commands::OnConflict::Replace,
             true,
             2,
+            Default::default(),
             config,
         )
         .await
         .expect_err("--force-replace cannot bypass attachment preflight");
         assert!(error.to_string().contains("attachments"), "{error}");
 
-        let reopened = crate::backend::local::LocalBackend::new(Some(&local)).unwrap();
-        assert!(matches!(
-            reopened
-                .secrets()
-                .get_secret("target", "a-clean", false)
-                .await,
-            Err(BackendError::NotFound { .. })
-        ));
+        assert!(
+            !tmp.path().join("store/vaults/target").exists(),
+            "attachment preflight must precede even destination vault creation"
+        );
     }
 
     #[tokio::test]
