@@ -58,80 +58,33 @@ impl BlobManager {
         self
     }
 
-    /// Upload a file to blob storage
+    /// Upload a file with ordinary bookkeeping and optional tag permissions.
     pub async fn upload_file(
         &self,
         request: FileUploadRequest,
         reporter: &dyn ProgressReporter,
     ) -> Result<FileInfo> {
-        // Determine content type
-        let content_type = request.content_type.unwrap_or_else(|| {
-            mime_guess::from_path(&request.name)
-                .first_or_octet_stream()
-                .to_string()
-        });
+        let client = self.file_client(&request.name);
+        upload_file_to_client(&client, request, reporter, false).await
+    }
 
-        // Build metadata with groups
-        let mut metadata = request.metadata.clone();
-        if !request.groups.is_empty() {
-            metadata.insert("groups".to_string(), request.groups.join(","));
-        }
-        metadata.insert("uploaded_by".to_string(), "crosstache".to_string());
-        metadata.insert("uploaded_at".to_string(), Utc::now().to_rfc3339());
+    /// Restore exact metadata and tags after the caller's strict preflight.
+    pub async fn upload_file_for_restore(
+        &self,
+        request: FileUploadRequest,
+        reporter: &dyn ProgressReporter,
+    ) -> Result<FileInfo> {
+        let client = self.file_client(&request.name);
+        upload_file_to_client(&client, request, reporter, true).await
+    }
 
-        // Create BlobServiceClient using token credential
-        let token_credential = self.auth_provider.get_token_credential();
-
-        let blob_service = BlobServiceClient::new(&self.storage_account, token_credential);
-
-        // Get container client
-        let container_client = blob_service.container_client(&self.container_name);
-
-        // Get blob client for the specific file
-        let blob_client = container_client.blob_client(&request.name);
-
-        // Store content length before moving request.content
-        let content_length = request.content.len() as u64;
-        reporter.set_total(content_length);
-
-        // Build SDK Metadata from our HashMap
-        let mut sdk_metadata = Metadata::new();
-        for (k, v) in &metadata {
-            sdk_metadata.insert(k.clone(), v.clone());
-        }
-
-        // Perform the upload, setting metadata in a single API call.
-        // Note: .tags() is intentionally omitted — setting blob tags requires
-        // Storage Blob Data Owner; using it causes 403 for accounts with only
-        // Storage Blob Data Contributor.
-        let response = blob_client
-            .put_block_blob(request.content)
-            .content_type(&content_type)
-            .metadata(sdk_metadata)
-            .await
-            .map_err(|e| CrosstacheError::azure_api(format!("Failed to upload blob: {e}")))?;
-        reporter.advance(content_length);
-        reporter.finish_clear();
-
-        // Extract response data and build FileInfo
-        let etag = response.etag.to_string();
-
-        // Convert Azure response datetime from time::OffsetDateTime to chrono::DateTime<Utc>
-        let last_modified = {
-            let timestamp = response.last_modified.unix_timestamp();
-            chrono::DateTime::from_timestamp(timestamp, 0).unwrap_or_else(Utc::now)
-        };
-
-        Ok(FileInfo {
-            name: request.name,
-            size: content_length,
-            content_type,
-            last_modified,
-            etag,
-            groups: request.groups,
-            metadata,
-            tags: request.tags,
-        })
+    fn file_client(&self, name: &str) -> BlobClient {
+        BlobServiceClient::new(
+            &self.storage_account,
+            self.auth_provider.get_token_credential(),
+        )
+        .container_client(&self.container_name)
+        .blob_client(name)
     }
 
     /// List files in the container
@@ -468,82 +421,14 @@ impl BlobManager {
         Ok(())
     }
 
-    /// Get file metadata without downloading content
+    /// Get metadata with the ordinary best-effort tag lookup.
     pub async fn get_file_info(&self, name: &str) -> Result<FileInfo> {
-        // Validate file name parameter
-        if name.trim().is_empty() {
-            return Err(CrosstacheError::config(
-                "File name cannot be empty".to_string(),
-            ));
-        }
+        get_file_info_from_client(&self.file_client(name), name, false).await
+    }
 
-        // Create BlobServiceClient using token credential
-        let token_credential = self.auth_provider.get_token_credential();
-        let blob_service = BlobServiceClient::new(&self.storage_account, token_credential);
-
-        // Get container and blob clients
-        let container_client = blob_service.container_client(&self.container_name);
-        let blob_client = container_client.blob_client(name);
-
-        // Get blob properties
-        let properties = blob_client.get_properties().await.map_err(|e| {
-            let error_msg = e.to_string().to_lowercase();
-            if error_msg.contains("404") || error_msg.contains("not found") {
-                CrosstacheError::vault_not_found(format!("File '{name}' not found"))
-            } else {
-                CrosstacheError::azure_api(format!("Failed to get blob properties: {e}"))
-            }
-        })?;
-
-        // Extract all properties
-        let size = properties.blob.properties.content_length;
-        let content_type = properties.blob.properties.content_type.clone();
-        let last_modified = {
-            let timestamp = properties.blob.properties.last_modified.unix_timestamp();
-            chrono::DateTime::from_timestamp(timestamp, 0).unwrap_or_else(Utc::now)
-        };
-        let etag = properties.blob.properties.etag.to_string();
-
-        // Get custom metadata including groups
-        let metadata = properties.blob.metadata.clone().unwrap_or_default();
-
-        // Extract groups from metadata
-        let groups: Vec<String> = metadata
-            .get("groups")
-            .map(|g| g.split(',').map(|s| s.trim().to_string()).collect())
-            .unwrap_or_default();
-
-        // Fetch tags via a separate API call (get_properties does not include them).
-        // Silently falls back to empty tags on 403 (requires Storage Blob Data Owner
-        // role or 't' SAS permission).
-        let tags: HashMap<String, String> = match blob_client.get_tags().await {
-            Ok(r) => HashMap::from(r.tags),
-            Err(e) => {
-                let msg = e.to_string().to_lowercase();
-                if msg.contains("403") || msg.contains("authorizationpermissionmismatch") {
-                    tracing::debug!(
-                        "Tag read for '{}' returned 403; tags will be empty. \
-                         Grant Storage Blob Data Owner or add 't' to the SAS token.",
-                        name
-                    );
-                } else {
-                    tracing::warn!("Failed to fetch tags for '{}': {}", name, e);
-                }
-                HashMap::new()
-            }
-        };
-
-        // Build complete FileInfo with all available data
-        Ok(FileInfo {
-            name: name.to_string(),
-            size,
-            content_type,
-            last_modified,
-            etag,
-            groups,
-            metadata,
-            tags,
-        })
+    /// Restore must know the complete tag set before replacing a blob.
+    pub async fn get_file_restore_info(&self, name: &str) -> Result<FileInfo> {
+        get_file_info_from_client(&self.file_client(name), name, true).await
     }
 
     /// Stream download a large file
@@ -875,6 +760,154 @@ async fn read_chunk<R: tokio::io::AsyncRead + Unpin>(
     Ok(chunk)
 }
 
+async fn upload_file_to_client(
+    blob_client: &BlobClient,
+    request: FileUploadRequest,
+    reporter: &dyn ProgressReporter,
+    restore: bool,
+) -> Result<FileInfo> {
+    // Determine content type
+    let content_type = request.content_type.unwrap_or_else(|| {
+        mime_guess::from_path(&request.name)
+            .first_or_octet_stream()
+            .to_string()
+    });
+
+    // Build metadata with groups
+    let mut metadata = request.metadata.clone();
+    if !restore {
+        if !request.groups.is_empty() {
+            metadata.insert("groups".to_string(), request.groups.join(","));
+        }
+        metadata.insert("uploaded_by".to_string(), "crosstache".to_string());
+        metadata.insert("uploaded_at".to_string(), Utc::now().to_rfc3339());
+    }
+
+    // Store content length before moving request.content
+    let content_length = request.content.len() as u64;
+    reporter.set_total(content_length);
+
+    // Build SDK Metadata from our HashMap
+    let mut sdk_metadata = Metadata::new();
+    for (k, v) in &metadata {
+        sdk_metadata.insert(k.clone(), v.clone());
+    }
+
+    // Perform the upload, setting metadata in a single API call.
+    // Ordinary uploads omit tags for contributor credentials. Restore has
+    // already required a successful tag read and must preserve the exact set.
+    let mut upload = blob_client
+        .put_block_blob(request.content)
+        .content_type(&content_type)
+        .metadata(sdk_metadata);
+    if restore {
+        upload = upload.tags(request.tags.clone());
+    }
+    let response = upload
+        .await
+        .map_err(|e| CrosstacheError::azure_api(format!("Failed to upload blob: {e}")))?;
+    reporter.advance(content_length);
+    reporter.finish_clear();
+
+    // Extract response data and build FileInfo
+    let etag = response.etag.to_string();
+
+    // Convert Azure response datetime from time::OffsetDateTime to chrono::DateTime<Utc>
+    let last_modified = {
+        let timestamp = response.last_modified.unix_timestamp();
+        chrono::DateTime::from_timestamp(timestamp, 0).unwrap_or_else(Utc::now)
+    };
+
+    Ok(FileInfo {
+        name: request.name,
+        size: content_length,
+        content_type,
+        last_modified,
+        etag,
+        groups: request.groups,
+        metadata,
+        tags: request.tags,
+    })
+}
+
+async fn get_file_info_from_client(
+    blob_client: &BlobClient,
+    name: &str,
+    strict_tags: bool,
+) -> Result<FileInfo> {
+    // Validate file name parameter
+    if name.trim().is_empty() {
+        return Err(CrosstacheError::config(
+            "File name cannot be empty".to_string(),
+        ));
+    }
+
+    // Get blob properties
+    let properties = blob_client.get_properties().await.map_err(|e| {
+        let error_msg = e.to_string().to_lowercase();
+        if error_msg.contains("404") || error_msg.contains("not found") {
+            CrosstacheError::vault_not_found(format!("File '{name}' not found"))
+        } else {
+            CrosstacheError::azure_api(format!("Failed to get blob properties: {e}"))
+        }
+    })?;
+
+    // Extract all properties
+    let size = properties.blob.properties.content_length;
+    let content_type = properties.blob.properties.content_type.clone();
+    let last_modified = {
+        let timestamp = properties.blob.properties.last_modified.unix_timestamp();
+        chrono::DateTime::from_timestamp(timestamp, 0).unwrap_or_else(Utc::now)
+    };
+    let etag = properties.blob.properties.etag.to_string();
+
+    // Get custom metadata including groups
+    let metadata = properties.blob.metadata.clone().unwrap_or_default();
+
+    // Extract groups from metadata
+    let groups: Vec<String> = metadata
+        .get("groups")
+        .map(|g| g.split(',').map(|s| s.trim().to_string()).collect())
+        .unwrap_or_default();
+
+    // Fetch tags via a separate API call (get_properties does not include them).
+    // Silently falls back to empty tags on 403 (requires Storage Blob Data Owner
+    // role or 't' SAS permission).
+    let tags: HashMap<String, String> = match blob_client.get_tags().await {
+        Ok(r) => HashMap::from(r.tags),
+        Err(e) => {
+            if strict_tags {
+                return Err(CrosstacheError::azure_api(format!(
+                    "Failed to read blob tags for restore: {e}"
+                )));
+            }
+            let msg = e.to_string().to_lowercase();
+            if msg.contains("403") || msg.contains("authorizationpermissionmismatch") {
+                tracing::debug!(
+                    "Tag read for '{}' returned 403; tags will be empty. \
+                         Grant Storage Blob Data Owner or add 't' to the SAS token.",
+                    name
+                );
+            } else {
+                tracing::warn!("Failed to fetch tags for '{}': {}", name, e);
+            }
+            HashMap::new()
+        }
+    };
+
+    // Build complete FileInfo with all available data
+    Ok(FileInfo {
+        name: name.to_string(),
+        size,
+        content_type,
+        last_modified,
+        etag,
+        groups,
+        metadata,
+        tags,
+    })
+}
+
 /// Pin all pages to the properties generation. Kept separate from credential
 /// construction so transport tests exercise the exact production SDK path.
 async fn download_snapshot_from_client(
@@ -1083,3 +1116,7 @@ mod tests {
         assert_eq!(chunks[2], &data[200..]);
     }
 }
+
+#[cfg(test)]
+#[path = "restore_tests.rs"]
+mod restore_tests;

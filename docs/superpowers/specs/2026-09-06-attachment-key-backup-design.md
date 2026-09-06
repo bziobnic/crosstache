@@ -1,6 +1,6 @@
 # Encrypted attachment-key backup and offline restore
 
-Status: proposed design for review, following merged PR #430.
+Status: implementation contract, incorporating the design merged in PR #431.
 
 ## Outcome and scope
 
@@ -14,6 +14,11 @@ payloads. Users must separately preserve and restore the encrypted files,
 including their metadata, at the manifest's original names. It does not back up
 ordinary secrets or historical object versions. Reports describe visible scope;
 agent policy may make that scope smaller than the whole vault.
+
+Destination files are updated in place. Azure file storage is container-scoped
+and ignores the vault argument; a separate recovery copy requires an independently
+configured destination container/account, not merely another vault name. Backend
+labels in a bundle are provenance and cannot prove physical storage separation.
 
 Rotation, changing the identities that encrypt files, key deletion, retirement,
 renaming files, and transparent fallback during normal downloads are excluded.
@@ -136,6 +141,10 @@ destination.
 Validate the complete bundle before provider access. Destination name validation
 and existing policy checks apply to every record and file. Fail on any policy or
 provider error rather than skipping denied objects and reporting full success.
+Preflight locally configured Set policy for every planned custody write before
+any mutation; remote provider write permissions are still checked by the actual
+write and may fail after earlier successful steps. Read fresh file metadata when
+classifying destination files because provider listings may omit it.
 
 Require every manifest file to exist at its original logical name in destination
 storage, with ciphertext matching the bundle hash. Authenticate each file using
@@ -218,7 +227,11 @@ covered by this operation's success statement.
   resolution, offline acknowledgement, safe report rendering.
 - src/secret/attachment_lifecycle.rs: share narrowly scoped exact-read and pointer
   verification helpers where useful, without exposing a raw secret backend.
-- Existing AttachmentKeyStore and FileBackend APIs remain the authority boundary;
+- AttachmentKeyStore and FileBackend remain the authority boundary. Add a custody
+  write-policy preflight and explicit file restore methods: full metadata reads
+  propagate tag errors, and replacement preserves supplied metadata and tags.
+  Backends without these restore methods fail closed before file mutation.
+  Display-oriented metadata reads and ordinary upload bookkeeping stay unchanged;
   normal download semantics and generic custody guards remain strict.
 - docs/attachments.md, README command reference, CHANGELOG.md, and ROADMAP.md:
   document commands, separate payload backups, visible scope, offline semantics,

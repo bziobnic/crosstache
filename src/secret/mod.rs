@@ -4,10 +4,16 @@
 //! including name sanitization, group management, and advanced secret operations.
 
 #[cfg(feature = "file-ops")]
+pub(crate) mod attachment_backup;
+#[cfg(feature = "file-ops")]
+pub(crate) mod attachment_backup_codec;
+#[cfg(feature = "file-ops")]
 pub mod attachment_inventory;
 pub mod attachment_key;
 #[cfg(feature = "file-ops")]
 pub mod attachment_lifecycle;
+#[cfg(feature = "file-ops")]
+pub(crate) mod attachment_restore;
 pub mod attachments;
 pub mod manager;
 pub mod models;

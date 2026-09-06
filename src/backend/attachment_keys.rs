@@ -20,6 +20,15 @@ pub struct RetainedKeySummary {
 #[cfg_attr(not(feature = "file-ops"), allow(dead_code))] // Encryption consumers are feature-gated.
 #[async_trait]
 pub trait AttachmentKeyStore: Send + Sync {
+    /// Check deterministic local policy for a planned custody write and its
+    /// required exact value readback, without mutation. The default checks the
+    /// canonical custody name only; policy wrappers authorize Set and raw Get.
+    /// This does not promise that remote provider permissions or concurrent
+    /// state will still permit the eventual write and verification reads.
+    async fn preflight_set_secret(&self, _vault: &str, name: &str) -> Result<(), BackendError> {
+        validate_name(name)
+    }
+
     /// List visible current retained custody records without reading values or
     /// historical versions.
     async fn list_retained_keys(

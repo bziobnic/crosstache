@@ -105,15 +105,19 @@ binding). Staged as PR 1 (integrity foundation) → PR 2 (lifecycle) → PR 3
 does not verify ciphertext, enumerate unreferenced retained keys, or authorize
 retirement.
 
-**PR 2 — implemented on this branch:** marked retained-key enumeration
+**PR 2 — merged in PR #430:** marked retained-key enumeration
 (`attachment-key keys`), offline V1→V2 upgrade preserving the original identity
 and pinned versions, explicit V2 legacy fallback reads, and pointer recovery
 from existing verified retained keys. Upgrade/recovery preview by default;
-application requires stopped writers and `--apply --offline`. Final review
-and merge remain.
+application requires stopped writers and `--apply --offline`.
 
-**Remaining PR 2 / PR 3:** encrypted key export/import and cross-vault recovery,
-rotation, rewrap, and logical retirement.
+**PR 2 — implemented on this branch, review/merge pending:** encrypted key bundles and offline
+cross-vault restore following the design merged in PR #431. Restore verifies
+current ciphertext, imports retained identities, rebinds provider-version
+references, and publishes the pointer last; malformed-pointer repair is explicit.
+Payload backups and historical blob versions are separate.
+
+**Remaining PR 3:** rotation, rewrap, and logical retirement.
 
 ### P1 — Make rename and migration attachment-aware
 

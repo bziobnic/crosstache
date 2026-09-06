@@ -113,7 +113,8 @@ strict-format retained key-record name, including provider-equivalent alias
 spellings. `--force` cannot override this protection. The same boundary applies
 to Web edits and folder moves, imports, and migration targets. Generic opaque
 backup restore is disabled because its destination cannot be checked before
-provider mutation. Dedicated pointer recovery is described below; encrypted key backup/restore and retirement remain future work.
+provider mutation. Dedicated pointer recovery and encrypted key backup/restore
+are described below. Rotation and retirement remain future work.
 
 ### Sync skips ciphertext
 
@@ -333,3 +334,67 @@ Encrypted key export/import, rotation, rewrap, and retirement remain future work
 Provider soft-deleted records may need restoration through the provider's
 recovery tooling before these commands can access or write them. Existing
 Local read-time journal recovery applies to these commands as well.
+
+### Encrypted key backups and offline restore
+
+`attachment-key export` creates an age-encrypted bundle containing verified
+attachment identities, active/legacy bindings, and a manifest of visible current
+encrypted files. Supply an independent X25519 age recovery recipient and keep
+its private identity separately from the vault. The bundle contains **no file
+payloads or ordinary secrets**. Back up ciphertext and its metadata separately.
+
+Stop all writers and older clients for the source vault, then export:
+
+```sh
+xv attachment-key export --vault SOURCE --recipient age1... --output keys.age --offline
+```
+
+Export authenticates managed ciphertext and checks exact key versions. Missing
+keys, invalid references, or observed source changes fail the operation. It
+includes unreferenced visible retained keys, but cannot export records hidden by
+agent policy. The output path must not already exist; no plaintext key file is
+created. A healthy source pointer is required.
+
+To recover into the same or another vault, first restore the separately backed-up
+ciphertext **and metadata** at their original names. Every manifest file must be
+present, unchanged; additional managed destination files cause a conflict.
+An age identity file may contain comments and exactly one X25519 private key.
+
+Restore updates files in the destination's configured storage in place. Azure
+file storage is scoped to a blob container, not to the vault name: selecting
+another vault on the same Azure backend still selects the same files. For a
+separate cross-vault recovery copy, configure a destination backend with a
+different container or storage account before restoring the file backup there.
+
+```sh
+xv attachment-key restore --vault DEST --input keys.age --identity-file recovery.agekey --format json
+# After reviewing the preview, keep all destination writers stopped:
+xv attachment-key restore --vault DEST --input keys.age --identity-file recovery.agekey --apply --offline
+```
+
+Preview reads and authenticates files but writes nothing. Apply imports missing
+retained keys, verifies their actual destination versions, and updates file key
+references while preserving ciphertext bytes and user metadata. It verifies
+normal decryption before publishing the active/legacy pointer last. Source
+provider version IDs are never fabricated at the destination. Repeating the
+command resumes interrupted work and reuses verified keys and rebound files.
+
+If the destination pointer is malformed, add `--repair-pointer` to both preview
+and apply. This explicitly permits replacing that malformed value after the
+bundle's keys and files verify; it cannot replace a valid V1 pointer or conflicting
+V2 bindings. A V1 destination must first use `attachment-key upgrade`. Unmarked
+or invalid retained-record collisions are never overwritten. Soft-deleted cloud
+records may still require provider recovery before import can proceed.
+
+Cloud restore requires permission to read object tags and to write the preserved
+tags. A tag-read failure stops preflight; it is never treated as an empty tag set.
+Configured agent policy is checked for planned key writes and their exact-value
+readback before mutation. Provider permissions are also checked at each actual
+operation, so a later provider failure can leave completed steps to retry.
+
+These commands cover the bundle's visible **current files**, not historical blob
+versions. Keep writers stopped throughout restore: drift checks detect observed
+changes but there is no portable atomic transaction across providers. On failure,
+completed writes remain available for retry; no automatic rollback or key deletion
+occurs. Rotation, re-encryption under another identity, and retirement are separate
+operations.

@@ -6,8 +6,14 @@ use serde::Serialize;
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
 use crate::secret::attachment_key::AttachmentKeyId;
-use crate::secret::{attachment_inventory, attachment_lifecycle};
+use crate::secret::{
+    attachment_backup, attachment_backup_codec as codec, attachment_inventory,
+    attachment_lifecycle, attachment_restore,
+};
 use crate::utils::format::{sanitize_control_chars, OutputFormat};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use zeroize::Zeroizing;
 
 #[derive(Debug, clap::Args)]
 pub struct ApplyOptions {
@@ -21,6 +27,32 @@ pub struct ApplyOptions {
 
 #[derive(Debug, Subcommand)]
 pub enum AttachmentKeyCommands {
+    /// Export verified keys and a current-file manifest encrypted to an independent age recipient
+    Export {
+        #[arg(long)]
+        vault: Option<String>,
+        #[arg(long)]
+        recipient: String,
+        #[arg(long)]
+        output: PathBuf,
+        /// Acknowledge all source writers and older clients are stopped
+        #[arg(long, required = true)]
+        offline: bool,
+    },
+    /// Preview recovery from an encrypted key bundle; file payloads must be restored separately
+    Restore {
+        #[arg(long)]
+        vault: Option<String>,
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long)]
+        identity_file: PathBuf,
+        /// Explicitly permit repairing a malformed pointer after all keys and files verify
+        #[arg(long)]
+        repair_pointer: bool,
+        #[command(flatten)]
+        action: ApplyOptions,
+    },
     /// List visible marked retained-key records without reading private values
     Keys {
         #[arg(long)]
@@ -83,6 +115,7 @@ pub(crate) async fn execute(command: AttachmentKeyCommands, config: Config) -> R
     match &command {
         AttachmentKeyCommands::Upgrade { action, .. }
         | AttachmentKeyCommands::Recover { action, .. }
+        | AttachmentKeyCommands::Restore { action, .. }
             if action.apply && !action.offline =>
         {
             return Err(CrosstacheError::invalid_argument(
@@ -91,6 +124,52 @@ pub(crate) async fn execute(command: AttachmentKeyCommands, config: Config) -> R
         }
         _ => {}
     }
+    // Validate recovery inputs before credentials or provider access. Private
+    // state remains in these non-Debug locals and never reaches report rendering.
+    let export_recipient = match &command {
+        AttachmentKeyCommands::Export {
+            recipient,
+            output,
+            offline,
+            ..
+        } => {
+            if !offline {
+                return Err(CrosstacheError::invalid_argument(
+                    "Export requires --offline and stopped writers.",
+                ));
+            }
+            if output.as_os_str().is_empty() || output.file_name().is_none() {
+                return Err(CrosstacheError::invalid_argument(
+                    "Choose a new output file for the encrypted backup.",
+                ));
+            }
+            match std::fs::symlink_metadata(output) {
+                Ok(_) => {
+                    return Err(CrosstacheError::conflict(
+                        "Backup output already exists; choose a new path.",
+                    ))
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+            Some(recipient.parse::<age::x25519::Recipient>().map_err(|_| {
+                CrosstacheError::invalid_argument("Expected an X25519 age recovery recipient.")
+            })?)
+        }
+        _ => None,
+    };
+    let restore_bundle = match &command {
+        AttachmentKeyCommands::Restore {
+            input,
+            identity_file,
+            ..
+        } => {
+            let identity = read_recovery_identity(identity_file)?;
+            let bytes = read_bounded(input, codec::MAX_BUNDLE_BYTES)?;
+            Some(codec::decrypt(&bytes, &identity)?)
+        }
+        _ => None,
+    };
     // Validate caller-supplied identifiers before any provider access.
     let recovery_ids = if let AttachmentKeyCommands::Recover {
         key_id,
@@ -116,7 +195,9 @@ pub(crate) async fn execute(command: AttachmentKeyCommands, config: Config) -> R
         | AttachmentKeyCommands::Inventory { vault }
         | AttachmentKeyCommands::Keys { vault }
         | AttachmentKeyCommands::Upgrade { vault, .. }
-        | AttachmentKeyCommands::Recover { vault, .. } => vault.as_deref(),
+        | AttachmentKeyCommands::Recover { vault, .. }
+        | AttachmentKeyCommands::Export { vault, .. }
+        | AttachmentKeyCommands::Restore { vault, .. } => vault.as_deref(),
     };
     let (backend, backend_name, vault) = match vault_override {
         None => crate::cli::vault_ops::resolve_current_vault(&config, None).await?,
@@ -131,6 +212,89 @@ pub(crate) async fn execute(command: AttachmentKeyCommands, config: Config) -> R
         }
     };
     match command {
+        AttachmentKeyCommands::Export { output, .. } => {
+            let files = backend.files().ok_or_else(|| {
+                crate::cli::file_ops::file_storage_unsupported_error(backend.as_ref())
+            })?;
+            let bundle = attachment_backup::collect(
+                backend.attachment_keys().as_ref(),
+                files,
+                &backend_name,
+                &vault,
+            )
+            .await?;
+            let encrypted = codec::encrypt(
+                &bundle,
+                export_recipient
+                    .as_ref()
+                    .expect("validated export recipient"),
+            )?;
+            write_backup(&output, &encrypted)?;
+            #[derive(Serialize)]
+            struct ExportReport<'a> {
+                schema_version: u32,
+                operation: &'static str,
+                outcome: &'static str,
+                scope: &'static str,
+                identities: usize,
+                files: usize,
+                active_key_id: &'a str,
+                legacy_key_id: Option<&'a str>,
+                key_ids: Vec<&'a str>,
+                verified_files: Vec<&'a str>,
+                source_references: &'a [codec::SourceRef],
+            }
+            render(
+                &Envelope {
+                    backend: &backend_name,
+                    vault: &vault,
+                    report: ExportReport {
+                        schema_version: 1,
+                        operation: "export",
+                        outcome: "exported",
+                        scope: "visible_current_files",
+                        identities: bundle.identities.len(),
+                        files: bundle.files.len(),
+                        active_key_id: &bundle.active_key_id,
+                        legacy_key_id: bundle.legacy_key_id.as_deref(),
+                        key_ids: bundle
+                            .identities
+                            .iter()
+                            .map(|r| r.key_id.as_str())
+                            .collect(),
+                        verified_files: bundle.files.iter().map(|f| f.name.as_str()).collect(),
+                        source_references: &bundle.references,
+                    },
+                },
+                format,
+            )
+        }
+        AttachmentKeyCommands::Restore {
+            action,
+            repair_pointer,
+            ..
+        } => {
+            let files = backend.files().ok_or_else(|| {
+                crate::cli::file_ops::file_storage_unsupported_error(backend.as_ref())
+            })?;
+            let report = attachment_restore::restore(
+                backend.attachment_keys().as_ref(),
+                files,
+                &vault,
+                restore_bundle.as_ref().expect("validated recovery bundle"),
+                action.apply,
+                repair_pointer,
+            )
+            .await?;
+            render(
+                &Envelope {
+                    backend: &backend_name,
+                    vault: &vault,
+                    report,
+                },
+                format,
+            )
+        }
         AttachmentKeyCommands::Keys { .. } => {
             #[derive(Serialize)]
             struct RetainedReport {
@@ -217,6 +381,61 @@ pub(crate) async fn execute(command: AttachmentKeyCommands, config: Config) -> R
     }
 }
 
+fn read_bounded(path: &Path, max: usize) -> Result<Zeroizing<Vec<u8>>> {
+    let file = std::fs::File::open(path)?;
+    let mut bytes = Zeroizing::new(Vec::new());
+    file.take(max as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > max {
+        return Err(CrosstacheError::invalid_argument(
+            "Recovery input exceeds its size limit.",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn read_recovery_identity(path: &Path) -> Result<age::x25519::Identity> {
+    let bytes = read_bounded(path, 64 * 1024)?;
+    let invalid = || {
+        CrosstacheError::invalid_argument(
+            "Recovery identity file must contain exactly one X25519 age private key.",
+        )
+    };
+    let text = std::str::from_utf8(&bytes).map_err(|_| invalid())?;
+    let mut lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !s.starts_with('#'));
+    let identity = lines
+        .next()
+        .ok_or_else(invalid)?
+        .parse()
+        .map_err(|_| invalid())?;
+    if lines.next().is_some() {
+        return Err(invalid());
+    }
+    Ok(identity)
+}
+
+fn write_backup(path: &Path, encrypted: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
+    file.write_all(encrypted)?;
+    file.as_file().sync_all()?;
+    file.persist_noclobber(path).map_err(|e| {
+        if e.error.kind() == std::io::ErrorKind::AlreadyExists {
+            CrosstacheError::conflict("Backup output already exists; choose a new path.")
+        } else {
+            CrosstacheError::from(e.error)
+        }
+    })?;
+    #[cfg(unix)]
+    std::fs::File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
 fn render<T: Serialize>(report: &T, format: OutputFormat) -> Result<()> {
     match format {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(report)?),
@@ -239,4 +458,71 @@ fn parse_id(raw: &str) -> Result<AttachmentKeyId> {
             "Expected an attachment key ID: ak1- followed by 64 lowercase hexadecimal digits.",
         )
     })
+}
+
+#[cfg(test)]
+mod backup_cli_tests {
+    use super::{read_recovery_identity, write_backup};
+    use crate::cli::commands::Cli;
+    use clap::Parser;
+
+    #[test]
+    fn backup_restore_cli_requires_explicit_offline_writes() {
+        let export = [
+            "xv",
+            "attachment-key",
+            "export",
+            "--recipient",
+            "age1test",
+            "--output",
+            "keys.age",
+        ];
+        assert!(Cli::try_parse_from(export).is_err());
+        assert!(Cli::try_parse_from(export.into_iter().chain(["--offline"])).is_ok());
+        let restore = [
+            "xv",
+            "attachment-key",
+            "restore",
+            "--input",
+            "keys.age",
+            "--identity-file",
+            "key.txt",
+        ];
+        assert!(Cli::try_parse_from(restore).is_ok());
+        assert!(Cli::try_parse_from(restore.into_iter().chain(["--apply"])).is_err());
+        assert!(Cli::try_parse_from(restore.into_iter().chain([
+            "--apply",
+            "--offline",
+            "--repair-pointer"
+        ]))
+        .is_ok());
+    }
+
+    #[test]
+    fn backup_file_io_never_overwrites_or_echoes_private_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("bundle.age");
+        write_backup(&out, b"ciphertext").unwrap();
+        assert!(write_backup(&out, b"replacement").is_err());
+        assert_eq!(std::fs::read(&out).unwrap(), b"ciphertext");
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "temporary ciphertext file is removed on error"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&out).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        let secret = dir.path().join("invalid-key");
+        std::fs::write(&secret, "PRIVATE-INVALID-IDENTITY").unwrap();
+        let error = read_recovery_identity(&secret).err().unwrap();
+        assert!(!format!("{error:?}").contains("PRIVATE-INVALID-IDENTITY"));
+        std::fs::write(&secret, vec![b'x'; 64 * 1024 + 1]).unwrap();
+        assert!(read_recovery_identity(&secret).is_err());
+    }
 }

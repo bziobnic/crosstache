@@ -4,6 +4,10 @@
 
 ### Added
 
+- Encrypted attachment-key export and offline restore for current visible files,
+  including cross-vault key-version rebinding, preview, safe retry, and explicit
+  malformed-pointer repair. Ciphertext payloads require separate backups.
+
 - `xv attachment-key keys` enumerates visible marked retained-key records.
   Offline `upgrade` preserves the V1 identity and old attachment reads when
   converting to V2; `recover` repairs missing/broken pointers from existing

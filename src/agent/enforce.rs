@@ -218,6 +218,22 @@ impl Backend for PolicyEnforcedBackend {
 // and carry the same redacted audit context into the local backend.
 #[async_trait]
 impl crate::backend::attachment_keys::AttachmentKeyStore for &PolicyEnforcedBackend {
+    async fn preflight_set_secret(&self, vault: &str, name: &str) -> Result<(), BackendError> {
+        crate::backend::attachment_keys::validate_name(name)?;
+        let context = self.authorize(vault, name, Operation::Set, false)?;
+        // Custody writes require exact value readback before restore can
+        // continue. Reject a deterministic disclosure denial before mutation.
+        self.authorize(vault, name, Operation::Get, true)?;
+        AUDIT_CONTEXT
+            .scope(context, async {
+                self.inner
+                    .attachment_keys()
+                    .preflight_set_secret(vault, name)
+                    .await
+            })
+            .await
+    }
+
     async fn list_retained_keys(
         &self,
         vault: &str,
