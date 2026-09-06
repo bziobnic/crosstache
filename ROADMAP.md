@@ -111,13 +111,17 @@ and pinned versions, explicit V2 legacy fallback reads, and pointer recovery
 from existing verified retained keys. Upgrade/recovery preview by default;
 application requires stopped writers and `--apply --offline`.
 
-**PR 2 — implemented on this branch, review/merge pending:** encrypted key bundles and offline
+**PR 2 — merged in PR #432:** encrypted key bundles and offline
 cross-vault restore following the design merged in PR #431. Restore verifies
 current ciphertext, imports retained identities, rebinds provider-version
 references, and publishes the pointer last; malformed-pointer repair is explicit.
 Payload backups and historical blob versions are separate.
 
-**Remaining PR 3:** rotation, rewrap, and logical retirement.
+**PR 3 — rotation implemented on this branch, review/merge pending:** offline
+rotation previews and verifies an expected V2 active ID before creating and
+publishing a new retained identity. Existing reads and legacy bindings survive.
+
+**Remaining:** rewrap and logical retirement, one subsequent PR each.
 
 ### P1 — Make rename and migration attachment-aware
 

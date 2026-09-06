@@ -27,6 +27,8 @@ struct ServiceState {
     records: HashMap<String, (String, String)>,
     operations: Vec<String>,
     list_pages: Vec<Value>,
+    deny_describe: bool,
+    describe_current: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -104,14 +106,36 @@ impl HttpConnector for RetainedKeyTransport {
                         response(200, json!({"Name": name, "VersionId": version}))
                     }
                 }
+                "DescribeSecret" => {
+                    if state.deny_describe {
+                        response(
+                            400,
+                            json!({"__type": "AccessDeniedException", "Message": "metadata denied"}),
+                        )
+                    } else {
+                        let name = body["SecretId"].as_str().unwrap();
+                        let (version, _) = state.records.get(name).expect("committed key");
+                        let current = state.describe_current.as_ref().unwrap_or(version);
+                        response(
+                            200,
+                            json!({"Name": name, "Description": "retained note",
+                            "Tags": [{"Key": "xv:content_type", "Value": KEY_RECORD_CONTENT_TYPE},
+                                {"Key": "xv:original_name", "Value": name.strip_prefix(&format!("{VAULT}/")).unwrap()},
+                                {"Key": "owner", "Value": "custody"}],
+                            "VersionIdsToStages": {current: ["AWSCURRENT"]}}),
+                        )
+                    }
+                }
                 "GetSecretValue" => {
                     let name = body["SecretId"].as_str().unwrap();
                     let (version, value) = state.records.get(name).expect("committed key");
-                    assert_eq!(body["VersionId"], *version, "must read exact version");
+                    if body.get("VersionId").is_some() {
+                        assert_eq!(body["VersionId"], *version, "must read exact version");
+                    }
                     assert!(body.get("VersionStage").is_none());
                     response(
                         200,
-                        json!({"Name": name, "VersionId": version, "SecretString": value}),
+                        json!({"Name": name, "VersionId": version, "SecretString": value, "VersionStages": ["AWSPREVIOUS"]}),
                     )
                 }
                 // PutSecretValue, UpdateSecret, TagResource, UntagResource and
@@ -179,15 +203,21 @@ async fn retained_commit_returns_create_secret_version_and_reads_exact_material(
         .unwrap();
     assert_eq!(committed.name, request.name);
     assert_eq!(committed.version, format!("{:032}", 1));
+    state.lock().unwrap().describe_current = Some("newer-current-version".into());
     let read = keys
         .get_secret_version(VAULT, &request.name, &committed.version, true)
         .await
         .unwrap();
     assert_eq!(read.version, committed.version);
+    assert_eq!(read.content_type, KEY_RECORD_CONTENT_TYPE);
+    assert!(read.enabled);
+    assert_eq!(read.tags["owner"], "custody");
+    assert_eq!(read.tags["note"], "retained note");
+    assert_eq!(read.tags["aws:stages"], "AWSPREVIOUS");
     assert_eq!(read.value.unwrap().as_str(), request.value.as_str());
     assert_eq!(
         state.lock().unwrap().operations,
-        ["CreateSecret", "GetSecretValue"]
+        ["CreateSecret", "DescribeSecret", "GetSecretValue"]
     );
 }
 
@@ -215,7 +245,12 @@ async fn concurrent_same_name_retained_commits_conflict_without_mutating_winner(
     assert_eq!(state.records.len(), 1);
     assert_eq!(
         state.operations,
-        ["CreateSecret", "CreateSecret", "GetSecretValue"]
+        [
+            "CreateSecret",
+            "CreateSecret",
+            "DescribeSecret",
+            "GetSecretValue"
+        ]
     );
 }
 
@@ -249,7 +284,9 @@ async fn concurrent_distinct_retained_keys_remain_independently_exact_version_re
         [
             "CreateSecret",
             "CreateSecret",
+            "DescribeSecret",
             "GetSecretValue",
+            "DescribeSecret",
             "GetSecretValue"
         ]
     );
@@ -335,5 +372,45 @@ async fn aws_retained_listing_preserves_content_type_and_generic_custody_hiding(
         state.lock().unwrap().operations,
         vec!["ListSecrets"; 6],
         "all three reads must paginate without fetching values or extra metadata"
+    );
+}
+
+#[tokio::test]
+async fn aws_current_value_version_comes_from_value_response_not_describe() {
+    use crate::backend::SecretBackend;
+    let (backend, state) = backend(1);
+    let request = key_request();
+    let committed = RawAttachmentKeyStore::new(&backend)
+        .commit_retained_key(VAULT, request.clone())
+        .await
+        .unwrap();
+    state.lock().unwrap().describe_current = Some("different-described-version".into());
+    let read = backend
+        .get_secret(VAULT, &request.name, true)
+        .await
+        .unwrap();
+    assert_eq!(read.version, committed.version);
+    assert_eq!(read.value.unwrap().as_str(), request.value.as_str());
+    assert_eq!(read.content_type, KEY_RECORD_CONTENT_TYPE);
+    assert_eq!(read.tags["aws:stages"], "AWSPREVIOUS");
+}
+
+#[tokio::test]
+async fn aws_exact_value_read_fails_if_custody_metadata_cannot_be_read() {
+    let (backend, state) = backend(1);
+    let keys = RawAttachmentKeyStore::new(&backend);
+    let request = key_request();
+    let committed = keys
+        .commit_retained_key(VAULT, request.clone())
+        .await
+        .unwrap();
+    state.lock().unwrap().deny_describe = true;
+    assert!(keys
+        .get_secret_version(VAULT, &request.name, &committed.version, true)
+        .await
+        .is_err());
+    assert_eq!(
+        state.lock().unwrap().operations,
+        ["CreateSecret", "DescribeSecret"]
     );
 }

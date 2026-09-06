@@ -23,6 +23,58 @@ use std::process::{Command, Output};
 use tempfile::TempDir;
 
 #[test]
+fn attachment_rotation_cli_preserves_reads_and_rejects_repeat_rotation() {
+    let env = FileEnv::new();
+    std::fs::write(env.path().join("before.txt"), b"before rotation").unwrap();
+    env.ok(&["file", "upload", "before.txt", "--encrypt"]);
+    let status: serde_json::Value =
+        serde_json::from_str(&env.ok(&["attachment-key", "status", "--format", "json"])).unwrap();
+    let old = status["report"]["active_key_id"].as_str().unwrap();
+    let preview = env.ok(&[
+        "attachment-key",
+        "rotate",
+        "--from-key-id",
+        old,
+        "--format",
+        "json",
+    ]);
+    assert!(!preview.contains("AGE-SECRET-KEY"));
+    let keys: serde_json::Value =
+        serde_json::from_str(&env.ok(&["attachment-key", "keys", "--format", "json"])).unwrap();
+    assert_eq!(keys["report"]["keys"].as_array().unwrap().len(), 1);
+    let args = [
+        "attachment-key",
+        "rotate",
+        "--from-key-id",
+        old,
+        "--apply",
+        "--offline",
+        "--format",
+        "json",
+    ];
+    assert!(!env.ok(&args).contains("AGE-SECRET-KEY"));
+    assert!(!env.run(&args).status.success());
+    let keys: serde_json::Value =
+        serde_json::from_str(&env.ok(&["attachment-key", "keys", "--format", "json"])).unwrap();
+    assert_eq!(keys["report"]["keys"].as_array().unwrap().len(), 2);
+    let status: serde_json::Value =
+        serde_json::from_str(&env.ok(&["attachment-key", "status", "--format", "json"])).unwrap();
+    assert_ne!(status["report"]["active_key_id"].as_str().unwrap(), old);
+    std::fs::write(env.path().join("after.txt"), b"after rotation").unwrap();
+    env.ok(&["file", "upload", "after.txt", "--encrypt"]);
+    env.ok(&["file", "download", "before.txt", "--output", "before.out"]);
+    env.ok(&["file", "download", "after.txt", "--output", "after.out"]);
+    assert_eq!(
+        std::fs::read(env.path().join("before.out")).unwrap(),
+        b"before rotation"
+    );
+    assert_eq!(
+        std::fs::read(env.path().join("after.out")).unwrap(),
+        b"after rotation"
+    );
+}
+
+#[test]
 fn attachment_key_encrypted_backup_restores_another_vault_through_cli() {
     use age::secrecy::ExposeSecret;
     use crosstache::backend::{local::LocalBackend, Backend};

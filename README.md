@@ -1359,6 +1359,10 @@ Back up ciphertext and metadata separately. Restore preserves ciphertext while
 rebinding exact key versions, including across vaults. Use `--repair-pointer`
 explicitly when repairing a malformed destination pointer.
 
+To rotate new uploads while retaining old reads, preview
+`xv attachment-key rotate --from-key-id OLD_ACTIVE_ID`, then apply with
+`--apply --offline` while writers are stopped.
+
 `xv list` hides `xv-attachment-key`. Full workflow, sync/rename/migrate
 pitfalls, and Azure's `xv_encrypted` metadata key:
 [`docs/attachments.md`](docs/attachments.md).
