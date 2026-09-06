@@ -366,3 +366,126 @@ async fn legacy_pointer_is_refused_without_upgrading_it() {
     assert_eq!(before.version, after.version);
     assert_eq!(before.value, after.value);
 }
+
+// Exercise the provider-aware default inventory with deterministic local storage.
+struct InventoryProvider<'a> {
+    inner: &'a crate::backend::local::LocalBackend,
+    kind: crate::backend::BackendKind,
+}
+#[async_trait::async_trait]
+impl crate::backend::Backend for InventoryProvider<'_> {
+    fn name(&self) -> &'static str {
+        "inventory-fixture"
+    }
+    fn kind(&self) -> crate::backend::BackendKind {
+        self.kind
+    }
+    fn capabilities(&self) -> crate::backend::BackendCapabilities {
+        self.inner.capabilities()
+    }
+    fn secrets(&self) -> &dyn crate::backend::SecretBackend {
+        self.inner.secrets()
+    }
+    fn files(&self) -> Option<&dyn crate::backend::FileBackend> {
+        self.inner.files()
+    }
+    async fn health_check(&self) -> std::result::Result<(), crate::backend::BackendError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn azure_alias_generic_source_destination_and_migration_guards() {
+    use crate::backend::{ensure_no_attachments, Backend, BackendKind};
+    let (_dir, b) = fixture().await;
+    let azure = InventoryProvider {
+        inner: &b,
+        kind: BackendKind::Azure,
+    };
+    // Caller aliases represent source move, force destination overwrite, and
+    // the original spelling returned by a migration's secret listing.
+    for caller in ["DB", "-db-", "__db__", "db"] {
+        let error = ensure_no_attachments(&azure, "default", caller)
+            .await
+            .expect_err("Azure aliases must not bypass generic attachment preflight");
+        assert!(error.to_string().contains("attachment"));
+    }
+    for kind in [BackendKind::Local, BackendKind::Aws] {
+        let exact = InventoryProvider { inner: &b, kind };
+        assert!(exact
+            .attachment_names("default", "DB")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+    assert_eq!(
+        azure.attachment_names("default", "db").await.unwrap().len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn azure_alias_planner_destination_refuses_alternate_spelling() {
+    use crate::backend::BackendKind;
+    let (_dir, b) = fixture().await;
+    let azure = InventoryProvider {
+        inner: &b,
+        kind: BackendKind::Azure,
+    };
+    let mut target_alias = intent();
+    target_alias.destination_name = "__db__".into();
+    let error = plan(&azure, &azure, target_alias)
+        .await
+        .expect_err("destination alias attachments must block preview");
+    assert!(error.to_string().contains("attachment"));
+}
+
+#[tokio::test]
+async fn azure_alias_planner_source_refuses_third_spelling() {
+    use crate::backend::{Backend, BackendKind, SecretBackend};
+    let (_dir, b) = fixture().await;
+    let azure = InventoryProvider {
+        inner: &b,
+        kind: BackendKind::Azure,
+    };
+    let secret = b
+        .guarded_secrets()
+        .get_secret("default", "db", false)
+        .await
+        .unwrap();
+    b.guarded_secrets()
+        .set_secret(
+            "default",
+            crate::secret::manager::SecretRequest {
+                name: "__DB__".into(),
+                value: Zeroizing::new("fixture".into()),
+                content_type: None,
+                enabled: Some(true),
+                expires_on: None,
+                not_before: None,
+                tags: None,
+                groups: None,
+                note: None,
+                folder: None,
+            },
+        )
+        .await
+        .unwrap();
+    b.files()
+        .unwrap()
+        .upload_file("default", upload("attachments/__DB__/third"), None)
+        .await
+        .unwrap();
+    let error = plan(&azure, &azure, intent())
+        .await
+        .expect_err("source third-alias attachments must not be silently omitted");
+    assert!(error.to_string().contains("attachment"));
+    assert_eq!(
+        b.guarded_secrets()
+            .get_secret("default", "db", false)
+            .await
+            .unwrap()
+            .version,
+        secret.version
+    );
+}

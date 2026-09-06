@@ -131,6 +131,14 @@ or destination prefixes before changing secrets. `xv update --rename` and `xv mv
 also check before applying accompanying metadata or folder changes. Folder-only
 moves keep the same secret name and attachment prefix.
 
+Azure checks the entire attachment namespace because Key Vault resolves sanitized,
+case-insensitive secret names while blob paths retain the spelling used at upload.
+If an equivalent name owns objects under a different spelling (for example,
+`my_secret`, `my-secret`, or `MY--SECRET`), generic operations and transfer preview
+refuse with an attachment alias error. Preview currently requires an unambiguous
+exact owner prefix; it cannot combine or rename those alias prefixes. Listing errors
+also block the operation. Local and AWS retain exact, case-sensitive ownership.
+
 Inspect a proposed transfer without changing data:
 
 ```bash

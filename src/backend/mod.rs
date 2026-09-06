@@ -288,18 +288,26 @@ pub trait Backend: Send + Sync {
                 )
             })?;
             let prefix = attachment_prefix(name)?;
+            // Azure secret lookup normalizes names, while blob paths preserve
+            // caller spelling. A narrow blob prefix cannot establish absence.
+            let azure = self.kind() == BackendKind::Azure;
             let listed = files
                 .list_files(
                     vault,
                     crate::blob::models::FileListRequest {
-                        prefix: Some(prefix.clone()),
+                        prefix: Some(if azure { "attachments/".into() } else { prefix }),
                         groups: None,
                         limit: None,
                         delimiter: None,
                     },
                 )
                 .await?;
-            return validate_attachment_names(name, listed.into_iter().map(|file| file.name));
+            let names = listed.into_iter().map(|file| file.name);
+            return if azure {
+                validate_azure_attachment_names(name, names)
+            } else {
+                validate_attachment_names(name, names)
+            };
         }
         #[cfg(not(feature = "file-ops"))]
         {
@@ -341,6 +349,54 @@ fn attachment_prefix(name: &str) -> Result<String, BackendError> {
         ));
     }
     Ok(format!("attachments/{name}/"))
+}
+
+/// Keep transfer mappings exact: an equivalent Azure owner spelled differently
+/// is an explicit refusal, never evidence that a secret has no attachments.
+#[cfg(feature = "file-ops")]
+fn validate_azure_attachment_names(
+    owner: &str,
+    names: impl IntoIterator<Item = String>,
+) -> Result<Vec<String>, BackendError> {
+    let identity = crate::utils::sanitizer::sanitize_secret_name(owner).map_err(|e| {
+        BackendError::Internal(format!("attachment owner normalization failed: {e}"))
+    })?;
+    let prefix = attachment_prefix(owner)?;
+    let mut seen = std::collections::BTreeSet::new();
+    let mut exact = Vec::new();
+    for name in names {
+        if !seen.insert(name.clone()) {
+            return Err(BackendError::Internal(
+                "attachment listing returned duplicate objects".into(),
+            ));
+        }
+        let rest = name.strip_prefix("attachments/").ok_or_else(|| {
+            BackendError::Internal("attachment listing returned an out-of-prefix object".into())
+        })?;
+        if !rest.contains('/') || rest.starts_with('/') {
+            return Err(BackendError::Internal(
+                "attachment listing has ambiguous ownership".into(),
+            ));
+        }
+        // A historical user spelling can itself contain '/'. Consider every
+        // possible owner boundary; ambiguity must not silently omit an object.
+        for (boundary, _) in rest.match_indices('/') {
+            let candidate = &rest[..boundary];
+            let candidate_identity = crate::utils::sanitizer::sanitize_secret_name(candidate)
+                .map_err(|e| {
+                    BackendError::Internal(format!("attachment owner normalization failed: {e}"))
+                })?;
+            if identity.eq_ignore_ascii_case(&candidate_identity) && candidate != owner {
+                return Err(BackendError::InvalidArgument(format!(
+                    "attachment owner alias '{candidate}' resolves to Azure secret '{owner}'; transfer preview and generic mutations require an unambiguous exact attachment prefix"
+                )));
+            }
+        }
+        if name.starts_with(&prefix) {
+            exact.push(name);
+        }
+    }
+    validate_attachment_names(owner, exact)
 }
 
 pub(crate) fn validate_attachment_names(
@@ -439,6 +495,43 @@ mod tests {
         assert!(!cs.is_valid("has space"));
         assert!(!cs.is_valid("has*star"));
         assert!(!cs.is_valid("has(paren)"));
+    }
+
+    #[cfg(feature = "file-ops")]
+    #[test]
+    fn azure_attachment_inventory_preserves_exactness_and_fails_closed() {
+        let inventory = |owner: &str, names: &[&str]| {
+            validate_azure_attachment_names(owner, names.iter().map(|name| name.to_string()))
+        };
+        assert_eq!(
+            inventory("db", &["attachments/db-copy/x", "attachments/db/a"]).unwrap(),
+            vec!["attachments/db/a"]
+        );
+        assert!(inventory("db", &[]).unwrap().is_empty());
+        for names in [
+            vec!["attachments/db/x", "attachments/db/x"],
+            vec!["other/db/x"],
+            vec!["attachments/no-owner-boundary"],
+            vec!["attachments//x"],
+            vec!["attachments/__DB__/x"],
+            vec!["attachments/my/secret/x"],
+        ] {
+            let owner = if names[0].contains("my/secret") {
+                "my-secret"
+            } else {
+                "db"
+            };
+            let error = inventory(owner, &names)
+                .expect_err("invalid or aliased inventory must fail closed");
+            assert!(error.to_string().contains("attachment"));
+        }
+        // These spellings exercise the real sanitizer's hash fallback paths,
+        // rather than an approximation based only on replacing separators.
+        for original in ["!!!".to_string(), "x".repeat(128)] {
+            let canonical = crate::utils::sanitizer::sanitize_secret_name(&original).unwrap();
+            let name = format!("attachments/{original}/x");
+            assert!(inventory(&canonical, &[&name]).is_err());
+        }
     }
 
     #[test]
