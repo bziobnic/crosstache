@@ -137,7 +137,13 @@ If an equivalent name owns objects under a different spelling (for example,
 `my_secret`, `my-secret`, or `MY--SECRET`), generic operations and transfer preview
 refuse with an attachment alias error. Preview currently requires an unambiguous
 exact owner prefix; it cannot combine or rename those alias prefixes. Listing errors
-also block the operation. Local and AWS retain exact, case-sensitive ownership.
+also block the operation. AWS retains exact, case-sensitive ownership.
+
+Local checks the store's actual filename resolution. If a requested secret spelling
+resolves to metadata with a different name, transfer and rename refuse it. Orphaned
+attachment paths are checked the same way, including on case-insensitive filesystems.
+Use the exact stored spelling. Distinct names remain valid on case-sensitive stores;
+Local does not universally fold names to lowercase.
 
 Inspect a proposed transfer without changing data:
 

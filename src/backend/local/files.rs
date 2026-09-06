@@ -27,32 +27,10 @@ use super::{crypto, paths};
 // Path helpers
 // ---------------------------------------------------------------------------
 
-/// URL-encode a file name for safe use as a filename component.
-fn encode_name(name: &str) -> String {
-    url::form_urlencoded::byte_serialize(name.as_bytes()).collect()
-}
-
-const PLATFORM_SAFE_NAME_MAX: usize = 255;
-const LONGEST_ACTIVE_SUFFIX_BYTES: usize = ".meta.json".len();
-
-fn validate_logical_file_name(name: &str) -> Result<(), BackendError> {
-    if name.is_empty() || name.len() > PLATFORM_SAFE_NAME_MAX {
-        return Err(BackendError::InvalidArgument(
-            "local file key must contain 1 to 255 UTF-8 bytes".into(),
-        ));
-    }
-    Ok(())
-}
-
-fn storage_stem(name: &str) -> Result<String, BackendError> {
-    validate_logical_file_name(name)?;
-    let encoded = encode_name(name);
-    if encoded.len() + LONGEST_ACTIVE_SUFFIX_BYTES <= PLATFORM_SAFE_NAME_MAX {
-        return Ok(encoded);
-    }
-    let digest = Sha256::digest(name.as_bytes());
-    Ok(format!("h-{digest:x}"))
-}
+use super::paths::{
+    file_storage_stem as storage_stem, validate_logical_file_name, LONGEST_ACTIVE_SUFFIX_BYTES,
+    PLATFORM_SAFE_NAME_MAX,
+};
 
 #[cfg(test)]
 fn files_dir(store_path: &Path, vault: &str) -> Result<PathBuf, BackendError> {

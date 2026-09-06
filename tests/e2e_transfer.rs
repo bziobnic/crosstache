@@ -196,3 +196,137 @@ fn forced_move_preserves_an_attached_destination() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("attachment"));
     assert_eq!(before, store_bytes(&temp.path().join("store")));
 }
+
+#[test]
+fn local_case_alias_move_preserves_attached_source() {
+    let (mut command, temp) = common::xv_isolated_local();
+    assert!(command
+        .args(["set", "source", "--value", "fixture"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    std::fs::write(temp.path().join("proof.txt"), b"proof").unwrap();
+    assert!(common::xv_existing_isolated_local(temp.path(), temp.path())
+        .args(["attach", "source", "proof.txt"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let secrets = temp.path().join("store/vaults/default/secrets");
+    // Reproduce filesystem alias lookup deterministically on case-sensitive CI.
+    for suffix in ["meta.json", "age"] {
+        let alias = secrets.join(format!("SOURCE.{suffix}"));
+        if !alias.exists() {
+            std::fs::hard_link(secrets.join(format!("source.{suffix}")), alias).unwrap();
+        }
+    }
+    let before = store_bytes(&temp.path().join("store"));
+    for verb in ["move", "transfer"] {
+        let mut command = common::xv_existing_isolated_local(temp.path(), temp.path());
+        command.args([
+            verb,
+            "SOURCE",
+            "--from",
+            "default",
+            "--to",
+            "default",
+            "--new-name",
+            "destination",
+        ]);
+        if verb == "move" {
+            command.arg("--force");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            !output.status.success(),
+            "{verb} silently accepted a physical secret alias"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("attachment"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(before, store_bytes(&temp.path().join("store")));
+    }
+}
+
+#[test]
+fn local_case_alias_force_preserves_attached_destination() {
+    local_case_alias_force_destination(false);
+}
+#[test]
+fn local_case_alias_force_preserves_orphan_destination() {
+    local_case_alias_force_destination(true);
+}
+fn local_case_alias_force_destination(orphan: bool) {
+    let (mut command, temp) = common::xv_isolated_local();
+    assert!(command
+        .args(["set", "source", "--value", "fixture"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    assert!(common::xv_existing_isolated_local(temp.path(), temp.path())
+        .args(["set", "destination", "--value", "fixture"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    std::fs::write(temp.path().join("proof.txt"), b"proof").unwrap();
+    assert!(common::xv_existing_isolated_local(temp.path(), temp.path())
+        .args(["attach", "destination", "proof.txt"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let secrets = temp.path().join("store/vaults/default/secrets");
+    if orphan {
+        for suffix in ["meta.json", "age"] {
+            std::fs::remove_file(secrets.join(format!("destination.{suffix}"))).unwrap();
+        }
+        let files = temp.path().join("store/vaults/default/files");
+        for suffix in ["meta.json", "age"] {
+            let alias = files.join(format!("attachments%2FDESTINATION%2Fproof.txt.{suffix}"));
+            if !alias.exists() {
+                std::fs::hard_link(
+                    files.join(format!("attachments%2Fdestination%2Fproof.txt.{suffix}")),
+                    alias,
+                )
+                .unwrap();
+            }
+        }
+    } else {
+        for suffix in ["meta.json", "age"] {
+            let alias = secrets.join(format!("DESTINATION.{suffix}"));
+            if !alias.exists() {
+                std::fs::hard_link(secrets.join(format!("destination.{suffix}")), alias).unwrap();
+            }
+        }
+    }
+    let before = store_bytes(&temp.path().join("store"));
+    let output = common::xv_existing_isolated_local(temp.path(), temp.path())
+        .args([
+            "move",
+            "source",
+            "--from",
+            "default",
+            "--to",
+            "default",
+            "--new-name",
+            "DESTINATION",
+            "--force",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "force accepted destination physical alias (orphan={orphan})"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("attachment"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(before, store_bytes(&temp.path().join("store")));
+}
