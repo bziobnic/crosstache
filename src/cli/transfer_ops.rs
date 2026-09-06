@@ -33,7 +33,7 @@ pub struct TransferOptions {
     /// Resume the saved transfer with this operation ID and the same intent
     #[arg(long, requires = "offline")]
     pub resume: Option<String>,
-    /// Recovery directory (defaults to transfer-recovery beside xv.conf)
+    /// Recovery directory (overrides XV_TRANSFER_RECOVERY_DIR and the safe default)
     #[arg(long)]
     pub recovery_dir: Option<std::path::PathBuf>,
 }

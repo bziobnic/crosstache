@@ -180,9 +180,16 @@ Recovery rechecks the saved source and destination evidence before proceeding. I
 never deletes the destination as rollback. Unexpected changes cause a conflict for
 manual inspection. A completed transfer can be resumed safely to verify its result.
 
-Recovery files live in `transfer-recovery` beside the xv configuration file; the CLI
-can select another directory with `--recovery-dir PATH`. Recovery directories must
-be outside the secret store and Git worktrees. Keep that directory and its
+Recovery files normally live in `transfer-recovery` beside the xv configuration
+file. If that location is Git-managed, xv uses `crosstache/transfer-recovery` under
+the platform's local data directory, provided that location is outside Git too.
+Set `XV_TRANSFER_RECOVERY_DIR` for both CLI and web server operations; the CLI's
+`--recovery-dir PATH` takes precedence. Relative paths resolve from the process's
+working directory. Recovery directories must be outside the secret store and Git
+worktrees. If no safe default exists, choose an external directory explicitly.
+Existing records at the original location prevent an automatic fallback: move the
+entire recovery directory, including its identity, together and select its new path.
+Keep that directory and its
 separate recovery identity together until recovery is no longer needed. Journals are
 encrypted and authenticated and contain no secret values or decrypted attachments.
 Losing the identity prevents automatic recovery; inspect retained provider data

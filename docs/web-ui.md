@@ -23,6 +23,8 @@ age-encrypted blobs the same way `xv file download` does. Local attached secrets
 be renamed through a preview and explicit stopped-writers acknowledgement. The
 transfer verifies the destination before removing the source and saves a recovery
 ID for interrupted operations. Other backends keep the attachment rename guard.
+Set `XV_TRANSFER_RECOVERY_DIR` in the server environment to choose a recovery
+directory outside Git and the secret store. The browser never supplies local paths.
 Ordinary secrets continue to use atomic rename. See
 [`docs/attachments.md`](attachments.md).
 
