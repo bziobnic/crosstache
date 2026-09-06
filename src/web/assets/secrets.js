@@ -2982,20 +2982,20 @@ async function applyAttachmentRename() {
       `/api/secrets/${encodeURIComponent(preview.selection)}/attachment-rename/apply${vaultQS(preview.operationScope.vault, preview.operationScope)}`,
       { new_name: preview.newName, offline: true },
     );
-    if (!isCurrentDrawer(generation, preview.selection) || !scopeMatchesCurrent(preview.operationScope)) return;
-    $('#rename-result').textContent = `Recovery ID: ${report.id}. ${report.complete ? 'Rename complete.' : 'Recovery is pending.'}`;
-    if (report.complete) {
-      closeDrawer();
-      toast(`Renamed ${preview.selection} to ${preview.newName}. Recovery ID: ${report.id}`);
+    if (isCurrentDrawer(generation, preview.selection) && scopeMatchesCurrent(preview.operationScope)) {
+      $('#rename-result').textContent = `Recovery ID: ${report.id}. ${report.complete ? 'Rename complete.' : 'Recovery is pending.'}`;
+      if (report.complete) {
+        closeDrawer();
+        toast(`Renamed ${preview.selection} to ${preview.newName}. Recovery ID: ${report.id}`);
+      }
     }
-    if (scopeMatchesCurrent(preview.operationScope)) {
-      await loadSecrets(preview.operationScope.vault, preview.operationScope);
-      if (!report.complete) await loadAttachmentRenameRecovery(preview.operationScope, generation, preview.selection);
-    }
+    await refreshAttachmentRenameViews(preview.operationScope);
   } catch (error) {
-    const recoveryId = error?.details?.recovery_id;
-    if (recoveryId) $('#rename-result').textContent = `Recovery ID: ${recoveryId}. Keep writers stopped and retry.`;
-    showFormError(error);
+    if (isCurrentDrawer(generation, preview.selection) && scopeMatchesCurrent(preview.operationScope)) {
+      const recoveryId = error?.details?.recovery_id;
+      if (recoveryId) $('#rename-result').textContent = `Recovery ID: ${recoveryId}. Keep writers stopped and retry.`;
+      showFormError(error);
+    }
   } finally {
     setSavePending(false);
     endScopedMutation();
@@ -3031,18 +3031,16 @@ function renderAttachmentRenameRecovery(summaries, scope, generation, selection)
           `/api/secrets/${encodeURIComponent(summary.intent.source_name)}/attachment-rename/${encodeURIComponent(summary.id)}/resume${vaultQS(scope.vault, scope)}`,
           { new_name: summary.intent.destination_name, offline: true },
         );
-        if (!isCurrentDrawer(generation, selection) || !scopeMatchesCurrent(scope)) return;
-        $('#rename-result').textContent = `Recovery ID: ${report.id}. ${report.complete ? 'Rename complete.' : 'Recovery is pending.'}`;
-        if (report.complete) {
-          closeDrawer();
-          toast(`Renamed ${summary.intent.source_name} to ${summary.intent.destination_name}. Recovery ID: ${report.id}`);
+        if (isCurrentDrawer(generation, selection) && scopeMatchesCurrent(scope)) {
+          $('#rename-result').textContent = `Recovery ID: ${report.id}. ${report.complete ? 'Rename complete.' : 'Recovery is pending.'}`;
+          if (report.complete) {
+            closeDrawer();
+            toast(`Renamed ${summary.intent.source_name} to ${summary.intent.destination_name}. Recovery ID: ${report.id}`);
+          }
         }
-        if (scopeMatchesCurrent(scope)) {
-          await loadSecrets(scope.vault, scope);
-          if (!report.complete) await loadAttachmentRenameRecovery(scope, generation, selection);
-        }
+        await refreshAttachmentRenameViews(scope);
       } catch (error) {
-        showFormError(error);
+        if (isCurrentDrawer(generation, selection) && scopeMatchesCurrent(scope)) showFormError(error);
       } finally {
         setSavePending(false);
         endScopedMutation();
@@ -3054,6 +3052,16 @@ function renderAttachmentRenameRecovery(summaries, scope, generation, selection)
   syncAttachmentRenameControls();
 }
 
+async function refreshAttachmentRenameViews(scope) {
+  if (!scopeMatchesCurrent(scope)) return;
+  await loadSecrets(scope.vault, scope);
+  // Navigation changes drawer ownership, but the same-vault tree still needs
+  // refreshing. Any open drawer owns a separate, freshly captured recovery read.
+  if (scopeMatchesCurrent(scope) && editing && scopeMatchesCurrent(drawerScope)) {
+    await loadAttachmentRenameRecovery(scope, drawerGeneration, editing);
+  }
+}
+
 async function loadAttachmentRenameRecovery(scope, generation, selection) {
   if (!ctx.capabilities.files) return;
   try {
@@ -3062,7 +3070,7 @@ async function loadAttachmentRenameRecovery(scope, generation, selection) {
       renderAttachmentRenameRecovery(summaries, scope, generation, selection);
     }
   } catch (error) {
-    if (isCurrentDrawer(generation, selection)) showFormError(error);
+    if (isCurrentDrawer(generation, selection) && scopeMatchesCurrent(scope)) showFormError(error);
   }
 }
 

@@ -1851,6 +1851,98 @@ test(`pending attachment rename recovery from ${selection} survives edits and cl
 
 }
 
+for (const operation of ['apply', 'resume']) {
+  for (const outcome of ['success', 'error']) {
+    for (const changedScope of [false, true]) {
+      test(`late attachment rename ${operation} ${outcome} after ${changedScope ? 'scope change' : 'drawer navigation'} isolates drawer feedback and refreshes only its current scope`, async () => {
+        const gate = deferred();
+        const recoveryId = '123e4567-e89b-42d3-a456-426614174000';
+        const initial = {
+          vault: 'one', backend: 'test', workspace: { alias: 'primary' },
+          capabilities: { files: true, atomic_rename: true },
+        };
+        const calls = [];
+        let completed = false;
+        const api = async (method, requestPath) => {
+          calls.push({ method, path: requestPath });
+          if (requestPath === '/api/context') return initial;
+          if (requestPath === '/api/types') return { types: [] };
+          if (requestPath === '/api/vaults') return { vaults: [{ name: 'one' }, { name: 'two' }] };
+          if (requestPath.includes('/attachment-rename/preview')) return {
+            attachment_count: 1, ciphertext_bytes: 256, execution_supported: true, limitation: '',
+          };
+          if (requestPath.includes('/attachment-rename/apply') || requestPath.includes(`/${recoveryId}/resume`)) {
+            await gate.promise;
+            if (outcome === 'error') {
+              const error = new Error('Old rename failed');
+              error.details = { recovery_id: recoveryId };
+              throw error;
+            }
+            completed = true;
+            return { id: recoveryId, complete: true };
+          }
+          if (method === 'GET' && requestPath.startsWith('/api/attachment-renames?')) return operation === 'resume' && !completed ? [{
+            id: recoveryId, complete: false, intent: { source_name: 'existing', destination_name: 'destination' },
+          }] : [];
+          if (method === 'GET' && requestPath.startsWith('/api/secrets?')) return [
+            { name: completed ? 'destination' : 'existing' }, { name: 'other' },
+          ];
+          if (method === 'GET' && /^\/api\/secrets\/(existing|other)\?/.test(requestPath)) return {
+            tags: {}, content_type: '', enabled: true, not_before: null,
+          };
+          return [];
+        };
+        const ui = await mountRouteUi({ apiImpl: api });
+        try {
+          await openExistingSecret(ui, 'existing');
+          if (operation === 'apply') {
+            ui.elements.get('#rename-name').value = 'destination';
+            await ui.elements.get('#rename-preview').onclick();
+          } else {
+            await settleUntil(() => ui.elements.get('#rename-recovery-list').children.length === 1);
+          }
+          ui.elements.get('#rename-stopped-writers').checked = true;
+          ui.elements.get('#rename-stopped-writers').onchange();
+          const pending = operation === 'apply'
+            ? ui.elements.get('#rename-apply').onclick()
+            : ui.find('#rename-recovery-list', (element) => element.tagName === 'BUTTON').onclick();
+          // Exercise a late callback after an independent route/store transition.
+          // Ordinary navigation's pending guards are covered separately.
+          ui.store.dispatch({ type: 'draft/save-pending', value: false });
+          ui.store.dispatch({ type: 'mutation/pending', value: false });
+          if (changedScope) ui.store.dispatch({
+            type: 'context/switch-succeeded',
+            context: { ...initial, vault: 'two', workspace: { alias: 'stage' } },
+            secrets: [{ name: 'other' }],
+          });
+          await openExistingSecret(ui, 'other');
+          assert.equal(ui.elements.get('#drawer-title').textContent, 'other');
+          ui.elements.get('#rename-result').textContent = 'Current drawer feedback';
+          ui.elements.get('#secret-form-error').querySelector('.error-message').textContent = 'Current drawer error';
+          const before = calls.length;
+          gate.resolve();
+          await pending;
+          assert.equal(ui.elements.get('#drawer').hidden, false, 'new drawer remains open');
+          assert.equal(ui.elements.get('#drawer-title').textContent, 'other');
+          assert.equal(ui.elements.get('#rename-result').textContent, 'Current drawer feedback');
+          assert.equal(ui.elements.get('#secret-form-error').querySelector('.error-message').textContent, 'Current drawer error');
+          const lateCalls = calls.slice(before);
+          if (outcome === 'success' && !changedScope) {
+            assert.ok(ui.find('#secrets-table tbody', (element) => element.getAttribute?.('aria-label') === 'Edit secret destination'), 'same-scope tree includes renamed destination');
+            assert.equal(ui.find('#secrets-table tbody', (element) => element.getAttribute?.('aria-label') === 'Edit secret existing'), null, 'same-scope tree removes source');
+            assert.ok(lateCalls.some(({ path }) => path.startsWith('/api/attachment-renames?')), 'current drawer recovery list is refreshed');
+          } else if (changedScope) {
+            assert.equal(lateCalls.length, 0, 'old scope never refreshes or writes into the new scope');
+          }
+        } finally {
+          gate.resolve();
+          ui.restore();
+        }
+      });
+    }
+  }
+}
+
 test('attachment rename preview keeps the ordinary atomic route for a secret without attachments', async () => {
   const calls = [];
   const api = async (method, path, body) => {
