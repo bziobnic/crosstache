@@ -5,6 +5,8 @@
 /// no hint is registered. Hints are TTY-only — print them after the
 /// main error message.
 pub fn hint_for(code: &str) -> Option<&'static str> {
+    use crate::error::AttachmentError;
+
     Some(match code {
         "xv-vault-not-found" => "Run 'xv vault list' to see available vaults.",
         "xv-secret-not-found" => "Run 'xv list' to see secrets in the active vault.",
@@ -26,6 +28,17 @@ pub fn hint_for(code: &str) -> Option<&'static str> {
         "xv-env-not-defined" => "Run 'xv env list' to see defined environments.",
         "xv-azure-api" => "Check Azure service status and your subscription quotas.",
         "xv-scan-leak-detected" => "Findings printed to stderr; review and remove the leak before committing. Use 'xv scan --hook' for CI integration.",
+        "xv-attachment-key-missing" => AttachmentError::KeyMissing.hint(),
+        "xv-attachment-key-invalid" => AttachmentError::KeyInvalid.hint(),
+        "xv-attachment-pointer-invalid" => AttachmentError::PointerInvalid.hint(),
+        "xv-attachment-key-mismatch" => AttachmentError::KeyMismatch.hint(),
+        "xv-attachment-key-version-invalid" => AttachmentError::KeyVersionInvalid.hint(),
+        "xv-attachment-commit-unconfirmed" => AttachmentError::CommitUnconfirmed.hint(),
+        "xv-attachment-initialization-conflict" => AttachmentError::InitializationConflict.hint(),
+        "xv-attachment-reference-invalid" => AttachmentError::ReferenceInvalid.hint(),
+        "xv-attachment-not-ciphertext" => AttachmentError::NotCiphertext.hint(),
+        "xv-attachment-decryption-failed" => AttachmentError::DecryptionFailed.hint(),
+        "xv-attachment-snapshot-unsupported" => AttachmentError::SnapshotUnsupported.hint(),
         _ => return None,
     })
 }
@@ -44,6 +57,28 @@ mod tests {
         assert!(hint_for("xv-env-not-defined").is_some());
         assert!(hint_for("xv-scan-leak-detected").is_some());
         assert!(hint_for("xv-backend-unavailable").is_some());
+    }
+
+    #[test]
+    fn attachment_errors_have_actionable_hints() {
+        for code in [
+            "xv-attachment-key-missing",
+            "xv-attachment-key-invalid",
+            "xv-attachment-pointer-invalid",
+            "xv-attachment-key-mismatch",
+            "xv-attachment-key-version-invalid",
+            "xv-attachment-commit-unconfirmed",
+            "xv-attachment-initialization-conflict",
+            "xv-attachment-reference-invalid",
+            "xv-attachment-not-ciphertext",
+            "xv-attachment-decryption-failed",
+            "xv-attachment-snapshot-unsupported",
+        ] {
+            let hint = hint_for(code).unwrap_or_else(|| panic!("missing hint for {code}"));
+            assert!(!hint.trim().is_empty(), "empty hint for {code}");
+            assert!(!hint.contains('\n'), "multiline hint for {code}");
+        }
+        assert_eq!(hint_for("xv-attachment-unknown"), None);
     }
 
     #[test]

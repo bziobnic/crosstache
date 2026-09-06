@@ -1,5 +1,8 @@
 use thiserror::Error;
 
+mod attachment;
+pub use attachment::AttachmentError;
+
 /// Display-safe setup failure for desktop recovery and diagnostics.
 ///
 /// Every string is sanitized before construction. The raw provider error is
@@ -504,6 +507,9 @@ pub enum CrosstacheError {
         candidates: Vec<String>,
     },
 
+    #[error(transparent)]
+    Attachment(#[from] AttachmentError),
+
     #[error("Unknown error: {0}")]
     Unknown(String),
 }
@@ -513,6 +519,7 @@ impl CrosstacheError {
     /// New variants must add a code; the exhaustive match keeps this honest.
     pub fn code(&self) -> &'static str {
         match self {
+            Self::Attachment(kind) => kind.code(),
             Self::AuthenticationError(_) => "xv-auth-failed",
             Self::AzureApiError(_) => "xv-azure-api",
             Self::Conflict(_) => "xv-conflict",
@@ -552,7 +559,7 @@ impl CrosstacheError {
     /// `docs/exit-codes.md` for the public table.
     pub fn exit_code(&self) -> i32 {
         match self {
-            Self::InvalidArgument(_) => 2,
+            Self::InvalidArgument(_) | Self::Attachment(_) => 2,
             Self::ConfigError(_) | Self::ConfigLoadError(_) | Self::EnvNotDefined { .. } => 3,
             Self::BackendUnavailable { .. } => 3,
 

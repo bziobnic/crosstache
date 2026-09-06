@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- Attachment integrity failures now expose specific `xv-attachment-*` error
+  codes and safe recovery hints in CLI/Web responses. Azure missing key versions
+  retain their not-found classification. Attachment domain failures continue to
+  use exit status 2 and HTTP 400. Single-file upload/download progress goes to
+  stderr so failed operations preserve clean JSON error output.
+
 - Attachment key initialization now uses create-only retained records on Local
   and AWS, verified versioned writes on Azure, and retries racing name conflicts.
   Local key/pointer pairs are durably journaled and recover interrupted writes

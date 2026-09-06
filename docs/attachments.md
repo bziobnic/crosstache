@@ -178,3 +178,30 @@ same decrypt path as `xv file download`. See [`web-ui.md`](web-ui.md).
 - Design: [`superpowers/specs/2026-07-21-secret-file-attachments-design.md`](superpowers/specs/2026-07-21-secret-file-attachments-design.md)
 - File storage overview: [`FEATURES.md`](FEATURES.md#file-storage)
 - Cross-cloud secret migration (secrets only): [`migration.md`](migration.md)
+
+## Structured attachment errors
+
+Attachment integrity failures have stable codes in CLI JSON/YAML errors and
+Web error responses. They retain CLI exit status `2` and Web HTTP `400` for
+compatibility. Messages and recovery hints contain no private keys, ciphertext,
+or raw provider responses. Authentication, permission, and network failures keep
+their existing error codes.
+
+| Code | Meaning |
+|------|---------|
+| `xv-attachment-key-missing` | The required key record or exact provider version is absent. |
+| `xv-attachment-key-invalid` | The stored key has no value or is not an age identity. |
+| `xv-attachment-pointer-invalid` | The active pointer is empty or malformed. |
+| `xv-attachment-key-mismatch` | The stored identity does not derive the expected key ID. |
+| `xv-attachment-key-version-invalid` | A key commit returned no version or exact-version verification returned a different version. |
+| `xv-attachment-commit-unconfirmed` | The active pointer could not be confirmed after publication. |
+| `xv-attachment-initialization-conflict` | Bounded initialization attempts exhausted conflicting retained names. |
+| `xv-attachment-reference-invalid` | The blob reference is incomplete, malformed, or uses an unsupported schema. |
+| `xv-attachment-not-ciphertext` | A managed attachment contains non-age bytes; plaintext output was refused. |
+| `xv-attachment-decryption-failed` | The required key could not decrypt the attachment. |
+| `xv-attachment-snapshot-unsupported` | The backend cannot read consistent file bytes and metadata. |
+
+Restore original attachment/key data from a trusted backup when custody or
+integrity is broken. Generating a replacement key cannot decrypt old attachments.
+CLI TTY output and Web responses provide guidance specific to the error code.
+See [exit codes](exit-codes.md) for the CLI error envelope.

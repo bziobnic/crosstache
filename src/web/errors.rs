@@ -124,7 +124,7 @@ pub(crate) fn crosstache_error(error: CrosstacheError) -> (StatusCode, ApiErrorB
         AuthenticationError(_) => StatusCode::UNAUTHORIZED,
         Conflict(_) => StatusCode::CONFLICT,
         RateLimited(_) => StatusCode::TOO_MANY_REQUESTS,
-        InvalidArgument(_) | InvalidUrl(_) => StatusCode::BAD_REQUEST,
+        Attachment(_) | InvalidArgument(_) | InvalidUrl(_) => StatusCode::BAD_REQUEST,
         BackendUnavailable { .. }
         | NetworkError(_)
         | DnsResolutionError { .. }
@@ -199,6 +199,7 @@ pub(crate) fn crosstache_error(error: CrosstacheError) -> (StatusCode, ApiErrorB
             "The request could not be completed.".into(),
             "Try again. If the problem continues, check the application logs.",
         ),
+        Attachment(kind) => (kind.to_string(), kind.hint()),
         InvalidArgument(_) => (
             "The request contains invalid data.".into(),
             "Correct the request and try again.",
@@ -370,4 +371,53 @@ fn generic(
             details: None,
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::AttachmentError;
+    use crate::web::api::ApiError;
+    use axum::response::IntoResponse;
+
+    #[tokio::test]
+    async fn attachment_failures_render_safe_actionable_client_errors() {
+        use AttachmentError::*;
+
+        for (kind, code) in [
+            (KeyMissing, "xv-attachment-key-missing"),
+            (KeyInvalid, "xv-attachment-key-invalid"),
+            (PointerInvalid, "xv-attachment-pointer-invalid"),
+            (KeyMismatch, "xv-attachment-key-mismatch"),
+            (KeyVersionInvalid, "xv-attachment-key-version-invalid"),
+            (CommitUnconfirmed, "xv-attachment-commit-unconfirmed"),
+            (
+                InitializationConflict,
+                "xv-attachment-initialization-conflict",
+            ),
+            (ReferenceInvalid, "xv-attachment-reference-invalid"),
+            (NotCiphertext, "xv-attachment-not-ciphertext"),
+            (DecryptionFailed, "xv-attachment-decryption-failed"),
+            (SnapshotUnsupported, "xv-attachment-snapshot-unsupported"),
+        ] {
+            let expected_message = kind.to_string();
+            let expected_hint = kind.hint();
+            let response = ApiError::from(CrosstacheError::Attachment(kind)).into_response();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{code}");
+            assert_eq!(response.headers()["content-type"], "application/json");
+            let bytes = axum::body::to_bytes(response.into_body(), 16 * 1024)
+                .await
+                .unwrap();
+            let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(envelope["error"]["code"], code);
+            assert_eq!(envelope["error"]["message"], expected_message);
+            assert_eq!(envelope["error"]["hint"], expected_hint);
+            assert!(envelope["error"]["field"].is_null());
+            assert!(envelope["error"]["details"].is_null());
+            assert_eq!(
+                crate::utils::error_hints::hint_for(code),
+                Some(expected_hint)
+            );
+        }
+    }
 }

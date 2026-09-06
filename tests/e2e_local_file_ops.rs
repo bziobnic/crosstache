@@ -132,8 +132,13 @@ fn file_roundtrip_upload_list_info_download_delete_on_local() {
     std::fs::write(env.path().join("payload.bin"), payload).unwrap();
 
     // upload
-    let up = env.ok(&["file", "upload", "payload.bin", "--name", "greeting.txt"]);
-    assert!(up.contains("greeting.txt"), "upload output: {up}");
+    let up = env.run(&["file", "upload", "payload.bin", "--name", "greeting.txt"]);
+    let progress = String::from_utf8_lossy(&up.stderr);
+    assert!(up.status.success(), "upload failed: {progress}");
+    assert!(
+        progress.contains("greeting.txt"),
+        "upload progress: {progress}"
+    );
     // lands on disk under the default vault
     assert_eq!(
         count_age_files(&env.files_dir("default")),
@@ -529,4 +534,100 @@ default_vault = "testvault"
         stderr.contains("not yet supported on the AWS backend"),
         "expected the AWS sync gate message, got: {stderr}"
     );
+}
+
+#[test]
+fn attachment_integrity_failure_has_structured_cli_error_and_no_plaintext_output() {
+    let env = FileEnv::new();
+    std::fs::write(env.path().join("payload.bin"), b"DO-NOT-RETURN-PAYLOAD").unwrap();
+    env.ok(&["file", "upload", "payload.bin", "--name", "managed.txt"]);
+    let metadata_path = std::fs::read_dir(env.files_dir("default"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.to_string_lossy().ends_with(".meta.json"))
+        .unwrap();
+    let mut metadata: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&metadata_path).unwrap()).unwrap();
+    metadata["metadata"]["xv_encrypted"] = serde_json::json!("age");
+    std::fs::write(metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+    for format in ["json", "plain"] {
+        let output = env.run(&[
+            "file",
+            "download",
+            "managed.txt",
+            "-o",
+            "result.txt",
+            "--format",
+            format,
+        ]);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(!env.path().join("result.txt").exists());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(!stdout.contains("DO-NOT-RETURN-PAYLOAD"));
+        assert!(!stderr.contains("DO-NOT-RETURN-PAYLOAD"));
+        if format == "json" {
+            let body: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+            assert_eq!(body["error"]["code"], "xv-attachment-not-ciphertext");
+            assert_eq!(body["error"]["exit_code"], 2);
+        } else {
+            assert!(stdout.is_empty());
+            assert!(stderr.contains("xv-attachment-not-ciphertext"));
+        }
+    }
+}
+
+#[test]
+fn attachment_upload_failure_keeps_cli_json_free_of_progress_text() {
+    use crosstache::backend::{local::LocalBackend, Backend};
+    use crosstache::config::settings::LocalConfig;
+    use crosstache::secret::manager::SecretRequest;
+    let env = FileEnv::new();
+    std::fs::write(env.path().join("payload.bin"), b"PRIVATE-UPLOAD-CONTENT").unwrap();
+    let backend = LocalBackend::new(Some(&LocalConfig {
+        store_path: Some(env.path().join("store").display().to_string()),
+        key_file: Some(env.path().join("key.txt").display().to_string()),
+        default_vault: Some("default".into()),
+        ..Default::default()
+    }))
+    .unwrap();
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        backend
+            .attachment_keys()
+            .set_secret(
+                "default",
+                SecretRequest {
+                    name: "xv-attachment-key".into(),
+                    value: zeroize::Zeroizing::new("INVALID-POINTER-CONTENT".into()),
+                    content_type: None,
+                    enabled: None,
+                    expires_on: None,
+                    not_before: None,
+                    tags: None,
+                    groups: None,
+                    note: None,
+                    folder: None,
+                },
+            )
+            .await
+            .unwrap();
+    });
+    let output = env.run(&[
+        "file",
+        "upload",
+        "payload.bin",
+        "--encrypt",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    let body: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("only JSON belongs on stdout");
+    assert_eq!(body["error"]["code"], "xv-attachment-pointer-invalid");
+    assert_eq!(count_age_files(&env.files_dir("default")), 0);
+    for bytes in [&output.stdout, &output.stderr] {
+        let text = String::from_utf8_lossy(bytes);
+        assert!(!text.contains("PRIVATE-UPLOAD-CONTENT"));
+        assert!(!text.contains("INVALID-POINTER-CONTENT"));
+    }
 }
