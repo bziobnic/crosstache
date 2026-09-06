@@ -205,3 +205,54 @@ Restore original attachment/key data from a trusted backup when custody or
 integrity is broken. Generating a replacement key cannot decrypt old attachments.
 CLI TTY output and Web responses provide guidance specific to the error code.
 See [exit codes](exit-codes.md) for the CLI error envelope.
+
+## Inspecting key status and file references
+
+```sh
+xv attachment-key status
+xv attachment-key inventory --format json
+xv attachment-key status --vault production --format yaml
+```
+
+Both commands use the same current backend/vault resolution as file commands,
+including the workspace default entry. An explicit `--vault` selects an attached
+workspace alias when it matches one, otherwise a literal vault on the effective
+backend. Reports include the backend registry
+name and vault so named backends remain distinguishable. JSON and YAML reports
+contain a `report` object with `schema_version: 1`; human output uses the same
+nested structure. CSV and templates are not supported.
+
+`status` reads the active pointer and validates the active age identity and
+derived key ID. It reports `absent`, `v1`, `v2`, or `invalid`, together with
+public key IDs, the active provider version, and a safe `problem_code` when
+integrity is broken. It never initializes or rotates an attachment key and
+does not require file storage. A completed diagnosis exits successfully even
+when it reports an absent or broken key; scripts should inspect
+`report.mode` and `report.problem_code`. Provider access failures still fail
+the command with their usual error codes. Inspecting status requires
+permission to read the pointer and active key material, although neither is
+printed.
+
+`inventory` lists files and reads each file's metadata, including encrypted
+files outside `attachments/`. Entries are sorted by name and classified as
+`schema1`, `legacy_unversioned`, `invalid_reference`, or `unmanaged`.
+Only valid schema-1 references include a key ID, slot, and provider version.
+It requests no private key material or blob downloads and emits no report if a
+listing or per-file metadata request fails.
+
+These commands request no custody mutations. The local backend's existing
+read-time crash recovery still applies: it may restore ciphertext files or
+finish pending journal operations before returning a read. They are not a
+forensic mode that guarantees zero filesystem writes.
+
+The inventory is explicitly a `metadata_only` observation. It does not verify
+ciphertext, test decryption, enumerate unreferenced retained keys, or establish
+that any key can be retired. It observes the files returned by the provider;
+listing and metadata reads are not one atomic snapshot and may race concurrent
+uploads or deletes. Cloud inventory uses the existing file-info API for each listed file: on
+AWS/Azure that means a properties/metadata request and a separate best-effort
+tag request, in addition to listing requests. Tags are not used for reference
+classification, so an optional tag-read failure does not invalidate it. S3
+listings alone omit user metadata.
+Stop concurrent writers and use a future verified migration/retirement
+workflow before making custody changes.

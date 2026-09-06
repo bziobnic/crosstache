@@ -631,3 +631,175 @@ fn attachment_upload_failure_keeps_cli_json_free_of_progress_text() {
         assert!(!text.contains("INVALID-POINTER-CONTENT"));
     }
 }
+
+#[test]
+fn attachment_key_observations_are_structured_read_only_and_vault_scoped() {
+    let env = FileEnv::new();
+    let status = || -> serde_json::Value {
+        serde_json::from_str(&env.ok(&["attachment-key", "status", "--format", "json"])).unwrap()
+    };
+    let empty = status();
+    assert_eq!(empty["backend"], "local");
+    assert_eq!(empty["vault"], "default");
+    assert_eq!(empty["report"]["mode"], "absent");
+
+    std::fs::write(
+        env.path().join("private.bin"),
+        b"NEVER-PRINT-INVENTORY-PAYLOAD",
+    )
+    .unwrap();
+    env.ok(&[
+        "file",
+        "upload",
+        "private.bin",
+        "--name",
+        "encrypted.bin",
+        "--encrypt",
+    ]);
+    env.ok(&["file", "upload", "private.bin", "--name", "ordinary.bin"]);
+    let active = status();
+    assert_eq!(active["report"]["mode"], "v2");
+    assert!(active["report"]["problem_code"].is_null());
+    assert!(active["report"]["active_key_id"]
+        .as_str()
+        .unwrap()
+        .starts_with("ak1-"));
+    let inventory = env.ok(&["attachment-key", "inventory", "--format", "json"]);
+    assert!(!inventory.contains("NEVER-PRINT-INVENTORY-PAYLOAD"));
+    assert!(!inventory.contains("AGE-SECRET-KEY"));
+    let inventory: serde_json::Value = serde_json::from_str(&inventory).unwrap();
+    assert_eq!(inventory["report"]["observation"], "metadata_only");
+    let rows = inventory["report"]["files"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["name"], "encrypted.bin");
+    assert_eq!(rows[0]["classification"], "schema1");
+    assert_eq!(rows[0]["key_id"], active["report"]["active_key_id"]);
+    assert_eq!(
+        rows[0]["provider_version"],
+        active["report"]["active_version"]
+    );
+    assert_eq!(rows[1]["classification"], "unmanaged");
+    assert_eq!(
+        status(),
+        active,
+        "observations must not rotate or rewrite the pointer"
+    );
+    let yaml = env.ok(&["attachment-key", "status", "--format", "yaml"]);
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+    assert_eq!(yaml["report"]["mode"].as_str(), Some("v2"));
+
+    env.ok(&["vault", "create", "elsewhere"]);
+    let other: serde_json::Value = serde_json::from_str(&env.ok(&[
+        "attachment-key",
+        "status",
+        "--vault",
+        "elsewhere",
+        "--format",
+        "json",
+    ]))
+    .unwrap();
+    assert_eq!(other["vault"], "elsewhere");
+    assert_eq!(other["report"]["mode"], "absent");
+    let csv = env.run(&["attachment-key", "inventory", "--format", "csv"]);
+    assert_eq!(csv.status.code(), Some(2));
+}
+
+#[test]
+fn attachment_key_inventory_uses_workspace_default_entry() {
+    let env = FileEnv::new();
+    env.ok(&["vault", "create", "project"]);
+    env.ok(&[
+        "cx",
+        "add",
+        "project",
+        "--backend",
+        "local",
+        "--as",
+        "project-alias",
+        "--default",
+    ]);
+    std::fs::write(env.path().join("file.bin"), b"workspace-payload").unwrap();
+    env.ok(&["file", "upload", "file.bin", "--encrypt"]);
+    for command in ["status", "inventory"] {
+        let body: serde_json::Value =
+            serde_json::from_str(&env.ok(&["attachment-key", command, "--format", "json"]))
+                .unwrap();
+        let alias: serde_json::Value = serde_json::from_str(&env.ok(&[
+            "attachment-key",
+            command,
+            "--vault",
+            "project-alias",
+            "--format",
+            "json",
+        ]))
+        .unwrap();
+        assert_eq!(
+            alias, body,
+            "explicit alias must select the same backend/vault as default"
+        );
+        assert_eq!(body["backend"], "local");
+        assert_eq!(body["vault"], "project");
+        if command == "status" {
+            assert_eq!(body["report"]["mode"], "v2");
+        } else {
+            assert_eq!(body["report"]["files"].as_array().unwrap().len(), 1);
+            assert_eq!(body["report"]["files"][0]["classification"], "schema1");
+        }
+    }
+}
+
+#[test]
+fn attachment_key_status_reports_broken_pointer_without_exposing_or_replacing_it() {
+    use crosstache::backend::{local::LocalBackend, Backend};
+    use crosstache::config::settings::LocalConfig;
+    use crosstache::secret::manager::SecretRequest;
+    let env = FileEnv::new();
+    let backend = LocalBackend::new(Some(&LocalConfig {
+        store_path: Some(env.path().join("store").display().to_string()),
+        key_file: Some(env.path().join("key.txt").display().to_string()),
+        default_vault: Some("default".into()),
+        ..Default::default()
+    }))
+    .unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let original = runtime
+        .block_on(backend.attachment_keys().set_secret(
+            "default",
+            SecretRequest {
+                name: "xv-attachment-key".into(),
+                value: zeroize::Zeroizing::new("PRIVATE-BROKEN-POINTER".into()),
+                content_type: None,
+                enabled: None,
+                expires_on: None,
+                not_before: None,
+                tags: None,
+                groups: None,
+                note: None,
+                folder: None,
+            },
+        ))
+        .unwrap();
+    for format in ["json", "yaml", "plain"] {
+        let output = env.ok(&["attachment-key", "status", "--format", format]);
+        assert!(output.contains("xv-attachment-pointer-invalid"));
+        assert!(!output.contains("PRIVATE-BROKEN-POINTER"));
+        if format == "json" {
+            let body: serde_json::Value = serde_json::from_str(&output).unwrap();
+            assert_eq!(body["report"]["mode"], "invalid");
+        }
+    }
+    // File-reference inventory must not depend on a readable/valid key.
+    let inventory: serde_json::Value =
+        serde_json::from_str(&env.ok(&["attachment-key", "inventory", "--format", "json"]))
+            .unwrap();
+    assert!(inventory["report"]["files"].as_array().unwrap().is_empty());
+    let after = runtime
+        .block_on(
+            backend
+                .attachment_keys()
+                .get_secret("default", "xv-attachment-key", true),
+        )
+        .unwrap();
+    assert_eq!(after.version, original.version);
+    assert_eq!(after.value.unwrap().as_str(), "PRIVATE-BROKEN-POINTER");
+}
