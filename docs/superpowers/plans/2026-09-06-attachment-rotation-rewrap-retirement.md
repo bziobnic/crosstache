@@ -77,7 +77,11 @@ Review, CI, merge as Task 1. Report all three PRs and validation evidence.
 
 - Task 1: merged as PR #433 (0528326) after clean independent review, Bugbot,
   and Linux/Windows CI. Local validation: 4,172 passed, 47 ignored; Clippy/fmt clean.
-- Task 2: implemented and reviewed, including a partial-envelope regression fix.
-  Local validation: 4,191 passed, 47 ignored; all-features/all-targets workspace
-  Clippy with warnings denied and formatting checks passed. PR checks/merge pending.
-- Task 3: pending Task 2 merge.
+- Task 2: merged as PR #434 (28c50de) after clean independent review, Bugbot,
+  and Linux/Windows CI. Local validation: 4,191 passed, 47 ignored; Clippy/fmt clean.
+- Task 3: implemented, including strict metadata-only custody, complete-visibility
+  refusal under agent policies, and Azure preservation of unrelated tag values.
+  Independent task review, Azure fix re-review, and final whole-lifecycle review
+  are clean. Local validation: 4,224 passed, 47 ignored; all-features/all-targets
+  workspace Clippy with warnings denied, formatting, and minimal-feature build
+  passed. Current-head CI and Bugbot are required before the final PR merges.

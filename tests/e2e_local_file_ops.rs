@@ -23,6 +23,80 @@ use std::process::{Command, Output};
 use tempfile::TempDir;
 
 #[test]
+fn attachment_retirement_cli_refuses_used_keys_and_marks_rewrapped_key() {
+    let env = FileEnv::new();
+    std::fs::write(env.path().join("retire.txt"), b"still readable").unwrap();
+    env.ok(&["file", "upload", "retire.txt", "--encrypt"]);
+    let status: serde_json::Value =
+        serde_json::from_str(&env.ok(&["attachment-key", "status", "--format", "json"])).unwrap();
+    let old = status["report"]["active_key_id"].as_str().unwrap();
+    let retire = [
+        "attachment-key",
+        "retire",
+        "--key-id",
+        old,
+        "--apply",
+        "--offline",
+        "--format",
+        "json",
+    ];
+    assert!(
+        !env.run(&retire).status.success(),
+        "active key must be protected"
+    );
+    env.ok(&[
+        "attachment-key",
+        "rotate",
+        "--from-key-id",
+        old,
+        "--apply",
+        "--offline",
+    ]);
+    assert!(
+        !env.run(&retire).status.success(),
+        "referenced key must be protected"
+    );
+    let status: serde_json::Value =
+        serde_json::from_str(&env.ok(&["attachment-key", "status", "--format", "json"])).unwrap();
+    let active = status["report"]["active_key_id"].as_str().unwrap();
+    env.ok(&[
+        "attachment-key",
+        "rewrap",
+        "--to-key-id",
+        active,
+        "--apply",
+        "--offline",
+    ]);
+    env.ok(&["attachment-key", "retire", "--key-id", old]);
+    let keys: serde_json::Value =
+        serde_json::from_str(&env.ok(&["attachment-key", "keys", "--format", "json"])).unwrap();
+    let candidate = keys["report"]["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|k| k["key_id"] == old)
+        .unwrap();
+    assert_eq!(candidate["retired"], false);
+    assert!(!env.ok(&retire).contains("AGE-SECRET-KEY"));
+    env.ok(&retire);
+    let keys: serde_json::Value =
+        serde_json::from_str(&env.ok(&["attachment-key", "keys", "--format", "json"])).unwrap();
+    let records = keys["report"]["keys"].as_array().unwrap();
+    assert_eq!(records.len(), 2);
+    let candidate = records.iter().find(|k| k["key_id"] == old).unwrap();
+    assert_eq!(candidate["retired"], true);
+    assert_eq!(candidate["enabled"], true);
+    let after_status: serde_json::Value =
+        serde_json::from_str(&env.ok(&["attachment-key", "status", "--format", "json"])).unwrap();
+    assert_eq!(status, after_status);
+    env.ok(&["file", "download", "retire.txt", "--output", "retired.out"]);
+    assert_eq!(
+        std::fs::read(env.path().join("retired.out")).unwrap(),
+        b"still readable"
+    );
+}
+
+#[test]
 fn attachment_rewrap_cli_moves_old_files_and_retries_without_key_changes() {
     let env = FileEnv::new();
     std::fs::write(env.path().join("old.txt"), b"rewrap plaintext").unwrap();

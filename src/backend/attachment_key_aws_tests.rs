@@ -29,6 +29,7 @@ struct ServiceState {
     list_pages: Vec<Value>,
     deny_describe: bool,
     describe_current: Option<String>,
+    retirement_tags: HashMap<String, String>,
 }
 
 #[derive(Clone, Debug)]
@@ -116,12 +117,18 @@ impl HttpConnector for RetainedKeyTransport {
                         let name = body["SecretId"].as_str().unwrap();
                         let (version, _) = state.records.get(name).expect("committed key");
                         let current = state.describe_current.as_ref().unwrap_or(version);
+                        let mut tags = vec![
+                            json!({"Key": "xv:content_type", "Value": KEY_RECORD_CONTENT_TYPE}),
+                            json!({"Key": "xv:original_name", "Value": name.strip_prefix(&format!("{VAULT}/")).unwrap()}),
+                            json!({"Key": "owner", "Value": "custody"}),
+                        ];
+                        if let Some(value) = state.retirement_tags.get(name) {
+                            tags.push(json!({"Key": crate::secret::attachment_key::KEY_RETIRED_TAG, "Value": value}));
+                        }
                         response(
                             200,
                             json!({"Name": name, "Description": "retained note",
-                            "Tags": [{"Key": "xv:content_type", "Value": KEY_RECORD_CONTENT_TYPE},
-                                {"Key": "xv:original_name", "Value": name.strip_prefix(&format!("{VAULT}/")).unwrap()},
-                                {"Key": "owner", "Value": "custody"}],
+                            "Tags": tags,
                             "VersionIdsToStages": {current: ["AWSCURRENT"]}}),
                         )
                     }
@@ -138,8 +145,17 @@ impl HttpConnector for RetainedKeyTransport {
                         json!({"Name": name, "VersionId": version, "SecretString": value, "VersionStages": ["AWSPREVIOUS"]}),
                     )
                 }
-                // PutSecretValue, UpdateSecret, TagResource, UntagResource and
-                // latest-version fallbacks are forbidden in this custody seam.
+                "TagResource" => {
+                    let name = body["SecretId"].as_str().unwrap().to_owned();
+                    assert_eq!(
+                        body["Tags"],
+                        json!([{"Key": crate::secret::attachment_key::KEY_RETIRED_TAG, "Value": "true"}])
+                    );
+                    state.retirement_tags.insert(name, "true".into());
+                    response(200, json!({}))
+                }
+                // Retirement is tag-only; value/description writes and removals
+                // remain forbidden in this custody seam.
                 other => panic!("retained custody made forbidden AWS call: {other}"),
             };
             Ok(result)
@@ -413,4 +429,60 @@ async fn aws_exact_value_read_fails_if_custody_metadata_cannot_be_read() {
         state.lock().unwrap().operations,
         ["CreateSecret", "DescribeSecret"]
     );
+}
+
+#[tokio::test]
+async fn retirement_aws_transport_only_adds_one_tag_without_value_or_version_writes() {
+    use crate::secret::attachment_key::{
+        AttachmentKeyRef, KeySlot, SecretVersion, KEY_RETIRED_TAG,
+    };
+    let (backend, state) = backend(1);
+    let keys = RawAttachmentKeyStore::new(&backend);
+    let request = key_request();
+    let committed = keys
+        .commit_retained_key(VAULT, request.clone())
+        .await
+        .unwrap();
+    let id = AttachmentKeyId::parse(
+        request
+            .name
+            .strip_prefix(crate::secret::attachment_key::RETAINED_RECORD_PREFIX)
+            .unwrap(),
+    )
+    .unwrap();
+    let reference = AttachmentKeyRef {
+        key_id: id,
+        slot: KeySlot::Retained,
+        provider_version: SecretVersion::new(committed.version.clone()),
+    };
+    let before = keys.get_secret(VAULT, &request.name, true).await.unwrap();
+    state.lock().unwrap().operations.clear();
+    let after = keys.mark_retired(VAULT, &reference).await.unwrap();
+    assert_eq!(after.version, committed.version);
+    assert_eq!(after.value, before.value);
+    assert!(after.enabled);
+    assert_eq!(after.tags[KEY_RETIRED_TAG], "true");
+    for (key, value) in before.tags {
+        assert_eq!(after.tags.get(&key), Some(&value));
+    }
+    let original = keys
+        .get_secret_version(VAULT, &request.name, &committed.version, true)
+        .await
+        .unwrap();
+    assert_eq!(original.value.unwrap().as_str(), request.value.as_str());
+    keys.mark_retired(VAULT, &reference).await.unwrap();
+    let state = state.lock().unwrap();
+    assert_eq!(state.records.len(), 1);
+    assert_eq!(
+        state
+            .operations
+            .iter()
+            .filter(|op| op.as_str() == "TagResource")
+            .count(),
+        1
+    );
+    assert!(state
+        .operations
+        .iter()
+        .all(|op| ["DescribeSecret", "GetSecretValue", "TagResource"].contains(&op.as_str())));
 }
