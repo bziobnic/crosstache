@@ -1367,6 +1367,10 @@ Then preview `xv attachment-key rewrap --to-key-id ACTIVE_KEY_ID` to move curren
 attachments to that key; apply with `--apply --offline`. Interrupted retries skip
 verified completed files. Keep old keys for historical ciphertext and backups.
 
+`xv attachment-key retire --key-id OLD_KEY_ID` previews an advisory retirement
+mark; apply with `--apply --offline`. Active, legacy-bound, or currently referenced
+keys are refused. The mark never deletes keys or disables historical reads.
+
 `xv list` hides `xv-attachment-key`. Full workflow, sync/rename/migrate
 pitfalls, and Azure's `xv_encrypted` metadata key:
 [`docs/attachments.md`](docs/attachments.md).

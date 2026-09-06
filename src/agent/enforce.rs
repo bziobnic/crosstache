@@ -218,6 +218,49 @@ impl Backend for PolicyEnforcedBackend {
 // and carry the same redacted audit context into the local backend.
 #[async_trait]
 impl crate::backend::attachment_keys::AttachmentKeyStore for &PolicyEnforcedBackend {
+    async fn assert_complete_visibility(&self, _vault: &str) -> Result<(), BackendError> {
+        // A policy may hide keys independently of the delegated file listing.
+        // Even an apparently broad configured policy is not a visibility proof.
+        Err(BackendError::PermissionDenied(
+            "attachment retirement requires complete vault visibility without an agent policy"
+                .into(),
+        ))
+    }
+    async fn preflight_retirement(
+        &self,
+        vault: &str,
+        reference: &crate::secret::attachment_key::AttachmentKeyRef,
+    ) -> Result<(), BackendError> {
+        crate::backend::attachment_keys::validate_retirement_ref(reference)?;
+        let name = crate::secret::attachment_key::retained_record_name(&reference.key_id);
+        let context = self.authorize(vault, &name, Operation::Update, false)?;
+        self.authorize(vault, &name, Operation::Get, true)?;
+        AUDIT_CONTEXT
+            .scope(
+                context,
+                self.inner
+                    .attachment_keys()
+                    .preflight_retirement(vault, reference),
+            )
+            .await
+    }
+    async fn mark_retired(
+        &self,
+        vault: &str,
+        reference: &crate::secret::attachment_key::AttachmentKeyRef,
+    ) -> Result<SecretProperties, BackendError> {
+        crate::backend::attachment_keys::validate_retirement_ref(reference)?;
+        let name = crate::secret::attachment_key::retained_record_name(&reference.key_id);
+        let context = self.authorize(vault, &name, Operation::Update, false)?;
+        self.authorize(vault, &name, Operation::Get, true)?;
+        AUDIT_CONTEXT
+            .scope(
+                context,
+                self.inner.attachment_keys().mark_retired(vault, reference),
+            )
+            .await
+    }
+
     async fn preflight_set_secret(&self, vault: &str, name: &str) -> Result<(), BackendError> {
         crate::backend::attachment_keys::validate_name(name)?;
         let context = self.authorize(vault, name, Operation::Set, false)?;

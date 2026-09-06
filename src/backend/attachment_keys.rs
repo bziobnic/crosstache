@@ -4,7 +4,9 @@
 //! values or the underlying provider handle.
 
 use super::{BackendError, SecretBackend};
-use crate::secret::attachment_key::{classify_reserved_name, ReservedClass};
+use crate::secret::attachment_key::{
+    self as key, classify_reserved_name, AttachmentKeyRef, ReservedClass,
+};
 use crate::secret::manager::{SecretProperties, SecretRequest};
 use async_trait::async_trait;
 use serde::Serialize;
@@ -15,6 +17,7 @@ pub struct RetainedKeySummary {
     pub name: String,
     pub key_id: String,
     pub enabled: bool,
+    pub retired: bool,
 }
 
 #[cfg_attr(not(feature = "file-ops"), allow(dead_code))] // Encryption consumers are feature-gated.
@@ -27,6 +30,33 @@ pub trait AttachmentKeyStore: Send + Sync {
     /// state will still permit the eventual write and verification reads.
     async fn preflight_set_secret(&self, _vault: &str, name: &str) -> Result<(), BackendError> {
         validate_name(name)
+    }
+
+    /// Certify unfiltered custody visibility. Callers also require full provider
+    /// vault permissions and a complete file listing; remote IAM is not inferred.
+    async fn assert_complete_visibility(&self, _vault: &str) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported(
+            "complete attachment custody visibility".into(),
+        ))
+    }
+    async fn preflight_retirement(
+        &self,
+        _vault: &str,
+        _reference: &AttachmentKeyRef,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported(
+            "attachment key retirement".into(),
+        ))
+    }
+    /// Advisory metadata only. Never disables, replaces or deletes an identity.
+    async fn mark_retired(
+        &self,
+        _vault: &str,
+        _reference: &AttachmentKeyRef,
+    ) -> Result<SecretProperties, BackendError> {
+        Err(BackendError::Unsupported(
+            "attachment key retirement".into(),
+        ))
     }
 
     /// List visible current retained custody records without reading values or
@@ -95,6 +125,45 @@ pub(crate) fn validate_retained_request(request: &SecretRequest) -> Result<(), B
     Ok(())
 }
 
+pub(crate) fn validate_retirement_ref(reference: &AttachmentKeyRef) -> Result<(), BackendError> {
+    if reference.slot != key::KeySlot::Retained
+        || reference.provider_version.as_str().is_empty()
+        || !matches!(
+            classify_reserved_name(&key::retained_record_name(&reference.key_id)),
+            ReservedClass::StrictRetainedRecord
+        )
+    {
+        return Err(BackendError::PermissionDenied(
+            "retirement requires an exact canonical retained reference".into(),
+        ));
+    }
+    Ok(())
+}
+fn retirement_conflict() -> BackendError {
+    BackendError::Conflict("attachment retirement identity or metadata verification failed".into())
+}
+fn validate_retirement_record(
+    p: &SecretProperties,
+    reference: &AttachmentKeyRef,
+) -> Result<(), BackendError> {
+    if p.name != key::retained_record_name(&reference.key_id)
+        || p.version != reference.provider_version.as_str()
+        || !p.enabled
+        || !key::is_marked_key_record(&p.content_type)
+    {
+        return Err(retirement_conflict());
+    }
+    let identity = p
+        .value
+        .as_deref()
+        .and_then(|v| v.trim().parse::<age::x25519::Identity>().ok())
+        .ok_or_else(retirement_conflict)?;
+    if key::AttachmentKeyId::derive(&identity.to_public().to_string()) != reference.key_id {
+        return Err(retirement_conflict());
+    }
+    Ok(())
+}
+
 pub(crate) struct RawAttachmentKeyStore<'a> {
     secrets: &'a dyn SecretBackend,
     versioned_set: bool,
@@ -120,6 +189,88 @@ impl<'a> RawAttachmentKeyStore<'a> {
 
 #[async_trait]
 impl AttachmentKeyStore for RawAttachmentKeyStore<'_> {
+    async fn assert_complete_visibility(&self, _vault: &str) -> Result<(), BackendError> {
+        Ok(())
+    }
+    async fn preflight_retirement(
+        &self,
+        _vault: &str,
+        reference: &AttachmentKeyRef,
+    ) -> Result<(), BackendError> {
+        validate_retirement_ref(reference)
+    }
+    async fn mark_retired(
+        &self,
+        vault: &str,
+        reference: &AttachmentKeyRef,
+    ) -> Result<SecretProperties, BackendError> {
+        use crate::secret::manager::{FieldUpdate, SecretUpdateRequest};
+        validate_retirement_ref(reference)?;
+        let name = key::retained_record_name(&reference.key_id);
+        let before = self.secrets.get_secret(vault, &name, true).await?;
+        validate_retirement_record(&before, reference)?;
+        let exact = self
+            .secrets
+            .get_secret_version(vault, &name, reference.provider_version.as_str(), true)
+            .await?;
+        validate_retirement_record(&exact, reference)?;
+        if before.value != exact.value {
+            return Err(retirement_conflict());
+        }
+        if before.tags.get(key::KEY_RETIRED_TAG).map(String::as_str) != Some("true") {
+            self.secrets
+                .update_secret(
+                    vault,
+                    &name,
+                    SecretUpdateRequest {
+                        name: name.clone(),
+                        expected_revision: None,
+                        value: None,
+                        content_type: None,
+                        enabled: None,
+                        expires_on: FieldUpdate::Unchanged,
+                        not_before: FieldUpdate::Unchanged,
+                        tags: Some(std::collections::HashMap::from([(
+                            key::KEY_RETIRED_TAG.into(),
+                            "true".into(),
+                        )])),
+                        groups: None,
+                        note: FieldUpdate::Unchanged,
+                        folder: FieldUpdate::Unchanged,
+                        replace_tags: false,
+                        replace_groups: false,
+                    },
+                )
+                .await?;
+        }
+        let after = self.secrets.get_secret(vault, &name, true).await?;
+        validate_retirement_record(&after, reference)?;
+        let mut expected_tags = before.tags.clone();
+        expected_tags.insert(key::KEY_RETIRED_TAG.into(), "true".into());
+        if after.value != before.value
+            || after.tags != expected_tags
+            || after.original_name != before.original_name
+            || after.content_type != before.content_type
+            || after.enabled != before.enabled
+            || after.expires_on != before.expires_on
+            || after.not_before != before.not_before
+            || after.created_on != before.created_on
+            || after.created_timestamp != before.created_timestamp
+            || after.recovery_level != before.recovery_level
+        {
+            return Err(retirement_conflict());
+        }
+        let exact_after = self
+            .secrets
+            .get_secret_version(vault, &name, reference.provider_version.as_str(), true)
+            .await?;
+        validate_retirement_record(&exact_after, reference)?;
+        if exact_after.value != before.value {
+            return Err(retirement_conflict());
+        }
+        Ok(after)
+    }
+
     async fn list_retained_keys(
         &self,
         vault: &str,
@@ -146,6 +297,8 @@ impl AttachmentKeyStore for RawAttachmentKeyStore<'_> {
                     name: summary.name,
                     key_id,
                     enabled: summary.enabled,
+                    retired: summary.tags.get(key::KEY_RETIRED_TAG).map(String::as_str)
+                        == Some("true"),
                 })
             })
             .collect::<Vec<_>>();
@@ -367,6 +520,29 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, BackendError::Unsupported(_)));
+    }
+
+    #[tokio::test]
+    async fn stores_without_retirement_support_fail_closed() {
+        let reference = key::AttachmentKeyRef {
+            key_id: key::AttachmentKeyId::derive("test"),
+            slot: key::KeySlot::Retained,
+            provider_version: key::SecretVersion::new("version"),
+        };
+        assert!(matches!(
+            LegacyKeyStore.assert_complete_visibility("default").await,
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            LegacyKeyStore
+                .preflight_retirement("default", &reference)
+                .await,
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            LegacyKeyStore.mark_retired("default", &reference).await,
+            Err(BackendError::Unsupported(_))
+        ));
     }
 
     #[tokio::test]

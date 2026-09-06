@@ -4,6 +4,10 @@
 
 ### Added
 
+- Logical attachment-key retirement verifies complete current-file usage before
+  marking an unused retained key. Active and legacy-bound keys remain protected;
+  identities, versions, enabled state, and historical reads are preserved.
+
 - Offline attachment rewrap authenticates current managed files before replacing
   them with ciphertext under the active retained key, preserving file metadata
   and supporting retries without deleting historical keys.
@@ -26,6 +30,9 @@
   references. Inventory does not download payloads or establish retirement safety.
 
 ### Fixed
+
+- Azure metadata-only secret updates preserve unrelated creator/name tags and
+  unchanged group text, including when adding an attachment retirement marker.
 
 - AWS exact-version reads retain record metadata for strict attachment key
   verification and report the version returned with the secret value.

@@ -121,11 +121,13 @@ Payload backups and historical blob versions are separate.
 rotation previews and verifies an expected V2 active ID before creating and
 publishing a new retained identity. Existing reads and legacy bindings survive.
 
-**PR 3 — rewrap implemented on this branch, review/merge pending:** authenticate
+**PR 3 — rewrap merged in PR #434:** authenticate
 the complete visible current managed inventory, re-encrypt to the active retained
 key, preserve file metadata, and verify replacements with interrupted retries.
 
-**Remaining:** logical retirement in a subsequent PR.
+**PR 3 — logical retirement:** authenticate the complete current inventory and
+mark unused retained keys without deleting or disabling them. Active and explicit
+legacy bindings remain protected; historical versions stay readable.
 
 ### P1 — Make rename and migration attachment-aware
 

@@ -108,8 +108,8 @@ impl AzureSecretBackend {
 }
 
 /// Build the full replacement tag map for an attributes-only `PATCH`:
-/// resolve merge/replace semantics against the current tags, then stamp
-/// crosstache's metadata tags exactly as `prepare_secret_request` does.
+/// resolve merge/replace semantics while preserving immutable identity metadata
+/// and byte-for-byte values of fields for which no update was requested.
 fn build_patched_tags(
     request: &SecretUpdateRequest,
     current_tags: &HashMap<String, String>,
@@ -124,8 +124,8 @@ fn build_patched_tags(
         Some(new_tags) => new_tags.clone(),
         // No tag change requested: preserve every existing tag (including
         // custom user tags and `groups`) rather than starting from an empty
-        // map. The crosstache-managed keys below are re-stamped on top, and
-        // note/folder/groups overrides (if any) still apply after that.
+        // map. Identity metadata is preserved below, and explicit
+        // note/folder/groups overrides still apply after that.
         None => current_tags.clone(),
     };
 
@@ -149,31 +149,29 @@ fn build_patched_tags(
             // Replace: use new_groups as-is (may be empty)
             Some(new_groups.clone())
         }
-        None => {
-            // No change requested: preserve existing groups
-            current_tags.get("groups").map(|g| {
-                g.split(',')
-                    .map(|s| s.trim().to_string())
-                    .collect::<Vec<_>>()
-            })
-        }
+        None => None,
     };
 
-    tags.insert(
-        crate::backend::TAG_ORIGINAL_NAME.to_string(),
-        request.name.clone(),
-    );
-    tags.insert(
-        crate::backend::TAG_CREATED_BY.to_string(),
-        "crosstache".to_string(),
-    );
+    // A metadata patch does not rename a record or change its creator. Preserve
+    // these fields, including absence, and do not accept tag-based spoofing.
+    for name in [
+        crate::backend::TAG_ORIGINAL_NAME,
+        crate::backend::TAG_CREATED_BY,
+    ] {
+        tags.remove(name);
+        if let Some(value) = current_tags.get(name) {
+            tags.insert(name.into(), value.clone());
+        }
+    }
 
-    // Handle groups: remove first, then conditionally insert.
     tags.remove("groups");
     if let Some(groups) = groups {
         if !groups.is_empty() {
             tags.insert("groups".to_string(), groups.join(","));
         }
+    } else if let Some(groups) = current_tags.get("groups") {
+        // No groups update: preserve spaces and an explicitly empty value.
+        tags.insert("groups".into(), groups.clone());
     }
 
     // Handle note: remove first, then conditionally insert.
@@ -520,6 +518,37 @@ mod build_patched_tags_tests {
     }
 
     #[test]
+    fn retirement_tag_delta_preserves_custom_and_absent_identity_metadata_byte_for_byte() {
+        use crate::secret::attachment_key::{self as key, AttachmentKeyId};
+        let name = key::retained_record_name(&AttachmentKeyId::derive("test"));
+        for custom in [false, true] {
+            let mut current = HashMap::from([
+                ("groups".into(), "one, two".into()),
+                ("note".into(), "preserved note".into()),
+                ("custom".into(), "preserved".into()),
+            ]);
+            if custom {
+                current.insert(
+                    crate::backend::TAG_CREATED_BY.into(),
+                    "external-import".into(),
+                );
+                current.insert(
+                    crate::backend::TAG_ORIGINAL_NAME.into(),
+                    "imported spelling".into(),
+                );
+            }
+            let mut request = base_request(&name);
+            request.tags = Some(HashMap::from([(
+                key::KEY_RETIRED_TAG.into(),
+                "true".into(),
+            )]));
+            let mut expected = current.clone();
+            expected.insert(key::KEY_RETIRED_TAG.into(), "true".into());
+            assert_eq!(build_patched_tags(&request, &current), expected);
+        }
+    }
+
+    #[test]
     fn none_tags_preserves_existing_custom_tags_and_groups() {
         let current = current_tags();
         let mut request = base_request("my-secret");
@@ -530,14 +559,8 @@ mod build_patched_tags_tests {
         assert_eq!(result.get("custom").map(String::as_str), Some("keep"));
         assert_eq!(result.get("groups").map(String::as_str), Some("team-a"));
         assert_eq!(result.get("note").map(String::as_str), Some("new"));
-        assert_eq!(
-            result.get("original_name").map(String::as_str),
-            Some("my-secret")
-        );
-        assert_eq!(
-            result.get("created_by").map(String::as_str),
-            Some("crosstache")
-        );
+        assert!(!result.contains_key("original_name"));
+        assert!(!result.contains_key("created_by"));
     }
 
     #[test]
@@ -571,15 +594,26 @@ mod build_patched_tags_tests {
         assert_eq!(result.get("x").map(String::as_str), Some("1"));
         // Full replacement: old custom tag is gone...
         assert!(!result.contains_key("custom"));
-        // ...but crosstache-managed keys are always re-stamped.
-        assert_eq!(
-            result.get("original_name").map(String::as_str),
-            Some("my-secret")
-        );
-        assert_eq!(
-            result.get("created_by").map(String::as_str),
-            Some("crosstache")
-        );
+        // Metadata updates do not invent previously absent identity tags.
+        assert!(!result.contains_key("original_name"));
+        assert!(!result.contains_key("created_by"));
+    }
+
+    #[test]
+    fn metadata_patch_preserves_empty_groups_and_rejects_identity_tag_spoofing() {
+        for existing in [false, true] {
+            let mut current = HashMap::from([("groups".into(), String::new())]);
+            if existing {
+                current.insert(crate::backend::TAG_ORIGINAL_NAME.into(), "original".into());
+                current.insert(crate::backend::TAG_CREATED_BY.into(), "creator".into());
+            }
+            let mut request = base_request("name");
+            request.tags = Some(HashMap::from([
+                (crate::backend::TAG_ORIGINAL_NAME.into(), "spoofed".into()),
+                (crate::backend::TAG_CREATED_BY.into(), "spoofed".into()),
+            ]));
+            assert_eq!(build_patched_tags(&request, &current), current);
+        }
     }
 
     #[test]
@@ -686,6 +720,8 @@ mod atomic_conversion_update_tests {
     struct AtomicUpdateMock {
         reads: AtomicUsize,
         updates: Mutex<Vec<SecretRequest>>,
+        retirement: Option<Mutex<SecretProperties>>,
+        patches: AtomicUsize,
     }
 
     impl AtomicUpdateMock {
@@ -693,6 +729,8 @@ mod atomic_conversion_update_tests {
             Self {
                 reads: AtomicUsize::new(0),
                 updates: Mutex::new(Vec::new()),
+                retirement: None,
+                patches: AtomicUsize::new(0),
             }
         }
     }
@@ -725,7 +763,36 @@ mod atomic_conversion_update_tests {
             _include_value: bool,
         ) -> Result<SecretProperties> {
             self.reads.fetch_add(1, Ordering::SeqCst);
+            if let Some(state) = &self.retirement {
+                let mut p = state.lock().unwrap().clone();
+                if !_include_value {
+                    p.value = None;
+                }
+                return Ok(p);
+            }
             Ok(properties())
+        }
+
+        async fn update_secret_attributes(
+            &self,
+            _v: &str,
+            _n: &str,
+            update: &SecretAttributesUpdate,
+        ) -> Result<SecretProperties> {
+            assert!(update.enabled.is_none());
+            assert!(update.content_type.is_none());
+            assert!(update.expires_on.is_none());
+            assert!(update.not_before.is_none());
+            let mut p = self.retirement.as_ref().unwrap().lock().unwrap();
+            let mut expected = p.tags.clone();
+            expected.insert(
+                crate::secret::attachment_key::KEY_RETIRED_TAG.into(),
+                "true".into(),
+            );
+            assert_eq!(update.tags.as_ref(), Some(&expected));
+            p.tags = expected;
+            self.patches.fetch_add(1, Ordering::SeqCst);
+            Ok(p.clone())
         }
 
         async fn update_secret(
@@ -745,10 +812,15 @@ mod atomic_conversion_update_tests {
             &self,
             _v: &str,
             _n: &str,
-            _ver: &str,
-            _i: bool,
+            version: &str,
+            include: bool,
         ) -> Result<SecretProperties> {
-            unimplemented!()
+            let mut p = self.retirement.as_ref().unwrap().lock().unwrap().clone();
+            assert_eq!(p.version, version);
+            if !include {
+                p.value = None;
+            }
+            Ok(p)
         }
         async fn list_secrets(&self, _v: &str, _g: Option<&str>) -> Result<Vec<SecretSummary>> {
             unimplemented!()
@@ -788,6 +860,59 @@ mod atomic_conversion_update_tests {
             _b: &[u8],
         ) -> Result<SecretProperties> {
             unimplemented!()
+        }
+    }
+
+    #[tokio::test]
+    async fn retirement_azure_adapter_uses_only_patch_and_preserves_exact_identity_metadata() {
+        use crate::backend::attachment_keys::{AttachmentKeyStore, RawAttachmentKeyStore};
+        use crate::secret::attachment_key::{
+            self as key, AttachmentKeyId, AttachmentKeyRef, KeySlot, SecretVersion,
+        };
+        use age::secrecy::ExposeSecret;
+        for custom in [false, true] {
+            let identity = age::x25519::Identity::generate();
+            let id = AttachmentKeyId::derive(&identity.to_public().to_string());
+            let mut p = properties();
+            p.name = key::retained_record_name(&id);
+            p.original_name = if custom {
+                "imported spelling".into()
+            } else {
+                p.name.clone()
+            };
+            p.value = Some(Zeroizing::new(identity.to_string().expose_secret().into()));
+            p.content_type = key::KEY_RECORD_CONTENT_TYPE.into();
+            p.tags = HashMap::from([
+                ("groups".into(), "one, two".into()),
+                ("custom".into(), "preserved".into()),
+            ]);
+            if custom {
+                p.tags.insert(
+                    crate::backend::TAG_ORIGINAL_NAME.into(),
+                    p.original_name.clone(),
+                );
+                p.tags
+                    .insert(crate::backend::TAG_CREATED_BY.into(), "external".into());
+            }
+            let reference = AttachmentKeyRef {
+                key_id: id,
+                slot: KeySlot::Retained,
+                provider_version: SecretVersion::new(p.version.clone()),
+            };
+            let mut mock = AtomicUpdateMock::new();
+            mock.retirement = Some(Mutex::new(p.clone()));
+            let inner = Arc::new(mock);
+            let backend = AzureSecretBackend::new(inner.clone());
+            let keys = RawAttachmentKeyStore::versioned(&backend);
+            let after = keys.mark_retired("vault", &reference).await.unwrap();
+            assert_eq!(after.value, p.value);
+            assert_eq!(after.version, p.version);
+            assert_eq!(after.enabled, p.enabled);
+            assert_eq!(after.original_name, p.original_name);
+            assert_eq!(inner.patches.load(Ordering::SeqCst), 1);
+            assert!(inner.updates.lock().unwrap().is_empty());
+            keys.mark_retired("vault", &reference).await.unwrap();
+            assert_eq!(inner.patches.load(Ordering::SeqCst), 1);
         }
     }
 

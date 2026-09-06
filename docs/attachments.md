@@ -114,8 +114,7 @@ spellings. `--force` cannot override this protection. The same boundary applies
 to Web edits and folder moves, imports, and migration targets. Generic opaque
 backup restore is disabled because its destination cannot be checked before
 provider mutation. Dedicated pointer recovery and encrypted key backup/restore
-are described below. Offline rotation and rewrap are available; logical retirement
-follows as a separate lifecycle operation.
+are described below, along with offline rotation, rewrap, and logical retirement.
 
 ### Sync skips ciphertext
 
@@ -256,10 +255,10 @@ AWS/Azure that means a properties/metadata request and a separate best-effort
 tag request, in addition to listing requests. Tags are not used for reference
 classification, so an optional tag-read failure does not invalidate it. S3
 listings alone omit user metadata.
-Stop concurrent writers and use a future verified migration/retirement
-workflow before making custody changes.
+Stop concurrent writers and use the verified lifecycle commands below before
+making custody changes; inventory alone is not a retirement check.
 
-## Retained keys, offline upgrade, and pointer recovery
+## Retained keys and offline lifecycle operations
 
 ```sh
 xv attachment-key keys --format json
@@ -331,8 +330,8 @@ observation commands. No private key is printed.
 This recovery repairs the pointer using keys already present. It cannot restore
 deleted key material, recreate a missing provider version, recover attachments
 already unreadable before upgrade, or restore a ring into another vault.
-Encrypted key backup/restore, rotation, and rewrap are available as described below.
-Logical retirement remains planned work.
+Encrypted key backup/restore, rotation, rewrap, and logical retirement are available
+as described below.
 Provider soft-deleted records may need restoration through the provider's
 recovery tooling before these commands can access or write them. Existing
 Local read-time journal recovery applies to these commands as well.
@@ -454,3 +453,34 @@ changes but do not provide an atomic transaction across the vault. Rewrap change
 no keys or pointer bindings and never deletes retained identities. Historical
 blob versions, external copies, and backups retain their original key dependency;
 rewrapping current files does not make old keys safe to delete.
+
+### Logical retirement without deleting keys
+
+`attachment-key retire` marks a retained key as retired after verifying that the
+healthy V2 ring and visible current managed files no longer depend on it:
+
+```sh
+xv attachment-key retire --key-id OLD_KEY_ID --format json
+xv attachment-key retire --key-id OLD_KEY_ID --apply --offline
+xv attachment-key keys --format json
+```
+
+Preview verifies custody and authenticates all managed current files without
+writing. Apply requires stopped writers and adds only the
+`xv_attachment_key_retired=true` metadata tag. `keys` exposes a `retired` boolean.
+Other tags, identity material, enabled state, and provider versions are preserved;
+no ciphertext or pointer is changed. Repeating the command verifies the same
+conditions before returning an already-retired result.
+
+The active key and explicit legacy binding cannot be retired. The legacy binding
+remains protected even after current files are rewrapped, because historical
+pre-schema ciphertext may still depend on it. Any current managed reference to
+the candidate, including another provider version or legacy slot, also blocks
+retirement. Invalid metadata, unreadable keys, tampering, or observed drift stop
+the operation.
+
+Use full vault visibility and permissions. Retirement is refused through an agent
+policy context because a restricted view cannot establish that a key is unused.
+The marker is advisory: it does not revoke access, block explicit pointer recovery,
+or authorize deletion. Historical blob versions, external ciphertext, and backups
+may still require the key; their normal exact-version reads remain supported.

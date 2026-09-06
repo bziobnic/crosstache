@@ -93,6 +93,9 @@ pub const RETAINED_RECORD_PREFIX: &str = "xv-attachment-key-";
 /// that merely collides with a strict-format name.
 pub const KEY_RECORD_CONTENT_TYPE: &str = "application/x-xv-attachment-key-record";
 
+/// Advisory lifecycle tag; never gates historical decryption.
+pub const KEY_RETIRED_TAG: &str = "xv_attachment_key_retired";
+
 /// True if a secret's content type marks it as a managed key-custody record.
 pub fn is_marked_key_record(content_type: &str) -> bool {
     content_type == KEY_RECORD_CONTENT_TYPE
