@@ -22,6 +22,129 @@ fn store_bytes(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
 }
 
 #[test]
+fn attached_rename_applies_offline_and_resumes_after_process_restart() {
+    let (mut command, temp) = common::xv_isolated_local();
+    let output = command
+        .args(["set", "cert", "--value", "private-secret-value"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::write(temp.path().join("proof.txt"), b"private-attachment-content").unwrap();
+    let output = common::xv_existing_isolated_local(temp.path(), temp.path())
+        .args(["attach", "cert", "proof.txt"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let recovery = temp.path().join("recovery");
+    let base = [
+        "transfer",
+        "cert",
+        "--from",
+        "default",
+        "--to",
+        "default",
+        "--new-name",
+        "renamed",
+        "--move",
+    ];
+    let before = store_bytes(&temp.path().join("store"));
+    let output = common::xv_existing_isolated_local(temp.path(), temp.path())
+        .args(base)
+        .arg("--apply")
+        .arg("--recovery-dir")
+        .arg(&recovery)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert_eq!(before, store_bytes(&temp.path().join("store")));
+    assert!(!recovery.exists());
+
+    let output = common::xv_existing_isolated_local(temp.path(), temp.path())
+        .args(base)
+        .args(["--apply", "--offline"])
+        .arg("--recovery-dir")
+        .arg(&recovery)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["complete"], true);
+    let id = report["id"].as_str().unwrap();
+    let output = common::xv_existing_isolated_local(temp.path(), temp.path())
+        .args(["get", "renamed", "--raw"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        "private-secret-value"
+    );
+    let output = common::xv_existing_isolated_local(temp.path(), temp.path())
+        .args(["get", "cert", "--raw"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let output = common::xv_existing_isolated_local(temp.path(), temp.path())
+        .args([
+            "attachments",
+            "renamed",
+            "--get",
+            "proof.txt",
+            "--output",
+            "proof-restored.txt",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read(temp.path().join("proof-restored.txt")).unwrap(),
+        b"private-attachment-content"
+    );
+    let after = store_bytes(&temp.path().join("store"));
+    let output = common::xv_existing_isolated_local(temp.path(), temp.path())
+        .args(base)
+        .args(["--resume", id, "--offline"])
+        .arg("--recovery-dir")
+        .arg(&recovery)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(after, store_bytes(&temp.path().join("store")));
+    for content in store_bytes(&recovery).values() {
+        assert!(!content
+            .windows(b"private-secret-value".len())
+            .any(|part| part == b"private-secret-value"));
+        assert!(!content
+            .windows(b"private-attachment-content".len())
+            .any(|part| part == b"private-attachment-content"));
+    }
+}
+
+#[test]
 fn attached_transfer_preview_is_json_and_preserves_the_store() {
     let (mut command, temp) = common::xv_isolated_local();
     let output = command
@@ -69,7 +192,7 @@ fn attached_transfer_preview_is_json_and_preserves_the_store() {
     );
     let preview: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(preview["attachment_count"], 1);
-    assert_eq!(preview["execution_supported"], false);
+    assert_eq!(preview["execution_supported"], true);
     assert_eq!(preview["intent"]["destination_name"], "certificate");
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(!text.contains("private-secret-value"));

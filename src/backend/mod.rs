@@ -235,6 +235,15 @@ impl Default for BackendCapabilities {
 // Core Backend trait
 // ---------------------------------------------------------------------------
 
+/// Provider-derived physical namespaces. Callers must treat these as opaque.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransferLocation {
+    pub secrets: String,
+    pub files: String,
+    pub keys: String,
+}
+
 /// Core trait every backend must implement.
 ///
 /// Provides lifecycle management (health check), capability negotiation,
@@ -242,6 +251,23 @@ impl Default for BackendCapabilities {
 #[allow(dead_code)] // Infrastructure for Phase 2 pluggability — consumed by future backends.
 #[async_trait]
 pub trait Backend: Send + Sync {
+    /// Ensure independent recovery custody cannot enter a backend or Git store.
+    async fn validate_transfer_recovery_path(
+        &self,
+        _vault: &str,
+        _path: &std::path::Path,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported(
+            "independent transfer recovery location".into(),
+        ))
+    }
+
+    async fn transfer_location(&self, _vault: &str) -> Result<TransferLocation, BackendError> {
+        Err(BackendError::Unsupported(
+            "physical transfer location".into(),
+        ))
+    }
+
     /// Human-readable backend name, e.g. `"azure"`, `"local"`.
     fn name(&self) -> &'static str;
 

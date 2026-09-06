@@ -157,6 +157,8 @@ pub(crate) struct WebState {
     pub(crate) folder_tokens: folder_tokens::FolderTokenService,
     pub(crate) registry: Arc<BackendRegistry>,
     #[cfg(feature = "file-ops")]
+    pub(crate) recovery_store: Arc<crate::secret::attachment_transfer_execution::RecoveryStore>,
+    #[cfg(feature = "file-ops")]
     pub(crate) archive_jobs: Arc<tokio::sync::Semaphore>,
     #[cfg(feature = "file-ops")]
     pub(crate) archive_limits: archive::ArchiveLimits,
@@ -185,12 +187,27 @@ impl WebState {
             folder_tokens: folder_tokens::FolderTokenService::random(),
             registry,
             #[cfg(feature = "file-ops")]
+            recovery_store: Arc::new(
+                crate::secret::attachment_transfer_execution::RecoveryStore::from_config_path(
+                    context.config_path.clone(),
+                ),
+            ),
+            #[cfg(feature = "file-ops")]
             archive_jobs: archive::archive_job_limiter(),
             #[cfg(feature = "file-ops")]
             archive_limits: archive::ArchiveLimits::default(),
             backend,
             context,
         }
+    }
+
+    #[cfg(all(feature = "file-ops", test))]
+    pub(crate) fn with_recovery_store(
+        mut self,
+        recovery_store: crate::secret::attachment_transfer_execution::RecoveryStore,
+    ) -> Self {
+        self.recovery_store = Arc::new(recovery_store);
+        self
     }
 
     fn with_folder_tokens(mut self, folder_tokens: folder_tokens::FolderTokenService) -> Self {
@@ -350,6 +367,28 @@ pub(crate) fn build_router(state: Arc<WebState>) -> Router {
 
     #[cfg(feature = "file-ops")]
     let api = api
+        .route(
+            "/secrets/{name}/attachment-rename/preview",
+            post(secrets::preview_attachment_rename).layer(axum::extract::DefaultBodyLimit::max(
+                secrets::MAX_RENAME_REQUEST_BYTES,
+            )),
+        )
+        .route(
+            "/secrets/{name}/attachment-rename/apply",
+            post(secrets::apply_attachment_rename).layer(axum::extract::DefaultBodyLimit::max(
+                secrets::MAX_RENAME_REQUEST_BYTES,
+            )),
+        )
+        .route(
+            "/secrets/{name}/attachment-rename/{id}/resume",
+            post(secrets::resume_attachment_rename).layer(axum::extract::DefaultBodyLimit::max(
+                secrets::MAX_RENAME_REQUEST_BYTES,
+            )),
+        )
+        .route(
+            "/attachment-renames",
+            get(secrets::list_attachment_rename_recovery),
+        )
         .route(
             "/files/preflight",
             post(files::preflight).layer(axum::extract::DefaultBodyLimit::max(

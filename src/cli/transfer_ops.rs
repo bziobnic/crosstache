@@ -1,10 +1,11 @@
-//! Read-only attachment transfer previews.
+//! Attachment transfer previews, offline execution, and recovery.
 
 use crate::backend::BackendRegistry;
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
 
 #[derive(Debug, clap::Args)]
+#[command(group(clap::ArgGroup::new("transfer_execution").args(["apply", "resume"])))]
 pub struct TransferOptions {
     /// Source secret name
     pub name: String,
@@ -23,6 +24,18 @@ pub struct TransferOptions {
     /// Expected destination active attachment key ID for cross-vault transfers
     #[arg(long)]
     pub to_key_id: Option<String>,
+    /// Apply the transfer after verifying source and destination
+    #[arg(long, requires = "offline")]
+    pub apply: bool,
+    /// Assert that other writers to both endpoints have stopped
+    #[arg(long, requires = "transfer_execution")]
+    pub offline: bool,
+    /// Resume the saved transfer with this operation ID and the same intent
+    #[arg(long, requires = "offline")]
+    pub resume: Option<String>,
+    /// Recovery directory (overrides XV_TRANSFER_RECOVERY_DIR and the safe default)
+    #[arg(long)]
+    pub recovery_dir: Option<std::path::PathBuf>,
 }
 
 pub(crate) async fn execute(
@@ -30,9 +43,8 @@ pub(crate) async fn execute(
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
-    use crate::secret::attachment_transfer::{
-        self, TransferEndpoint, TransferIntent, TransferOperation,
-    };
+    use crate::secret::attachment_transfer::{TransferEndpoint, TransferIntent, TransferOperation};
+    use crate::secret::attachment_transfer_execution::{self as execution, RecoveryStore};
     let rebuilt;
     let registry = match registry {
         Some(registry) => registry,
@@ -79,8 +91,37 @@ pub(crate) async fn execute(
         },
         destination_key_id: options.to_key_id,
     };
-    let plan = attachment_transfer::plan(source.as_ref(), destination.as_ref(), intent).await?;
-    println!("{}", serde_json::to_string_pretty(&plan.preview())?);
+    if options.apply || options.resume.is_some() {
+        let root = match options.recovery_dir {
+            Some(path) => path,
+            None => RecoveryStore::default_path()?,
+        };
+        let recovery = RecoveryStore::new(root);
+        let report = if let Some(id) = options.resume {
+            execution::resume(
+                source.as_ref(),
+                destination.as_ref(),
+                intent,
+                &id,
+                options.offline,
+                &recovery,
+            )
+            .await?
+        } else {
+            execution::apply(
+                source.as_ref(),
+                destination.as_ref(),
+                intent,
+                options.offline,
+                &recovery,
+            )
+            .await?
+        };
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        let preview = execution::preview(source.as_ref(), destination.as_ref(), intent).await?;
+        println!("{}", serde_json::to_string_pretty(&preview)?);
+    }
     Ok(())
 }
 
@@ -116,7 +157,38 @@ mod tests {
     }
 
     #[test]
-    fn transfer_preview_requires_both_endpoints_and_has_no_apply_switch() {
+    fn transfer_apply_requires_explicit_offline_and_resume_uses_existing_intent() {
+        let base = [
+            "xv",
+            "transfer",
+            "cert",
+            "--from",
+            "default",
+            "--to",
+            "default",
+            "--new-name",
+            "renamed",
+            "--move",
+        ];
+        let mut args = base.to_vec();
+        args.push("--apply");
+        assert!(Cli::try_parse_from(&args).is_err());
+        args.push("--offline");
+        assert!(Cli::try_parse_from(&args).is_ok());
+        let mut resume = base.to_vec();
+        resume.extend([
+            "--resume",
+            "d38ee960-1d83-4db8-9b48-6a4dc395e606",
+            "--offline",
+        ]);
+        assert!(Cli::try_parse_from(&resume).is_ok());
+        let mut invalid = base.to_vec();
+        invalid.push("--offline");
+        assert!(Cli::try_parse_from(&invalid).is_err());
+    }
+
+    #[test]
+    fn transfer_preview_requires_both_endpoints_and_apply_requires_offline() {
         assert!(Cli::try_parse_from(["xv", "transfer", "cert", "--from", "work"]).is_err());
         assert!(Cli::try_parse_from([
             "xv", "transfer", "cert", "--from", "work", "--to", "stage", "--apply",

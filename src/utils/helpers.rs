@@ -18,17 +18,17 @@ type FileMode = u32;
 enum FileOpenBehavior {
     Replace,
     Exclusive,
-    #[cfg(any(feature = "ui", test))]
+    #[cfg(any(feature = "file-ops", feature = "ui", test))]
     Lock,
 }
 
 impl FileOpenBehavior {
     fn is_lock(self) -> bool {
-        #[cfg(any(feature = "ui", test))]
+        #[cfg(any(feature = "file-ops", feature = "ui", test))]
         {
             matches!(self, Self::Lock)
         }
-        #[cfg(not(any(feature = "ui", test)))]
+        #[cfg(not(any(feature = "file-ops", feature = "ui", test)))]
         {
             false
         }
@@ -255,7 +255,7 @@ pub fn write_private_file_no_follow_create_new(
 ///
 /// Missing parent directories are created owner-only (0700 on Unix), and the
 /// lock file itself is created owner-only (0600 on Unix).
-#[cfg(any(feature = "ui", test))]
+#[cfg(any(feature = "file-ops", feature = "ui", test))]
 pub fn open_private_lock_file_no_follow(path: &Path) -> Result<std::fs::File> {
     write_file_no_follow_with_mode(path, &[], FileOpenBehavior::Lock, 0o600, 0o700)
 }
@@ -398,7 +398,7 @@ fn write_file_no_follow_with_mode(
         let (access_mode, create_mode) = match behavior {
             FileOpenBehavior::Replace => (libc::O_WRONLY, libc::O_TRUNC),
             FileOpenBehavior::Exclusive => (libc::O_WRONLY, libc::O_EXCL),
-            #[cfg(any(feature = "ui", test))]
+            #[cfg(any(feature = "file-ops", feature = "ui", test))]
             FileOpenBehavior::Lock => (libc::O_RDWR, libc::O_EXCL),
         };
         let mut fd = unsafe {
@@ -498,7 +498,7 @@ fn write_file_no_follow_with_mode(
             FileOpenBehavior::Exclusive => {
                 options.create_new(true);
             }
-            #[cfg(any(feature = "ui", test))]
+            #[cfg(any(feature = "file-ops", feature = "ui", test))]
             FileOpenBehavior::Lock => {
                 options.read(true);
             }
@@ -1434,12 +1434,9 @@ fn windows_apply_and_verify_private_dacl(
 ) -> Result<()> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Foundation::ERROR_SUCCESS;
-    use windows_sys::Win32::Security::Authorization::{
-        GetSecurityInfo, SetSecurityInfo, SE_FILE_OBJECT,
-    };
+    use windows_sys::Win32::Security::Authorization::{SetSecurityInfo, SE_FILE_OBJECT};
     use windows_sys::Win32::Security::{
-        GetSecurityDescriptorControl, DACL_SECURITY_INFORMATION,
-        PROTECTED_DACL_SECURITY_INFORMATION, SE_DACL_PROTECTED,
+        DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
     };
 
     let expected_dacl = windows_security_descriptor_dacl(private_descriptor.0, "expected private")?;
@@ -1462,6 +1459,23 @@ fn windows_apply_and_verify_private_dacl(
         )));
     }
 
+    windows_verify_private_dacl(file, private_descriptor, path, label)
+}
+
+#[cfg(windows)]
+fn windows_verify_private_dacl(
+    file: &std::fs::File,
+    private_descriptor: &WindowsSecurityDescriptor,
+    path: &Path,
+    label: &str,
+) -> Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+    use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::{
+        GetSecurityDescriptorControl, DACL_SECURITY_INFORMATION, SE_DACL_PROTECTED,
+    };
+    let expected_dacl = windows_security_descriptor_dacl(private_descriptor.0, "expected private")?;
     let mut actual_dacl = std::ptr::null_mut();
     let mut actual_descriptor = std::ptr::null_mut();
     let queried = unsafe {
@@ -1544,6 +1558,15 @@ fn open_windows_atomic_parent(
     path: &Path,
     private_security: Option<&WindowsSecurityDescriptor>,
 ) -> Result<WindowsAtomicParent> {
+    open_windows_atomic_parent_with_create(path, private_security, true)
+}
+
+#[cfg(windows)]
+fn open_windows_atomic_parent_with_create(
+    path: &Path,
+    private_security: Option<&WindowsSecurityDescriptor>,
+    create: bool,
+) -> Result<WindowsAtomicParent> {
     use std::path::Component;
     use windows_sys::Win32::Storage::FileSystem::{
         CreateDirectoryW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
@@ -1622,7 +1645,7 @@ fn open_windows_atomic_parent(
             std::ptr::null(),
         ) {
             Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(error) if create && error.kind() == std::io::ErrorKind::NotFound => {
                 let wide = windows_wide(&current);
                 let created = unsafe { CreateDirectoryW(wide.as_ptr(), security_pointer) };
                 if created == 0
@@ -1685,6 +1708,199 @@ fn open_windows_atomic_parent(
         _directory: directory,
         absolute,
     })
+}
+
+/// Private recovery storage pinned by Windows directory handles and an OS lock.
+/// All child opens inspect the handle, never a followed path, before reading.
+#[cfg(all(windows, feature = "file-ops"))]
+pub(crate) struct WindowsRecoveryDirectory {
+    parent: WindowsAtomicParent,
+    _lock: std::fs::File,
+}
+
+#[cfg(all(windows, feature = "file-ops"))]
+impl WindowsRecoveryDirectory {
+    fn error() -> CrosstacheError {
+        CrosstacheError::config("Unsafe or inaccessible attachment recovery storage")
+    }
+
+    fn child(&self, name: &str) -> Result<PathBuf> {
+        if name.is_empty()
+            || name == "."
+            || name == ".."
+            || name.len() > 128
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
+        {
+            return Err(Self::error());
+        }
+        Ok(self.parent.absolute.with_file_name(name))
+    }
+
+    fn verify_file(file: &std::fs::File, path: &Path) -> Result<()> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY,
+            FILE_ATTRIBUTE_REPARSE_POINT,
+        };
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle().cast(), &mut info) } == 0
+            || info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
+                != 0
+            || info.nNumberOfLinks != 1
+        {
+            return Err(Self::error());
+        }
+        windows_verify_private_dacl(
+            file,
+            &windows_private_security_descriptor()?,
+            path,
+            "recovery file",
+        )
+    }
+
+    pub(crate) fn open(root: &Path, create: bool) -> Result<Self> {
+        use fs2::FileExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            CREATE_NEW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+            FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_DELETE, FILE_SHARE_READ,
+            FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL,
+        };
+        let descriptor = windows_private_security_descriptor()?;
+        let parent =
+            open_windows_atomic_parent_with_create(&root.join("lock"), Some(&descriptor), create)?;
+        let root_path = parent.absolute.parent().ok_or_else(Self::error)?;
+        let directory = windows_create_file(
+            root_path,
+            READ_CONTROL,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null(),
+        )
+        .map_err(|_| Self::error())?;
+        windows_verify_private_dacl(&directory, &descriptor, root_path, "recovery directory")?;
+        let security = windows_security_attributes(Some(&descriptor));
+        let access = FILE_GENERIC_READ | FILE_GENERIC_WRITE | READ_CONTROL;
+        // Deny delete sharing for the lifetime of the session so the lock inode
+        // cannot be replaced while another process tries to acquire it.
+        let lock = if create {
+            match windows_create_file(
+                &parent.absolute,
+                access,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                CREATE_NEW,
+                FILE_FLAG_OPEN_REPARSE_POINT,
+                &security,
+            ) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    windows_create_file(
+                        &parent.absolute,
+                        access,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE,
+                        OPEN_EXISTING,
+                        FILE_FLAG_OPEN_REPARSE_POINT,
+                        std::ptr::null(),
+                    )
+                    .map_err(|_| Self::error())?
+                }
+                Err(_) => return Err(Self::error()),
+            }
+        } else {
+            windows_create_file(
+                &parent.absolute,
+                access,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT,
+                std::ptr::null(),
+            )
+            .map_err(|_| Self::error())?
+        };
+        Self::verify_file(&lock, &parent.absolute)?;
+        lock.try_lock_exclusive().map_err(|_| {
+            CrosstacheError::conflict("Another attachment transfer recovery session is active")
+        })?;
+        Ok(Self {
+            parent,
+            _lock: lock,
+        })
+    }
+
+    fn open_child(&self, name: &str) -> Result<Option<std::fs::File>> {
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        };
+        let path = self.child(name)?;
+        let file = match windows_create_file(
+            &path,
+            FILE_GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null(),
+        ) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(Self::error()),
+        };
+        Self::verify_file(&file, &path)?;
+        Ok(Some(file))
+    }
+
+    pub(crate) fn exists(&self, name: &str) -> Result<bool> {
+        Ok(self.open_child(name)?.is_some())
+    }
+
+    pub(crate) fn read(&self, name: &str, max: usize) -> Result<Vec<u8>> {
+        use std::io::Read;
+        let file = self.open_child(name)?.ok_or_else(Self::error)?;
+        if file.metadata().map_err(|_| Self::error())?.len() > max as u64 {
+            return Err(Self::error());
+        }
+        let mut bytes = Vec::new();
+        file.take((max as u64).saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|_| Self::error())?;
+        if bytes.len() > max {
+            return Err(Self::error());
+        }
+        Ok(bytes)
+    }
+
+    pub(crate) fn write(&self, name: &str, bytes: &[u8]) -> Result<()> {
+        let path = self.child(name)?;
+        // Refuse unsafe existing entries before atomically replacing a private
+        // generation. The retained directory chain pins this path throughout.
+        let _ = self.open_child(name)?;
+        atomic_write_file_no_follow_windows(&path, bytes, true)
+    }
+
+    pub(crate) fn names(&self) -> Result<Vec<String>> {
+        let root = self.parent.absolute.parent().ok_or_else(Self::error)?;
+        let mut names = Vec::new();
+        for (count, entry) in std::fs::read_dir(root)
+            .map_err(|_| Self::error())?
+            .enumerate()
+        {
+            if count >= 10_000 {
+                return Err(Self::error());
+            }
+            let name = entry
+                .map_err(|_| Self::error())?
+                .file_name()
+                .into_string()
+                .map_err(|_| Self::error())?;
+            if name.ends_with(".age") {
+                self.child(&name)?;
+                names.push(name);
+            }
+        }
+        Ok(names)
+    }
 }
 
 /// Byte size to allocate and report for a `FILE_RENAME_INFO` carrying a name
@@ -3549,6 +3765,57 @@ mod tests {
             std::fs::read(root.path().join(backup_name)).unwrap(),
             b"diagnosed"
         );
+    }
+
+    #[cfg(all(windows, feature = "file-ops"))]
+    #[test]
+    fn windows_recovery_storage_is_private_bounded_and_locked() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("recovery");
+        assert!(WindowsRecoveryDirectory::open(&root, false).is_err());
+        assert!(!root.exists());
+        let session = WindowsRecoveryDirectory::open(&root, true).unwrap();
+        session.write("identity", b"private").unwrap();
+        assert_eq!(session.read("identity", 7).unwrap(), b"private");
+        assert!(session.read("identity", 6).is_err());
+        assert!(session.read("../identity", 100).is_err());
+        assert!(session.write("identity:alternate", b"no").is_err());
+        assert!(WindowsRecoveryDirectory::open(&root, false).is_err());
+        session.write("operation.age", b"encrypted").unwrap();
+        session.write("operation.age", b"replacement").unwrap();
+        assert_eq!(session.names().unwrap(), vec!["operation.age"]);
+        assert_private_windows_dacl(&root);
+        assert_private_windows_dacl(&root.join("identity"));
+        drop(session);
+        let session = WindowsRecoveryDirectory::open(&root, false).unwrap();
+        assert_eq!(session.read("operation.age", 100).unwrap(), b"replacement");
+    }
+
+    #[cfg(all(windows, feature = "file-ops"))]
+    #[test]
+    fn windows_recovery_storage_rejects_links_and_public_acl() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("recovery");
+        let session = WindowsRecoveryDirectory::open(&root, true).unwrap();
+        session.write("identity", b"private").unwrap();
+        std::fs::hard_link(root.join("identity"), root.join("alias")).unwrap();
+        assert!(session.read("identity", 100).is_err());
+        std::fs::remove_file(root.join("alias")).unwrap();
+        set_windows_dacl(&root.join("identity"), "D:P(A;;FA;;;WD)");
+        assert!(session.read("identity", 100).is_err());
+        assert!(session.write("identity", b"replacement").is_err());
+        assert!(session.read("missing", 100).is_err());
+        let target = temp.path().join("outside");
+        std::fs::write(&target, b"outside").unwrap();
+        match std::os::windows::fs::symlink_file(&target, root.join("linked")) {
+            Ok(()) => {
+                assert!(session.read("linked", 100).is_err());
+                assert!(session.write("linked", b"replacement").is_err());
+                assert_eq!(std::fs::read(target).unwrap(), b"outside");
+            }
+            Err(error) if windows_symlink_unavailable(&error) => {}
+            Err(error) => panic!("{error}"),
+        }
     }
 
     #[cfg(windows)]

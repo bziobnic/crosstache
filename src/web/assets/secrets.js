@@ -1078,6 +1078,7 @@ let recordState = null;
 let plainSecretState = null;
 let selectedGroups = [];
 let conversionPreviewState = null;
+let renamePreviewState = null;
 let conversionOperationGeneration = 0;
 let conversionLifecycleEpoch = 0;
 const conversionFieldStates = new Map();
@@ -1469,7 +1470,7 @@ function syncDraftControls() {
   for (const selector of [
     '#close-drawer', '#dismiss-drawer', '#new-secret', '#tab-secrets', '#tab-files', '#tab-trash',
     '#save', '#delete', '#conversion-toggle', '#rename-toggle',
-    '#conversion-preview', '#conversion-confirm', '#rename-submit',
+    '#conversion-preview', '#conversion-confirm', '#rename-preview', '#rename-apply',
   ]) {
     syncPendingDisabled($(selector), pending);
   }
@@ -1480,6 +1481,10 @@ function syncDraftControls() {
   for (const control of conversionWorkflow.querySelectorAll('input, select, button')) {
     syncPendingDisabled(control, pending);
   }
+  const renameWorkflow = $('#rename-workflow');
+  if (pending) renameWorkflow.setAttribute('inert', '');
+  else renameWorkflow.removeAttribute('inert');
+  renameWorkflow.setAttribute('aria-disabled', String(pending));
   const backdrop = $('#drawer-backdrop');
   backdrop.dataset.pending = String(pending);
   backdrop.classList.toggle('pending-disabled', pending);
@@ -2881,29 +2886,191 @@ async function confirmConversion() {
   }
 }
 
-async function renameSecret() {
+function clearRenamePreview() {
+  renamePreviewState = null;
+  $('#rename-summary').hidden = true;
+  $('#rename-summary').textContent = '';
+  $('#rename-confirmation').hidden = $('#rename-recovery-list').children.length === 0;
+  $('#rename-stopped-writers').checked = false;
+  $('#rename-apply').hidden = true;
+  $('#rename-apply').disabled = true;
+  $('#rename-result').textContent = '';
+  syncAttachmentRenameControls();
+}
+
+function syncAttachmentRenameControls() {
+  const confirmed = Boolean($('#rename-stopped-writers').checked);
+  $('#rename-apply').disabled = !confirmed || !renamePreviewState?.execution_supported;
+  for (const button of $('#rename-recovery-list').querySelectorAll('button')) {
+    button.disabled = !confirmed;
+  }
+}
+
+async function atomicRename(selection, newName, operationScope) {
+  await api(
+    'POST',
+    `/api/secrets/${encodeURIComponent(selection)}/rename${vaultQS(operationScope.vault, operationScope)}`,
+    { new_name: newName },
+  );
+  closeDrawer();
+  toast(`Renamed ${selection} to ${newName}`);
+  if (scopeMatchesCurrent(operationScope)) await loadSecrets(operationScope.vault, operationScope);
+}
+
+async function previewRename() {
   if (!editing || !canStartScopedAction(drawerScope)) return;
   const newName = $('#rename-name').value.trim();
   if (!newName) return;
   const selection = editing;
   const operationScope = structuredClone(drawerScope);
-  beginScopedMutation();
+  if (!ctx.capabilities.files) {
+    beginScopedMutation();
+    setSavePending(true);
+    clearFormError();
+    try {
+      await atomicRename(selection, newName, operationScope);
+    } catch (error) {
+      if (editing === selection) showFormError(error);
+    } finally {
+      setSavePending(false);
+      endScopedMutation();
+    }
+    return;
+  }
   setSavePending(true);
   clearFormError();
   try {
-    await api(
+    const preview = await api(
       'POST',
-      `/api/secrets/${encodeURIComponent(selection)}/rename${vaultQS(operationScope.vault, operationScope)}`,
+      `/api/secrets/${encodeURIComponent(selection)}/attachment-rename/preview${vaultQS(operationScope.vault, operationScope)}`,
       { new_name: newName },
     );
-    closeDrawer();
-    toast(`Renamed ${selection} to ${newName}`);
-    if (scopeMatchesCurrent(operationScope)) await loadSecrets(operationScope.vault, operationScope);
+    if (editing !== selection || !scopeMatchesCurrent(operationScope)) return;
+    if (preview.attachment_count === 0) {
+      beginScopedMutation();
+      try {
+        await atomicRename(selection, newName, operationScope);
+      } finally {
+        endScopedMutation();
+      }
+      return;
+    }
+    renamePreviewState = { ...preview, newName, selection, operationScope };
+    $('#rename-summary').textContent = `${preview.attachment_count} attachments (${fmtSize(preview.ciphertext_bytes)}) will move with this secret.`;
+    if (preview.limitation) $('#rename-summary').textContent += ` ${preview.limitation}`;
+    $('#rename-summary').hidden = false;
+    $('#rename-confirmation').hidden = false;
+    $('#rename-apply').hidden = !preview.execution_supported;
+    syncAttachmentRenameControls();
   } catch (error) {
     if (editing === selection) showFormError(error);
   } finally {
     setSavePending(false);
+  }
+}
+
+async function applyAttachmentRename() {
+  const preview = renamePreviewState;
+  const generation = drawerGeneration;
+  if (!preview || !$('#rename-stopped-writers').checked || !canStartScopedAction(preview.operationScope)) return;
+  beginScopedMutation();
+  setSavePending(true);
+  clearFormError();
+  try {
+    const report = await api(
+      'POST',
+      `/api/secrets/${encodeURIComponent(preview.selection)}/attachment-rename/apply${vaultQS(preview.operationScope.vault, preview.operationScope)}`,
+      { new_name: preview.newName, offline: true },
+    );
+    if (isCurrentDrawer(generation, preview.selection) && scopeMatchesCurrent(preview.operationScope)) {
+      $('#rename-result').textContent = `Recovery ID: ${report.id}. ${report.complete ? 'Rename complete.' : 'Recovery is pending.'}`;
+      if (report.complete) {
+        closeDrawer();
+        toast(`Renamed ${preview.selection} to ${preview.newName}. Recovery ID: ${report.id}`);
+      }
+    }
+    await refreshAttachmentRenameViews(preview.operationScope);
+  } catch (error) {
+    if (isCurrentDrawer(generation, preview.selection) && scopeMatchesCurrent(preview.operationScope)) {
+      const recoveryId = error?.details?.recovery_id;
+      if (recoveryId) $('#rename-result').textContent = `Recovery ID: ${recoveryId}. Keep writers stopped and retry.`;
+      showFormError(error);
+    }
+  } finally {
+    setSavePending(false);
     endScopedMutation();
+  }
+}
+
+function renderAttachmentRenameRecovery(summaries, scope, generation, selection) {
+  const list = $('#rename-recovery-list');
+  list.replaceChildren();
+  const pending = summaries.filter((summary) => (
+    !summary.complete
+    && (summary.intent?.source_name === selection || summary.intent?.destination_name === selection)
+  ));
+  $('#rename-recovery').hidden = pending.length === 0;
+  $('#rename-confirmation').hidden = pending.length === 0 && !renamePreviewState;
+  for (const summary of pending) {
+    const item = document.createElement('li');
+    const label = document.createElement('span');
+    label.textContent = `${summary.intent.source_name} → ${summary.intent.destination_name} · ${summary.id}`;
+    const retry = document.createElement('button');
+    retry.type = 'button';
+    retry.className = 'button secondary';
+    retry.textContent = 'Retry';
+    retry.disabled = !$('#rename-stopped-writers').checked;
+    retry.onclick = async () => {
+      if (!$('#rename-stopped-writers').checked || !isCurrentDrawer(generation, selection) || !canStartScopedAction(scope)) return;
+      beginScopedMutation();
+      setSavePending(true);
+      clearFormError();
+      try {
+        const report = await api(
+          'POST',
+          `/api/secrets/${encodeURIComponent(summary.intent.source_name)}/attachment-rename/${encodeURIComponent(summary.id)}/resume${vaultQS(scope.vault, scope)}`,
+          { new_name: summary.intent.destination_name, offline: true },
+        );
+        if (isCurrentDrawer(generation, selection) && scopeMatchesCurrent(scope)) {
+          $('#rename-result').textContent = `Recovery ID: ${report.id}. ${report.complete ? 'Rename complete.' : 'Recovery is pending.'}`;
+          if (report.complete) {
+            closeDrawer();
+            toast(`Renamed ${summary.intent.source_name} to ${summary.intent.destination_name}. Recovery ID: ${report.id}`);
+          }
+        }
+        await refreshAttachmentRenameViews(scope);
+      } catch (error) {
+        if (isCurrentDrawer(generation, selection) && scopeMatchesCurrent(scope)) showFormError(error);
+      } finally {
+        setSavePending(false);
+        endScopedMutation();
+      }
+    };
+    item.append(label, retry);
+    list.appendChild(item);
+  }
+  syncAttachmentRenameControls();
+}
+
+async function refreshAttachmentRenameViews(scope) {
+  if (!scopeMatchesCurrent(scope)) return;
+  await loadSecrets(scope.vault, scope);
+  // Navigation changes drawer ownership, but the same-vault tree still needs
+  // refreshing. Any open drawer owns a separate, freshly captured recovery read.
+  if (scopeMatchesCurrent(scope) && editing && scopeMatchesCurrent(drawerScope)) {
+    await loadAttachmentRenameRecovery(scope, drawerGeneration, editing);
+  }
+}
+
+async function loadAttachmentRenameRecovery(scope, generation, selection) {
+  if (!ctx.capabilities.files) return;
+  try {
+    const summaries = await api('GET', `/api/attachment-renames${vaultQS(scope.vault, scope)}`);
+    if (isCurrentDrawer(generation, selection) && scopeMatchesCurrent(scope)) {
+      renderAttachmentRenameRecovery(summaries, scope, generation, selection);
+    }
+  } catch (error) {
+    if (isCurrentDrawer(generation, selection) && scopeMatchesCurrent(scope)) showFormError(error);
   }
 }
 
@@ -2933,6 +3100,9 @@ async function openDrawerNow(name, invoker, scope) {
   renderGroupEditor();
   renderFolderSuggestions();
   conversionPreviewState = null;
+  $('#rename-recovery').hidden = true;
+  $('#rename-recovery-list').replaceChildren();
+  clearRenamePreview();
   $('#conversion-summary').hidden = true;
   $('#conversion-summary').replaceChildren();
   $('#conversion-required-fields').replaceChildren();
@@ -2968,6 +3138,7 @@ async function openDrawerNow(name, invoker, scope) {
   $('#conversion-toggle').hidden = !name || !ctx.capabilities.conditional_conversion;
   $('#rename-toggle').hidden = !name || !ctx.capabilities.atomic_rename;
   $('#rename-name').value = '';
+  if (name) void loadAttachmentRenameRecovery(scope, generation, name);
   if (name) {
     try {
       const meta = await api('GET', `/api/secrets/${encodeURIComponent(name)}${vaultQS(scope.vault, scope)}`);
@@ -3119,7 +3290,13 @@ $('#conversion-target').onchange = () => {
 };
 $('#conversion-preview').onclick = previewConversion;
 $('#conversion-confirm').onclick = confirmConversion;
-$('#rename-submit').onclick = renameSecret;
+$('#rename-preview').onclick = previewRename;
+$('#rename-apply').onclick = applyAttachmentRename;
+$('#rename-stopped-writers').onchange = syncAttachmentRenameControls;
+$('#rename-name').oninput = () => {
+  clearRenamePreview();
+  updateDraft();
+};
 $('#drawer-backdrop').onclick = (event) => {
   if (store.snapshot().savePending || dialogs.topModal() !== $('#drawer')) {
     event.preventDefault();
@@ -3236,6 +3413,7 @@ $('#copy').onclick = async () => {
 
 $('#secret-form').onsubmit = async (ev) => {
   ev.preventDefault();
+  if ($('#drawer').hidden) return;
   const operationScope = structuredClone(drawerScope || captureOperationScope());
   if (!canStartScopedAction(operationScope)) return;
   const generation = drawerGeneration;

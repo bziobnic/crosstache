@@ -196,6 +196,15 @@ struct RenameJournal {
     deleted_at_millis: u128,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeleteJournal {
+    version: u8,
+    source_stem: String,
+    trash_stem: String,
+    deleted_at_millis: u128,
+}
+
 /// Whether a version-archive directory exists and contains at least one entry.
 ///
 /// An empty directory (e.g. left by an interrupted `merge_versions_dir`) must
@@ -1121,7 +1130,9 @@ impl LocalSecretBackend {
                     && path
                         .file_name()
                         .and_then(|name| name.to_str())
-                        .is_some_and(|name| name.starts_with("rename-"))
+                        .is_some_and(|name| {
+                            name.starts_with("rename-") || name.starts_with("delete-")
+                        })
             })
             .collect::<Vec<_>>();
         transactions.sort();
@@ -1133,6 +1144,13 @@ impl LocalSecretBackend {
         vault: &str,
         dir: &Path,
     ) -> Result<(), BackendError> {
+        if dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("delete-"))
+        {
+            return self.recover_delete_transaction_locked(vault, dir);
+        }
         let journal_path = dir.join("journal.json");
         if !journal_path.exists() {
             fs::remove_dir_all(dir).map_err(|e| {
@@ -1232,6 +1250,139 @@ impl LocalSecretBackend {
         })?;
         sync_directory(&transactions_dir(&self.store_path, vault)?)?;
         Ok(())
+    }
+
+    fn recover_delete_transaction_locked(
+        &self,
+        vault: &str,
+        dir: &Path,
+    ) -> Result<(), BackendError> {
+        let journal_path = dir.join("journal.json");
+        if journal_path.exists() {
+            let bytes = fs::read(&journal_path)
+                .map_err(|e| BackendError::Internal(format!("read delete journal: {e}")))?;
+            let journal: DeleteJournal = serde_json::from_slice(&bytes)
+                .map_err(|e| BackendError::Internal(format!("parse delete journal: {e}")))?;
+            if journal.version != 1
+                || [&journal.source_stem, &journal.trash_stem].iter().any(|s| {
+                    s.is_empty() || s.contains('/') || s.contains('\\') || *s == "." || *s == ".."
+                })
+            {
+                return Err(BackendError::Internal("invalid delete journal".into()));
+            }
+            let saved_meta = read_meta(&dir.join("source.meta"), &self.identity)?;
+            durable_replace_from(
+                &dir.join("source.age"),
+                &age_path(&self.store_path, vault, &journal.source_stem)?,
+            )?;
+            self.recovery_interruption(117)?;
+            durable_replace_from(
+                &dir.join("source.meta"),
+                &meta_path(&self.store_path, vault, &journal.source_stem)?,
+            )?;
+            self.recovery_interruption(118)?;
+            let trash = trash_entry_dir(
+                &self.store_path,
+                vault,
+                &journal.trash_stem,
+                journal.deleted_at_millis,
+            )?;
+            if trash.exists() {
+                fs::remove_dir_all(&trash).map_err(|e| {
+                    BackendError::Internal(format!("remove transaction trash: {e}"))
+                })?;
+                sync_directory(&trash_base_dir(&self.store_path, vault)?)?;
+            }
+            self.recovery_interruption(119)?;
+            self.ensure_opaque_layout(vault, &saved_meta.name)?;
+            if self.opaque_filenames {
+                sync_file(&opaque::index_path(&secrets_dir(&self.store_path, vault)?))?;
+            }
+            sync_directory(&secrets_dir(&self.store_path, vault)?)?;
+            self.recovery_interruption(120)?;
+            Self::remove_transaction_file(&journal_path, "recovered delete journal")?;
+            sync_directory(dir)?;
+            self.recovery_interruption(121)?;
+        }
+        fs::remove_dir_all(dir)
+            .map_err(|e| BackendError::Internal(format!("clean delete transaction: {e}")))?;
+        sync_directory(&transactions_dir(&self.store_path, vault)?)
+    }
+
+    fn delete_transaction_locked(&self, vault: &str, name: &str) -> Result<(), BackendError> {
+        let source_stem = self.resolve_active_stem(vault, name)?;
+        let trash_stem = self.active_stem(name);
+        let deleted_at_millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| BackendError::Internal(format!("deletion clock: {e}")))?
+            .as_millis();
+        let trash = trash_entry_dir(&self.store_path, vault, &trash_stem, deleted_at_millis)?;
+        if trash.exists() {
+            return Err(BackendError::Conflict(
+                "deletion trash already exists".into(),
+            ));
+        }
+        let root = transactions_dir(&self.store_path, vault)?;
+        create_private_dir(&root)
+            .map_err(|e| BackendError::Internal(format!("create delete transaction root: {e}")))?;
+        sync_directory(&secrets_dir(&self.store_path, vault)?)?;
+        let dir = root.join(format!("delete-{}", uuid::Uuid::new_v4()));
+        create_private_dir(&dir)
+            .map_err(|e| BackendError::Internal(format!("create delete transaction: {e}")))?;
+        sync_directory(&root)?;
+        let source_age = age_path(&self.store_path, vault, &source_stem)?;
+        let source_meta = meta_path(&self.store_path, vault, &source_stem)?;
+        durable_replace_from(&source_age, &dir.join("source.age"))?;
+        // Preserve encrypted metadata in opaque stores, including legacy input.
+        let meta = read_meta(&source_meta, &self.identity)?;
+        write_meta(
+            &dir.join("source.meta"),
+            &meta,
+            MetaCrypto {
+                recipients: &self.recipients,
+                encrypt: self.encrypt_metadata || self.opaque_filenames,
+            },
+        )?;
+        sync_file(&dir.join("source.meta"))?;
+        sync_directory(&dir)?;
+        self.recovery_interruption(110)?;
+        let journal = DeleteJournal {
+            version: 1,
+            source_stem,
+            trash_stem: trash_stem.clone(),
+            deleted_at_millis,
+        };
+        let bytes = serde_json::to_vec(&journal)
+            .map_err(|e| BackendError::Internal(format!("serialize delete journal: {e}")))?;
+        durable_write_private(&dir.join("journal.tmp"), &bytes)?;
+        fs::rename(dir.join("journal.tmp"), dir.join("journal.json"))
+            .map_err(|e| BackendError::Internal(format!("publish delete journal: {e}")))?;
+        sync_directory(&dir)?;
+        self.recovery_interruption(111)?;
+        self.delete_secret_at_locked(vault, name, deleted_at_millis)?;
+        self.recovery_interruption(112)?;
+        for entry in fs::read_dir(&trash)
+            .map_err(|e| BackendError::Internal(format!("read deletion trash: {e}")))?
+        {
+            let entry = entry
+                .map_err(|e| BackendError::Internal(format!("read deletion trash entry: {e}")))?;
+            sync_file(&entry.path())?;
+        }
+        sync_directory(&trash)?;
+        sync_directory(&trash_base_dir(&self.store_path, vault)?)?;
+        let secrets = secrets_dir(&self.store_path, vault)?;
+        if self.opaque_filenames {
+            sync_file(&opaque::index_path(&secrets))?;
+        }
+        sync_directory(&secrets)?;
+        sync_directory(&paths::vault_dir(&self.store_path, vault)?)?;
+        self.recovery_interruption(113)?;
+        Self::remove_transaction_file(&dir.join("journal.json"), "committed delete journal")?;
+        sync_directory(&dir)?;
+        self.recovery_interruption(114)?;
+        fs::remove_dir_all(&dir)
+            .map_err(|e| BackendError::Internal(format!("clean committed delete: {e}")))?;
+        sync_directory(&root)
     }
 
     fn recover_all_rename_transactions_locked(&self, vault: &str) -> Result<(), BackendError> {
@@ -1920,11 +2071,14 @@ impl LocalSecretBackend {
             fs::rename(&ap, &dest)
                 .map_err(|e| BackendError::Internal(format!("move age to trash: {e}")))?;
         }
+        self.recovery_interruption(115)?;
         if mp.exists() {
             let dest = tdir.join(format!("{trash_stem}.meta.json"));
             fs::rename(&mp, &dest)
                 .map_err(|e| BackendError::Internal(format!("move meta to trash: {e}")))?;
         }
+
+        self.recovery_interruption(116)?;
 
         // Write deletion metadata. With opaque filenames on, the trash dir name
         // is opaque and `.deleted.json` must NOT carry plaintext `original_name`
@@ -2541,6 +2695,39 @@ impl LocalSecretBackend {
 
 #[async_trait]
 impl SecretBackend for LocalSecretBackend {
+    fn supports_atomic_create(&self) -> bool {
+        true
+    }
+    fn supports_conditional_delete(&self) -> bool {
+        true
+    }
+
+    async fn delete_secret_if_revision(
+        &self,
+        vault: &str,
+        name: &str,
+        expected_revision: &str,
+    ) -> Result<(), BackendError> {
+        let result = (|| {
+            let _lock = self.mutation_lock_for_name(vault, name)?;
+            let snapshot = self.get_secret_snapshot_locked(vault, name, false)?;
+            if snapshot.revision != expected_revision {
+                return Err(BackendError::SourceRevisionConflict { name: name.into() });
+            }
+            if self.has_attachments_locked(vault, name)? {
+                return Err(BackendError::Conflict(
+                    "source attachment prefix is not empty".into(),
+                ));
+            }
+            self.delete_transaction_locked(vault, name)
+        })();
+        if result.is_ok() {
+            self.audit_record(vault, AuditOp::DeleteSecret, name)?;
+            self.git_commit(&format!("delete {name}"))?;
+        }
+        self.audit_failure(vault, AuditOp::DeleteSecret, name, result)
+    }
+
     fn supports_conditional_update(&self) -> bool {
         true
     }
@@ -6903,6 +7090,164 @@ mod tests {
             .await
             .unwrap();
         assert_ne!(restored.revision, rolled_back.revision);
+    }
+
+    #[tokio::test]
+    async fn conditional_delete_recovers_every_boundary() {
+        for opaque in [false, true] {
+            for stage in [110, 111, 112, 113, 114, 115, 116] {
+                let (backend, tmp) = backend_for_mode(opaque);
+                backend
+                    .set_secret("default", make_request("source", "kept"))
+                    .await
+                    .unwrap();
+                let snapshot = backend
+                    .get_secret_snapshot("default", "source", true)
+                    .await
+                    .unwrap();
+                install_update_crash(&backend.store_path, stage);
+                assert!(
+                    backend
+                        .delete_secret_if_revision("default", "source", &snapshot.revision)
+                        .await
+                        .is_err(),
+                    "stage {stage}"
+                );
+                drop(backend);
+                let restarted = if opaque {
+                    reopen_opaque(&tmp, false)
+                } else {
+                    test_backend_reopen(&tmp, false)
+                };
+                let current = restarted
+                    .get_secret_snapshot("default", "source", true)
+                    .await;
+                if stage == 114 {
+                    assert!(matches!(current, Err(BackendError::NotFound { .. })));
+                } else {
+                    let current = current.unwrap();
+                    assert_eq!(current.revision, snapshot.revision, "stage {stage}");
+                    assert_eq!(current.properties.value, snapshot.properties.value);
+                    restarted
+                        .delete_secret_if_revision("default", "source", &current.revision)
+                        .await
+                        .unwrap();
+                }
+                assert!(restarted
+                    .list_secrets("default", None)
+                    .await
+                    .unwrap()
+                    .is_empty());
+                assert!(restarted
+                    .rename_transaction_dirs("default")
+                    .unwrap()
+                    .is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn conditional_delete_recovery_can_restart() {
+        for opaque in [false, true] {
+            for stage in 117..=121 {
+                let (backend, tmp) = backend_for_mode(opaque);
+                backend
+                    .set_secret("default", make_request("source", "kept"))
+                    .await
+                    .unwrap();
+                let snapshot = backend
+                    .get_secret_snapshot("default", "source", true)
+                    .await
+                    .unwrap();
+                install_update_crash(&backend.store_path, 112);
+                assert!(backend
+                    .delete_secret_if_revision("default", "source", &snapshot.revision)
+                    .await
+                    .is_err());
+                install_update_crash(&backend.store_path, stage);
+                assert!(backend.list_secrets("default", None).await.is_err());
+                drop(backend);
+                let restarted = if opaque {
+                    reopen_opaque(&tmp, false)
+                } else {
+                    test_backend_reopen(&tmp, false)
+                };
+                let current = restarted
+                    .get_secret_snapshot("default", "source", true)
+                    .await
+                    .unwrap();
+                assert_eq!(current.revision, snapshot.revision);
+                assert_eq!(current.properties.value, snapshot.properties.value);
+                assert!(restarted
+                    .rename_transaction_dirs("default")
+                    .unwrap()
+                    .is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn conditional_delete_rejects_nonempty_attachment_prefix() {
+        let (backend, tmp) = test_backend();
+        backend
+            .set_secret("default", make_request("source", "kept"))
+            .await
+            .unwrap();
+        let snapshot = backend
+            .get_secret_snapshot("default", "source", true)
+            .await
+            .unwrap();
+        let files = tmp.path().join("vaults/default/files");
+        fs::create_dir_all(&files).unwrap();
+        fs::write(
+            files.join("attachments%2Fsource%2Fproof.txt.meta.json"),
+            r#"{"name":"attachments/source/proof.txt"}"#,
+        )
+        .unwrap();
+        assert!(backend
+            .delete_secret_if_revision("default", "source", &snapshot.revision)
+            .await
+            .is_err());
+        assert!(backend.get_secret("default", "source", true).await.is_ok());
+        assert!(backend
+            .rename_transaction_dirs("default")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn conditional_delete_checks_generation() {
+        let (backend, _tmp) = test_backend();
+        backend
+            .set_secret("default", make_request("source", "old"))
+            .await
+            .unwrap();
+        let old = backend
+            .get_secret_snapshot("default", "source", true)
+            .await
+            .unwrap();
+        backend
+            .set_secret("default", make_request("source", "new"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            backend
+                .delete_secret_if_revision("default", "source", &old.revision)
+                .await,
+            Err(BackendError::SourceRevisionConflict { .. })
+        ));
+        let current = backend
+            .get_secret_snapshot("default", "source", true)
+            .await
+            .unwrap();
+        backend
+            .delete_secret_if_revision("default", "source", &current.revision)
+            .await
+            .unwrap();
+        assert!(matches!(
+            backend.get_secret("default", "source", true).await,
+            Err(BackendError::NotFound { .. })
+        ));
     }
 
     #[tokio::test]

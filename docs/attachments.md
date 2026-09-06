@@ -126,7 +126,7 @@ use `xv attach` / `xv attachments --get` / `xv file upload --encrypt` instead.
 ### Rename and move
 
 Attachment association is the blob path `attachments/<old-name>/…`.
-The web UI and generic CLI rename, copy and move commands refuse attached sources
+Generic CLI rename, copy and move commands refuse attached sources
 or destination prefixes before changing secrets. `xv update --rename` and `xv mv`
 also check before applying accompanying metadata or folder changes. Folder-only
 moves keep the same secret name and attachment prefix.
@@ -154,9 +154,50 @@ xv transfer cert --from work --to stage --to-key-id DESTINATION_ACTIVE_ID
 
 The JSON preview lists endpoints, attachment counts/bytes and verified key bindings,
 without secret values or file contents. Cross-vault attachments require a healthy
-destination V2 key ring and its explicit active key ID. This release provides the
-preview and encrypted recovery-manifest foundation; applying attached transfers is
-not yet enabled.
+destination V2 key ring and its explicit active key ID. The preview reports whether
+execution is supported. Same-vault local rename supports apply and recovery;
+cross-vault and cloud transfers remain preview-only in this release.
+
+Stop other writers, then apply a local rename explicitly:
+
+```bash
+xv transfer cert --from work --to work --new-name certificate --move --apply --offline
+```
+
+The destination secret and every attachment are created without overwriting existing
+data. The transfer preserves attachment ciphertext and metadata, verifies the complete
+destination, then removes the original attachments and finally the original secret.
+`--offline` asserts that other writers have stopped; this is a recoverable operation,
+not a transaction spanning the secret and attachment stores.
+
+The result includes a transfer ID. If interrupted, repeat the same intent with that ID:
+
+```bash
+xv transfer cert --from work --to work --new-name certificate --move --resume TRANSFER_ID --offline
+```
+
+Recovery rechecks the saved source and destination evidence before proceeding. It
+never deletes the destination as rollback. Unexpected changes cause a conflict for
+manual inspection. A completed transfer can be resumed safely to verify its result.
+
+Recovery files normally live in `transfer-recovery` beside the xv configuration
+file. If that location is Git-managed, xv uses `crosstache/transfer-recovery` under
+the platform's local data directory, provided that location is outside Git too.
+Set `XV_TRANSFER_RECOVERY_DIR` for both CLI and web server operations; the CLI's
+`--recovery-dir PATH` takes precedence. Relative paths resolve from the process's
+working directory. Recovery directories must be outside the secret store and Git
+worktrees. If no safe default exists, choose an external directory explicitly.
+Existing records at the original location prevent an automatic fallback: move the
+entire recovery directory, including its identity, together and select its new path.
+Keep that directory and its
+separate recovery identity together until recovery is no longer needed. Journals are
+encrypted and authenticated and contain no secret values or decrypted attachments.
+Losing the identity prevents automatic recovery; inspect retained provider data
+manually. Preview does not create recovery files.
+
+The web rename flow offers the same preview, stopped-writers acknowledgement, and
+recovery through an operation ID. Recovery paths and identity material stay on the
+server.
 
 ### Migration
 

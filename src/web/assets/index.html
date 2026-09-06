@@ -330,7 +330,20 @@
           <h3 id="rename-heading">Rename secret</h3>
           <p>Renaming is separate from content and metadata changes.</p>
           <label class="form-field" for="rename-name"><span class="field-label">New secret name</span><input id="rename-name" name="new_name" autocomplete="off"></label>
-          <button id="rename-submit" class="button primary" type="button">Apply rename</button>
+          <div id="rename-summary" class="impact-summary" role="status" aria-live="polite" hidden></div>
+          <div id="rename-confirmation" hidden>
+            <label class="checkbox-row" for="rename-stopped-writers"><input id="rename-stopped-writers" type="checkbox"> I have stopped every writer to this vault.</label>
+            <p class="field-help">Attachment rename runs offline and can be resumed with its recovery ID.</p>
+          </div>
+          <div class="workflow-actions">
+            <button id="rename-preview" class="button secondary" type="button">Preview rename</button>
+            <button id="rename-apply" class="button danger" type="button" hidden disabled>Apply attachment rename</button>
+          </div>
+          <p id="rename-result" class="field-help" role="status" aria-live="polite"></p>
+          <section id="rename-recovery" aria-labelledby="rename-recovery-heading" hidden>
+            <h4 id="rename-recovery-heading">Pending attachment renames</h4>
+            <ul id="rename-recovery-list" class="recovery-list"></ul>
+          </section>
         </section>
       </section>
     </div>

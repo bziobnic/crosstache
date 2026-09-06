@@ -28,3 +28,6 @@ pub mod rotation;
 
 #[cfg(feature = "file-ops")]
 pub mod attachment_transfer;
+
+#[cfg(feature = "file-ops")]
+pub mod attachment_transfer_execution;

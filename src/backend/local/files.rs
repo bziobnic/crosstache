@@ -111,6 +111,76 @@ struct LocalFileChain {
     files: AnchoredDir,
 }
 
+/// Resolve through the same anchored directory chain as file operations.
+pub(super) fn transfer_location(
+    store: &Path,
+    vault: &str,
+) -> Result<crate::backend::TransferLocation, BackendError> {
+    paths::validate_vault_name(vault)?;
+    let missing = || BackendError::Unsupported("local transfer namespace does not exist".into());
+    let store = open_configured_store_with_mode(store, false, false)?.ok_or_else(missing)?;
+    let vaults = store.open_dir("vaults")?.ok_or_else(missing)?;
+    let vault_dir = vaults.open_dir(vault)?.ok_or_else(missing)?;
+    let files = vault_dir.open_dir("files")?.ok_or_else(missing)?;
+    let secrets = vault_dir.open_dir("secrets")?.ok_or_else(missing)?;
+    let identity = |dir: &AnchoredDir| -> Result<String, BackendError> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let meta = dir
+                .file
+                .metadata()
+                .map_err(|e| BackendError::Internal(format!("inspect transfer directory: {e}")))?;
+            Ok(format!("{}:{}", meta.dev(), meta.ino()))
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::Storage::FileSystem::{
+                GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+            };
+            let mut info = BY_HANDLE_FILE_INFORMATION::default();
+            if unsafe { GetFileInformationByHandle(dir.file.as_raw_handle().cast(), &mut info) }
+                == 0
+            {
+                return Err(BackendError::Internal(format!(
+                    "inspect transfer directory: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
+            Ok(format!(
+                "{}:{}:{}",
+                info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow
+            ))
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = dir;
+            Err(BackendError::Unsupported(
+                "stable directory identities".into(),
+            ))
+        }
+    };
+    let base = format!(
+        "{}:{}:{}",
+        identity(&store)?,
+        identity(&vaults)?,
+        identity(&vault_dir)?
+    );
+    let namespace = |kind: &str, id: String| {
+        format!(
+            "local:{:x}",
+            Sha256::digest(format!("{kind}:{base}:{id}").as_bytes())
+        )
+    };
+    let secret_id = identity(&secrets)?;
+    Ok(crate::backend::TransferLocation {
+        secrets: namespace("secrets", secret_id.clone()),
+        files: namespace("files", identity(&files)?),
+        keys: namespace("keys", secret_id),
+    })
+}
+
 struct AnchoredDir {
     /// The retained directory handle.
     ///
@@ -778,6 +848,16 @@ fn open_configured_store(
     store_path: &Path,
     create: bool,
 ) -> Result<Option<AnchoredDir>, BackendError> {
+    open_configured_store_with_mode(store_path, create, true)
+}
+
+fn open_configured_store_with_mode(
+    store_path: &Path,
+    create: bool,
+    repair: bool,
+) -> Result<Option<AnchoredDir>, BackendError> {
+    #[cfg(not(unix))]
+    let _ = repair;
     #[cfg(unix)]
     {
         use std::path::Component;
@@ -861,7 +941,9 @@ fn open_configured_store(
             };
         }
         directory.display = logical;
-        directory.repair_private_mode()?;
+        if repair {
+            directory.repair_private_mode()?;
+        }
         Ok(Some(directory))
     }
     #[cfg(not(unix))]
@@ -1169,6 +1251,68 @@ impl LocalFileBackend {
         Ok(())
     }
 
+    fn delete_transaction_locked(
+        &self,
+        chain: &LocalFileChain,
+        name: &str,
+        expected_etag: &str,
+    ) -> Result<(), BackendError> {
+        self.recover_all_locked(chain)?;
+        let stem = storage_stem(name)?;
+        let active_age = format!("{stem}.age");
+        let active_meta = format!("{stem}.meta.json");
+        let metadata =
+            chain
+                .files
+                .read_file(&active_meta)?
+                .ok_or_else(|| BackendError::NotFound {
+                    name: name.into(),
+                    suggestion: None,
+                })?;
+        let info: FileInfo = serde_json::from_slice(&metadata)
+            .map_err(|e| BackendError::Internal(format!("parse file metadata: {e}")))?;
+        if info.etag != expected_etag {
+            return Err(BackendError::Conflict(
+                "source file generation changed".into(),
+            ));
+        }
+        if !chain.files.file_exists(&active_age)? {
+            return Err(BackendError::Internal(
+                "local file pair is incomplete".into(),
+            ));
+        }
+        let root = chain.files.open_or_create_private_dir(".transactions")?;
+        let transaction = root.open_or_create_private_dir(&stem)?;
+        chain
+            .files
+            .copy_file_to(&active_age, &transaction, "old.age")?;
+        chain
+            .files
+            .copy_file_to(&active_meta, &transaction, "old.meta.json")?;
+        transaction.sync()?;
+        self.file_crash(10)?;
+        let journal = serde_json::to_vec(&FileUploadJournal {
+            version: 1,
+            had_age: true,
+            had_meta: true,
+        })
+        .map_err(|e| BackendError::Internal(format!("serialize delete journal: {e}")))?;
+        transaction.create_private_file("journal.tmp", &journal)?;
+        transaction.rename_to("journal.tmp", &transaction, "journal.json")?;
+        transaction.sync()?;
+        self.file_crash(11)?;
+        chain.files.remove_file(&active_age)?;
+        chain.files.sync()?;
+        self.file_crash(12)?;
+        chain.files.remove_file(&active_meta)?;
+        chain.files.sync()?;
+        self.file_crash(13)?;
+        transaction.remove_file("journal.json")?;
+        transaction.sync()?;
+        self.file_crash(14)?;
+        Self::remove_transaction_dir(&root, &transaction, &stem)
+    }
+
     fn upload_transaction_locked(
         &self,
         chain: &LocalFileChain,
@@ -1346,7 +1490,6 @@ impl FileBackend for LocalFileBackend {
         Ok(())
     }
 
-    #[cfg(any(feature = "ui", test))]
     fn supports_atomic_create(&self) -> bool {
         true
     }
@@ -1361,7 +1504,6 @@ impl FileBackend for LocalFileBackend {
         self.upload_with_policy(vault, request, false)
     }
 
-    #[cfg(any(feature = "ui", test))]
     async fn upload_file_if_absent(
         &self,
         vault: &str,
@@ -1488,6 +1630,27 @@ impl FileBackend for LocalFileBackend {
         }
 
         Ok(results)
+    }
+
+    fn supports_conditional_delete(&self) -> bool {
+        true
+    }
+
+    async fn delete_file_if_etag(
+        &self,
+        vault: &str,
+        name: &str,
+        expected_etag: &str,
+    ) -> Result<(), BackendError> {
+        self.validate_file_name(name)?;
+        let chain = existing_local_file_chain(&self.store_path, vault)?.ok_or_else(|| {
+            BackendError::NotFound {
+                name: name.into(),
+                suggestion: None,
+            }
+        })?;
+        let _lock = lock_local_file_chain(&self.store_path, vault, &chain)?;
+        self.delete_transaction_locked(&chain, name, expected_etag)
     }
 
     async fn delete_file(&self, vault: &str, name: &str) -> Result<(), BackendError> {
@@ -2485,6 +2648,97 @@ mod tests {
                 .unwrap(),
             b"old"
         );
+    }
+
+    #[tokio::test]
+    async fn conditional_file_delete_recovers_every_boundary() {
+        for stage in 10..=14 {
+            let (backend, tmp) = test_file_backend();
+            let info = backend
+                .upload_file(
+                    "default",
+                    upload_request("atomic.txt", b"original", "old"),
+                    None,
+                )
+                .await
+                .unwrap();
+            assert!(backend
+                .delete_file_if_etag("default", "atomic.txt", "wrong-generation")
+                .await
+                .is_err());
+            let identity = backend.identity.clone();
+            let recipients = backend.recipients.clone();
+            install_file_crash(&backend.store_path, stage);
+            assert!(backend
+                .delete_file_if_etag("default", "atomic.txt", &info.etag)
+                .await
+                .is_err());
+            drop(backend);
+            let restarted = LocalFileBackend::new(tmp.path().to_path_buf(), identity, recipients);
+            let current = restarted.get_file_info("default", "atomic.txt").await;
+            if stage == 14 {
+                assert!(matches!(current, Err(BackendError::NotFound { .. })));
+            } else {
+                assert_eq!(current.unwrap().etag, info.etag);
+                assert_eq!(
+                    restarted
+                        .download_file("default", "atomic.txt", None)
+                        .await
+                        .unwrap(),
+                    b"original"
+                );
+                restarted
+                    .delete_file_if_etag("default", "atomic.txt", &info.etag)
+                    .await
+                    .unwrap();
+            }
+            assert!(matches!(
+                restarted.get_file_info("default", "atomic.txt").await,
+                Err(BackendError::NotFound { .. })
+            ));
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn transfer_location_binds_aliases_and_replaced_directories() {
+        let (backend, tmp) = test_file_backend();
+        backend
+            .upload_file(
+                "default",
+                upload_request("atomic.txt", b"original", "old"),
+                None,
+            )
+            .await
+            .unwrap();
+        let vault = tmp.path().join("vaults/default");
+        fs::create_dir_all(vault.join("secrets")).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        let original = transfer_location(tmp.path(), "default").unwrap();
+        assert_eq!(
+            fs::metadata(tmp.path()).unwrap().permissions().mode() & 0o777,
+            0o755,
+            "namespace discovery must not repair directory modes"
+        );
+        let alias_root = TempDir::new().unwrap();
+        let alias = alias_root.path().join("alias");
+        std::os::unix::fs::symlink(tmp.path(), &alias).unwrap();
+        assert!(transfer_location(&alias, "default").is_err());
+        assert_eq!(
+            original,
+            transfer_location(&fs::canonicalize(tmp.path()).unwrap(), "default").unwrap()
+        );
+        fs::rename(vault.join("files"), vault.join("files-old")).unwrap();
+        fs::create_dir(vault.join("files")).unwrap();
+        let changed = transfer_location(tmp.path(), "default").unwrap();
+        assert_ne!(original.files, changed.files);
+        assert_eq!(original.secrets, changed.secrets);
+        fs::rename(vault.join("secrets"), vault.join("secrets-old")).unwrap();
+        fs::create_dir(vault.join("secrets")).unwrap();
+        let changed = transfer_location(tmp.path(), "default").unwrap();
+        assert_ne!(original.secrets, changed.secrets);
+        assert_ne!(original.keys, changed.keys);
     }
 
     #[tokio::test]
