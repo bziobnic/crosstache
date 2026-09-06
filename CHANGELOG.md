@@ -4,6 +4,9 @@
 
 ### Added
 
+- Offline attachment-key rotation with preview, expected-active-ID protection,
+  exact key verification, and preservation of existing file reads and legacy keys.
+
 - Encrypted attachment-key export and offline restore for current visible files,
   including cross-vault key-version rebinding, preview, safe retry, and explicit
   malformed-pointer repair. Ciphertext payloads require separate backups.
@@ -19,6 +22,9 @@
   references. Inventory does not download payloads or establish retirement safety.
 
 ### Fixed
+
+- AWS exact-version reads retain record metadata for strict attachment key
+  verification and report the version returned with the secret value.
 
 - AWS secret listings preserve content-type metadata so retained attachment keys
   appear in `attachment-key keys` and stay hidden from generic secret listings.

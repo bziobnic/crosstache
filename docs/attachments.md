@@ -114,7 +114,8 @@ spellings. `--force` cannot override this protection. The same boundary applies
 to Web edits and folder moves, imports, and migration targets. Generic opaque
 backup restore is disabled because its destination cannot be checked before
 provider mutation. Dedicated pointer recovery and encrypted key backup/restore
-are described below. Rotation and retirement remain future work.
+are described below. Offline rotation is available; rewrap and retirement follow
+as separate lifecycle operations.
 
 ### Sync skips ciphertext
 
@@ -330,7 +331,8 @@ observation commands. No private key is printed.
 This recovery repairs the pointer using keys already present. It cannot restore
 deleted key material, recreate a missing provider version, recover attachments
 already unreadable before upgrade, or restore a ring into another vault.
-Encrypted key export/import, rotation, rewrap, and retirement remain future work.
+Encrypted key backup/restore and rotation are available as described below.
+Rewrap and retirement remain planned work.
 Provider soft-deleted records may need restoration through the provider's
 recovery tooling before these commands can access or write them. Existing
 Local read-time journal recovery applies to these commands as well.
@@ -396,5 +398,30 @@ These commands cover the bundle's visible **current files**, not historical blob
 versions. Keep writers stopped throughout restore: drift checks detect observed
 changes but there is no portable atomic transaction across providers. On failure,
 completed writes remain available for retry; no automatic rollback or key deletion
-occurs. Rotation, re-encryption under another identity, and retirement are separate
-operations.
+occurs. Re-encryption under another identity and retirement are separate operations.
+
+### Offline key rotation
+
+`attachment-key rotate` changes the key used for new encrypted uploads while
+retaining every existing identity and provider version. Existing ciphertext is
+unchanged and remains readable. Start with a healthy V2 ring (use `upgrade` for a
+V1 vault), stop all writers, and take an encrypted key backup first.
+
+```sh
+xv attachment-key status --format json
+xv attachment-key rotate --from-key-id OLD_ACTIVE_ID --format json
+xv attachment-key rotate --from-key-id OLD_ACTIVE_ID --apply --offline
+```
+
+Copy the active key ID from status into `OLD_ACTIVE_ID`. Preview validates the
+ring without generating or writing a key. Apply creates and exact-verifies a
+fresh independent identity before publishing the pointer; the explicit legacy
+binding stays unchanged. If the active ID no longer matches, the command refuses
+before creating another key. Thus repeating a successfully completed invocation
+cannot silently rotate again.
+
+Failure before pointer publication can leave an unreferenced retained candidate;
+retrying may create a fresh candidate. Do not delete these records. After an
+unconfirmed publication, inspect `status` and `keys`: retrying with the old expected
+ID refuses if publication succeeded. Drift checks detect observed changes but do
+not make this a provider-portable atomic transaction; writers must stay stopped.

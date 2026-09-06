@@ -7,6 +7,7 @@ use crate::secret::manager::{
     SecretUpdateRequest,
 };
 use aws_sdk_secretsmanager::operation::describe_secret::DescribeSecretOutput;
+use aws_sdk_secretsmanager::operation::get_secret_value::GetSecretValueOutput;
 use aws_sdk_secretsmanager::Client as SecretsManagerClient;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -241,6 +242,37 @@ impl AwsSecretBackend {
             });
         }
         Ok(versions)
+    }
+
+    /// AWS tags describe the record, not individual versions. Preserve that
+    /// metadata while binding the value to the version actually returned by
+    /// GetSecretValue; DescribeSecret's AWSCURRENT may have advanced meanwhile.
+    fn props_from_value(
+        &self,
+        describe: &DescribeSecretOutput,
+        value: &GetSecretValueOutput,
+        fallback_name: &str,
+    ) -> SecretProperties {
+        let mut props = self.props_from_describe(describe, fallback_name);
+        props.version = value.version_id().unwrap_or_default().to_string();
+        props.value = value
+            .secret_string()
+            .map(|s| zeroize::Zeroizing::new(s.to_string()));
+        // Never label a historical version current or reuse record-level tags
+        // as evidence about this version's mutable AWS stage labels.
+        props.tags.remove("aws:stages");
+        if !value.version_stages().is_empty() {
+            props
+                .tags
+                .insert("aws:stages".into(), value.version_stages().join(","));
+        }
+        if let Some(created) = value.created_date() {
+            props.created_timestamp = created.secs();
+            props.created_on = chrono::DateTime::from_timestamp(created.secs(), 0)
+                .map(|dt| dt.to_string())
+                .unwrap_or_default();
+        }
+        props
     }
 
     /// Build a `SecretProperties` from a `DescribeSecretOutput`.
@@ -520,11 +552,7 @@ impl SecretBackend for AwsSecretBackend {
         let describe = describe.map_err(|e| super::errors::from_describe(name, e))?;
         let value = value.map_err(|e| super::errors::from_get_value(name, e))?;
 
-        let mut props = self.props_from_describe(&describe, name);
-        props.value = value
-            .secret_string()
-            .map(|s| zeroize::Zeroizing::new(s.to_string()));
-        Ok(props)
+        Ok(self.props_from_value(&describe, &value, name))
     }
 
     async fn get_secret_version(
@@ -549,8 +577,17 @@ impl SecretBackend for AwsSecretBackend {
                 });
         }
 
-        // Get the secret value for this specific version.
-        let out = self
+        // Custody markers and other AWS tags are record-level metadata.
+        // A denied/failed DescribeSecret must fail this read rather than fabricate
+        // metadata or weaken the attachment layer's strict validation.
+        let describe = self
+            .client
+            .describe_secret()
+            .secret_id(&aws_full_name)
+            .send()
+            .await
+            .map_err(|e| super::errors::from_describe(name, e))?;
+        let value = self
             .client
             .get_secret_value()
             .secret_id(&aws_full_name)
@@ -558,32 +595,7 @@ impl SecretBackend for AwsSecretBackend {
             .send()
             .await
             .map_err(|e| super::errors::from_get_value(name, e))?;
-
-        // Build SecretProperties manually with the version-specific data.
-        let mut tags: HashMap<String, String> = HashMap::new();
-        tags.insert("aws:stages".to_string(), "[current]".to_string());
-
-        let version_id = out.version_id().unwrap_or("").to_string();
-        let secret_value = out
-            .secret_string()
-            .map(|s| zeroize::Zeroizing::new(s.to_string()));
-
-        Ok(SecretProperties {
-            name: name.to_string(),
-            original_name: name.to_string(),
-            value: secret_value,
-            version: version_id,
-            version_number: None,
-            created_timestamp: 0,
-            created_on: String::new(),
-            updated_on: String::new(),
-            enabled: true,
-            expires_on: None,
-            not_before: None,
-            tags,
-            content_type: String::new(),
-            recovery_level: None,
-        })
+        Ok(self.props_from_value(&describe, &value, name))
     }
 
     async fn list_versions(
