@@ -618,6 +618,12 @@ pub enum Commands {
         #[arg(short, long, requires = "get")]
         output: Option<String>,
     },
+    /// Inspect attachment key status and file metadata references (read-only)
+    #[cfg(feature = "file-ops")]
+    AttachmentKey {
+        #[command(subcommand)]
+        command: crate::cli::attachment_key_ops::AttachmentKeyCommands,
+    },
     /// Remove an attachment from a secret
     #[cfg(feature = "file-ops")]
     Detach {
@@ -2138,6 +2144,10 @@ impl Cli {
                 get,
                 output,
             } => crate::cli::attach_ops::execute_attachments(secret, get, output, config).await,
+            #[cfg(feature = "file-ops")]
+            Commands::AttachmentKey { command } => {
+                crate::cli::attachment_key_ops::execute(command, config).await
+            }
             #[cfg(feature = "file-ops")]
             Commands::Detach {
                 secret,

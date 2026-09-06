@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Added
+
+- Read-only `xv attachment-key status` and `inventory` reports with JSON/YAML
+  output, backend/vault context, safe key diagnostics, and file metadata
+  references. Inventory does not download payloads or establish retirement safety.
+
 ### Fixed
 
 - Attachment integrity failures now expose specific `xv-attachment-*` error

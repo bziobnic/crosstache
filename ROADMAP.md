@@ -23,7 +23,7 @@ Design: `2026-09-03-xv-race-free-attachment-key-lifecycle-design.md`
 binding). Staged as PR 1 (integrity foundation) → PR 2 (lifecycle) → PR 3
 (rewrap/retirement).
 
-**PR 1 — implemented (earlier chunks merged):**
+**PR 1 — merged:**
 
 - `src/secret/attachment_key.rs`: portable `ak1-` key IDs derived from the
   public recipient (§7.1); reserved schema-1 crypto metadata that overwrites
@@ -97,10 +97,16 @@ binding). Staged as PR 1 (integrity foundation) → PR 2 (lifecycle) → PR 3
   retain their own classifications. Azure missing exact versions remain typed
   not-found failures before attachment classification.
 
-**PR 1 scope is implemented on this branch; final review and merge remain.**
+**PR 1 integrity foundation is merged through PR #428.**
 
-**PR 2 / PR 3:** status/inventory, offline V1→V2 upgrade, encrypted
-export/import/recovery, rotation, rewrap, and logical retirement — none started.
+**PR 2 — status/file-reference inventory implemented on this branch:** read-only
+`xv attachment-key status` diagnoses the pointer and active identity;
+`xv attachment-key inventory` reports per-file metadata references. Inventory
+does not verify ciphertext, enumerate unreferenced retained keys, or authorize
+retirement. Final review and merge remain.
+
+**Remaining PR 2 / PR 3:** retained-key enumeration, offline V1→V2 upgrade,
+encrypted export/import/recovery, rotation, rewrap, and logical retirement.
 
 ### P1 — Make rename and migration attachment-aware
 
