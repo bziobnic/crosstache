@@ -957,6 +957,12 @@ pub enum Commands {
         #[arg(short, long)]
         group: Option<String>,
     },
+    /// Preview transfer of a secret together with its attachments
+    #[cfg(feature = "file-ops")]
+    Transfer {
+        #[command(flatten)]
+        options: crate::cli::transfer_ops::TransferOptions,
+    },
     /// Copy a secret from one vault to another
     Copy {
         /// Secret name
@@ -2352,6 +2358,10 @@ impl Cli {
                     registry,
                 )
                 .await
+            }
+            #[cfg(feature = "file-ops")]
+            Commands::Transfer { options } => {
+                crate::cli::transfer_ops::execute(options, config, registry).await
             }
             Commands::Copy {
                 name,

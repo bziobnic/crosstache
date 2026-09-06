@@ -131,12 +131,13 @@ legacy bindings remain protected; historical versions stay readable.
 
 ### P1 — Make rename and migration attachment-aware
 
-Attachments are associated by `attachments/<secret-name>/<filename>`. Rename
-currently cannot portably move that prefix (the web UI refuses the operation),
-and `xv migrate` copies secrets but not attachment ciphertext or key custody.
-Design and implement recoverable rename/move semantics plus migration that
-preserves readability, handles target-key conflicts explicitly, and is safe to
-resume after partial failure. Do not silently leave or orphan blobs.
+Attachments are associated by `attachments/<secret-name>/<filename>`. The shared
+transfer preflight now refuses generic copy/move/rename/migration when either
+attachment prefix is occupied or cannot be inspected. `xv transfer` offers a
+read-only authenticated preview; the encrypted manifest foundation is in place.
+Next: enable recoverable same-vault rename, then cross-vault/backend transfers
+with explicit destination key bindings. Verify the destination before source
+cleanup and make interrupted operations resumable without orphaning blobs.
 
 ### P1 — Persist a scheduled target manifest
 

@@ -74,13 +74,19 @@ No prerequisites beyond a configured local backend (`xv init --backend local`).
 
 ## How it works
 
-Pre-flight: `xv migrate` enumerates source and target secrets, computes a diff, and prints a summary. In dry-run mode, the run stops here.
+Pre-flight: `xv migrate` enumerates source and target secrets, computes a diff, and checks attachment prefixes before transferring secrets. Attached sources or destinations are refused, including with `--force-replace`; an unavailable attachment inventory is an error. In dry-run mode, no secrets are written.
 
 Per-secret transfer: each secret is `get_secret`'d from source (with value) and `set_secret`'d on target. Bounded by `--concurrency` (default 8). Throttling errors trigger exponential backoff with jitter.
 
 Idempotency: each migrated secret carries `xv:migrated_from=<source>:<vault>:<source-version-id>` and `xv:migrated_at=<timestamp>` tags on the target. Re-running `xv migrate` with `--on-conflict skip` (the default) detects these and skips entries where the source version matches.
 
-Interruption safety: a run interrupted with Ctrl-C leaves no partial-state damage. Each transfer is atomic. Re-run to resume.
+Interruption safety: an interrupted run may leave completed secret copies. Re-run to reconcile them using the migration tags. This command does not provide a transaction across the whole batch or transfer attachment blobs.
+
+To inspect an attachment transfer, use `xv transfer NAME --from SOURCE --to DESTINATION`.
+`SOURCE` and `DESTINATION` are vault names or workspace aliases; use `--new-name NEW`
+for a rename and `--move` to preview eventual source removal. Cross-vault attachments
+require `--to-key-id ACTIVE_ID` for a healthy destination key ring. This preview reads
+and authenticates the attachment data but does not apply transfers or create a journal.
 
 ## Metadata mapping
 

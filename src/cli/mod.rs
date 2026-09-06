@@ -26,6 +26,8 @@ pub(crate) mod schedule_ops;
 pub(crate) mod secret_ops;
 pub(crate) mod system_ops;
 pub(crate) mod totp_ops;
+#[cfg(feature = "file-ops")]
+pub(crate) mod transfer_ops;
 pub(crate) mod type_ops;
 pub(crate) mod upgrade_ops;
 pub(crate) mod vault_ops;
