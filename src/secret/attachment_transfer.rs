@@ -16,10 +16,18 @@ use std::{
 };
 use zeroize::Zeroizing;
 
+// Recovery codec is exercised by tests; production recovery is enabled in PR2.
+#[cfg_attr(not(test), allow(dead_code))]
 pub const MAX_MANIFEST_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_MANIFEST_FILES: usize = 10_000;
+// Recovery codec is exercised by tests; production recovery is enabled in PR2.
+#[cfg_attr(not(test), allow(dead_code))]
 const ENVELOPE_MAGIC: &[u8] = b"XV-TRANSFER-MANIFEST-1\0";
+// Recovery codec is exercised by tests; production recovery is enabled in PR2.
+#[cfg_attr(not(test), allow(dead_code))]
 const MAC_BYTES: usize = 32;
+// Recovery codec is exercised by tests; production recovery is enabled in PR2.
+#[cfg_attr(not(test), allow(dead_code))]
 const MAX_PLAINTEXT_BYTES: usize = 7 * 1024 * 1024;
 fn invalid() -> CrosstacheError {
     CrosstacheError::invalid_argument(
@@ -367,6 +375,8 @@ pub async fn plan(
     result.validate()?;
     Ok(result)
 }
+// Recovery codec is exercised by tests; production recovery is enabled in PR2.
+#[cfg_attr(not(test), allow(dead_code))]
 fn envelope_mac(recovery: &age::x25519::Identity) -> Hmac<Sha256> {
     let private = recovery.to_string();
     let mut derivation = Sha256::new();
@@ -379,6 +389,8 @@ fn envelope_mac(recovery: &age::x25519::Identity) -> Hmac<Sha256> {
 }
 /// Only encrypted bytes leave this codec; the recovery identity is caller owned.
 /// The private-derived MAC additionally prevents forgery by public recipients.
+// Recovery codec is exercised by tests; production recovery is enabled in PR2.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn encode(plan: &TransferPlan, recovery: &age::x25519::Identity) -> Result<Vec<u8>> {
     plan.validate()?;
     let plaintext = Zeroizing::new(serde_json::to_vec(plan).map_err(|_| invalid())?);
@@ -397,6 +409,8 @@ pub fn encode(plan: &TransferPlan, recovery: &age::x25519::Identity) -> Result<V
     }
     Ok(envelope)
 }
+// Recovery codec is exercised by tests; production recovery is enabled in PR2.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn decode(
     ciphertext: &[u8],
     recovery: &age::x25519::Identity,
@@ -439,10 +453,14 @@ pub fn decode(
     Ok(plan)
 }
 /// Atomic, private persistence using the existing symlink-resistant helper.
+// Recovery codec is exercised by tests; production recovery is enabled in PR2.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn persist(path: &Path, plan: &TransferPlan, recovery: &age::x25519::Identity) -> Result<()> {
     crate::utils::helpers::atomic_write_file_no_follow(path, &encode(plan, recovery)?, true)
 }
 /// A bounded stream reader: callers retain control over secure file opening.
+// Recovery codec is exercised by tests; production recovery is enabled in PR2.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn read_manifest(
     reader: impl Read,
     recovery: &age::x25519::Identity,
