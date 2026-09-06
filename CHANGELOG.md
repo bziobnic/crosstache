@@ -4,6 +4,10 @@
 
 ### Added
 
+- Offline attachment rewrap authenticates current managed files before replacing
+  them with ciphertext under the active retained key, preserving file metadata
+  and supporting retries without deleting historical keys.
+
 - Offline attachment-key rotation with preview, expected-active-ID protection,
   exact key verification, and preservation of existing file reads and legacy keys.
 

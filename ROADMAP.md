@@ -117,11 +117,15 @@ current ciphertext, imports retained identities, rebinds provider-version
 references, and publishes the pointer last; malformed-pointer repair is explicit.
 Payload backups and historical blob versions are separate.
 
-**PR 3 — rotation implemented on this branch, review/merge pending:** offline
+**PR 3 — rotation merged in PR #433:** offline
 rotation previews and verifies an expected V2 active ID before creating and
 publishing a new retained identity. Existing reads and legacy bindings survive.
 
-**Remaining:** rewrap and logical retirement, one subsequent PR each.
+**PR 3 — rewrap implemented on this branch, review/merge pending:** authenticate
+the complete visible current managed inventory, re-encrypt to the active retained
+key, preserve file metadata, and verify replacements with interrupted retries.
+
+**Remaining:** logical retirement in a subsequent PR.
 
 ### P1 — Make rename and migration attachment-aware
 

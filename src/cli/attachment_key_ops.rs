@@ -8,7 +8,7 @@ use crate::error::{CrosstacheError, Result};
 use crate::secret::attachment_key::AttachmentKeyId;
 use crate::secret::{
     attachment_backup, attachment_backup_codec as codec, attachment_inventory,
-    attachment_lifecycle, attachment_restore, attachment_rotation,
+    attachment_lifecycle, attachment_restore, attachment_rewrap, attachment_rotation,
 };
 use crate::utils::format::{sanitize_control_chars, OutputFormat};
 use std::io::{Read, Write};
@@ -27,6 +27,16 @@ pub struct ApplyOptions {
 
 #[derive(Debug, Subcommand)]
 pub enum AttachmentKeyCommands {
+    /// Preview re-encryption of current managed files to the active retained key
+    Rewrap {
+        #[arg(long)]
+        vault: Option<String>,
+        /// Expected current V2 active key ID
+        #[arg(long)]
+        to_key_id: String,
+        #[command(flatten)]
+        action: ApplyOptions,
+    },
     /// Preview rotation to a new retained identity, preserving existing file reads
     Rotate {
         #[arg(long)]
@@ -127,6 +137,7 @@ pub(crate) async fn execute(command: AttachmentKeyCommands, config: Config) -> R
         | AttachmentKeyCommands::Recover { action, .. }
         | AttachmentKeyCommands::Restore { action, .. }
         | AttachmentKeyCommands::Rotate { action, .. }
+        | AttachmentKeyCommands::Rewrap { action, .. }
             if action.apply && !action.offline =>
         {
             return Err(CrosstacheError::invalid_argument(
@@ -205,6 +216,10 @@ pub(crate) async fn execute(command: AttachmentKeyCommands, config: Config) -> R
         AttachmentKeyCommands::Rotate { from_key_id, .. } => Some(parse_id(from_key_id)?),
         _ => None,
     };
+    let rewrap_id = match &command {
+        AttachmentKeyCommands::Rewrap { to_key_id, .. } => Some(parse_id(to_key_id)?),
+        _ => None,
+    };
     let vault_override = match &command {
         AttachmentKeyCommands::Status { vault }
         | AttachmentKeyCommands::Inventory { vault }
@@ -213,7 +228,8 @@ pub(crate) async fn execute(command: AttachmentKeyCommands, config: Config) -> R
         | AttachmentKeyCommands::Recover { vault, .. }
         | AttachmentKeyCommands::Export { vault, .. }
         | AttachmentKeyCommands::Restore { vault, .. } => vault.as_deref(),
-        AttachmentKeyCommands::Rotate { vault, .. } => vault.as_deref(),
+        AttachmentKeyCommands::Rotate { vault, .. }
+        | AttachmentKeyCommands::Rewrap { vault, .. } => vault.as_deref(),
     };
     let (backend, backend_name, vault) = match vault_override {
         None => crate::cli::vault_ops::resolve_current_vault(&config, None).await?,
@@ -228,6 +244,27 @@ pub(crate) async fn execute(command: AttachmentKeyCommands, config: Config) -> R
         }
     };
     match command {
+        AttachmentKeyCommands::Rewrap { action, .. } => {
+            let files = backend.files().ok_or_else(|| {
+                crate::cli::file_ops::file_storage_unsupported_error(backend.as_ref())
+            })?;
+            let report = attachment_rewrap::rewrap(
+                backend.attachment_keys().as_ref(),
+                files,
+                &vault,
+                rewrap_id.as_ref().expect("validated rewrap ID"),
+                action.apply,
+            )
+            .await?;
+            render(
+                &Envelope {
+                    backend: &backend_name,
+                    vault: &vault,
+                    report,
+                },
+                format,
+            )
+        }
         AttachmentKeyCommands::Rotate { action, .. } => {
             let report = attachment_rotation::rotate(
                 backend.attachment_keys().as_ref(),
@@ -498,6 +535,15 @@ mod backup_cli_tests {
     use super::{read_recovery_identity, write_backup};
     use crate::cli::commands::Cli;
     use clap::Parser;
+
+    #[test]
+    fn rewrap_cli_requires_expected_target_and_offline_apply() {
+        assert!(Cli::try_parse_from(["xv", "attachment-key", "rewrap"]).is_err());
+        let args = ["xv", "attachment-key", "rewrap", "--to-key-id", "ak1-test"];
+        assert!(Cli::try_parse_from(args).is_ok());
+        assert!(Cli::try_parse_from(args.into_iter().chain(["--apply"])).is_err());
+        assert!(Cli::try_parse_from(args.into_iter().chain(["--apply", "--offline"])).is_ok());
+    }
 
     #[test]
     fn rotation_cli_requires_expected_id_and_offline_apply() {

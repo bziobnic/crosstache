@@ -114,8 +114,8 @@ spellings. `--force` cannot override this protection. The same boundary applies
 to Web edits and folder moves, imports, and migration targets. Generic opaque
 backup restore is disabled because its destination cannot be checked before
 provider mutation. Dedicated pointer recovery and encrypted key backup/restore
-are described below. Offline rotation is available; rewrap and retirement follow
-as separate lifecycle operations.
+are described below. Offline rotation and rewrap are available; logical retirement
+follows as a separate lifecycle operation.
 
 ### Sync skips ciphertext
 
@@ -331,8 +331,8 @@ observation commands. No private key is printed.
 This recovery repairs the pointer using keys already present. It cannot restore
 deleted key material, recreate a missing provider version, recover attachments
 already unreadable before upgrade, or restore a ring into another vault.
-Encrypted key backup/restore and rotation are available as described below.
-Rewrap and retirement remain planned work.
+Encrypted key backup/restore, rotation, and rewrap are available as described below.
+Logical retirement remains planned work.
 Provider soft-deleted records may need restoration through the provider's
 recovery tooling before these commands can access or write them. Existing
 Local read-time journal recovery applies to these commands as well.
@@ -425,3 +425,32 @@ retrying may create a fresh candidate. Do not delete these records. After an
 unconfirmed publication, inspect `status` and `keys`: retrying with the old expected
 ID refuses if publication succeeded. Drift checks detect observed changes but do
 not make this a provider-portable atomic transaction; writers must stay stopped.
+
+### Rewrap current attachments to the active key
+
+After rotation, `attachment-key rewrap` re-encrypts current managed files under
+the active V2 identity. Stop all writers, keep an encrypted key backup and a
+separate backup of ciphertext and metadata, then use the active ID from `status`:
+
+```sh
+xv attachment-key rewrap --to-key-id ACTIVE_KEY_ID --format json
+xv attachment-key rewrap --to-key-id ACTIVE_KEY_ID --apply --offline
+```
+
+Preview authenticates every visible managed current file without writing. Apply
+also verifies the whole inventory before the first replacement, then re-encrypts
+each old file and records the exact retained target-key version. It preserves
+user metadata, tags, groups, content type, and upload bookkeeping. Plaintext stays
+in memory. Already-target files are authenticated and skipped.
+
+Schema-1 files use their exact source key versions. Older files without a schema
+require the ring's explicit legacy binding. Missing keys, invalid crypto metadata,
+tampered ciphertext, or an unexpected active ID stop the operation. Complete
+metadata access is required; tag-read errors are not treated as empty tags.
+
+If interrupted, completed replacements remain readable and a retry skips them.
+Keep writers stopped until verification completes: drift checks detect observed
+changes but do not provide an atomic transaction across the vault. Rewrap changes
+no keys or pointer bindings and never deletes retained identities. Historical
+blob versions, external copies, and backups retain their original key dependency;
+rewrapping current files does not make old keys safe to delete.
