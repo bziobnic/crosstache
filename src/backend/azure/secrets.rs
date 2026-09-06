@@ -222,6 +222,31 @@ impl SecretBackend for AzureSecretBackend {
             .map_err(map_error)
     }
 
+    async fn get_transfer_snapshot(
+        &self,
+        vault: &str,
+        name: &str,
+        include_value: bool,
+    ) -> Result<crate::backend::secret::SecretSnapshot, BackendError> {
+        let properties = self.get_secret(vault, name, include_value).await?;
+        if properties.version.is_empty() {
+            return Err(BackendError::Unsupported(
+                "Azure transfer requires a provider version".into(),
+            ));
+        }
+        let revision = crate::backend::secret::transfer_metadata_revision(&properties)?;
+        let after = self.get_secret(vault, name, false).await?;
+        if crate::backend::secret::transfer_metadata_revision(&after)? != revision {
+            return Err(BackendError::Conflict(
+                "Azure secret metadata/version changed during transfer read".into(),
+            ));
+        }
+        Ok(crate::backend::secret::SecretSnapshot {
+            properties,
+            revision,
+        })
+    }
+
     async fn get_secret_version(
         &self,
         vault: &str,
@@ -722,6 +747,7 @@ mod atomic_conversion_update_tests {
         updates: Mutex<Vec<SecretRequest>>,
         retirement: Option<Mutex<SecretProperties>>,
         patches: AtomicUsize,
+        transfer_drift: bool,
     }
 
     impl AtomicUpdateMock {
@@ -731,6 +757,7 @@ mod atomic_conversion_update_tests {
                 updates: Mutex::new(Vec::new()),
                 retirement: None,
                 patches: AtomicUsize::new(0),
+                transfer_drift: false,
             }
         }
     }
@@ -762,7 +789,7 @@ mod atomic_conversion_update_tests {
             _name: &str,
             _include_value: bool,
         ) -> Result<SecretProperties> {
-            self.reads.fetch_add(1, Ordering::SeqCst);
+            let read = self.reads.fetch_add(1, Ordering::SeqCst);
             if let Some(state) = &self.retirement {
                 let mut p = state.lock().unwrap().clone();
                 if !_include_value {
@@ -770,7 +797,11 @@ mod atomic_conversion_update_tests {
                 }
                 return Ok(p);
             }
-            Ok(properties())
+            let mut p = properties();
+            if self.transfer_drift && read > 0 {
+                p.tags.insert("folder".into(), "changed".into());
+            }
+            Ok(p)
         }
 
         async fn update_secret_attributes(
@@ -861,6 +892,26 @@ mod atomic_conversion_update_tests {
         ) -> Result<SecretProperties> {
             unimplemented!()
         }
+    }
+
+    #[tokio::test]
+    async fn azure_transfer_read_rechecks_metadata_without_enabling_cas() {
+        let stable = Arc::new(AtomicUpdateMock::new());
+        let adapter = AzureSecretBackend::new(stable.clone());
+        let before = adapter
+            .get_transfer_snapshot("vault", "secret", false)
+            .await
+            .unwrap();
+        assert_eq!(stable.reads.load(Ordering::SeqCst), 2);
+        assert!(!adapter.supports_atomic_create());
+        assert!(!adapter.supports_conditional_delete());
+        assert!(!before.revision.is_empty());
+        let mut drift = AtomicUpdateMock::new();
+        drift.transfer_drift = true;
+        assert!(AzureSecretBackend::new(Arc::new(drift))
+            .get_transfer_snapshot("vault", "secret", false)
+            .await
+            .is_err());
     }
 
     #[tokio::test]

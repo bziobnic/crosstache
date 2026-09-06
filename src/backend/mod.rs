@@ -268,6 +268,37 @@ pub trait Backend: Send + Sync {
         ))
     }
 
+    /// Resolve the physical secret namespace without requiring file storage.
+    async fn transfer_secret_namespace(&self, vault: &str) -> Result<String, BackendError> {
+        Ok(self.transfer_location(vault).await?.secrets)
+    }
+
+    /// Compare final destination names without creating a vault or probing by writes.
+    /// Providers must fail closed when a potential alias cannot be resolved.
+    async fn transfer_secret_names_collide(
+        &self,
+        _vault: &str,
+        left: &str,
+        right: &str,
+    ) -> Result<bool, BackendError> {
+        Ok(left == right)
+    }
+
+    /// Prepare a destination only while its read-only namespace evidence matches.
+    async fn prepare_transfer_destination(
+        &self,
+        vault: &str,
+        expected: &TransferLocation,
+    ) -> Result<TransferLocation, BackendError> {
+        let actual = self.transfer_location(vault).await?;
+        if &actual != expected {
+            return Err(BackendError::Conflict(
+                "transfer destination namespace changed".into(),
+            ));
+        }
+        Ok(actual)
+    }
+
     /// Human-readable backend name, e.g. `"azure"`, `"local"`.
     fn name(&self) -> &'static str;
 

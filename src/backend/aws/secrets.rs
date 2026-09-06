@@ -495,6 +495,164 @@ impl AwsSecretBackend {
 
 #[async_trait::async_trait]
 impl SecretBackend for AwsSecretBackend {
+    async fn validate_transfer_metadata(
+        &self,
+        vault: &str,
+        request: &SecretRequest,
+    ) -> Result<(), BackendError> {
+        super::encoding::validate_full_secret_name(vault, &request.name)?;
+        // CreateSecret and Tag service constraints, including generated tags.
+        // Reject rather than truncate; errors deliberately contain no values.
+        if request.value.is_empty() || request.value.len() > 65_536 {
+            return Err(BackendError::InvalidArgument(
+                "AWS transfer secret value must contain 1–65536 bytes".into(),
+            ));
+        }
+        if request
+            .note
+            .as_ref()
+            .is_some_and(|note| note.chars().count() > 2048)
+        {
+            return Err(BackendError::InvalidArgument(
+                "AWS transfer note exceeds the description limit".into(),
+            ));
+        }
+        if request.name.chars().count() > 256
+            || request
+                .folder
+                .as_ref()
+                .is_some_and(|value| value.chars().count() > 256)
+            || request
+                .content_type
+                .as_ref()
+                .is_some_and(|value| value.chars().count() > 256)
+            || request.tags.as_ref().is_some_and(|tags| {
+                tags.iter().any(|(key, value)| {
+                    key.is_empty() || key.chars().count() > 128 || value.chars().count() > 256
+                })
+            })
+        {
+            return Err(BackendError::InvalidArgument(
+                "AWS transfer metadata exceeds provider tag limits".into(),
+            ));
+        }
+
+        if request.enabled == Some(false) || request.not_before.is_some() {
+            return Err(BackendError::Unsupported(
+                "AWS cannot preserve disabled state or not-before metadata during transfer".into(),
+            ));
+        }
+        if request
+            .tags
+            .as_ref()
+            .is_some_and(|tags| tags.keys().any(|key| !preserves_request_tag(key)))
+        {
+            return Err(BackendError::Unsupported(
+                "AWS transfer cannot preserve unknown reserved xv: tags".into(),
+            ));
+        }
+        if request.note.as_ref().is_some_and(String::is_empty)
+            || request.folder.as_ref().is_some_and(String::is_empty)
+        {
+            return Err(BackendError::Unsupported(
+                "AWS transfer cannot preserve explicit empty note or folder metadata".into(),
+            ));
+        }
+        if let Some(groups) = &request.groups {
+            let encoded = super::metadata::encode_groups(groups);
+            if encoded.chars().count() > 256 {
+                return Err(BackendError::InvalidArgument(
+                    "AWS transfer groups exceed the provider tag limit".into(),
+                ));
+            }
+            if super::metadata::decode_groups(&encoded) != *groups {
+                return Err(BackendError::Unsupported(
+                    "AWS transfer cannot losslessly encode these group names".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn supports_atomic_create(&self) -> bool {
+        true
+    }
+
+    async fn get_transfer_snapshot(
+        &self,
+        vault: &str,
+        name: &str,
+        include_value: bool,
+    ) -> Result<crate::backend::secret::SecretSnapshot, BackendError> {
+        let full_name = super::encoding::aws_name(vault, name);
+        let before = self
+            .client
+            .describe_secret()
+            .secret_id(&full_name)
+            .send()
+            .await
+            .map_err(|error| super::errors::from_describe(name, error))?;
+        if before.name() != Some(full_name.as_str()) {
+            return Err(BackendError::Conflict(
+                "AWS transfer resolved a different physical secret name".into(),
+            ));
+        }
+        let mut properties = self.props_from_describe(&before, name);
+        let current_count = before
+            .version_ids_to_stages()
+            .map(|versions| {
+                versions
+                    .values()
+                    .filter(|stages| stages.iter().any(|stage| stage == "AWSCURRENT"))
+                    .count()
+            })
+            .unwrap_or(0);
+        if current_count != 1 || properties.version.is_empty() || before.deleted_date().is_some() {
+            return Err(BackendError::Unsupported(
+                "AWS transfer requires one live current provider version".into(),
+            ));
+        }
+        let revision = transfer_describe_revision(&before, &properties)?;
+        if include_value {
+            let value = self
+                .client
+                .get_secret_value()
+                .secret_id(&full_name)
+                .version_id(&properties.version)
+                .send()
+                .await
+                .map_err(|error| super::errors::from_get_value(name, error))?;
+            if value.version_id() != Some(properties.version.as_str()) {
+                return Err(BackendError::Conflict(
+                    "AWS returned a different transfer value version".into(),
+                ));
+            }
+            properties.value = Some(zeroize::Zeroizing::new(
+                value
+                    .secret_string()
+                    .ok_or_else(|| BackendError::Unsupported("binary AWS transfer secrets".into()))?
+                    .to_string(),
+            ));
+        }
+        let after = self
+            .client
+            .describe_secret()
+            .secret_id(full_name)
+            .send()
+            .await
+            .map_err(|error| super::errors::from_describe(name, error))?;
+        if transfer_describe_revision(&after, &self.props_from_describe(&after, name))? != revision
+        {
+            return Err(BackendError::Conflict(
+                "AWS secret metadata/version changed during transfer read".into(),
+            ));
+        }
+        Ok(crate::backend::secret::SecretSnapshot {
+            properties,
+            revision,
+        })
+    }
+
     // Required methods — real impls added in Tasks 13-22.
 
     async fn set_secret(
@@ -1118,4 +1276,42 @@ mod atomic_create_tests {
                 .unwrap()
         );
     }
+}
+
+#[cfg(test)]
+#[path = "secrets_transfer_tests.rs"]
+mod transfer_tests;
+
+fn transfer_describe_revision(
+    describe: &DescribeSecretOutput,
+    properties: &SecretProperties,
+) -> Result<String, BackendError> {
+    use sha2::{Digest, Sha256};
+    let mut tags: Vec<_> = describe
+        .tags()
+        .iter()
+        .map(|tag| (tag.key(), tag.value()))
+        .collect();
+    tags.sort();
+    let stages: std::collections::BTreeMap<_, _> = describe
+        .version_ids_to_stages()
+        .into_iter()
+        .flat_map(|map| map.iter())
+        .map(|(version, labels)| {
+            let mut labels = labels.clone();
+            labels.sort();
+            (version, labels)
+        })
+        .collect();
+    let bytes = serde_json::to_vec(&(
+        crate::backend::secret::transfer_metadata_revision(properties)?,
+        describe.arn(),
+        describe.name(),
+        describe.description(),
+        describe.deleted_date().map(|date| date.secs()),
+        tags,
+        stages,
+    ))
+    .map_err(|error| BackendError::Internal(format!("encode AWS transfer metadata: {error}")))?;
+    Ok(format!("aws-transfer:{:x}", Sha256::digest(bytes)))
 }

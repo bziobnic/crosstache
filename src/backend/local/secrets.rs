@@ -1550,7 +1550,7 @@ impl LocalSecretBackend {
 
     /// The preferred on-disk stem for `name`: the opaque keyed-hash stem when
     /// `opaque_filenames` is on, else the legacy URL-encoded stem.
-    fn active_stem(&self, name: &str) -> String {
+    pub(super) fn active_stem(&self, name: &str) -> String {
         match self.index_key.as_ref() {
             Some(key) => opaque::opaque_stem(key, name),
             None => encode_name(name),

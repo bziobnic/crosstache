@@ -319,6 +319,7 @@ impl From<&FileUploadRequest> for FileUploadSpec {
 /// S3-backed file storage. One instance serves every vault; the target vault
 /// is supplied per call (see [`FileBackend`]).
 pub struct AwsFileBackend {
+    endpoint_url: Option<String>,
     client: S3Client,
     bucket: String,
     chunk_size_mb: usize,
@@ -326,14 +327,63 @@ pub struct AwsFileBackend {
 }
 
 impl AwsFileBackend {
+    pub(super) fn transfer_namespace(&self, vault: &str) -> Result<String, BackendError> {
+        validate_vault_for_files(vault)?;
+        if !(3..=63).contains(&self.bucket.len())
+            || !self.bucket.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-')
+            })
+            || ["-s3alias", "--ol-s3", ".mrap", "--x-s3"]
+                .iter()
+                .any(|suffix| self.bucket.ends_with(suffix))
+        {
+            return Err(BackendError::Unsupported("S3 transfer requires a standard bucket name; access point and special bucket aliases have unproven physical identity".into()));
+        }
+
+        // Standard AWS buckets are globally unique within a partition, independent
+        // of the credentials or region used to access the bucket.
+        let service = match self.endpoint_url.as_deref() {
+            Some(endpoint) => match super::standard_transfer_endpoint(endpoint, "s3") {
+                Some(partition) => format!("aws-s3:{partition}"),
+                None => super::canonical_transfer_endpoint(endpoint)?,
+            },
+            None => {
+                let region = self
+                    .client
+                    .config()
+                    .region()
+                    .ok_or_else(|| {
+                        BackendError::Unsupported(
+                            "S3 transfer requires known region/partition".into(),
+                        )
+                    })?
+                    .as_ref();
+                if region.starts_with("cn-") {
+                    "aws-s3:aws-cn".into()
+                } else if region.starts_with("us-gov-") {
+                    "aws-s3:aws-us-gov".into()
+                } else {
+                    "aws-s3:aws".into()
+                }
+            }
+        };
+        Ok(format!("{service}:{}:{}", self.bucket, files_prefix(vault)))
+    }
+
     /// Create a backend for an existing bucket with default transfer settings.
     pub fn new(client: S3Client, bucket: String) -> Self {
         Self {
+            endpoint_url: None,
             client,
             bucket,
             chunk_size_mb: 8,
             max_concurrent_uploads: 3,
         }
+    }
+
+    pub(super) fn with_service_endpoint(mut self, endpoint: Option<String>) -> Self {
+        self.endpoint_url = endpoint;
+        self
     }
 
     /// Override chunk size (MB) and upload concurrency (builder style).
@@ -892,6 +942,53 @@ impl FileBackend for AwsFileBackend {
         validate_file_name(name)
     }
 
+    fn supports_atomic_create(&self) -> bool {
+        true
+    }
+
+    async fn upload_file_if_absent(
+        &self,
+        vault: &str,
+        request: FileUploadRequest,
+        reporter: Option<&dyn ProgressReporter>,
+    ) -> Result<FileInfo, BackendError> {
+        let key = validated_key(vault, &request.name)?;
+        let size = request.content.len() as u64;
+        validate_download_size(size, MAX_PART_SIZE_BYTES)?;
+        let content_type = request.content_type.clone().unwrap_or_else(|| {
+            mime_guess::from_path(&request.name)
+                .first_or_octet_stream()
+                .to_string()
+        });
+        let tagging = encode_tagging(&request.tags)?;
+        let output = self.client.put_object()
+            .bucket(&self.bucket).key(key).if_none_match("*")
+            .content_type(&content_type)
+            .set_metadata(Some(request.metadata.clone()))
+            .set_tagging(tagging)
+            .body(ByteStream::from(request.content))
+            .send().await.map_err(|error| {
+                if error.raw_response().is_some_and(|response| matches!(response.status().as_u16(), 409 | 412)) {
+                    BackendError::Conflict("conditional S3 creation conflicted; reconcile pending transfer before retry".into())
+                } else { errors::from_s3_put_object(&request.name, error) }
+            })?;
+        if let Some(reporter) = reporter {
+            reporter.set_total(size);
+            reporter.advance(size);
+            reporter.finish_clear();
+        }
+        Ok(FileInfo {
+            name: request.name,
+            size,
+            content_type,
+            last_modified: Utc::now(),
+            etag: output.e_tag().unwrap_or_default().to_string(),
+            groups: request.groups,
+            metadata: request.metadata,
+            tags: request.tags,
+        })
+    }
+
     async fn upload_file(
         &self,
         vault: &str,
@@ -1364,3 +1461,7 @@ mod snapshot_tests;
 #[cfg(test)]
 #[path = "files_restore_tests.rs"]
 mod restore_tests;
+
+#[cfg(test)]
+#[path = "files_conditional_tests.rs"]
+mod conditional_tests;

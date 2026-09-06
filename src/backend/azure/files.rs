@@ -24,6 +24,10 @@ pub struct AzureFileBackend {
 }
 
 impl AzureFileBackend {
+    pub(super) fn transfer_namespace(&self) -> Result<String, BackendError> {
+        self.inner.transfer_namespace().map_err(map_error)
+    }
+
     /// Wrap an existing `BlobManager`.
     pub(crate) fn new(inner: Arc<BlobManager>) -> Self {
         Self { inner }

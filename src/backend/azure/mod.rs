@@ -211,6 +211,60 @@ impl AzureBackend {
 
 #[async_trait]
 impl Backend for AzureBackend {
+    async fn validate_transfer_recovery_path(
+        &self,
+        _vault: &str,
+        _path: &std::path::Path,
+    ) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    async fn transfer_secret_namespace(&self, vault: &str) -> Result<String, BackendError> {
+        transfer_secret_namespace_for_vault(vault)
+    }
+
+    async fn transfer_secret_names_collide(
+        &self,
+        _vault: &str,
+        left: &str,
+        right: &str,
+    ) -> Result<bool, BackendError> {
+        let left = crate::utils::sanitizer::sanitize_secret_name(left).map_err(map_error)?;
+        let right = crate::utils::sanitizer::sanitize_secret_name(right).map_err(map_error)?;
+        Ok(left.eq_ignore_ascii_case(&right))
+    }
+
+    async fn transfer_location(
+        &self,
+        vault: &str,
+    ) -> Result<crate::backend::TransferLocation, BackendError> {
+        let secrets = self.transfer_secret_namespace(vault).await?;
+        #[cfg(feature = "file-ops")]
+        {
+            let files = self
+                .file_backend
+                .as_ref()
+                .ok_or_else(|| {
+                    BackendError::Unsupported(
+                        "Azure transfer requires configured blob storage".into(),
+                    )
+                })?
+                .transfer_namespace()?;
+            Ok(crate::backend::TransferLocation {
+                keys: secrets.clone(),
+                secrets,
+                files,
+            })
+        }
+        #[cfg(not(feature = "file-ops"))]
+        {
+            let _ = secrets;
+            Err(BackendError::Unsupported(
+                "Azure file operations unavailable".into(),
+            ))
+        }
+    }
+
     fn name(&self) -> &'static str {
         "azure"
     }
@@ -417,6 +471,30 @@ mod tests {
         assert_eq!(
             auth.token_calls.load(std::sync::atomic::Ordering::SeqCst),
             1
+        );
+    }
+}
+
+fn transfer_secret_namespace_for_vault(vault: &str) -> Result<String, BackendError> {
+    let url = types::AzureVaultName::try_from(vault)
+        .map_err(map_error)?
+        .key_vault_url()
+        .map_err(map_error)?;
+    Ok(format!("azure-secrets:{url}"))
+}
+
+#[cfg(test)]
+mod transfer_namespace_tests {
+    use super::*;
+    #[test]
+    fn azure_transfer_namespace_normalizes_vault_case() {
+        assert_eq!(
+            transfer_secret_namespace_for_vault("MyVault").unwrap(),
+            transfer_secret_namespace_for_vault("myvault").unwrap()
+        );
+        assert_ne!(
+            transfer_secret_namespace_for_vault("myvault").unwrap(),
+            transfer_secret_namespace_for_vault("other-vault").unwrap()
         );
     }
 }

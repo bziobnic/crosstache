@@ -46,6 +46,7 @@ impl Default for TransferConfig {
 }
 
 pub struct AwsBackend {
+    endpoint_url: Option<String>,
     secrets_impl: Arc<secrets::AwsSecretBackend>,
     vaults_impl: Arc<vaults::AwsVaultBackend>,
     audit_impl: Arc<audit::AwsAuditBackend>,
@@ -74,7 +75,8 @@ impl AwsBackend {
             let s3_client = auth::build_s3_client(aws_cfg, &sdk_config);
             Arc::new(
                 files::AwsFileBackend::new(s3_client, bucket)
-                    .with_transfer_config(transfer.chunk_size_mb, transfer.max_concurrent_uploads),
+                    .with_transfer_config(transfer.chunk_size_mb, transfer.max_concurrent_uploads)
+                    .with_service_endpoint(configured_service_endpoint(&sdk_config, "S3")),
             )
         });
         // Without file storage there is nothing to transfer; touch both fields
@@ -83,6 +85,7 @@ impl AwsBackend {
         let _ = (transfer.chunk_size_mb, transfer.max_concurrent_uploads);
 
         Ok(Self {
+            endpoint_url: configured_service_endpoint(&sdk_config, "Secrets Manager"),
             secrets_impl: Arc::new(secrets::AwsSecretBackend::new(client.clone())),
             vaults_impl: Arc::new(vaults::AwsVaultBackend::new(client)),
             audit_impl: Arc::new(audit::AwsAuditBackend::new(cloudtrail)),
@@ -94,6 +97,65 @@ impl AwsBackend {
 
 #[async_trait::async_trait]
 impl Backend for AwsBackend {
+    async fn validate_transfer_recovery_path(
+        &self,
+        _vault: &str,
+        _path: &std::path::Path,
+    ) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    async fn transfer_secret_namespace(&self, vault: &str) -> Result<String, BackendError> {
+        let marker = self
+            .secrets_impl
+            .client
+            .describe_secret()
+            .secret_id(encoding::marker_name(vault))
+            .send()
+            .await
+            .map_err(|error| errors::from_describe(vault, error))?;
+        let namespace = secret_namespace_from_marker(vault, &marker)?;
+        // Custom service instances can issue identical synthetic ARNs.
+        match self.endpoint_url.as_deref() {
+            Some(endpoint) => {
+                if standard_transfer_endpoint(endpoint, "secretsmanager").is_none() {
+                    return Err(BackendError::Unsupported("transfer cannot prove physical identity for custom AWS secret endpoints; use a standard AWS endpoint".into()));
+                }
+                Ok(namespace)
+            }
+            None => Ok(namespace),
+        }
+    }
+
+    async fn transfer_location(
+        &self,
+        vault: &str,
+    ) -> Result<crate::backend::TransferLocation, BackendError> {
+        let secrets = self.transfer_secret_namespace(vault).await?;
+        #[cfg(feature = "file-ops")]
+        {
+            let files = self
+                .files_impl
+                .as_ref()
+                .ok_or_else(|| {
+                    BackendError::Unsupported("AWS transfer requires configured S3 storage".into())
+                })?
+                .transfer_namespace(vault)?;
+            Ok(crate::backend::TransferLocation {
+                keys: secrets.clone(),
+                secrets,
+                files,
+            })
+        }
+        #[cfg(not(feature = "file-ops"))]
+        {
+            let _ = secrets;
+            Err(BackendError::Unsupported(
+                "AWS file operations unavailable".into(),
+            ))
+        }
+    }
+
     fn name(&self) -> &'static str {
         "aws"
     }
@@ -143,7 +205,7 @@ fn aws_capabilities(has_file_storage: bool) -> BackendCapabilities {
         has_atomic_record_conversion: false,
         has_conditional_record_conversion: false,
         has_atomic_rename: false,
-        has_atomic_file_create: false,
+        has_atomic_file_create: has_file_storage,
         has_enable_disable: false,
         has_vaults: true,
         has_file_storage,
@@ -181,4 +243,201 @@ mod capability_tests {
         assert!(!capabilities.has_atomic_file_create);
         assert!(!capabilities.has_enable_disable);
     }
+}
+
+fn secret_namespace_from_marker(
+    vault: &str,
+    marker: &aws_sdk_secretsmanager::operation::describe_secret::DescribeSecretOutput,
+) -> Result<String, BackendError> {
+    let invalid = || {
+        BackendError::Unsupported(
+            "cannot establish AWS physical vault namespace from marker".into(),
+        )
+    };
+    let expected = encoding::marker_name(vault);
+    if marker.name() != Some(expected.as_str())
+        || marker.deleted_date().is_some()
+        || !marker.tags().iter().any(|tag| {
+            tag.key() == Some(metadata::TAG_TYPE)
+                && tag.value() == Some(metadata::TAG_VALUE_VAULT_MARKER)
+        })
+    {
+        return Err(invalid());
+    }
+    let parts: Vec<_> = marker.arn().ok_or_else(invalid)?.splitn(7, ':').collect();
+    if parts.len() != 7
+        || parts[0] != "arn"
+        || parts[2] != "secretsmanager"
+        || parts[3].is_empty()
+        || parts[4].len() != 12
+        || !parts[4].bytes().all(|b| b.is_ascii_digit())
+        || parts[5] != "secret"
+        || !matches!(parts[1], "aws" | "aws-cn" | "aws-us-gov")
+    {
+        return Err(invalid());
+    }
+    let suffix = parts[6]
+        .strip_prefix(&format!("{expected}-"))
+        .ok_or_else(invalid)?;
+    if suffix.len() != 6 || !suffix.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return Err(invalid());
+    }
+    Ok(format!(
+        "aws-secrets:{}:{}:{}:{vault}",
+        parts[1], parts[3], parts[4]
+    ))
+}
+
+#[cfg(test)]
+mod transfer_namespace_tests {
+    use super::*;
+    #[test]
+    fn aws_transfer_endpoint_uses_sdk_service_specific_precedence() {
+        #[derive(Debug)]
+        struct Services;
+        impl aws_types::service_config::LoadServiceConfig for Services {
+            fn load_config(
+                &self,
+                key: aws_types::service_config::ServiceConfigKey<'_>,
+            ) -> Option<String> {
+                assert_eq!(key.env(), "AWS_ENDPOINT_URL");
+                assert_eq!(key.profile(), "endpoint_url");
+                Some(format!(
+                    "https://{}.example.test/",
+                    key.service_id().replace(' ', "").to_ascii_lowercase()
+                ))
+            }
+        }
+        let config = aws_config::SdkConfig::builder()
+            .service_config(Services)
+            .build();
+        assert_eq!(
+            configured_service_endpoint(&config, "S3").as_deref(),
+            Some("https://s3.example.test/")
+        );
+        assert_eq!(
+            configured_service_endpoint(&config, "Secrets Manager").as_deref(),
+            Some("https://secretsmanager.example.test/")
+        );
+        assert_eq!(
+            standard_transfer_endpoint("https://s3.us-east-1.amazonaws.com/", "s3"),
+            Some("aws")
+        );
+        assert_eq!(
+            standard_transfer_endpoint(
+                "https://secretsmanager.cn-north-1.amazonaws.com.cn/",
+                "secretsmanager"
+            ),
+            Some("aws-cn")
+        );
+        assert_eq!(
+            standard_transfer_endpoint("https://custom.example/", "secretsmanager"),
+            None
+        );
+    }
+
+    #[test]
+    fn aws_transfer_namespace_binds_account_region_and_validated_marker() {
+        use aws_sdk_secretsmanager::operation::describe_secret::DescribeSecretOutput;
+        use aws_sdk_secretsmanager::types::Tag;
+        let marker = |region: &str, account: &str| {
+            DescribeSecretOutput::builder()
+                .arn(format!(
+                    "arn:aws:secretsmanager:{region}:{account}:secret:prod/.xv-vault-abcdef"
+                ))
+                .name("prod/.xv-vault")
+                .tags(Tag::builder().key("xv:type").value("vault-marker").build())
+                .build()
+        };
+        let original =
+            secret_namespace_from_marker("prod", &marker("us-east-1", "123456789012")).unwrap();
+        assert_ne!(
+            original,
+            secret_namespace_from_marker("prod", &marker("us-east-1", "123456789013")).unwrap()
+        );
+        assert_ne!(
+            original,
+            secret_namespace_from_marker("prod", &marker("us-west-2", "123456789012")).unwrap()
+        );
+        assert!(
+            secret_namespace_from_marker("other", &marker("us-east-1", "123456789012")).is_err()
+        );
+    }
+}
+
+#[cfg(feature = "file-ops")]
+fn canonical_transfer_endpoint(endpoint: &str) -> Result<String, BackendError> {
+    let mut url = url::Url::parse(endpoint)
+        .map_err(|_| BackendError::Unsupported("invalid custom AWS transfer endpoint".into()))?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(BackendError::Unsupported(
+            "ambiguous custom AWS transfer endpoint".into(),
+        ));
+    }
+    if url.path().is_empty() {
+        url.set_path("/");
+    }
+    Ok(url.to_string())
+}
+
+fn standard_transfer_endpoint(endpoint: &str, service: &str) -> Option<&'static str> {
+    let url = url::Url::parse(endpoint).ok()?;
+    if url.scheme() != "https"
+        || url.port().is_some()
+        || url.path() != "/"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    let host = url.host_str()?;
+    let (prefix, china) = if let Some(prefix) = host.strip_suffix(".amazonaws.com.cn") {
+        (prefix, true)
+    } else {
+        (host.strip_suffix(".amazonaws.com")?, false)
+    };
+    let mut components = prefix.split('.');
+    if components.next()? != service {
+        return None;
+    }
+    let region = components.next();
+    if components.next().is_some() {
+        return None;
+    }
+    match region {
+        None if service == "s3" && !china => Some("aws"),
+        Some(region) if region.starts_with("cn-") && china => Some("aws-cn"),
+        Some(region) if region.starts_with("us-gov-") && !china => Some("aws-us-gov"),
+        Some(region) if !china && region.contains('-') => Some("aws"),
+        _ => None,
+    }
+}
+
+/// Match the pinned SDK Builder::from(SdkConfig) endpoint precedence, including
+/// service-specific environment/profile settings rather than only global config.
+fn configured_service_endpoint(config: &aws_config::SdkConfig, service: &str) -> Option<String> {
+    if config.get_origin("endpoint_url").is_client_config() {
+        return config.endpoint_url().map(str::to_string);
+    }
+    config
+        .service_config()
+        .and_then(|loader| {
+            loader.load_config(
+                aws_types::service_config::ServiceConfigKey::builder()
+                    .service_id(service)
+                    .env("AWS_ENDPOINT_URL")
+                    .profile("endpoint_url")
+                    .build()
+                    .expect("static endpoint key fields are present"),
+            )
+        })
+        .or_else(|| config.endpoint_url().map(str::to_string))
 }

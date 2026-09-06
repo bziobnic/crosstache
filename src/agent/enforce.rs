@@ -192,6 +192,31 @@ impl Backend for PolicyEnforcedBackend {
         self.inner.transfer_location(vault).await
     }
 
+    async fn transfer_secret_namespace(&self, vault: &str) -> Result<String, BackendError> {
+        self.inner.transfer_secret_namespace(vault).await
+    }
+
+    async fn transfer_secret_names_collide(
+        &self,
+        vault: &str,
+        left: &str,
+        right: &str,
+    ) -> Result<bool, BackendError> {
+        self.inner
+            .transfer_secret_names_collide(vault, left, right)
+            .await
+    }
+
+    async fn prepare_transfer_destination(
+        &self,
+        vault: &str,
+        expected: &crate::backend::TransferLocation,
+    ) -> Result<crate::backend::TransferLocation, BackendError> {
+        self.inner
+            .prepare_transfer_destination(vault, expected)
+            .await
+    }
+
     fn name(&self) -> &'static str {
         self.inner.name()
     }
@@ -396,6 +421,34 @@ impl crate::backend::attachment_keys::AttachmentKeyStore for &PolicyEnforcedBack
 
 #[async_trait]
 impl SecretBackend for PolicyEnforcedBackend {
+    async fn validate_transfer_metadata(
+        &self,
+        vault: &str,
+        request: &SecretRequest,
+    ) -> Result<(), BackendError> {
+        self.checked(
+            vault,
+            &request.name,
+            Operation::Set,
+            false,
+            self.inner
+                .secrets()
+                .validate_transfer_metadata(vault, request),
+        )
+        .await
+    }
+
+    async fn validate_transfer_delete(&self, vault: &str, name: &str) -> Result<(), BackendError> {
+        self.checked(
+            vault,
+            name,
+            Operation::Delete,
+            false,
+            self.inner.secrets().validate_transfer_delete(vault, name),
+        )
+        .await
+    }
+
     fn supports_atomic_create(&self) -> bool {
         self.inner.secrets().supports_atomic_create()
     }
@@ -542,6 +595,24 @@ impl SecretBackend for PolicyEnforcedBackend {
             self.inner
                 .secrets()
                 .get_secret_snapshot(vault, name, include_value),
+        )
+        .await
+    }
+
+    async fn get_transfer_snapshot(
+        &self,
+        vault: &str,
+        name: &str,
+        include_value: bool,
+    ) -> Result<crate::backend::secret::SecretSnapshot, BackendError> {
+        self.checked(
+            vault,
+            name,
+            Operation::Get,
+            include_value,
+            self.inner
+                .secrets()
+                .get_transfer_snapshot(vault, name, include_value),
         )
         .await
     }
@@ -959,6 +1030,36 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(test_properties("restored"))
         }
+    }
+
+    #[tokio::test]
+    async fn transfer_delete_preflight_denies_before_provider_access() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (inner, wrapped) = denied_wrapper(&tmp.path().join("decisions.jsonl"));
+        assert!(matches!(
+            wrapped
+                .secrets()
+                .validate_transfer_delete("prod", "secret")
+                .await,
+            Err(BackendError::PermissionDenied(_))
+        ));
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn transfer_snapshot_denials_precede_provider_access_for_value_and_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (inner, wrapped) = denied_wrapper(&tmp.path().join("decisions.jsonl"));
+        for include_value in [false, true] {
+            assert!(matches!(
+                wrapped
+                    .secrets()
+                    .get_transfer_snapshot("prod", "secret", include_value)
+                    .await,
+                Err(BackendError::PermissionDenied(_))
+            ));
+        }
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

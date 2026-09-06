@@ -355,6 +355,10 @@ impl Default for BlobConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Tabled)]
 pub struct Config {
+    /// Runtime-only constructor policy for read-only transfer preflight.
+    #[serde(skip)]
+    #[tabled(skip)]
+    pub runtime_open_existing_local: bool,
     /// Active backend: `"azure"` (default) or `"local"`.
     /// Missing / `None` is treated as `"azure"` for backward compatibility.
     #[tabled(skip)]
@@ -529,6 +533,7 @@ fn default_cache_ttl_secs() -> u64 {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            runtime_open_existing_local: false,
             backend: None,
             debug: false,
             subscription_id: String::new(),
