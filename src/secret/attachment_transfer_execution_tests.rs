@@ -971,6 +971,7 @@ async fn v3_recovery_refuses_republished_retained_identity() {
 // Real local storage with independently controlled secret capabilities models
 // cloud comparison-only snapshots without inventing CAS deletion authority.
 struct CapabilityBackend<'a> {
+    file_override: Option<&'a dyn crate::backend::FileBackend>,
     inner: &'a LocalBackend,
     create: bool,
     delete: bool,
@@ -1132,7 +1133,7 @@ impl Backend for CapabilityBackend<'_> {
         self.inner.attachment_keys()
     }
     fn files(&self) -> Option<&dyn crate::backend::FileBackend> {
-        self.inner.files()
+        self.file_override.or_else(|| self.inner.files())
     }
     async fn transfer_location(
         &self,
@@ -1183,6 +1184,7 @@ async fn capability_matrix_refuses_cloud_move_and_unsafe_destination_before_writ
         let (_source_dir, source, recovery) = fixture().await;
         let (_destination_dir, destination, _) = fixture().await;
         let from = CapabilityBackend {
+            file_override: None,
             inner: &source,
             create: true,
             delete: false,
@@ -1192,6 +1194,7 @@ async fn capability_matrix_refuses_cloud_move_and_unsafe_destination_before_writ
             deny_transfer_delete: false,
         };
         let to = CapabilityBackend {
+            file_override: None,
             inner: &destination,
             create: !unsafe_destination,
             delete: false,
@@ -1233,6 +1236,7 @@ async fn capability_matrix_allows_local_to_cloud_move_and_cloud_to_local_copy() 
         let (_source_dir, source, recovery) = fixture().await;
         let (_destination_dir, destination, _) = fixture().await;
         let from = CapabilityBackend {
+            file_override: None,
             inner: &source,
             create: true,
             delete: !source_cloud,
@@ -1242,6 +1246,7 @@ async fn capability_matrix_allows_local_to_cloud_move_and_cloud_to_local_copy() 
             deny_transfer_delete: false,
         };
         let to = CapabilityBackend {
+            file_override: None,
             inner: &destination,
             create: true,
             delete: false,
@@ -1286,6 +1291,7 @@ async fn strict_preflight_checks_transformed_folder_budget_without_writes() {
     let (_source_dir, source, recovery) = fixture().await;
     let (_destination_dir, destination, _) = fixture().await;
     let to = CapabilityBackend {
+        file_override: None,
         inner: &destination,
         create: true,
         delete: false,
@@ -1600,6 +1606,7 @@ async fn strict_preflight_refuses_unrepresentable_destination_metadata_before_wr
     let (_source_dir, source, recovery) = fixture().await;
     let (_destination_dir, destination, _) = fixture().await;
     let to = CapabilityBackend {
+        file_override: None,
         inner: &destination,
         create: true,
         delete: false,
@@ -1691,6 +1698,7 @@ async fn denied_policy_preflight(deny_delete: bool) {
     let (_source_dir, source, recovery) = fixture().await;
     let (_destination_dir, destination, _) = fixture().await;
     let from = CapabilityBackend {
+        file_override: None,
         inner: &source,
         create: true,
         delete: true,
@@ -1700,6 +1708,7 @@ async fn denied_policy_preflight(deny_delete: bool) {
         deny_transfer_delete: deny_delete,
     };
     let to = CapabilityBackend {
+        file_override: None,
         inner: &destination,
         create: true,
         delete: true,
@@ -1740,6 +1749,7 @@ async fn copy_does_not_require_source_delete_policy_permission() {
     let (_source_dir, source, recovery) = fixture().await;
     let (_destination_dir, destination, _) = fixture().await;
     let from = CapabilityBackend {
+        file_override: None,
         inner: &source,
         create: true,
         delete: true,
@@ -1756,6 +1766,216 @@ async fn copy_does_not_require_source_delete_policy_permission() {
             .unwrap()
             .complete
     );
+    assert_eq!(
+        source
+            .attachment_names("default", "db")
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+// Models S3's persisted groups user-metadata while retaining Local atomic I/O.
+struct S3GroupFiles<'a>(&'a dyn crate::backend::FileBackend);
+#[async_trait::async_trait]
+impl crate::backend::FileBackend for S3GroupFiles<'_> {
+    fn prepare_transfer_metadata(
+        &self,
+        groups: &[String],
+        metadata: &HashMap<String, String>,
+    ) -> std::result::Result<HashMap<String, String>, BackendError> {
+        let mut prepared = metadata.clone();
+        if !groups.is_empty() {
+            let joined = groups.join(",");
+            if joined
+                .split(',')
+                .map(str::trim)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+                != groups
+                || prepared.get("groups").is_some_and(|old| old != &joined)
+            {
+                return Err(BackendError::Unsupported("lossy file groups".into()));
+            }
+            prepared.insert("groups".into(), joined);
+        }
+        Ok(prepared)
+    }
+    fn supports_atomic_create(&self) -> bool {
+        true
+    }
+    async fn upload_file(
+        &self,
+        _: &str,
+        _: crate::blob::models::FileUploadRequest,
+        _: Option<&dyn crate::utils::progress::ProgressReporter>,
+    ) -> std::result::Result<crate::blob::models::FileInfo, BackendError> {
+        panic!("unconditional upload")
+    }
+    async fn upload_file_if_absent(
+        &self,
+        vault: &str,
+        mut request: crate::blob::models::FileUploadRequest,
+        reporter: Option<&dyn crate::utils::progress::ProgressReporter>,
+    ) -> std::result::Result<crate::blob::models::FileInfo, BackendError> {
+        request.metadata = self.prepare_transfer_metadata(&request.groups, &request.metadata)?;
+        self.0.upload_file_if_absent(vault, request, reporter).await
+    }
+    async fn download_file(
+        &self,
+        vault: &str,
+        name: &str,
+        reporter: Option<&dyn crate::utils::progress::ProgressReporter>,
+    ) -> std::result::Result<Vec<u8>, BackendError> {
+        self.0.download_file(vault, name, reporter).await
+    }
+    async fn download_file_snapshot(
+        &self,
+        vault: &str,
+        name: &str,
+        reporter: Option<&dyn crate::utils::progress::ProgressReporter>,
+    ) -> std::result::Result<crate::backend::file::FileDownloadSnapshot, BackendError> {
+        self.0.download_file_snapshot(vault, name, reporter).await
+    }
+    async fn list_files(
+        &self,
+        vault: &str,
+        request: crate::blob::models::FileListRequest,
+    ) -> std::result::Result<Vec<crate::blob::models::FileInfo>, BackendError> {
+        self.0.list_files(vault, request).await
+    }
+    async fn delete_file(&self, _: &str, _: &str) -> std::result::Result<(), BackendError> {
+        panic!("unconditional deletion")
+    }
+    async fn get_file_info(
+        &self,
+        vault: &str,
+        name: &str,
+    ) -> std::result::Result<crate::blob::models::FileInfo, BackendError> {
+        self.0.get_file_info(vault, name).await
+    }
+    async fn get_file_restore_info(
+        &self,
+        vault: &str,
+        name: &str,
+    ) -> std::result::Result<crate::blob::models::FileInfo, BackendError> {
+        self.0.get_file_restore_info(vault, name).await
+    }
+}
+
+#[tokio::test]
+async fn local_to_s3_group_metadata_is_prepared_before_evidence_and_upload() {
+    let (_source_dir, source, recovery) = fixture().await;
+    let (_destination_dir, destination, _) = fixture().await;
+    let files = S3GroupFiles(destination.files().unwrap());
+    let to = CapabilityBackend {
+        file_override: Some(&files),
+        inner: &destination,
+        create: true,
+        delete: false,
+        tag_limit: None,
+        refuse_metadata: false,
+        deny_transfer_read: false,
+        deny_transfer_delete: false,
+    };
+    let before = source
+        .files()
+        .unwrap()
+        .get_file_restore_info("default", "attachments/db/first")
+        .await
+        .unwrap();
+    assert_eq!(before.groups, vec!["group"]);
+    assert!(!before.metadata.contains_key("groups"));
+    let cross = cross_intent(&destination, TransferOperation::Copy).await;
+    preflight(&source, &to, cross.clone()).await.unwrap();
+    let report = apply(&source, &to, cross.clone(), true, &recovery)
+        .await
+        .unwrap();
+    assert!(report.complete);
+    let id = recovery.list().unwrap()[0].id.clone();
+    assert!(
+        resume(&source, &to, cross.clone(), &id, true, &recovery)
+            .await
+            .unwrap()
+            .complete
+    );
+    // A provider with different preparation rules cannot adopt saved S3 evidence.
+    assert!(resume(&source, &destination, cross, &id, true, &recovery)
+        .await
+        .is_err());
+    let actual = destination
+        .files()
+        .unwrap()
+        .get_file_restore_info("default", "attachments/db-new/first")
+        .await
+        .unwrap();
+    assert_eq!(actual.groups, before.groups);
+    assert_eq!(
+        actual.metadata.get("groups").map(String::as_str),
+        Some("group")
+    );
+    let source_after = source
+        .files()
+        .unwrap()
+        .get_file_restore_info("default", "attachments/db/first")
+        .await
+        .unwrap();
+    assert_eq!(source_after.metadata, before.metadata);
+}
+
+#[tokio::test]
+async fn s3_file_group_preflight_refuses_loss_before_writes() {
+    let (_source_dir, source, recovery) = fixture().await;
+    let (_destination_dir, destination, _) = fixture().await;
+    let snapshot = rewrap::snapshot(source.files().unwrap(), "default", "attachments/db/first")
+        .await
+        .unwrap();
+    source
+        .files()
+        .unwrap()
+        .restore_file(
+            "default",
+            crate::blob::models::FileUploadRequest {
+                name: snapshot.info.name,
+                content: snapshot.data.content,
+                content_type: Some(snapshot.info.content_type),
+                groups: vec!["comma,group".into()],
+                metadata: snapshot.info.metadata,
+                tags: snapshot.info.tags,
+            },
+        )
+        .await
+        .unwrap();
+    let files = S3GroupFiles(destination.files().unwrap());
+    let to = CapabilityBackend {
+        file_override: Some(&files),
+        inner: &destination,
+        create: true,
+        delete: false,
+        tag_limit: None,
+        refuse_metadata: false,
+        deny_transfer_read: false,
+        deny_transfer_delete: false,
+    };
+    let cross = cross_intent(&destination, TransferOperation::Move).await;
+    assert!(preflight(&source, &to, cross.clone())
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("lossy file groups"));
+    assert!(apply(&source, &to, cross, true, &recovery).await.is_err());
+    assert!(!recovery.root.exists());
+    assert!(destination
+        .secrets()
+        .get_secret("default", "db-new", false)
+        .await
+        .is_err());
+    assert!(destination
+        .attachment_names("default", "db-new")
+        .await
+        .unwrap()
+        .is_empty());
     assert_eq!(
         source
             .attachment_names("default", "db")

@@ -531,7 +531,11 @@ impl Journal {
                 {
                     return Err(invalid());
                 }
-                if evidence.metadata != expected_metadata {
+                if !allowed_destination_metadata(
+                    &expected_metadata,
+                    &evidence.metadata,
+                    &file.groups,
+                ) {
                     return Err(invalid());
                 }
             }
@@ -803,6 +807,46 @@ fn destination_request(
     }
     Ok(request)
 }
+// V3 permits only S3's lossless groups insertion in addition to crypto fields.
+// Runtime preparation below must still match the actual destination provider.
+fn allowed_destination_metadata(
+    original: &std::collections::HashMap<String, String>,
+    prepared: &std::collections::HashMap<String, String>,
+    groups: &[String],
+) -> bool {
+    if original == prepared {
+        return true;
+    }
+    if original.contains_key("groups")
+        || groups.is_empty()
+        || groups
+            .iter()
+            .any(|group| group.is_empty() || group.trim() != group || group.contains(','))
+    {
+        return false;
+    }
+    let mut canonical = original.clone();
+    canonical.insert("groups".into(), groups.join(","));
+    &canonical == prepared
+}
+fn prepared_destination_metadata(
+    destination: &dyn crate::backend::FileBackend,
+    file: &transfer::TransferFile,
+    binding: Option<&transfer::TransferKeyBinding>,
+) -> Result<std::collections::HashMap<String, String>> {
+    let mut original = file.metadata.clone();
+    if let Some(binding) = binding {
+        super::attachment_key::apply_crypto_metadata(&mut original, &key_reference(binding)?);
+    }
+    let prepared = destination.prepare_transfer_metadata(&file.groups, &original)?;
+    if !allowed_destination_metadata(&original, &prepared, &file.groups) {
+        return Err(BackendError::Unsupported(
+            "Destination cannot preserve attachment metadata exactly".into(),
+        )
+        .into());
+    }
+    Ok(prepared)
+}
 async fn checked_plan(
     source: &dyn Backend,
     destination: &dyn Backend,
@@ -829,6 +873,10 @@ async fn checked_plan(
         .guarded_secrets()
         .validate_transfer_metadata(&plan.intent.destination.vault, &request)
         .await?;
+    let destination_files = destination.files().ok_or_else(invalid)?;
+    for file in &plan.files {
+        prepared_destination_metadata(destination_files, file, plan.destination_key.as_ref())?;
+    }
     Ok(plan)
 }
 fn owned_preview(
@@ -885,6 +933,7 @@ async fn load_destination_ring(
     Ok(Some(saved))
 }
 fn validate_journal_budget(
+    destination: &dyn Backend,
     plan: &TransferPlan,
     locations: &(TransferLocation, TransferLocation),
     ring: &Option<rewrap::SavedRingBinding>,
@@ -906,10 +955,11 @@ fn validate_journal_budget(
     let mut states = Vec::with_capacity(plan.files.len());
     let mut evidence = Vec::with_capacity(plan.files.len());
     for file in &plan.files {
-        let mut metadata = file.metadata.clone();
-        if let Some(binding) = &plan.destination_key {
-            super::attachment_key::apply_crypto_metadata(&mut metadata, &key_reference(binding)?);
-        }
+        let metadata = prepared_destination_metadata(
+            destination.files().ok_or_else(invalid)?,
+            file,
+            plan.destination_key.as_ref(),
+        )?;
         states.push(serde_json::json!({"state": "delete_pending", "generation": {
             "etag": "\0".repeat(MAX_GENERATION_BYTES), "modified": "+262142-12-31T23:59:59.999999999Z"
         }}));
@@ -961,7 +1011,7 @@ pub async fn preflight(
         .guarded_secrets()
         .get_transfer_snapshot(&plan.intent.source.vault, &plan.intent.source_name, true)
         .await?;
-    validate_journal_budget(&plan, &locations, &ring, &secret.revision)?;
+    validate_journal_budget(destination, &plan, &locations, &ring, &secret.revision)?;
     Ok(owned_preview(&plan, Ok(locations)))
 }
 pub async fn preview(
@@ -1306,6 +1356,19 @@ async fn verify(
         .zip(&journal.files)
         .zip(&journal.destination_files)
     {
+        if !journal.legacy_v2 {
+            let prepared = prepared_destination_metadata(
+                destination.files().ok_or_else(invalid)?,
+                file,
+                journal.plan.destination_key.as_ref(),
+            )?;
+            if evidence
+                .as_ref()
+                .is_some_and(|evidence| evidence.metadata != prepared)
+            {
+                return Err(conflict());
+            }
+        }
         if source_set.contains(&file.source_name) {
             let current = saved_snapshot(
                 journal,
@@ -1510,7 +1573,15 @@ async fn execute(
                             journal.legacy_v2,
                         )
                         .await?;
-                        let mut metadata = file.metadata.clone();
+                        let metadata = if journal.legacy_v2 {
+                            file.metadata.clone()
+                        } else {
+                            prepared_destination_metadata(
+                                dest_files,
+                                &file,
+                                journal.plan.destination_key.as_ref(),
+                            )?
+                        };
                         let content = if let Some(binding) = &journal.plan.destination_key {
                             let reference = key_reference(binding)?;
                             let identity = rewrap::exact_identity(
@@ -1519,7 +1590,6 @@ async fn execute(
                                 &reference,
                             )
                             .await?;
-                            super::attachment_key::apply_crypto_metadata(&mut metadata, &reference);
                             let ciphertext = crate::backend::local::crypto::encrypt_bytes(
                                 &plaintext,
                                 &[identity.to_public()],
@@ -1546,6 +1616,16 @@ async fn execute(
                         save(session, journal)?;
                         verify(source, destination, session, journal).await?;
                         boundary("before_file_create")?;
+                        if !journal.legacy_v2
+                            && metadata
+                                != prepared_destination_metadata(
+                                    dest_files,
+                                    &file,
+                                    journal.plan.destination_key.as_ref(),
+                                )?
+                        {
+                            return Err(conflict());
+                        }
                         dest_files
                             .upload_file_if_absent(
                                 &i.destination.vault,
