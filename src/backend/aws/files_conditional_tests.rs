@@ -115,6 +115,105 @@ fn request() -> FileUploadRequest {
         tags: HashMap::from([("env".into(), "prod".into())]),
     }
 }
+
+#[test]
+fn s3_complete_file_preflight_rejects_tags_and_qualified_key_without_requests() {
+    use crate::backend::file::FileTransferRequest;
+    let (backend, transport) = backend(200);
+    let mut upload = request();
+    upload.metadata = backend
+        .prepare_transfer_metadata(&upload.groups, &upload.metadata)
+        .unwrap();
+    let validate = |vault: &str, upload: &FileUploadRequest| {
+        backend.validate_transfer_request(&FileTransferRequest {
+            vault,
+            name: &upload.name,
+            content_type: upload.content_type.as_deref(),
+            groups: &upload.groups,
+            tags: &upload.tags,
+            metadata: &upload.metadata,
+            size: upload.content.len() as u64,
+        })
+    };
+    assert!(validate("a", &upload).is_ok());
+    upload.tags = (0..11)
+        .map(|i| (format!("tag-{i}"), "value".into()))
+        .collect();
+    assert!(
+        validate("a", &upload).is_err(),
+        "11 object tags must fail pure preflight"
+    );
+    upload.tags.clear();
+    upload.name = format!("attachments/s/{}", "x".repeat(990));
+    assert_eq!(validated_key("a", &upload.name).unwrap().len(), 1012);
+    assert!(validate("a", &upload).is_ok());
+    assert!(
+        validate("destination-vault", &upload).is_err(),
+        "full destination key is 1028 bytes"
+    );
+    assert_eq!(*transport.puts.lock().unwrap(), 0);
+}
+
+#[test]
+fn s3_complete_file_preflight_enforces_tag_encoding_and_headers() {
+    use crate::backend::file::FileTransferRequest;
+    let (backend, transport) = backend(200);
+    let upload = request();
+    let metadata = backend
+        .prepare_transfer_metadata(&upload.groups, &upload.metadata)
+        .unwrap();
+    for tags in [
+        HashMap::from([("".into(), "value".into())]),
+        HashMap::from([("x".repeat(129), "value".into())]),
+        HashMap::from([("label".into(), "v".repeat(257))]),
+        HashMap::from([("label".into(), "bad\u{0000}value".into())]),
+        HashMap::from([("aws:reserved".into(), "value".into())]),
+        (0..10)
+            .map(|i| (format!("tag-{i}"), "界".repeat(256)))
+            .collect(),
+    ] {
+        let result = backend.validate_transfer_request(&FileTransferRequest {
+            vault: "a",
+            name: &upload.name,
+            content_type: upload.content_type.as_deref(),
+            groups: &upload.groups,
+            tags: &tags,
+            metadata: &metadata,
+            size: 10,
+        });
+        assert!(
+            result.is_err(),
+            "invalid tags must be refused without an upload"
+        );
+    }
+    let result = backend.validate_transfer_request(&FileTransferRequest {
+        vault: "a",
+        name: &upload.name,
+        content_type: Some("text/plain\r\nx-injected: true"),
+        groups: &upload.groups,
+        tags: &upload.tags,
+        metadata: &metadata,
+        size: 10,
+    });
+    assert!(result.is_err());
+    assert!(backend
+        .validate_transfer_request(&FileTransferRequest {
+            vault: "a",
+            name: &upload.name,
+            content_type: upload.content_type.as_deref(),
+            groups: &upload.groups,
+            tags: &upload.tags,
+            metadata: &metadata,
+            size: u64::MAX,
+        })
+        .is_err());
+    let valid = HashMap::from([("café".into(), "a+b / c".into())]);
+    assert_eq!(
+        encode_tagging(&valid).unwrap().as_deref(),
+        Some("caf%C3%A9=a%2Bb+%2F+c")
+    );
+    assert_eq!(*transport.puts.lock().unwrap(), 0);
+}
 #[tokio::test]
 async fn s3_conditional_create_preserves_request_and_sends_condition() {
     let (backend, transport) = backend(200);

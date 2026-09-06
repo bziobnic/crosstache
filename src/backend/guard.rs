@@ -99,6 +99,17 @@ impl Backend for GuardedBackend {
         self.inner.transfer_secret_namespace(vault).await
     }
 
+    async fn transfer_secret_physical_namespace(
+        &self,
+        vault: &str,
+    ) -> Result<String, BackendError> {
+        self.inner.transfer_secret_physical_namespace(vault).await
+    }
+
+    async fn transfer_file_physical_namespace(&self, vault: &str) -> Result<String, BackendError> {
+        self.inner.transfer_file_physical_namespace(vault).await
+    }
+
     async fn transfer_secret_names_collide(
         &self,
         vault: &str,

@@ -268,9 +268,26 @@ pub trait Backend: Send + Sync {
         ))
     }
 
-    /// Resolve the physical secret namespace without requiring file storage.
+    /// Resolve recovery-compatible secret namespace evidence without file storage.
+    /// Use `transfer_secret_physical_namespace` for physical alias decisions.
     async fn transfer_secret_namespace(&self, vault: &str) -> Result<String, BackendError> {
         Ok(self.transfer_location(vault).await?.secrets)
+    }
+
+    /// Physical secret-directory identity, independent of the path used to
+    /// reach it. Recovery location evidence may include additional ancestors.
+    /// Available without attachment storage; never creates directories.
+    async fn transfer_secret_physical_namespace(
+        &self,
+        vault: &str,
+    ) -> Result<String, BackendError> {
+        self.transfer_secret_namespace(vault).await
+    }
+
+    /// Actual object-storage identity, independent of recovery ancestor evidence.
+    /// A missing Local child is identified by its anchored creation parent.
+    async fn transfer_file_physical_namespace(&self, vault: &str) -> Result<String, BackendError> {
+        Ok(self.transfer_location(vault).await?.files)
     }
 
     /// Compare final destination names without creating a vault or probing by writes.

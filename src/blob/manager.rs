@@ -47,11 +47,34 @@ fn blob_transfer_namespace(storage_account: &str, container_name: &str) -> Resul
         .push(container_name);
     Ok(format!("azure-blob:{url}"))
 }
+
+fn transfer_blob_object_identity(client: &BlobClient) -> Result<String> {
+    let name = client.blob_name();
+    if name.trim_matches('/').is_empty()
+        || name.chars().count() > 1024
+        || name.chars().any(char::is_control)
+        || name.split('/').any(|part| matches!(part, "." | ".."))
+    {
+        return Err(CrosstacheError::invalid_argument(
+            "invalid or ambiguous Azure transfer file name",
+        ));
+    }
+    // Use the same SDK URL builder as upload, including its slash trimming and
+    // percent encoding. Building this URL performs no credential/provider I/O.
+    client
+        .url()
+        .map(|url| url.to_string())
+        .map_err(|_| CrosstacheError::invalid_url("invalid Azure transfer file URL"))
+}
 impl BlobManager {
     /// The same account service and container used by every blob request; vault
     /// names deliberately do not participate in this physical namespace.
     pub(crate) fn transfer_namespace(&self) -> Result<String> {
         blob_transfer_namespace(&self.storage_account, &self.container_name)
+    }
+
+    pub(crate) fn transfer_file_identity(&self, name: &str) -> Result<String> {
+        transfer_blob_object_identity(&self.file_client(name))
     }
 
     /// Create a new BlobManager instance with default chunk/concurrency settings.
@@ -1006,6 +1029,29 @@ mod snapshot_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transfer_blob_object_identity_uses_actual_sdk_key_without_io() {
+        let container = ClientBuilder::emulator().container_client("container");
+        let identity = |name: &str| transfer_blob_object_identity(&container.blob_client(name));
+        assert_eq!(
+            identity("proof.txt").unwrap(),
+            "http://127.0.0.1:10000/devstoreaccount1/container/proof.txt"
+        );
+        assert_eq!(
+            identity("proof.txt").unwrap(),
+            identity("/proof.txt/").unwrap()
+        );
+        assert_ne!(
+            identity("proof.txt").unwrap(),
+            identity("PROOF.txt").unwrap()
+        );
+        assert_ne!(identity("a/b").unwrap(), identity("a%2Fb").unwrap());
+        for invalid in ["", "../proof.txt", "a/./proof.txt", "bad\nname"] {
+            assert!(identity(invalid).is_err());
+        }
+        assert!(identity(&"a".repeat(1025)).is_err());
+    }
 
     // ── generate_block_id ────────────────────────────────────────────────────
 

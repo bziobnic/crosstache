@@ -779,6 +779,31 @@ async fn supported_route(
         }
     } else {
         physical_intent(intent, &a, &b)?;
+        // Recovery hashes pin the entire Local traversal chain. Unequal hashes
+        // do not establish disjoint storage when bind mounts share a leaf.
+        let same_secrets = source
+            .transfer_secret_physical_namespace(&intent.source.vault)
+            .await?
+            == destination
+                .transfer_secret_physical_namespace(&intent.destination.vault)
+                .await?;
+        let same_files = source
+            .transfer_file_physical_namespace(&intent.source.vault)
+            .await?
+            == destination
+                .transfer_file_physical_namespace(&intent.destination.vault)
+                .await?;
+        if (same_secrets || same_files) && intent.source_name == intent.destination_name {
+            return Err(CrosstacheError::conflict(
+                "Source and destination physically overlap",
+            ));
+        }
+        if same_secrets && intent.source != intent.destination {
+            return Err(BackendError::Unsupported(
+                "Aliased key namespaces: use the same resolved endpoint for both names".into(),
+            )
+            .into());
+        }
     }
     let ss = source.guarded_secrets();
     let ds = destination.guarded_secrets();
@@ -875,7 +900,28 @@ async fn checked_plan(
         .await?;
     let destination_files = destination.files().ok_or_else(invalid)?;
     for file in &plan.files {
-        prepared_destination_metadata(destination_files, file, plan.destination_key.as_ref())?;
+        let metadata =
+            prepared_destination_metadata(destination_files, file, plan.destination_key.as_ref())?;
+        let size = if plan.destination_key.is_some() {
+            file.size
+                .checked_add(
+                    transfer::MAX_OUTPUT_CIPHERTEXT_BYTES - transfer::MAX_SOURCE_CIPHERTEXT_BYTES,
+                )
+                .ok_or_else(invalid)?
+        } else {
+            file.size
+        };
+        destination_files.validate_transfer_request(
+            &crate::backend::file::FileTransferRequest {
+                vault: &plan.intent.destination.vault,
+                name: &file.destination_name,
+                content_type: Some(&file.content_type),
+                groups: &file.groups,
+                metadata: &metadata,
+                tags: &file.tags,
+                size,
+            },
+        )?;
     }
     Ok(plan)
 }
@@ -987,6 +1033,54 @@ pub async fn preflight(
     destination: &dyn Backend,
     intent: TransferIntent,
 ) -> Result<OwnedExecutionPreview> {
+    Ok(preflight_plan(source, destination, intent).await?.1)
+}
+
+/// Preflight every transfer and reserve all attachment object names before any
+/// batch mutation. One batch targets one resolved endpoint/vault, matching migrate.
+pub async fn preflight_batch(
+    source: &dyn Backend,
+    destination: &dyn Backend,
+    intents: &[TransferIntent],
+) -> Result<Vec<OwnedExecutionPreview>> {
+    let mut previews = Vec::with_capacity(intents.len());
+    let mut names: Vec<String> = Vec::new();
+    for intent in intents {
+        if intents
+            .first()
+            .is_some_and(|first| first.destination != intent.destination)
+        {
+            return Err(CrosstacheError::invalid_argument(
+                "a transfer batch must target one resolved destination vault",
+            ));
+        }
+        let (plan, preview) = preflight_plan(source, destination, intent.clone()).await?;
+        let files = destination.files().ok_or_else(invalid)?;
+        for file in plan.files {
+            for previous in &names {
+                if files
+                    .transfer_file_names_collide(
+                        &intent.destination.vault,
+                        previous,
+                        &file.destination_name,
+                    )
+                    .await?
+                {
+                    return Err(CrosstacheError::conflict("selected migration attachments collide in the destination object namespace"));
+                }
+            }
+            names.push(file.destination_name);
+        }
+        previews.push(preview);
+    }
+    Ok(previews)
+}
+
+async fn preflight_plan(
+    source: &dyn Backend,
+    destination: &dyn Backend,
+    intent: TransferIntent,
+) -> Result<(TransferPlan, OwnedExecutionPreview)> {
     let locations = supported(source, destination, &intent).await?;
     // Readback needs value disclosure even while the destination is absent.
     // Authorize that exact route now instead of discovering denial after create.
@@ -1012,7 +1106,8 @@ pub async fn preflight(
         .get_transfer_snapshot(&plan.intent.source.vault, &plan.intent.source_name, true)
         .await?;
     validate_journal_budget(destination, &plan, &locations, &ring, &secret.revision)?;
-    Ok(owned_preview(&plan, Ok(locations)))
+    let preview = owned_preview(&plan, Ok(locations));
+    Ok((plan, preview))
 }
 pub async fn preview(
     source: &dyn Backend,

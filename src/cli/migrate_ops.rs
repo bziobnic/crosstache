@@ -559,19 +559,10 @@ pub(crate) async fn execute_migrate(
                     destination_key_id: attachments.to_key_id.clone(),
                     destination_folder: None,
                 };
-                let preview = crate::secret::attachment_transfer_execution::preflight(
-                    source.as_ref(),
-                    target.as_ref(),
-                    intent.clone(),
-                )
-                .await?;
                 if !dry_run && !attachments.offline {
                     return Err(CrosstacheError::invalid_argument(
                         "attached migration requires --offline after stopping other writers",
                     ));
-                }
-                if dry_run {
-                    println!("{}", serde_json::to_string_pretty(&preview)?);
                 }
                 attached_intents.push(intent);
             }
@@ -589,6 +580,20 @@ pub(crate) async fn execute_migrate(
                 .validate_transfer_metadata(&target_vault, &request)
                 .await?;
             names_to_process.push((name, destination_name.clone()));
+        }
+    }
+    #[cfg(feature = "file-ops")]
+    {
+        let previews = crate::secret::attachment_transfer_execution::preflight_batch(
+            source.as_ref(),
+            target.as_ref(),
+            &attached_intents,
+        )
+        .await?;
+        if dry_run {
+            for preview in previews {
+                println!("{}", serde_json::to_string_pretty(&preview)?);
+            }
         }
     }
     if dry_run {
@@ -1113,6 +1118,157 @@ mod tests {
     #[tokio::test]
     async fn migration_batch_opaque_case_names_remain_distinct() {
         migration_batch_destination_names(["a", "A"], true, false).await;
+    }
+
+    #[cfg(feature = "file-ops")]
+    #[tokio::test]
+    async fn destination_file_collisions_across_migration_batch_precede_earlier_writes() {
+        let tmp = TempDir::new().unwrap();
+        let mut local = LocalConfig {
+            store_path: Some(tmp.path().join("store").display().to_string()),
+            key_file: Some(tmp.path().join("identity").display().to_string()),
+            default_vault: Some("source".into()),
+            encrypt_metadata: Some(false),
+            opaque_filenames: Some(false),
+            ..Default::default()
+        };
+        let source = crate::backend::local::LocalBackend::new(Some(&local)).unwrap();
+        for (lookup, final_name) in [("provider-one", "a"), ("provider-two", "A")] {
+            source
+                .secrets()
+                .set_secret(
+                    "source",
+                    SecretRequest {
+                        name: lookup.into(),
+                        value: Zeroizing::new(format!("value-{lookup}")),
+                        content_type: None,
+                        enabled: None,
+                        expires_on: None,
+                        not_before: None,
+                        tags: None,
+                        groups: None,
+                        note: None,
+                        folder: None,
+                    },
+                )
+                .await
+                .unwrap();
+            let path = tmp
+                .path()
+                .join(format!("store/vaults/source/secrets/{lookup}.meta.json"));
+            let mut metadata: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            metadata["original_name"] = final_name.into();
+            std::fs::write(path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+            crate::secret::attachments::upload_encrypted(
+                source.attachment_keys().as_ref(),
+                source.files().unwrap(),
+                "source",
+                crate::blob::models::FileUploadRequest {
+                    name: format!("attachments/{lookup}/proof.txt"),
+                    content: lookup.as_bytes().to_vec(),
+                    content_type: Some("text/plain".into()),
+                    groups: vec![],
+                    tags: HashMap::new(),
+                    metadata: HashMap::new(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        local.default_vault = Some("target".into());
+        local.opaque_filenames = Some(true);
+        let target = crate::backend::local::LocalBackend::new(Some(&local)).unwrap();
+        let initialized = crate::secret::attachment_lifecycle::initialize(
+            target.attachment_keys().as_ref(),
+            target.files().unwrap(),
+            "target",
+            true,
+        )
+        .await
+        .unwrap();
+        let parent = tmp.path().join("store/vaults/target");
+        std::fs::write(parent.join("case-probe"), b"").unwrap();
+        let insensitive = parent.join("CASE-PROBE").exists();
+        std::fs::remove_file(parent.join("case-probe")).unwrap();
+        let recovery = tmp.path().join("recovery");
+        let result = execute_migrate(
+            "local:source".into(),
+            "local:target".into(),
+            None,
+            None,
+            false,
+            crate::cli::commands::OnConflict::Replace,
+            true,
+            1,
+            crate::cli::transfer_support::AttachmentTransferOptions {
+                with_attachments: true,
+                offline: true,
+                to_key_id: initialized.active_key_id,
+                recovery_dir: Some(recovery.clone()),
+            },
+            Config {
+                backend: Some("local".into()),
+                local: Some(local),
+                ..Default::default()
+            },
+        )
+        .await;
+        let unknown = result.as_ref().err().is_some_and(|e| {
+            e.to_string()
+                .contains("cannot establish destination filesystem case semantics")
+        });
+        if insensitive || unknown {
+            let error =
+                result.expect_err("opaque secrets still share encoded attachment object names");
+            for name in ["a", "A"] {
+                assert!(target
+                    .secrets()
+                    .get_secret("target", name, false)
+                    .await
+                    .is_err());
+            }
+            assert!(
+                !parent.join("files").exists(),
+                "later collision must prevent the first namespace preparation"
+            );
+            assert!(
+                !recovery.exists(),
+                "later collision must prevent the first recovery journal"
+            );
+            assert!(error.to_string().contains("collid") || unknown, "{error}");
+        } else {
+            result.unwrap();
+            for name in ["a", "A"] {
+                assert_eq!(
+                    target.attachment_names("target", name).await.unwrap().len(),
+                    1
+                );
+            }
+        }
+        for lookup in ["provider-one", "provider-two"] {
+            // Reopening in opaque mode migrates legacy source stems as well.
+            assert_eq!(
+                target
+                    .secrets()
+                    .get_secret("source", lookup, true)
+                    .await
+                    .unwrap()
+                    .value
+                    .unwrap()
+                    .as_str(),
+                format!("value-{lookup}")
+            );
+            assert_eq!(
+                target
+                    .attachment_names("source", lookup)
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
     }
 
     async fn migration_batch_destination_names(

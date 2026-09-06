@@ -18,6 +18,35 @@ pub(super) fn secret_namespace(store: &Path, vault: &str) -> Result<String, Back
     Ok(discover(store, vault, false)?.secrets)
 }
 
+pub(super) fn physical_secret_namespace(store: &Path, vault: &str) -> Result<String, BackendError> {
+    paths::validate_vault_name(vault)?;
+    let missing = || BackendError::Unsupported("local transfer namespace does not exist".into());
+    let store = open_configured_store_with_mode(store, false, false)?.ok_or_else(missing)?;
+    let vaults = store.open_dir("vaults")?.ok_or_else(missing)?;
+    let vault_dir = vaults.open_dir(vault)?.ok_or_else(missing)?;
+    let secrets = vault_dir.open_dir("secrets")?.ok_or_else(missing)?;
+    physical_directory_namespace(&secrets)
+}
+
+pub(super) fn physical_directory_namespace(dir: &AnchoredDir) -> Result<String, BackendError> {
+    Ok(format!("local-directory:{}", directory_identity(dir)?))
+}
+
+pub(super) fn physical_file_namespace(store: &Path, vault: &str) -> Result<String, BackendError> {
+    paths::validate_vault_name(vault)?;
+    let missing = || BackendError::Unsupported("local transfer namespace does not exist".into());
+    let store = open_configured_store_with_mode(store, false, false)?.ok_or_else(missing)?;
+    let vaults = store.open_dir("vaults")?.ok_or_else(missing)?;
+    let vault_dir = vaults.open_dir(vault)?.ok_or_else(missing)?;
+    match vault_dir.open_dir("files")? {
+        Some(files) => physical_directory_namespace(&files),
+        None => Ok(format!(
+            "local-files-child:{}",
+            physical_directory_namespace(&vault_dir)?
+        )),
+    }
+}
+
 fn discover(
     store: &Path,
     vault: &str,
@@ -37,6 +66,43 @@ fn discover(
     location_from_dirs(&store, &vaults, &vault_dir, &secrets, files.as_ref())
 }
 
+fn directory_identity(dir: &AnchoredDir) -> Result<String, BackendError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta = dir
+            .file
+            .metadata()
+            .map_err(|e| BackendError::Internal(format!("inspect transfer directory: {e}")))?;
+        Ok(format!("{}:{}", meta.dev(), meta.ino()))
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        };
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        if unsafe { GetFileInformationByHandle(dir.file.as_raw_handle().cast(), &mut info) } == 0 {
+            return Err(BackendError::Internal(format!(
+                "inspect transfer directory: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        Ok(format!(
+            "{}:{}:{}",
+            info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow
+        ))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = dir;
+        Err(BackendError::Unsupported(
+            "stable directory identities".into(),
+        ))
+    }
+}
+
 fn location_from_dirs(
     store: &AnchoredDir,
     vaults: &AnchoredDir,
@@ -44,44 +110,7 @@ fn location_from_dirs(
     secrets: &AnchoredDir,
     files: Option<&AnchoredDir>,
 ) -> Result<crate::backend::TransferLocation, BackendError> {
-    let identity = |dir: &AnchoredDir| -> Result<String, BackendError> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            let meta = dir
-                .file
-                .metadata()
-                .map_err(|e| BackendError::Internal(format!("inspect transfer directory: {e}")))?;
-            Ok(format!("{}:{}", meta.dev(), meta.ino()))
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::io::AsRawHandle;
-            use windows_sys::Win32::Storage::FileSystem::{
-                GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
-            };
-            let mut info = BY_HANDLE_FILE_INFORMATION::default();
-            if unsafe { GetFileInformationByHandle(dir.file.as_raw_handle().cast(), &mut info) }
-                == 0
-            {
-                return Err(BackendError::Internal(format!(
-                    "inspect transfer directory: {}",
-                    std::io::Error::last_os_error()
-                )));
-            }
-            Ok(format!(
-                "{}:{}:{}",
-                info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow
-            ))
-        }
-        #[cfg(not(any(unix, windows)))]
-        {
-            let _ = dir;
-            Err(BackendError::Unsupported(
-                "stable directory identities".into(),
-            ))
-        }
-    };
+    let identity = directory_identity;
     let base = format!(
         "{}:{}:{}",
         identity(store)?,
@@ -152,7 +181,127 @@ pub(super) fn prepare(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::{
+        Backend, BackendCapabilities, BackendKind, SecretBackend, TransferLocation,
+    };
     use std::fs;
+
+    // Bind mounts are unavailable on the macOS runner. Model precisely their
+    // handle topology: different real parents reaching the very same retained
+    // secret-directory handle. Secret reads use the real shared Local backend.
+    struct LeafAlias<'a> {
+        inner: &'a super::super::LocalBackend,
+        location: TransferLocation,
+    }
+    #[async_trait::async_trait]
+    impl Backend for LeafAlias<'_> {
+        fn name(&self) -> &'static str {
+            "local"
+        }
+        fn kind(&self) -> BackendKind {
+            BackendKind::Local
+        }
+        fn capabilities(&self) -> BackendCapabilities {
+            self.inner.capabilities()
+        }
+        fn secrets(&self) -> &dyn SecretBackend {
+            self.inner.secrets()
+        }
+        async fn health_check(&self) -> Result<(), BackendError> {
+            Ok(())
+        }
+        async fn transfer_location(&self, _vault: &str) -> Result<TransferLocation, BackendError> {
+            Ok(self.location.clone())
+        }
+        async fn transfer_secret_physical_namespace(
+            &self,
+            vault: &str,
+        ) -> Result<String, BackendError> {
+            self.inner.transfer_secret_physical_namespace(vault).await
+        }
+    }
+
+    #[tokio::test]
+    async fn same_leaf_different_parents_refuses_self_target_without_secret_writes() {
+        use crate::config::settings::LocalConfig;
+        use crate::secret::manager::SecretRequest;
+        use zeroize::Zeroizing;
+        let temp = tempfile::tempdir().unwrap();
+        let inner = super::super::LocalBackend::new(Some(&LocalConfig {
+            store_path: Some(temp.path().join("store-a").display().to_string()),
+            key_file: Some(temp.path().join("identity").display().to_string()),
+            default_vault: Some("default".into()),
+            ..Default::default()
+        }))
+        .unwrap();
+        let original = inner
+            .secrets()
+            .set_secret(
+                "default",
+                SecretRequest {
+                    name: "source".into(),
+                    value: Zeroizing::new("keep-me".into()),
+                    content_type: None,
+                    enabled: Some(true),
+                    expires_on: None,
+                    not_before: None,
+                    tags: None,
+                    groups: None,
+                    note: None,
+                    folder: None,
+                },
+            )
+            .await
+            .unwrap();
+        fs::create_dir_all(temp.path().join("store-b/vaults/default")).unwrap();
+        let open = |name: &str| {
+            let store = open_configured_store_with_mode(&temp.path().join(name), false, false)
+                .unwrap()
+                .unwrap();
+            let vaults = store.open_dir("vaults").unwrap().unwrap();
+            let vault = vaults.open_dir("default").unwrap().unwrap();
+            (store, vaults, vault)
+        };
+        let (a, av, ad) = open("store-a");
+        let (b, bv, bd) = open("store-b");
+        let shared = ad.open_dir("secrets").unwrap().unwrap();
+        let left = LeafAlias {
+            inner: &inner,
+            location: location_from_dirs(&a, &av, &ad, &shared, None).unwrap(),
+        };
+        let right = LeafAlias {
+            inner: &inner,
+            location: location_from_dirs(&b, &bv, &bd, &shared, None).unwrap(),
+        };
+        assert_ne!(left.location.secrets, right.location.secrets);
+        assert_eq!(
+            left.transfer_secret_physical_namespace("default")
+                .await
+                .unwrap(),
+            right
+                .transfer_secret_physical_namespace("default")
+                .await
+                .unwrap()
+        );
+        let error = crate::cli::transfer_support::reject_self_target(
+            &left, "default", "source", &right, "default", "source",
+        )
+        .await
+        .expect_err("same anchored leaf must refuse before the generic copy/delete gate");
+        assert!(error.to_string().contains("same physical secret"));
+        let after = inner
+            .secrets()
+            .get_secret("default", "source", true)
+            .await
+            .unwrap();
+        assert_eq!(after.version, original.version);
+        assert_eq!(after.value.as_deref().map(|v| v.as_str()), Some("keep-me"));
+        assert!(!temp.path().join("store-a/vaults/default/files").exists());
+        assert!(fs::read_dir(temp.path().join("store-b/vaults/default"))
+            .unwrap()
+            .next()
+            .is_none());
+    }
     fn store() -> tempfile::TempDir {
         let temp = tempfile::tempdir().unwrap();
         fs::create_dir_all(temp.path().join("vaults/default/secrets")).unwrap();

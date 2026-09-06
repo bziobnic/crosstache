@@ -359,8 +359,22 @@ pub async fn plan(
         for name in &names {
             files.validate_file_name(name)?;
             let suffix = name.strip_prefix(&prefix).ok_or_else(invalid)?;
-            destination_files
-                .validate_file_name(&format!("attachments/{}/{suffix}", i.destination_name))?;
+            let destination_name = format!("attachments/{}/{suffix}", i.destination_name);
+            destination_files.validate_file_name(&destination_name)?;
+            for previous in &result.files {
+                if destination_files
+                    .transfer_file_names_collide(
+                        &i.destination.vault,
+                        &previous.destination_name,
+                        &destination_name,
+                    )
+                    .await?
+                {
+                    return Err(CrosstacheError::conflict(
+                        "planned attachments collide in the destination object namespace",
+                    ));
+                }
+            }
             if files
                 .get_file_restore_info(&i.source.vault, name)
                 .await?
@@ -378,7 +392,7 @@ pub async fn plan(
                 rewrap::authenticate(keys.as_ref(), &i.source.vault, &reference, &snap).await?;
             let evidence = TransferFile {
                 source_name: name.clone(),
-                destination_name: format!("attachments/{}/{suffix}", i.destination_name),
+                destination_name,
                 size: snap.info.size,
                 content_type: snap.info.content_type,
                 last_modified: snap.info.last_modified,

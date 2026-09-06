@@ -625,6 +625,33 @@ impl LocalFileBackend {
 
 #[async_trait]
 impl FileBackend for LocalFileBackend {
+    fn validate_transfer_request(
+        &self,
+        request: &crate::backend::file::FileTransferRequest<'_>,
+    ) -> Result<(), BackendError> {
+        paths::validate_vault_name(request.vault)?;
+        self.validate_file_name(request.name)
+    }
+
+    async fn transfer_file_names_collide(
+        &self,
+        vault: &str,
+        left: &str,
+        right: &str,
+    ) -> Result<bool, BackendError> {
+        paths::validate_vault_name(vault)?;
+        let left = storage_stem(left)?;
+        let right = storage_stem(right)?;
+        if left == right {
+            return Ok(true);
+        }
+        if !left.eq_ignore_ascii_case(&right) {
+            return Ok(false);
+        }
+        // File stems never use the secret backend's opaque filename setting.
+        super::name_collision::case_insensitive_for_child(&self.store_path, vault, "files")
+    }
+
     async fn get_file_restore_info(
         &self,
         vault: &str,
@@ -1058,6 +1085,75 @@ pub(super) mod tests {
 
         let backend = LocalFileBackend::new(store, identity, recipients);
         (backend, tmp)
+    }
+
+    #[tokio::test]
+    async fn destination_file_identity_uses_files_case_semantics_and_hashes_read_only() {
+        let (backend, tmp) = test_file_backend();
+        let parent = tmp.path().join("vaults/default");
+        // A secret-directory alias must not affect independent file semantics.
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(".", parent.join("secrets")).unwrap();
+        for existing in [true, false] {
+            if !existing {
+                fs::remove_dir(parent.join("files")).unwrap();
+            }
+            let directory = if existing {
+                parent.join("files")
+            } else {
+                parent.clone()
+            };
+            fs::write(directory.join("case-probe"), b"").unwrap();
+            let insensitive = directory.join("CASE-PROBE").exists();
+            fs::remove_file(directory.join("case-probe")).unwrap();
+            let before = tree_snapshot(tmp.path());
+            match backend
+                .transfer_file_names_collide(
+                    "default",
+                    "attachments/cert/proof.txt",
+                    "attachments/cert/PROOF.txt",
+                )
+                .await
+            {
+                Ok(collides) => assert_eq!(collides, insensitive),
+                Err(BackendError::Unsupported(message)) if !cfg!(target_os = "macos") => assert!(
+                    message.contains("cannot establish destination filesystem case semantics")
+                ),
+                other => panic!("unexpected identity result: {other:?}"),
+            }
+            let owner = "s".repeat(220);
+            assert!(!backend
+                .transfer_file_names_collide(
+                    "default",
+                    &format!("attachments/{owner}/proof.txt"),
+                    &format!("attachments/{owner}/PROOF.txt")
+                )
+                .await
+                .unwrap());
+            assert!(backend
+                .transfer_file_names_collide(
+                    "default",
+                    "attachments/cert/proof.txt",
+                    "attachments/cert/proof.txt"
+                )
+                .await
+                .unwrap());
+            assert_eq!(tree_snapshot(tmp.path()), before);
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(".", parent.join("files")).unwrap();
+            let before = tree_snapshot(tmp.path());
+            assert!(backend
+                .transfer_file_names_collide(
+                    "default",
+                    "attachments/cert/proof.txt",
+                    "attachments/cert/PROOF.txt"
+                )
+                .await
+                .is_err());
+            assert_eq!(tree_snapshot(tmp.path()), before);
+        }
     }
 
     fn tree_snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {

@@ -379,6 +379,55 @@ pub(crate) fn rename_request_from_properties(
     })
 }
 
+/// Validate the final destination request before any transfer mutation.
+pub(crate) fn validate_transfer_request(
+    dest: &dyn crate::backend::Backend,
+    request: &crate::secret::manager::SecretRequest,
+) -> crate::error::Result<()> {
+    let reserved = crate::backend::ALWAYS_WRITTEN_TAGS.len()
+        + usize::from(request.groups.as_ref().is_some_and(|g| !g.is_empty()))
+        + usize::from(request.note.is_some())
+        + usize::from(request.folder.is_some());
+    let user_tags: std::collections::BTreeMap<String, String> = request
+        .tags
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    crate::records::check_tag_budget(
+        &dest.capabilities(),
+        reserved,
+        &std::collections::BTreeMap::new(),
+        &user_tags,
+    )
+}
+
+/// Deterministic value-free cloud drift evidence. All mutable semantic metadata
+/// participates, including folder/note/groups in the sorted tag map.
+pub(crate) fn transfer_metadata_revision(
+    properties: &SecretProperties,
+) -> Result<String, BackendError> {
+    use sha2::{Digest, Sha256};
+    let tags: std::collections::BTreeMap<_, _> = properties.tags.iter().collect();
+    let bytes = serde_json::to_vec(&(
+        &properties.name,
+        &properties.original_name,
+        &properties.version,
+        properties.version_number,
+        properties.created_timestamp,
+        &properties.created_on,
+        &properties.updated_on,
+        properties.enabled,
+        properties.expires_on,
+        properties.not_before,
+        tags,
+        &properties.content_type,
+        &properties.recovery_level,
+    ))
+    .map_err(|error| BackendError::Internal(format!("encode transfer metadata: {error}")))?;
+    Ok(format!("transfer-metadata:{:x}", Sha256::digest(bytes)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -645,53 +694,4 @@ mod tests {
         let err = rename_request_from_properties("new", &props).unwrap_err();
         assert!(matches!(err, BackendError::Internal(_)), "{err:?}");
     }
-}
-
-/// Validate the final destination request before any transfer mutation.
-pub(crate) fn validate_transfer_request(
-    dest: &dyn crate::backend::Backend,
-    request: &crate::secret::manager::SecretRequest,
-) -> crate::error::Result<()> {
-    let reserved = crate::backend::ALWAYS_WRITTEN_TAGS.len()
-        + usize::from(request.groups.as_ref().is_some_and(|g| !g.is_empty()))
-        + usize::from(request.note.is_some())
-        + usize::from(request.folder.is_some());
-    let user_tags: std::collections::BTreeMap<String, String> = request
-        .tags
-        .clone()
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
-    crate::records::check_tag_budget(
-        &dest.capabilities(),
-        reserved,
-        &std::collections::BTreeMap::new(),
-        &user_tags,
-    )
-}
-
-/// Deterministic value-free cloud drift evidence. All mutable semantic metadata
-/// participates, including folder/note/groups in the sorted tag map.
-pub(crate) fn transfer_metadata_revision(
-    properties: &SecretProperties,
-) -> Result<String, BackendError> {
-    use sha2::{Digest, Sha256};
-    let tags: std::collections::BTreeMap<_, _> = properties.tags.iter().collect();
-    let bytes = serde_json::to_vec(&(
-        &properties.name,
-        &properties.original_name,
-        &properties.version,
-        properties.version_number,
-        properties.created_timestamp,
-        &properties.created_on,
-        &properties.updated_on,
-        properties.enabled,
-        properties.expires_on,
-        properties.not_before,
-        tags,
-        &properties.content_type,
-        &properties.recovery_level,
-    ))
-    .map_err(|error| BackendError::Internal(format!("encode transfer metadata: {error}")))?;
-    Ok(format!("transfer-metadata:{:x}", Sha256::digest(bytes)))
 }

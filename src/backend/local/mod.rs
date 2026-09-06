@@ -403,6 +403,17 @@ impl Backend for LocalBackend {
         transfer_namespace::secret_namespace(&self.config.store_path, vault)
     }
 
+    async fn transfer_secret_physical_namespace(
+        &self,
+        vault: &str,
+    ) -> Result<String, BackendError> {
+        transfer_namespace::physical_secret_namespace(&self.config.store_path, vault)
+    }
+
+    async fn transfer_file_physical_namespace(&self, vault: &str) -> Result<String, BackendError> {
+        transfer_namespace::physical_file_namespace(&self.config.store_path, vault)
+    }
+
     async fn transfer_secret_names_collide(
         &self,
         vault: &str,

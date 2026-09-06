@@ -1178,6 +1178,514 @@ async fn cross_intent(destination: &LocalBackend, operation: TransferOperation) 
     cross
 }
 
+struct SharedFileLeaf<'a> {
+    secrets: &'a LocalBackend,
+    files: &'a LocalBackend,
+}
+#[async_trait::async_trait]
+impl Backend for SharedFileLeaf<'_> {
+    fn name(&self) -> &'static str {
+        "local"
+    }
+    fn kind(&self) -> crate::backend::BackendKind {
+        crate::backend::BackendKind::Local
+    }
+    fn capabilities(&self) -> crate::backend::BackendCapabilities {
+        self.secrets.capabilities()
+    }
+    fn secrets(&self) -> &dyn SecretBackend {
+        self.secrets.secrets()
+    }
+    fn files(&self) -> Option<&dyn crate::backend::FileBackend> {
+        self.files.files()
+    }
+    async fn health_check(&self) -> std::result::Result<(), BackendError> {
+        Ok(())
+    }
+    async fn transfer_location(
+        &self,
+        vault: &str,
+    ) -> std::result::Result<TransferLocation, BackendError> {
+        self.secrets.transfer_location(vault).await
+    }
+    async fn transfer_secret_physical_namespace(
+        &self,
+        vault: &str,
+    ) -> std::result::Result<String, BackendError> {
+        self.secrets.transfer_secret_physical_namespace(vault).await
+    }
+    async fn transfer_file_physical_namespace(
+        &self,
+        vault: &str,
+    ) -> std::result::Result<String, BackendError> {
+        self.files.transfer_file_physical_namespace(vault).await
+    }
+}
+
+#[tokio::test]
+async fn shared_file_leaf_under_different_parents_refuses_physical_overlap() {
+    let (_source_dir, source, recovery) = fixture().await;
+    let (_destination_dir, destination, _) = fixture().await;
+    // Independent secret stores, with the destination's file operations reaching
+    // the source's actual files leaf, as a bind mount does without a symlink.
+    let alias = SharedFileLeaf {
+        secrets: &destination,
+        files: &source,
+    };
+    assert_ne!(
+        source.transfer_location("default").await.unwrap().files,
+        alias.transfer_location("default").await.unwrap().files
+    );
+    let mut cross = cross_intent(&destination, TransferOperation::Copy).await;
+    cross.destination_name = cross.source_name.clone();
+    let error = supported(&source, &alias, &cross)
+        .await
+        .expect_err("equal physical files must refuse even with different parent-chain hashes");
+    assert!(error.to_string().contains("overlap"), "{error}");
+    assert!(!recovery.root.exists());
+    assert_eq!(
+        source
+            .attachment_names("default", "db")
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        destination
+            .attachment_names("default", "db")
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn destination_file_collisions_within_plan_precede_recovery_and_secret_writes() {
+    let (source_dir, _, recovery) = fixture().await;
+    let source = LocalBackend::new(Some(&LocalConfig {
+        store_path: Some(source_dir.path().join("store").display().to_string()),
+        key_file: Some(source_dir.path().join("key").display().to_string()),
+        default_vault: Some("default".into()),
+        opaque_filenames: Some(true),
+        ..Default::default()
+    }))
+    .unwrap();
+    let destination_dir = tempfile::tempdir().unwrap();
+    let destination = LocalBackend::new(Some(&LocalConfig {
+        store_path: Some(destination_dir.path().join("store").display().to_string()),
+        key_file: Some(destination_dir.path().join("key").display().to_string()),
+        default_vault: Some("default".into()),
+        opaque_filenames: Some(true),
+        ..Default::default()
+    }))
+    .unwrap();
+    super::super::attachment_lifecycle::initialize(
+        destination.attachment_keys().as_ref(),
+        destination.files().unwrap(),
+        "default",
+        true,
+    )
+    .await
+    .unwrap();
+    // Both source keys hash to distinct stems; the shorter destination keys
+    // encode to stems differing only by ASCII case. This uses real Local I/O.
+    let owner = "s".repeat(220);
+    let props = source
+        .secrets()
+        .get_secret("default", "db", true)
+        .await
+        .unwrap();
+    source
+        .secrets()
+        .set_secret(
+            "default",
+            rename_request_from_properties(&owner, &props).unwrap(),
+        )
+        .await
+        .unwrap();
+    for suffix in ["proof.txt", "PROOF.txt"] {
+        crate::secret::attachments::upload_encrypted(
+            source.attachment_keys().as_ref(),
+            source.files().unwrap(),
+            "default",
+            crate::blob::models::FileUploadRequest {
+                name: format!("attachments/{owner}/{suffix}"),
+                content: suffix.as_bytes().to_vec(),
+                content_type: Some("text/plain".into()),
+                groups: vec![],
+                tags: HashMap::new(),
+                metadata: HashMap::new(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    }
+    // Test-only observation; production preflight must never create a probe.
+    let parent = destination_dir.path().join("store/vaults/default");
+    std::fs::write(parent.join("case-probe"), b"").unwrap();
+    let insensitive = parent.join("CASE-PROBE").exists();
+    std::fs::remove_file(parent.join("case-probe")).unwrap();
+    let mut cross = cross_intent(&destination, TransferOperation::Copy).await;
+    cross.source_name = owner.clone();
+    cross.destination_name = "cert".into();
+    let result = preflight(&source, &destination, cross.clone()).await;
+    let unknown = result.as_ref().err().is_some_and(|e| {
+        e.to_string()
+            .contains("cannot establish destination filesystem case semantics")
+    });
+    if insensitive || unknown {
+        let error =
+            result.expect_err("proof.txt and PROOF.txt must be reserved as one destination object");
+        assert!(error.to_string().contains("collid") || unknown, "{error}");
+        assert!(apply(&source, &destination, cross, true, &recovery)
+            .await
+            .is_err());
+        assert!(destination
+            .secrets()
+            .get_secret("default", "cert", false)
+            .await
+            .is_err());
+        assert!(!parent.join("files").exists());
+        assert!(!recovery.root.exists());
+    } else {
+        result.unwrap();
+        assert!(
+            apply(&source, &destination, cross, true, &recovery)
+                .await
+                .unwrap()
+                .complete
+        );
+        assert_eq!(
+            destination
+                .attachment_names("default", "cert")
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+    assert_eq!(
+        source
+            .attachment_names("default", &owner)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[cfg(feature = "aws")]
+mod s3_request_preflight {
+    use super::*;
+    use crate::backend::{file::FileTransferRequest, FileBackend};
+    use crate::blob::models::{FileInfo, FileListRequest, FileUploadRequest};
+    use crate::utils::progress::ProgressReporter;
+
+    // Real Local encrypted snapshots and the real S3 request validator. Only
+    // transport/storage is substituted; no cloud request is issued by this fixture.
+    // A long S3 source key maps to a short Local backing key for portable storage.
+    struct S3Files<'a> {
+        inner: &'a dyn FileBackend,
+        validator: crate::backend::aws::files::AwsFileBackend,
+        alias: Option<(String, String)>,
+    }
+    impl<'a> S3Files<'a> {
+        fn new(inner: &'a dyn FileBackend, alias: Option<(String, String)>) -> Self {
+            let config = aws_sdk_s3::Config::builder()
+                .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
+                .region(aws_sdk_s3::config::Region::new("us-east-1"))
+                .credentials_provider(aws_sdk_s3::config::Credentials::new(
+                    "test", "test", None, None, "test",
+                ))
+                .build();
+            Self {
+                inner,
+                validator: crate::backend::aws::files::AwsFileBackend::new(
+                    aws_sdk_s3::Client::from_conf(config),
+                    "bucket".into(),
+                ),
+                alias,
+            }
+        }
+        fn backing<'b>(&'b self, name: &'b str) -> &'b str {
+            self.alias
+                .as_ref()
+                .filter(|(logical, _)| logical == name)
+                .map_or(name, |(_, stored)| stored)
+        }
+        fn logical(&self, mut info: FileInfo) -> FileInfo {
+            if let Some((logical, stored)) = &self.alias {
+                if &info.name == stored {
+                    info.name = logical.clone();
+                }
+            }
+            info
+        }
+    }
+    #[async_trait::async_trait]
+    impl FileBackend for S3Files<'_> {
+        fn validate_transfer_request(
+            &self,
+            request: &FileTransferRequest<'_>,
+        ) -> std::result::Result<(), BackendError> {
+            self.validator.validate_transfer_request(request)
+        }
+        fn validate_file_name(&self, name: &str) -> std::result::Result<(), BackendError> {
+            self.validator.validate_file_name(name)
+        }
+        fn prepare_transfer_metadata(
+            &self,
+            groups: &[String],
+            metadata: &HashMap<String, String>,
+        ) -> std::result::Result<HashMap<String, String>, BackendError> {
+            self.validator.prepare_transfer_metadata(groups, metadata)
+        }
+        async fn transfer_file_names_collide(
+            &self,
+            vault: &str,
+            left: &str,
+            right: &str,
+        ) -> std::result::Result<bool, BackendError> {
+            self.validator
+                .transfer_file_names_collide(vault, left, right)
+                .await
+        }
+        fn supports_atomic_create(&self) -> bool {
+            true
+        }
+        async fn upload_file(
+            &self,
+            _: &str,
+            _: FileUploadRequest,
+            _: Option<&dyn ProgressReporter>,
+        ) -> std::result::Result<FileInfo, BackendError> {
+            panic!("preflight must prevent upload")
+        }
+        async fn upload_file_if_absent(
+            &self,
+            _: &str,
+            _: FileUploadRequest,
+            _: Option<&dyn ProgressReporter>,
+        ) -> std::result::Result<FileInfo, BackendError> {
+            panic!("preflight must prevent conditional upload")
+        }
+        async fn download_file(
+            &self,
+            vault: &str,
+            name: &str,
+            reporter: Option<&dyn ProgressReporter>,
+        ) -> std::result::Result<Vec<u8>, BackendError> {
+            self.inner
+                .download_file(vault, self.backing(name), reporter)
+                .await
+        }
+        async fn download_file_snapshot(
+            &self,
+            vault: &str,
+            name: &str,
+            reporter: Option<&dyn ProgressReporter>,
+        ) -> std::result::Result<crate::backend::file::FileDownloadSnapshot, BackendError> {
+            self.inner
+                .download_file_snapshot(vault, self.backing(name), reporter)
+                .await
+        }
+        async fn list_files(
+            &self,
+            vault: &str,
+            mut request: FileListRequest,
+        ) -> std::result::Result<Vec<FileInfo>, BackendError> {
+            let prefix = request.prefix.take().unwrap_or_default();
+            Ok(self
+                .inner
+                .list_files(vault, request)
+                .await?
+                .into_iter()
+                .map(|info| self.logical(info))
+                .filter(|info| info.name.starts_with(&prefix))
+                .collect())
+        }
+        async fn get_file_info(
+            &self,
+            vault: &str,
+            name: &str,
+        ) -> std::result::Result<FileInfo, BackendError> {
+            Ok(self.logical(self.inner.get_file_info(vault, self.backing(name)).await?))
+        }
+        async fn get_file_restore_info(
+            &self,
+            vault: &str,
+            name: &str,
+        ) -> std::result::Result<FileInfo, BackendError> {
+            Ok(self.logical(
+                self.inner
+                    .get_file_restore_info(vault, self.backing(name))
+                    .await?,
+            ))
+        }
+        async fn delete_file(&self, _: &str, _: &str) -> std::result::Result<(), BackendError> {
+            panic!("preflight must prevent deletion")
+        }
+    }
+
+    async fn rejects_later_request_before_any_writes(long_key: bool) {
+        let temp = tempfile::tempdir().unwrap();
+        let make = |store: &str, vault: &str| {
+            LocalBackend::new(Some(&LocalConfig {
+                store_path: Some(temp.path().join(store).display().to_string()),
+                key_file: Some(
+                    temp.path()
+                        .join(format!("{store}-key"))
+                        .display()
+                        .to_string(),
+                ),
+                default_vault: Some(vault.into()),
+                ..Default::default()
+            }))
+            .unwrap()
+        };
+        let source = make("source", "a");
+        let destination = make("destination", "destination-vault");
+        for name in ["good", "s"] {
+            source
+                .secrets()
+                .set_secret(
+                    "a",
+                    SecretRequest {
+                        name: name.into(),
+                        value: Zeroizing::new(format!("value-{name}")),
+                        content_type: None,
+                        enabled: Some(true),
+                        expires_on: None,
+                        not_before: None,
+                        tags: None,
+                        groups: None,
+                        note: None,
+                        folder: None,
+                    },
+                )
+                .await
+                .unwrap();
+            crate::secret::attachments::upload_encrypted(
+                source.attachment_keys().as_ref(),
+                source.files().unwrap(),
+                "a",
+                FileUploadRequest {
+                    name: format!("attachments/{name}/proof"),
+                    content: name.as_bytes().to_vec(),
+                    content_type: Some("text/plain".into()),
+                    groups: vec![],
+                    metadata: HashMap::new(),
+                    tags: if name == "s" && !long_key {
+                        (0..11)
+                            .map(|i| (format!("tag-{i}"), "value".into()))
+                            .collect()
+                    } else {
+                        HashMap::new()
+                    },
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        let initialized = super::super::super::attachment_lifecycle::initialize(
+            destination.attachment_keys().as_ref(),
+            destination.files().unwrap(),
+            "destination-vault",
+            true,
+        )
+        .await
+        .unwrap();
+        let alias = long_key.then(|| {
+            (
+                format!("attachments/s/{}", "x".repeat(990)),
+                "attachments/s/proof".into(),
+            )
+        });
+        let sf = S3Files::new(source.files().unwrap(), alias);
+        let df = S3Files::new(destination.files().unwrap(), None);
+        let wrap = |inner, files| CapabilityBackend {
+            inner,
+            file_override: Some(files),
+            create: true,
+            delete: false,
+            tag_limit: None,
+            refuse_metadata: false,
+            deny_transfer_read: false,
+            deny_transfer_delete: false,
+        };
+        let from = wrap(&source, &sf as &dyn FileBackend);
+        let to = wrap(&destination, &df as &dyn FileBackend);
+        let intents: Vec<_> = ["good", "s"]
+            .into_iter()
+            .map(|name| TransferIntent {
+                source: transfer::TransferEndpoint {
+                    identity: "source".into(),
+                    vault: "a".into(),
+                },
+                destination: transfer::TransferEndpoint {
+                    identity: "destination".into(),
+                    vault: "destination-vault".into(),
+                },
+                source_name: name.into(),
+                destination_name: name.into(),
+                operation: TransferOperation::Copy,
+                destination_key_id: initialized.active_key_id.clone(),
+                destination_folder: None,
+            })
+            .collect();
+        assert!(preflight(&from, &to, intents[0].clone()).await.is_ok());
+        assert!(
+            preflight(&from, &to, intents[1].clone()).await.is_err(),
+            "deterministic S3 request failure must precede destination creation"
+        );
+        assert!(
+            preflight_batch(&from, &to, &intents).await.is_err(),
+            "later request failure must refuse the complete batch"
+        );
+        let recovery = RecoveryStore::new(temp.path().join("recovery"));
+        assert!(apply(&from, &to, intents[1].clone(), true, &recovery)
+            .await
+            .is_err());
+        assert!(!recovery.root.exists());
+        assert!(!temp
+            .path()
+            .join("destination/vaults/destination-vault/files")
+            .exists());
+        for name in ["good", "s"] {
+            assert!(destination
+                .secrets()
+                .get_secret("destination-vault", name, false)
+                .await
+                .is_err());
+            assert_eq!(
+                source
+                    .secrets()
+                    .get_secret("a", name, true)
+                    .await
+                    .unwrap()
+                    .value
+                    .unwrap()
+                    .as_str(),
+                format!("value-{name}")
+            );
+            assert_eq!(source.attachment_names("a", name).await.unwrap().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn s3_complete_file_preflight_rejects_later_eleven_tag_entry_without_writes() {
+        rejects_later_request_before_any_writes(false).await;
+    }
+    #[tokio::test]
+    async fn s3_complete_file_preflight_rejects_later_long_destination_key_without_writes() {
+        rejects_later_request_before_any_writes(true).await;
+    }
+}
+
 #[tokio::test]
 async fn capability_matrix_refuses_cloud_move_and_unsafe_destination_before_writes() {
     for unsafe_destination in [false, true] {

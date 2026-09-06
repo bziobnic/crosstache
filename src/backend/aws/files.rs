@@ -236,6 +236,24 @@ fn encode_tagging(tags: &HashMap<String, String>) -> Result<Option<String>, Back
             tags.len() - MAX_OBJECT_TAGS
         )));
     }
+    static CHARACTERS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let allowed = CHARACTERS.get_or_init(|| {
+        regex::Regex::new(r"^[\p{L}\p{N}\p{Z}_.:/=+\-@]*$")
+            .expect("static S3 tag character pattern")
+    });
+    // S3 stores tags in UTF-16; supplementary characters consume two positions.
+    if tags.iter().any(|(key, value)| {
+        key.is_empty()
+            || key.encode_utf16().count() > 128
+            || value.encode_utf16().count() > 256
+            || key.to_ascii_lowercase().starts_with("aws:")
+            || !allowed.is_match(key)
+            || !allowed.is_match(value)
+    }) {
+        return Err(BackendError::InvalidArgument(
+            "S3 object tags violate provider length, character, or reserved-prefix limits".into(),
+        ));
+    }
     let mut serializer = url::form_urlencoded::Serializer::new(String::new());
     // Sort for deterministic output.
     let mut pairs: Vec<(&String, &String)> = tags.iter().collect();
@@ -243,7 +261,66 @@ fn encode_tagging(tags: &HashMap<String, String>) -> Result<Option<String>, Back
     for (k, v) in pairs {
         serializer.append_pair(k, v);
     }
-    Ok(Some(serializer.finish()))
+    let encoded = serializer.finish();
+    if encoded.len() > 8192 {
+        return Err(BackendError::InvalidArgument(
+            "S3 encoded object tags exceed the request header limit".into(),
+        ));
+    }
+    Ok(Some(encoded))
+}
+
+struct PreparedConditionalFile {
+    key: String,
+    content_type: String,
+    tagging: Option<String>,
+    metadata: HashMap<String, String>,
+}
+
+impl AwsFileBackend {
+    /// Shared by pure transfer preflight and the actual conditional PutObject.
+    fn prepare_conditional_file(
+        &self,
+        request: &crate::backend::file::FileTransferRequest<'_>,
+    ) -> Result<PreparedConditionalFile, BackendError> {
+        let key = validated_key(request.vault, request.name)?;
+        validate_download_size(request.size, MAX_PART_SIZE_BYTES)?;
+        let content_type = request.content_type.map(str::to_owned).unwrap_or_else(|| {
+            mime_guess::from_path(request.name)
+                .first_or_octet_stream()
+                .to_string()
+        });
+        if content_type.is_empty()
+            || content_type.trim() != content_type
+            || content_type.bytes().any(|b| !(0x20..=0x7e).contains(&b))
+        {
+            return Err(BackendError::InvalidArgument(
+                "S3 content type cannot be represented losslessly as a request header".into(),
+            ));
+        }
+        let tagging = encode_tagging(request.tags)?;
+        let metadata = self.prepare_transfer_metadata(request.groups, request.metadata)?;
+        let known_header_bytes = content_type.len()
+            + "content-type".len()
+            + tagging
+                .as_ref()
+                .map_or(0, |tags| tags.len() + "x-amz-tagging".len())
+            + metadata
+                .iter()
+                .map(|(key, value)| "x-amz-meta-".len() + key.len() + value.len())
+                .sum::<usize>();
+        if known_header_bytes > 8192 {
+            return Err(BackendError::InvalidArgument(
+                "S3 file metadata and tags exceed the request header limit".into(),
+            ));
+        }
+        Ok(PreparedConditionalFile {
+            key,
+            content_type,
+            tagging,
+            metadata,
+        })
+    }
 }
 
 /// Convert an SDK timestamp to `chrono::DateTime<Utc>`.
@@ -938,6 +1015,21 @@ fn ensure_folder_prefix(full_prefix: String, user_prefix: &str, delimiter: &str)
 
 #[async_trait]
 impl FileBackend for AwsFileBackend {
+    fn validate_transfer_request(
+        &self,
+        request: &crate::backend::file::FileTransferRequest<'_>,
+    ) -> Result<(), BackendError> {
+        self.prepare_conditional_file(request).map(|_| ())
+    }
+    async fn transfer_file_names_collide(
+        &self,
+        vault: &str,
+        left: &str,
+        right: &str,
+    ) -> Result<bool, BackendError> {
+        Ok(validated_key(vault, left)? == validated_key(vault, right)?)
+    }
+
     fn prepare_transfer_metadata(
         &self,
         groups: &[String],
@@ -1011,16 +1103,21 @@ impl FileBackend for AwsFileBackend {
         request: FileUploadRequest,
         reporter: Option<&dyn ProgressReporter>,
     ) -> Result<FileInfo, BackendError> {
-        let key = validated_key(vault, &request.name)?;
         let size = request.content.len() as u64;
-        validate_download_size(size, MAX_PART_SIZE_BYTES)?;
-        let content_type = request.content_type.clone().unwrap_or_else(|| {
-            mime_guess::from_path(&request.name)
-                .first_or_octet_stream()
-                .to_string()
-        });
-        let tagging = encode_tagging(&request.tags)?;
-        let metadata = self.prepare_transfer_metadata(&request.groups, &request.metadata)?;
+        let PreparedConditionalFile {
+            key,
+            content_type,
+            tagging,
+            metadata,
+        } = self.prepare_conditional_file(&crate::backend::file::FileTransferRequest {
+            vault,
+            name: &request.name,
+            content_type: request.content_type.as_deref(),
+            groups: &request.groups,
+            tags: &request.tags,
+            metadata: &request.metadata,
+            size,
+        })?;
         let output = self.client.put_object()
             .bucket(&self.bucket).key(key).if_none_match("*")
             .content_type(&content_type)

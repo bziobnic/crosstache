@@ -4,11 +4,19 @@ use crate::backend::error::BackendError;
 use std::path::Path;
 
 pub(super) fn case_insensitive(store: &Path, vault: &str) -> Result<bool, BackendError> {
+    case_insensitive_for_child(store, vault, "secrets")
+}
+
+pub(super) fn case_insensitive_for_child(
+    store: &Path,
+    vault: &str,
+    child: &str,
+) -> Result<bool, BackendError> {
     let mut directory =
         open_configured_store_with_mode(store, false, false)?.ok_or_else(unknown)?;
     // A not-yet-created descendant inherits the closest existing parent's
     // filesystem/directory semantics. Never create a probe or target directory.
-    for component in ["vaults", vault, "secrets"] {
+    for component in ["vaults", vault, child] {
         match directory.open_dir(component)? {
             Some(child) => directory = child,
             None => break,

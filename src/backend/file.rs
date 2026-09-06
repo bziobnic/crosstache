@@ -17,6 +17,20 @@ pub struct FileDownloadSnapshot {
     pub metadata: std::collections::HashMap<String, String>,
 }
 
+/// Complete metadata-only create request for deterministic transfer preflight.
+/// Metadata is the prepared persisted representation; size is a known upper
+/// bound before reencryption, and the actual byte length at upload. No content,
+/// key material, Debug or serialization is exposed through this validation API.
+pub struct FileTransferRequest<'a> {
+    pub vault: &'a str,
+    pub name: &'a str,
+    pub content_type: Option<&'a str>,
+    pub groups: &'a [String],
+    pub metadata: &'a std::collections::HashMap<String, String>,
+    pub tags: &'a std::collections::HashMap<String, String>,
+    pub size: u64,
+}
+
 /// Trait for file/blob storage operations.
 ///
 /// The five lifecycle methods are required — if a backend exposes `files()`,
@@ -33,6 +47,30 @@ pub struct FileDownloadSnapshot {
 /// [`list_files_hierarchical`]: FileBackend::list_files_hierarchical
 #[async_trait]
 pub trait FileBackend: Send + Sync {
+    /// Validate all deterministic request constraints without provider I/O.
+    fn validate_transfer_request(
+        &self,
+        request: &FileTransferRequest<'_>,
+    ) -> Result<(), BackendError> {
+        self.validate_file_name(request.name)?;
+        self.prepare_transfer_metadata(request.groups, request.metadata)?;
+        Ok(())
+    }
+
+    /// Compare two destination objects in the same vault without creating or
+    /// probing storage. Providers compare their actual validated object keys;
+    /// filesystem backends must refuse ambiguous, unknown case semantics.
+    async fn transfer_file_names_collide(
+        &self,
+        _vault: &str,
+        left: &str,
+        right: &str,
+    ) -> Result<bool, BackendError> {
+        self.validate_file_name(left)?;
+        self.validate_file_name(right)?;
+        Ok(left == right)
+    }
+
     /// Read-only preparation of the exact metadata persisted at the destination.
     /// Reject nonrepresentable inputs before any transfer mutation.
     fn prepare_transfer_metadata(

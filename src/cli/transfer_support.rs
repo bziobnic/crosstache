@@ -69,9 +69,11 @@ pub(crate) async fn reject_self_target(
             .as_ref()
             .is_some_and(|p| p.name == source_props.name);
     if same_name {
-        let source_namespace = source.transfer_secret_namespace(source_vault).await?;
+        let source_namespace = source
+            .transfer_secret_physical_namespace(source_vault)
+            .await?;
         let destination_namespace = destination
-            .transfer_secret_namespace(destination_vault)
+            .transfer_secret_physical_namespace(destination_vault)
             .await?;
         if source_namespace == destination_namespace {
             return Err(CrosstacheError::conflict(
