@@ -957,7 +957,7 @@ pub enum Commands {
         #[arg(short, long)]
         group: Option<String>,
     },
-    /// Preview transfer of a secret together with its attachments
+    /// Preview, apply offline, or resume a secret transfer with attachments
     #[cfg(feature = "file-ops")]
     Transfer {
         #[command(flatten)]

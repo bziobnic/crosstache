@@ -60,6 +60,6 @@ with the expected head SHA. Record merged PRs and validation below.
 
 ## Progress
 
-- Task 1: in progress from main d0d8530.
-- Task 2: pending Task 1 merge.
+- Task 1: merged PR #436 at 78369d4; 4,282 tests passed, 47 ignored; Linux/Windows CI and Bugbot clean.
+- Task 2: in progress from 78369d4; local offline rename and recovery.
 - Task 3: pending Task 2 merge.

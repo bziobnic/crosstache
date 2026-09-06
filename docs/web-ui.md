@@ -19,9 +19,11 @@ secret-kind fields masked and individually revealable/copyable.
 
 Opening a secret lists its file attachments (if any) as download links in the
 detail drawer (`GET /api/secrets/{name}/attachments`). Downloads decrypt
-age-encrypted blobs the same way `xv file download` does. Renaming a secret
-that still has attachments is refused (`xv-attachments-block-rename`) —
-detach first, or keep the current name. See
+age-encrypted blobs the same way `xv file download` does. Local attached secrets can
+be renamed through a preview and explicit stopped-writers acknowledgement. The
+transfer verifies the destination before removing the source and saves a recovery
+ID for interrupted operations. Other backends keep the attachment rename guard.
+Ordinary secrets continue to use atomic rename. See
 [`docs/attachments.md`](attachments.md).
 
 The secret drawer can be dismissed with the close control (top-right `x`),
