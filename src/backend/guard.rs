@@ -78,6 +78,23 @@ impl GuardedBackend {
 
 #[async_trait]
 impl Backend for GuardedBackend {
+    async fn validate_transfer_recovery_path(
+        &self,
+        vault: &str,
+        path: &std::path::Path,
+    ) -> Result<(), BackendError> {
+        self.inner
+            .validate_transfer_recovery_path(vault, path)
+            .await
+    }
+
+    async fn transfer_location(
+        &self,
+        vault: &str,
+    ) -> Result<crate::backend::TransferLocation, BackendError> {
+        self.inner.transfer_location(vault).await
+    }
+
     fn name(&self) -> &'static str {
         self.inner.name()
     }
@@ -135,6 +152,25 @@ impl<'a> GuardedSecretBackend<'a> {
 #[async_trait]
 impl SecretBackend for GuardedSecretBackend<'_> {
     // -- Mutations: guarded before delegating -------------------------------
+
+    fn supports_atomic_create(&self) -> bool {
+        self.inner.secrets().supports_atomic_create()
+    }
+    fn supports_conditional_delete(&self) -> bool {
+        self.inner.secrets().supports_conditional_delete()
+    }
+    async fn delete_secret_if_revision(
+        &self,
+        vault: &str,
+        name: &str,
+        expected_revision: &str,
+    ) -> Result<(), BackendError> {
+        self.ensure_mutable(name)?;
+        self.inner
+            .secrets()
+            .delete_secret_if_revision(vault, name, expected_revision)
+            .await
+    }
 
     async fn set_secret(
         &self,
@@ -558,6 +594,12 @@ mod tests {
             ));
             assert!(matches!(
                 guard.rename_secret("v", name, "elsewhere").await,
+                Err(BackendError::PermissionDenied(_))
+            ));
+            assert!(matches!(
+                guard
+                    .delete_secret_if_revision("v", name, "generation")
+                    .await,
                 Err(BackendError::PermissionDenied(_))
             ));
             // Renaming a normal secret ONTO a reserved name is also blocked.

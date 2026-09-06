@@ -175,6 +175,23 @@ impl PolicyEnforcedBackend {
 
 #[async_trait]
 impl Backend for PolicyEnforcedBackend {
+    async fn validate_transfer_recovery_path(
+        &self,
+        vault: &str,
+        path: &std::path::Path,
+    ) -> Result<(), BackendError> {
+        self.inner
+            .validate_transfer_recovery_path(vault, path)
+            .await
+    }
+
+    async fn transfer_location(
+        &self,
+        vault: &str,
+    ) -> Result<crate::backend::TransferLocation, BackendError> {
+        self.inner.transfer_location(vault).await
+    }
+
     fn name(&self) -> &'static str {
         self.inner.name()
     }
@@ -379,6 +396,30 @@ impl crate::backend::attachment_keys::AttachmentKeyStore for &PolicyEnforcedBack
 
 #[async_trait]
 impl SecretBackend for PolicyEnforcedBackend {
+    fn supports_atomic_create(&self) -> bool {
+        self.inner.secrets().supports_atomic_create()
+    }
+    fn supports_conditional_delete(&self) -> bool {
+        self.inner.secrets().supports_conditional_delete()
+    }
+    async fn delete_secret_if_revision(
+        &self,
+        vault: &str,
+        name: &str,
+        expected_revision: &str,
+    ) -> Result<(), BackendError> {
+        self.checked(
+            vault,
+            name,
+            Operation::Delete,
+            false,
+            self.inner
+                .secrets()
+                .delete_secret_if_revision(vault, name, expected_revision),
+        )
+        .await
+    }
+
     async fn set_secret(
         &self,
         vault: &str,

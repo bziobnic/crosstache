@@ -31,6 +31,26 @@ pub struct SecretSnapshot {
 #[allow(dead_code)] // Infrastructure for Phase 2 pluggability — consumed by future backends.
 #[async_trait]
 pub trait SecretBackend: Send + Sync {
+    fn supports_atomic_create(&self) -> bool {
+        false
+    }
+
+    fn supports_conditional_delete(&self) -> bool {
+        false
+    }
+
+    /// Delete exactly the saved generation, only with an empty attachment prefix.
+    async fn delete_secret_if_revision(
+        &self,
+        _vault: &str,
+        _name: &str,
+        _expected_revision: &str,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported(
+            "conditional secret delete".into(),
+        ))
+    }
+
     /// Create or update a secret. Returns the new version's properties.
     async fn set_secret(
         &self,
@@ -485,6 +505,19 @@ mod tests {
             note: Some("ride along".to_string()),
             folder: Some("proj/db".to_string()),
         }
+    }
+
+    #[tokio::test]
+    async fn default_conditional_delete_is_unsupported() {
+        let backend = StubBackend::new();
+        assert!(!backend.supports_atomic_create());
+        assert!(!backend.supports_conditional_delete());
+        assert!(matches!(
+            backend
+                .delete_secret_if_revision("v", "name", "generation")
+                .await,
+            Err(BackendError::Unsupported(_))
+        ));
     }
 
     #[tokio::test]

@@ -272,8 +272,116 @@ impl LocalBackend {
     }
 }
 
+/// Canonicalize existing ancestors without creating a recovery directory.
+/// Resolve components in order so symlink/parent traversal cannot hide overlap.
+fn resolved_recovery_path(path: &std::path::Path) -> Result<std::path::PathBuf, BackendError> {
+    use std::path::Component;
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| BackendError::Internal(format!("resolve recovery path: {e}")))?
+            .join(path)
+    };
+    let mut resolved = std::path::PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => continue,
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            Component::Prefix(_) => {
+                resolved.push(component.as_os_str());
+                continue;
+            }
+            Component::RootDir | Component::Normal(_) => {
+                resolved.push(component.as_os_str());
+            }
+        }
+        match fs::symlink_metadata(&resolved) {
+            Ok(meta) => {
+                if !meta.is_dir() && !meta.file_type().is_symlink() {
+                    return Err(BackendError::InvalidArgument(
+                        "recovery path contains a non-directory".into(),
+                    ));
+                }
+                resolved = fs::canonicalize(&resolved).map_err(|e| {
+                    BackendError::Internal(format!("resolve recovery ancestor: {e}"))
+                })?;
+                if !resolved.is_dir() {
+                    return Err(BackendError::InvalidArgument(
+                        "recovery path contains a non-directory".into(),
+                    ));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(BackendError::Internal(format!(
+                    "inspect recovery ancestor: {error}"
+                )))
+            }
+        }
+    }
+    Ok(resolved)
+}
+
+fn validate_recovery_path(
+    store: &std::path::Path,
+    recovery: &std::path::Path,
+) -> Result<(), BackendError> {
+    let store = resolved_recovery_path(store)?;
+    let recovery = resolved_recovery_path(recovery)?;
+    if recovery.starts_with(&store) || store.starts_with(&recovery) {
+        return Err(BackendError::InvalidArgument(
+            "transfer recovery must be outside the backend store".into(),
+        ));
+    }
+    for ancestor in recovery.ancestors() {
+        match fs::symlink_metadata(ancestor.join(".git")) {
+            Ok(_) => {
+                return Err(BackendError::InvalidArgument(
+                    "transfer recovery must be outside Git worktrees".into(),
+                ))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(BackendError::Internal(format!(
+                    "inspect recovery Git boundary: {error}"
+                )))
+            }
+        }
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl Backend for LocalBackend {
+    async fn validate_transfer_recovery_path(
+        &self,
+        vault: &str,
+        path: &std::path::Path,
+    ) -> Result<(), BackendError> {
+        paths::validate_vault_name(vault)?;
+        validate_recovery_path(&self.config.store_path, path)
+    }
+
+    async fn transfer_location(
+        &self,
+        vault: &str,
+    ) -> Result<super::TransferLocation, BackendError> {
+        #[cfg(feature = "file-ops")]
+        {
+            files::transfer_location(&self.config.store_path, vault)
+        }
+        #[cfg(not(feature = "file-ops"))]
+        {
+            let _ = vault;
+            Err(BackendError::Unsupported(
+                "local transfer namespaces require file operations".into(),
+            ))
+        }
+    }
+
     fn name(&self) -> &'static str {
         "local"
     }
@@ -562,6 +670,40 @@ fn persisted_attachment_names(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn transfer_recovery_path_rejects_store_and_git_overlap_without_creation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = tmp.path().join("store");
+        std::fs::create_dir(&store).unwrap();
+        assert!(super::validate_recovery_path(&store, &store.join("missing/recovery")).is_err());
+        assert!(super::validate_recovery_path(&store, tmp.path()).is_err());
+        let outside = tmp.path().join("outside/missing");
+        super::validate_recovery_path(&store, &outside).unwrap();
+        assert!(!outside.exists());
+        let git = tmp.path().join("worktree");
+        std::fs::create_dir(&git).unwrap();
+        std::fs::write(git.join(".git"), "gitdir: elsewhere").unwrap();
+        assert!(super::validate_recovery_path(&store, &git.join("missing/recovery")).is_err());
+        assert!(super::validate_recovery_path(&store, &store.join("../store/missing")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transfer_recovery_path_resolves_symlink_aliases() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = tmp.path().join("store");
+        std::fs::create_dir(&store).unwrap();
+        let alias = tmp.path().join("alias");
+        std::os::unix::fs::symlink(&store, &alias).unwrap();
+        assert!(super::validate_recovery_path(&store, &alias.join("missing")).is_err());
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let alias = tmp.path().join("outside-alias");
+        std::os::unix::fs::symlink(&outside, &alias).unwrap();
+        super::validate_recovery_path(&store, &alias.join("missing")).unwrap();
+        assert!(!outside.join("missing").exists());
+    }
+
     use super::*;
     use crate::config::settings::LocalConfig;
     use tempfile::TempDir;

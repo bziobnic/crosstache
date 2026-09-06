@@ -64,7 +64,6 @@ pub trait FileBackend: Send + Sync {
     }
 
     /// Truthful implementation-side capability for atomic create-only upload.
-    #[cfg(any(feature = "ui", test))]
     fn supports_atomic_create(&self) -> bool {
         false
     }
@@ -82,7 +81,6 @@ pub trait FileBackend: Send + Sync {
     ///
     /// Backends that cannot provide this atomic guarantee reject the
     /// operation; callers must not emulate it with a check-then-upload race.
-    #[cfg(any(feature = "ui", test))]
     async fn upload_file_if_absent(
         &self,
         _vault: &str,
@@ -123,6 +121,19 @@ pub trait FileBackend: Send + Sync {
         vault: &str,
         request: FileListRequest,
     ) -> Result<Vec<FileInfo>, BackendError>;
+
+    fn supports_conditional_delete(&self) -> bool {
+        false
+    }
+
+    async fn delete_file_if_etag(
+        &self,
+        _vault: &str,
+        _name: &str,
+        _expected_etag: &str,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported("conditional file delete".into()))
+    }
 
     /// Delete a file by name.
     async fn delete_file(&self, vault: &str, name: &str) -> Result<(), BackendError>;
