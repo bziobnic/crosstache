@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- Attachment key initialization now uses create-only retained records on Local
+  and AWS, verified versioned writes on Azure, and retries racing name conflicts.
+  Local key/pointer pairs are durably journaled and recover interrupted writes
+  before reads; unexplained half-pairs fail closed.
+
 - Attachment downloads now read ciphertext and crypto metadata from one file
   generation: locked local reads, a single S3 GetObject response, or ETag-pinned
   Azure chunks. Concurrent Azure replacement, unsupported snapshot backends,

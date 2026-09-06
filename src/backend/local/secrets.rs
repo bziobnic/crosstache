@@ -163,7 +163,8 @@ impl UpdateTransactionPaths {
 struct UpdateJournal {
     version: u8,
     stem: String,
-    old_version: String,
+    // None records an initial creation; old string journals remain readable.
+    old_version: Option<String>,
 }
 
 #[derive(Debug)]
@@ -971,6 +972,11 @@ impl LocalSecretBackend {
                 paths.journal.display()
             )));
         }
+        // Establish durable marker absence before discarding recovery data,
+        // including retries after an earlier journal-unlink sync failed.
+        if paths.dir.exists() {
+            sync_directory(&paths.dir)?;
+        }
         Self::remove_transaction_file(&paths.journal_temp, "temporary update journal")?;
         for path in paths.data_files() {
             Self::remove_transaction_file(path, "transaction file")?;
@@ -1011,35 +1017,51 @@ impl LocalSecretBackend {
                 paths.journal.display()
             ))
         })?;
-        if journal.version != 1 || journal.stem != stem {
+        let valid_generation = matches!(
+            (journal.version, journal.old_version.as_ref()),
+            (1, Some(_)) | (2, None)
+        );
+        if !valid_generation || journal.stem != stem {
             return Err(BackendError::Internal(format!(
                 "invalid update journal {}",
                 paths.journal.display()
             )));
         }
-        if !paths.old_age.exists() || !paths.old_meta.exists() {
-            return Err(BackendError::Internal(format!(
-                "incomplete update recovery data for stem '{stem}'"
-            )));
-        }
-
         let active_age = age_path(&self.store_path, vault, stem)?;
         let active_meta = meta_path(&self.store_path, vault, stem)?;
-        durable_replace_from(&paths.old_age, &active_age)?;
-        durable_replace_from(&paths.old_meta, &active_meta)?;
-        self.recovery_interruption(20)?;
+        if let Some(old_version) = journal.old_version.as_ref() {
+            if !paths.old_age.exists() || !paths.old_meta.exists() {
+                return Err(BackendError::Internal(format!(
+                    "incomplete update recovery data for stem '{stem}'"
+                )));
+            }
+            durable_replace_from(&paths.old_age, &active_age)?;
+            self.recovery_interruption(19)?;
+            durable_replace_from(&paths.old_meta, &active_meta)?;
+            self.recovery_interruption(20)?;
 
-        let archive_dir = versions_dir(&self.store_path, vault, stem)?;
-        let archive_age = archive_dir.join(format!("{}.age", journal.old_version));
-        let archive_meta = archive_dir.join(format!("{}.meta.json", journal.old_version));
-        if Self::remove_transaction_file(&archive_age, "partial archive")? {
-            self.recovery_interruption(21)?;
-        }
-        if Self::remove_transaction_file(&archive_meta, "partial archive")? {
-            self.recovery_interruption(22)?;
-        }
-        if archive_dir.exists() {
-            sync_directory(&archive_dir)?;
+            let archive_dir = versions_dir(&self.store_path, vault, stem)?;
+            let archive_age = archive_dir.join(format!("{old_version}.age"));
+            let archive_meta = archive_dir.join(format!("{old_version}.meta.json"));
+            if Self::remove_transaction_file(&archive_age, "partial archive")? {
+                self.recovery_interruption(21)?;
+            }
+            if Self::remove_transaction_file(&archive_meta, "partial archive")? {
+                self.recovery_interruption(22)?;
+            }
+            if archive_dir.exists() {
+                sync_directory(&archive_dir)?;
+            }
+        } else {
+            // An initial creation has no backups. Keep the journal until both
+            // active halves and the index entry are durably absent; repeating
+            // any interrupted removal is safe.
+            Self::remove_transaction_file(&active_age, "uncommitted initial value")?;
+            self.recovery_interruption(19)?;
+            Self::remove_transaction_file(&active_meta, "uncommitted initial metadata")?;
+            sync_directory(active_age.parent().expect("active value has parent"))?;
+            self.update_attachment_index_locked(vault, stem, None)?;
+            self.recovery_interruption(20)?;
         }
         self.recovery_interruption(23)?;
 
@@ -1936,6 +1958,161 @@ impl LocalSecretBackend {
 }
 
 impl LocalSecretBackend {
+    /// Durably maintain the reverse index as part of a key-pair transaction.
+    /// A rollback of initial creation removes its entry before dropping the
+    /// journal. Existing legacy stems are valid index keys and remain in place.
+    fn update_attachment_index_locked(
+        &self,
+        vault: &str,
+        stem: &str,
+        name: Option<&str>,
+    ) -> Result<(), BackendError> {
+        if !self.opaque_filenames {
+            return Ok(());
+        }
+        let sdir = secrets_dir(&self.store_path, vault)?;
+        let mut index = opaque::load_index(&sdir, &self.identity)?;
+        if let Some(name) = name {
+            index.insert(
+                stem.to_string(),
+                opaque::IndexEntry {
+                    name: name.to_string(),
+                    v: 1,
+                },
+            );
+        } else if index.remove(stem).is_none() {
+            return Ok(());
+        }
+        let bytes = serde_json::to_vec(&index)
+            .map_err(|e| BackendError::Internal(format!("serialize key index: {e}")))?;
+        let ciphertext = crypto::encrypt_bytes(&bytes, &self.recipients)?;
+        let path = opaque::index_path(&sdir);
+        let temp = temp_path_for(&path)?;
+        durable_write_private(&temp, &ciphertext)?;
+        fs::rename(&temp, &path)
+            .map_err(|e| BackendError::Internal(format!("activate key index: {e}")))?;
+        sync_directory(&sdir)
+    }
+
+    /// The update journal also represents initial creation (no old version).
+    /// All pair files are staged and synced before publication; journal removal
+    /// is the commit point. Readers already recover these markers under the
+    /// vault lock, so no reader can observe a partially activated generation.
+    fn set_attachment_pair_locked(
+        &self,
+        vault: &str,
+        stem: &str,
+        value: &str,
+        meta: &SecretMeta,
+        old: Option<&(SecretMeta, Vec<u8>)>,
+    ) -> Result<(), BackendError> {
+        let transaction = UpdateTransactionPaths::new(&self.store_path, vault, stem)?;
+        let ap = age_path(&self.store_path, vault, stem)?;
+        let mp = meta_path(&self.store_path, vault, stem)?;
+        let archive = versions_dir(&self.store_path, vault, stem)?;
+        if let Some((old_meta, _)) = old {
+            // Recovery may remove only archives produced by this transaction.
+            // Refuse unexplained existing files rather than overwrite history.
+            if archive.join(format!("{}.age", old_meta.version)).exists()
+                || archive
+                    .join(format!("{}.meta.json", old_meta.version))
+                    .exists()
+            {
+                return Err(BackendError::Conflict(format!(
+                    "attachment key archive '{}' already exists",
+                    old_meta.version
+                )));
+            }
+        }
+        create_private_dir(&transaction.dir).map_err(|e| {
+            BackendError::Internal(format!("create key transaction directory: {e}"))
+        })?;
+        self.cleanup_unjournaled_transaction_locked(&transaction)?;
+        let mut simulated_crash = false;
+        let mut interrupt = |interruption| match interruption {
+            UpdateInterruption::None => Ok(()),
+            UpdateInterruption::Rollback(error) => Err(error),
+            UpdateInterruption::SimulatedCrash(error) => {
+                simulated_crash = true;
+                Err(error)
+            }
+        };
+        let result = (|| {
+            if let Some((_, old_age)) = old {
+                durable_write_private(&transaction.old_age, old_age)?;
+                let old_meta = fs::read(&mp).map_err(|e| {
+                    BackendError::Internal(format!("read existing key metadata: {e}"))
+                })?;
+                durable_write_private(&transaction.old_meta, &old_meta)?;
+            }
+            crypto::encrypt_to_file(&transaction.new_age, value.as_bytes(), &self.recipients)?;
+            sync_file(&transaction.new_age)?;
+            interrupt(self.update_interruption(40))?;
+            write_meta(
+                &transaction.new_meta,
+                meta,
+                MetaCrypto {
+                    recipients: &self.recipients,
+                    encrypt: self.encrypt_metadata,
+                },
+            )?;
+            sync_file(&transaction.new_meta)?;
+            sync_directory(&transaction.dir)?;
+            interrupt(self.update_interruption(41))?;
+            let journal = UpdateJournal {
+                version: if old.is_some() { 1 } else { 2 },
+                stem: stem.to_string(),
+                old_version: old.map(|(meta, _)| meta.version.clone()),
+            };
+            let bytes = serde_json::to_vec(&journal)
+                .map_err(|e| BackendError::Internal(format!("serialize key journal: {e}")))?;
+            interrupt(self.publish_update_journal_locked(&transaction, &bytes)?)?;
+            interrupt(self.update_interruption(0))?;
+            fs::rename(&transaction.new_age, &ap)
+                .map_err(|e| BackendError::Internal(format!("activate key value: {e}")))?;
+            sync_directory(ap.parent().expect("active value has parent"))?;
+            interrupt(self.update_interruption(1))?;
+            fs::rename(&transaction.new_meta, &mp)
+                .map_err(|e| BackendError::Internal(format!("activate key metadata: {e}")))?;
+            sync_directory(mp.parent().expect("active metadata has parent"))?;
+            interrupt(self.update_interruption(2))?;
+            if let Some((old_meta, _)) = old {
+                create_private_dir(&archive)
+                    .map_err(|e| BackendError::Internal(format!("create key archive: {e}")))?;
+                // Preserve the exact ciphertext and metadata representation,
+                // including the encryption mode and original version revision.
+                durable_replace_from(
+                    &transaction.old_age,
+                    &archive.join(format!("{}.age", old_meta.version)),
+                )?;
+                interrupt(self.update_interruption(42))?;
+                durable_replace_from(
+                    &transaction.old_meta,
+                    &archive.join(format!("{}.meta.json", old_meta.version)),
+                )?;
+                sync_directory(archive.parent().expect("archive has parent"))?;
+                sync_directory(ap.parent().expect("active value has parent"))?;
+            }
+            interrupt(self.update_interruption(3))?;
+            self.update_attachment_index_locked(vault, stem, Some(&meta.name))?;
+            interrupt(self.update_interruption(43))?;
+            Self::remove_transaction_file(&transaction.journal, "committed key journal")?;
+            sync_directory(&transaction.dir)?;
+            interrupt(self.update_interruption(4))?;
+            self.finish_update_transaction_locked(&transaction)
+        })();
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) if simulated_crash => Err(error),
+            Err(error) => match self.recover_update_for_stem_locked(vault, stem) {
+                Ok(()) => Err(error),
+                Err(recovery) => Err(BackendError::Internal(format!(
+                    "{error}; attachment key recovery also failed: {recovery}"
+                ))),
+            },
+        }
+    }
+
     fn set_secret_with_mode(
         &self,
         vault: &str,
@@ -1971,10 +2148,32 @@ impl LocalSecretBackend {
         let stem = self.resolve_active_stem(vault, &name)?;
         let ap = age_path(&store, vault, &stem)?;
         let mp = meta_path(&store, vault, &stem)?;
-        if require_absent && mp.exists() {
-            return Err(BackendError::Conflict(format!(
-                "secret '{name}' already exists in vault '{vault}'"
-            )));
+        let attachment_key = crate::secret::attachment_key::is_active_pointer_name(&name)
+            || crate::secret::attachment_key::is_strict_retained_record_name(&name);
+        if require_absent {
+            // Ordinary creates become visible with metadata and may retry an
+            // interrupted ciphertext-only write. Custody records instead refuse
+            // either unexplained half, including in the other filename layout.
+            for candidate in self.transaction_stems_for_name(&name) {
+                if meta_path(&store, vault, &candidate)?.exists()
+                    || (attachment_key && age_path(&store, vault, &candidate)?.exists())
+                {
+                    return Err(BackendError::Conflict(format!(
+                        "secret '{name}' already exists in vault '{vault}'"
+                    )));
+                }
+            }
+        }
+        if attachment_key {
+            for candidate in self.transaction_stems_for_name(&name) {
+                if age_path(&store, vault, &candidate)?.exists()
+                    != meta_path(&store, vault, &candidate)?.exists()
+                {
+                    return Err(BackendError::Conflict(format!(
+                        "incomplete attachment key pair '{name}' in vault '{vault}'"
+                    )));
+                }
+            }
         }
 
         // Snapshot old state for transactional replace+archive.
@@ -2016,6 +2215,19 @@ impl LocalSecretBackend {
             version: version.clone(),
             revision: new_revision(),
         };
+
+        if attachment_key {
+            self.set_attachment_pair_locked(
+                vault,
+                &stem,
+                &request.value,
+                &meta,
+                old_snapshot.as_ref(),
+            )?;
+            // Retain an existing legacy stem: migration is a separate operation
+            // and must not split a committed pair after its journal is removed.
+            return Ok(meta_to_properties(&meta, None));
+        }
 
         // Encrypt + write to temp files first, then atomically replace active.
         let _identity = identity;
@@ -2865,7 +3077,7 @@ impl SecretBackend for LocalSecretBackend {
                 let journal = UpdateJournal {
                     version: 1,
                     stem: stem.clone(),
-                    old_version: old_meta.version.clone(),
+                    old_version: Some(old_meta.version.clone()),
                 };
                 let journal_bytes = serde_json::to_vec_pretty(&journal).map_err(|e| {
                     BackendError::Internal(format!("serialize update journal: {e}"))
@@ -7063,5 +7275,415 @@ mod tests {
                 "leaky stem after rename: {fname}"
             );
         }
+    }
+
+    // These tests exercise actual encrypted files and vault locks. Removing pair
+    // journaling, accepting a half-pair, or dropping recovery before reads breaks
+    // their externally observable generation/absence assertions.
+    const KEY_POINTER: &str = "xv-attachment-key";
+    const RETAINED_KEY: &str =
+        "xv-attachment-key-ak1-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[tokio::test]
+    async fn attachment_pair_recovers_each_interrupted_write_boundary() {
+        for opaque in [false, true] {
+            for encrypted in [false, true] {
+                for replacement in [false, true] {
+                    for crash in [false, true] {
+                        for stage in [40, 41, 10, 11, 0, 1, 2, 42, 3, 43, 4] {
+                            if stage == 42 && !replacement {
+                                continue;
+                            }
+                            let (backend, tmp) = if opaque {
+                                test_backend_opaque_opts(encrypted)
+                            } else {
+                                test_backend_opts(encrypted)
+                            };
+                            let name = if replacement {
+                                KEY_POINTER
+                            } else {
+                                RETAINED_KEY
+                            };
+                            if replacement {
+                                backend
+                                    .set_secret("default", make_request(name, "old-key"))
+                                    .await
+                                    .unwrap();
+                            }
+                            if crash {
+                                install_update_crash(&backend.store_path, stage);
+                            } else {
+                                install_update_failure(&backend.store_path, stage);
+                            }
+                            let result = if replacement {
+                                backend
+                                    .set_secret("default", make_request(name, "new-key"))
+                                    .await
+                            } else {
+                                backend
+                                    .create_secret_if_absent(
+                                        "default",
+                                        make_request(name, "new-key"),
+                                    )
+                                    .await
+                            };
+                            assert!(
+                                result.is_err(),
+                                "write must stop at stage {stage}, replacement={replacement}"
+                            );
+                            drop(backend);
+                            let restarted = if opaque {
+                                reopen_opaque(&tmp, encrypted)
+                            } else {
+                                test_backend_reopen(&tmp, encrypted)
+                            };
+                            let current = restarted.get_secret("default", name, true).await;
+                            if stage == 4 || replacement {
+                                let current = current.unwrap();
+                                assert_eq!(
+                                    current.value.as_ref().map(|v| v.as_str()),
+                                    Some(if stage == 4 { "new-key" } else { "old-key" }),
+                                    "stage {stage}"
+                                );
+                                assert_eq!(
+                                    current.version,
+                                    if replacement && stage == 4 {
+                                        "v2"
+                                    } else {
+                                        "v1"
+                                    }
+                                );
+                            } else {
+                                assert!(
+                                    matches!(current, Err(BackendError::NotFound { .. })),
+                                    "stage {stage}: {current:?}"
+                                );
+                                let stem = restarted.active_stem(name);
+                                assert!(!age_path(&restarted.store_path, "default", &stem)
+                                    .unwrap()
+                                    .exists());
+                                assert!(!meta_path(&restarted.store_path, "default", &stem)
+                                    .unwrap()
+                                    .exists());
+                            }
+                            assert_eq!(
+                                restarted.list_secrets("default", None).await.unwrap().len(),
+                                usize::from(replacement || stage == 4)
+                            );
+                            assert!(!restarted
+                                .has_update_artifacts_for_name("default", name)
+                                .unwrap());
+                            if opaque {
+                                let index = opaque::load_index(
+                                    &secrets_dir(&restarted.store_path, "default").unwrap(),
+                                    &restarted.identity,
+                                )
+                                .unwrap();
+                                assert_eq!(index.len(), usize::from(replacement || stage == 4));
+                            }
+                            if replacement && stage == 4 {
+                                let archived = restarted
+                                    .get_secret_version("default", name, "v1", true)
+                                    .await
+                                    .unwrap();
+                                assert_eq!(
+                                    archived.value.as_ref().map(|v| v.as_str()),
+                                    Some("old-key")
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_create_retries_after_ciphertext_activation_without_metadata() {
+        for opaque in [false, true] {
+            for encrypted in [false, true] {
+                for name in ["ordinary-secret", "xv-attachment-key-notes"] {
+                    let (backend, _tmp) = if opaque {
+                        test_backend_opaque_opts(encrypted)
+                    } else {
+                        test_backend_opts(encrypted)
+                    };
+                    let stem = backend.active_stem(name);
+                    let ap = age_path(&backend.store_path, "default", &stem).unwrap();
+                    let mp = meta_path(&backend.store_path, "default", &stem).unwrap();
+                    // Persist precisely the state left by a stopped ordinary
+                    // create after the value rename and before metadata rename.
+                    crypto::encrypt_to_file(&ap, b"interrupted-value", &backend.recipients)
+                        .unwrap();
+                    assert!(!mp.exists());
+                    backend
+                        .create_secret_if_absent("default", make_request(name, "retry-value"))
+                        .await
+                        .expect("ordinary creation must be retryable");
+                    assert!(matches!(
+                        backend
+                            .create_secret_if_absent("default", make_request(name, "replacement"))
+                            .await,
+                        Err(BackendError::Conflict(_))
+                    ));
+                    let stored = backend.get_secret("default", name, true).await.unwrap();
+                    assert_eq!(stored.value.unwrap().as_str(), "retry-value");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn attachment_create_refuses_either_existing_half_pair_in_both_layouts() {
+        for opaque in [false, true] {
+            for legacy in [false, true] {
+                for metadata_only in [false, true] {
+                    let (backend, _tmp) = if opaque {
+                        test_backend_opaque()
+                    } else {
+                        test_backend()
+                    };
+                    let stem = if legacy {
+                        encode_name(RETAINED_KEY)
+                    } else {
+                        backend.active_stem(RETAINED_KEY)
+                    };
+                    let path = if metadata_only {
+                        meta_path(&backend.store_path, "default", &stem)
+                    } else {
+                        age_path(&backend.store_path, "default", &stem)
+                    }
+                    .unwrap();
+                    fs::write(&path, b"unexplained-existing-half").unwrap();
+                    let result = backend
+                        .create_secret_if_absent("default", make_request(RETAINED_KEY, "new-key"))
+                        .await;
+                    assert!(
+                        matches!(result, Err(BackendError::Conflict(_))),
+                        "{result:?}"
+                    );
+                    assert_eq!(fs::read(&path).unwrap(), b"unexplained-existing-half");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn attachment_initial_creation_recovery_can_itself_restart() {
+        for opaque in [false, true] {
+            for stage in [19, 20, 23, 24, 25, 28, 29, 30] {
+                let (backend, tmp) = if opaque {
+                    test_backend_opaque_opts(true)
+                } else {
+                    test_backend_opts(true)
+                };
+                install_update_crash(
+                    &backend.store_path,
+                    if stage == 28 || stage == 29 { 0 } else { 43 },
+                );
+                assert!(backend
+                    .create_secret_if_absent("default", make_request(RETAINED_KEY, "new-key"))
+                    .await
+                    .is_err());
+                install_update_crash(&backend.store_path, stage);
+                let error = backend
+                    .get_secret("default", RETAINED_KEY, true)
+                    .await
+                    .unwrap_err();
+                assert!(
+                    error.to_string().contains("simulated crash"),
+                    "stage {stage}: {error}"
+                );
+                drop(backend);
+                let restarted = if opaque {
+                    reopen_opaque(&tmp, true)
+                } else {
+                    test_backend_reopen(&tmp, true)
+                };
+                assert!(matches!(
+                    restarted.get_secret("default", RETAINED_KEY, true).await,
+                    Err(BackendError::NotFound { .. })
+                ));
+                restarted
+                    .create_secret_if_absent("default", make_request(RETAINED_KEY, "retry-key"))
+                    .await
+                    .unwrap();
+                let current = restarted
+                    .get_secret("default", RETAINED_KEY, true)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    current.value.as_ref().map(|v| v.as_str()),
+                    Some("retry-key")
+                );
+                assert_eq!(current.version, "v1");
+            }
+        }
+    }
+
+    #[test]
+    fn attachment_create_concurrent_writers_commit_only_one_pair() {
+        let (_backend, tmp) = test_backend_opaque_opts(true);
+        let first = reopen_opaque(&tmp, true);
+        let second = reopen_opaque(&tmp, true);
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let spawn = |backend: LocalSecretBackend,
+                     value: &'static str,
+                     barrier: Arc<std::sync::Barrier>| {
+            std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                barrier.wait();
+                runtime.block_on(
+                    backend.create_secret_if_absent("default", make_request(RETAINED_KEY, value)),
+                )
+            })
+        };
+        let a = spawn(first, "first", barrier.clone());
+        let b = spawn(second, "second", barrier);
+        let (a, b) = (a.join().unwrap(), b.join().unwrap());
+        assert!(matches!(
+            (&a, &b),
+            (Ok(_), Err(BackendError::Conflict(_))) | (Err(BackendError::Conflict(_)), Ok(_))
+        ));
+        let backend = reopen_opaque(&tmp, true);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let current = runtime
+            .block_on(backend.get_secret("default", RETAINED_KEY, true))
+            .unwrap();
+        assert_eq!(
+            current.value.as_ref().map(|v| v.as_str()),
+            Some(if a.is_ok() { "first" } else { "second" })
+        );
+        assert_eq!(current.version, "v1");
+    }
+
+    #[tokio::test]
+    async fn attachment_pair_rejects_ambiguous_legacy_journal_without_removing_active_key() {
+        let (backend, _tmp) = test_backend();
+        backend
+            .set_secret("default", make_request(KEY_POINTER, "old-key"))
+            .await
+            .unwrap();
+        let stem = backend.active_stem(KEY_POINTER);
+        let ap = age_path(&backend.store_path, "default", &stem).unwrap();
+        let mp = meta_path(&backend.store_path, "default", &stem).unwrap();
+        let old_age = fs::read(&ap).unwrap();
+        let old_meta = fs::read(&mp).unwrap();
+        let transaction =
+            UpdateTransactionPaths::new(&backend.store_path, "default", &stem).unwrap();
+        fs::create_dir_all(&transaction.dir).unwrap();
+        fs::write(
+            &transaction.journal,
+            serde_json::to_vec(&serde_json::json!({"version": 1, "stem": stem})).unwrap(),
+        )
+        .unwrap();
+        let result = backend.get_secret("default", KEY_POINTER, true).await;
+        assert!(
+            matches!(result, Err(BackendError::Internal(_))),
+            "{result:?}"
+        );
+        assert_eq!(fs::read(ap).unwrap(), old_age);
+        assert_eq!(fs::read(mp).unwrap(), old_meta);
+    }
+
+    #[tokio::test]
+    async fn attachment_pair_upsert_refuses_unexplained_halves_in_every_layout() {
+        for metadata_only in [false, true] {
+            for legacy in [false, true] {
+                let (backend, _tmp) = test_backend_opaque();
+                let stem = if legacy {
+                    encode_name(KEY_POINTER)
+                } else {
+                    backend.active_stem(KEY_POINTER)
+                };
+                let path = if metadata_only {
+                    meta_path(&backend.store_path, "default", &stem)
+                } else {
+                    age_path(&backend.store_path, "default", &stem)
+                }
+                .unwrap();
+                fs::write(&path, b"unexplained-existing-half").unwrap();
+                let result = backend
+                    .set_secret("default", make_request(KEY_POINTER, "new-key"))
+                    .await;
+                assert!(
+                    matches!(result, Err(BackendError::Conflict(_))),
+                    "{result:?}"
+                );
+                assert_eq!(fs::read(&path).unwrap(), b"unexplained-existing-half");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn attachment_pair_preserves_exact_archives_when_reopened_with_opaque_encrypted_metadata()
+    {
+        let (backend, tmp) = test_backend();
+        backend
+            .set_secret("default", make_request(KEY_POINTER, "first-key"))
+            .await
+            .unwrap();
+        backend
+            .set_secret("default", make_request(KEY_POINTER, "second-key"))
+            .await
+            .unwrap();
+        let stem = encode_name(KEY_POINTER);
+        let archive = versions_dir(&backend.store_path, "default", &stem).unwrap();
+        let first_age = fs::read(archive.join("v1.age")).unwrap();
+        let first_meta = fs::read(archive.join("v1.meta.json")).unwrap();
+        let second_age =
+            fs::read(age_path(&backend.store_path, "default", &stem).unwrap()).unwrap();
+        let second_meta =
+            fs::read(meta_path(&backend.store_path, "default", &stem).unwrap()).unwrap();
+        drop(backend);
+        let backend = reopen_opaque(&tmp, true);
+        install_update_crash(&backend.store_path, 3);
+        assert!(backend
+            .set_secret("default", make_request(KEY_POINTER, "third-key"))
+            .await
+            .is_err());
+        let old = backend
+            .get_secret("default", KEY_POINTER, true)
+            .await
+            .unwrap();
+        assert_eq!(old.value.as_ref().map(|v| v.as_str()), Some("second-key"));
+        assert_eq!(old.version, "v2");
+        assert_eq!(fs::read(archive.join("v1.age")).unwrap(), first_age);
+        assert_eq!(fs::read(archive.join("v1.meta.json")).unwrap(), first_meta);
+        assert!(!archive.join("v2.age").exists());
+        backend
+            .set_secret("default", make_request(KEY_POINTER, "third-key"))
+            .await
+            .unwrap();
+        assert_eq!(fs::read(archive.join("v2.age")).unwrap(), second_age);
+        assert_eq!(fs::read(archive.join("v2.meta.json")).unwrap(), second_meta);
+        assert_eq!(fs::read(archive.join("v1.age")).unwrap(), first_age);
+        assert_eq!(fs::read(archive.join("v1.meta.json")).unwrap(), first_meta);
+        assert!(crypto::is_age_encrypted(
+            &fs::read(meta_path(&backend.store_path, "default", &stem).unwrap()).unwrap()
+        ));
+        assert_eq!(
+            backend
+                .list_versions("default", KEY_POINTER)
+                .await
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(
+            backend.list_secrets("default", None).await.unwrap().len(),
+            1
+        );
+        let first = backend
+            .get_secret_version("default", KEY_POINTER, "v1", true)
+            .await
+            .unwrap();
+        assert_eq!(first.value.as_ref().map(|v| v.as_str()), Some("first-key"));
     }
 }

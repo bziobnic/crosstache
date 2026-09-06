@@ -311,7 +311,13 @@ async fn initialize_v2(
                     note: Some("crosstache attachment key custody record".to_string()),
                     folder: None,
                 };
-                let committed = secrets.set_secret(vault, request).await?;
+                let committed = match secrets.commit_retained_key(vault, request).await {
+                    Ok(committed) => committed,
+                    // Another writer won after the metadata probe. Reclassify
+                    // on the next attempt; never turn a create conflict into an upsert.
+                    Err(BackendError::Conflict(_)) => continue,
+                    Err(error) => return Err(error.into()),
+                };
                 if committed.version.is_empty() {
                     return Err(CrosstacheError::invalid_argument(format!(
                         "attachment key commit in vault '{vault}' returned no version"
@@ -321,6 +327,11 @@ async fn initialize_v2(
                 let reread = secrets
                     .get_secret_version(vault, &retained_name, &committed.version, true)
                     .await?;
+                if reread.version != committed.version {
+                    return Err(CrosstacheError::invalid_argument(format!(
+                        "attachment key commit in vault '{vault}' returned a different version on verification"
+                    )));
+                }
                 let value = reread.value.ok_or_else(|| {
                     CrosstacheError::invalid_argument(format!(
                         "attachment key record in vault '{vault}' has no value after commit"
@@ -540,6 +551,8 @@ mod tests {
         // name -> versions of (value, content_type), newest last.
         pub secrets: Mutex<HashMap<String, Vec<(String, String)>>>,
         pub set_count: Mutex<usize>,
+        create_collision: Mutex<Option<(String, String)>>,
+        read_version_override: Mutex<Option<String>>,
     }
 
     impl StubSecrets {
@@ -547,6 +560,8 @@ mod tests {
             Self {
                 secrets: Mutex::new(HashMap::new()),
                 set_count: Mutex::new(0),
+                create_collision: Mutex::new(None),
+                read_version_override: Mutex::new(None),
             }
         }
 
@@ -611,6 +626,28 @@ mod tests {
             Ok(props(&request.name, None, &version, &ct))
         }
 
+        async fn create_secret_if_absent(
+            &self,
+            _vault: &str,
+            request: SecretRequest,
+        ) -> std::result::Result<SecretProperties, BackendError> {
+            let mut count = self.set_count.lock().unwrap();
+            let mut map = self.secrets.lock().unwrap();
+            if let Some((name, value)) = self.create_collision.lock().unwrap().take() {
+                map.insert(name, vec![(value, String::new())]);
+            }
+            if map.contains_key(&request.name) {
+                return Err(BackendError::Conflict("exists".into()));
+            }
+            let ct = request.content_type.unwrap_or_default();
+            map.insert(
+                request.name.clone(),
+                vec![(request.value.to_string(), ct.clone())],
+            );
+            *count += 1;
+            Ok(props(&request.name, None, "1", &ct))
+        }
+
         async fn get_secret(
             &self,
             _vault: &str,
@@ -662,7 +699,11 @@ mod tests {
             Ok(props(
                 name,
                 include_value.then_some(val.as_str()),
-                version,
+                self.read_version_override
+                    .lock()
+                    .unwrap()
+                    .as_deref()
+                    .unwrap_or(version),
                 ct,
             ))
         }
@@ -1541,5 +1582,66 @@ mod tests {
         )
         .await
         .is_err());
+    }
+    #[cfg(feature = "file-ops")]
+    #[tokio::test]
+    async fn retained_commit_collision_after_probe_preserves_user_record_and_retries() {
+        use age::secrecy::ExposeSecret;
+        let secrets = StubSecrets::new();
+        let first = age::x25519::Identity::generate();
+        let second = age::x25519::Identity::generate();
+        let first_name = attachment_key::retained_record_name(&AttachmentKeyId::derive(
+            &first.to_public().to_string(),
+        ));
+        *secrets.create_collision.lock().unwrap() = Some((first_name.clone(), "user-value".into()));
+        let mut candidates = [first, second].into_iter();
+        let material = initialize_v2(
+            &crate::backend::attachment_keys::RawAttachmentKeyStore::new(&secrets),
+            "v",
+            &mut || {
+                Zeroizing::new(
+                    candidates
+                        .next()
+                        .unwrap()
+                        .to_string()
+                        .expose_secret()
+                        .to_string(),
+                )
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(secrets.latest(&first_name).as_deref(), Some("user-value"));
+        assert_ne!(
+            attachment_key::retained_record_name(&material.reference().key_id),
+            first_name
+        );
+        assert!(secrets.latest(ATTACHMENT_KEY_SECRET).is_some());
+    }
+
+    #[cfg(feature = "file-ops")]
+    #[tokio::test]
+    async fn retained_commit_rejects_wrong_version_before_publishing_pointer() {
+        use age::secrecy::ExposeSecret;
+        let secrets = StubSecrets::new();
+        *secrets.read_version_override.lock().unwrap() = Some("wrong-version".into());
+        let result = initialize_v2(
+            &crate::backend::attachment_keys::RawAttachmentKeyStore::new(&secrets),
+            "v",
+            &mut || {
+                Zeroizing::new(
+                    age::x25519::Identity::generate()
+                        .to_string()
+                        .expose_secret()
+                        .to_string(),
+                )
+            },
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "a mismatched provider version must fail verification"
+        );
+        assert!(secrets.latest(ATTACHMENT_KEY_SECRET).is_none());
     }
 }

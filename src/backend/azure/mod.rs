@@ -261,6 +261,12 @@ impl Backend for AzureBackend {
         &self.secret_backend
     }
 
+    fn attachment_keys(&self) -> Box<dyn crate::backend::attachment_keys::AttachmentKeyStore + '_> {
+        Box::new(
+            crate::backend::attachment_keys::RawAttachmentKeyStore::versioned(&self.secret_backend),
+        )
+    }
+
     fn vaults(&self) -> Option<&dyn VaultBackend> {
         Some(&self.vault_backend)
     }
@@ -336,12 +342,17 @@ mod tests {
     use azure_core::auth::{AccessToken, TokenCredential};
     use azure_identity::AzureCliCredential;
 
-    struct StubAzureAuthProvider;
+    #[derive(Default)]
+    struct StubAzureAuthProvider {
+        token_calls: std::sync::atomic::AtomicUsize,
+    }
 
     #[async_trait]
     impl AzureAuthProvider for StubAzureAuthProvider {
         async fn get_token(&self, _scopes: &[&str]) -> crate::error::Result<AccessToken> {
-            unreachable!("capability checks must not request Azure tokens")
+            self.token_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(CrosstacheError::authentication("test credential refusal"))
         }
 
         async fn get_tenant_id(&self) -> crate::error::Result<String> {
@@ -363,7 +374,8 @@ mod tests {
 
     #[test]
     fn azure_backend_declares_and_exposes_audit_backend() {
-        let backend = AzureBackend::new(&Config::default(), Arc::new(StubAzureAuthProvider))
+        let auth = Arc::new(StubAzureAuthProvider::default());
+        let backend = AzureBackend::new(&Config::default(), auth.clone())
             .expect("default Azure backend should construct for capability inspection");
 
         assert!(backend.capabilities().has_audit);
@@ -372,5 +384,39 @@ mod tests {
         assert!(!backend.capabilities().has_atomic_rename);
         assert!(!backend.capabilities().has_atomic_file_create);
         assert!(backend.audit().is_some());
+        assert_eq!(
+            auth.token_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
+    #[tokio::test]
+    async fn azure_custody_commit_reaches_versioned_set_and_preserves_auth_failure() {
+        use crate::secret::manager::SecretRequest;
+        let auth = Arc::new(StubAzureAuthProvider::default());
+        let backend = AzureBackend::new(&Config::default(), auth.clone()).unwrap();
+        let request = SecretRequest {
+            name: format!("xv-attachment-key-ak1-{}", "a".repeat(64)),
+            value: zeroize::Zeroizing::new("test-key-value".into()),
+            content_type: Some(crate::secret::attachment_key::KEY_RECORD_CONTENT_TYPE.into()),
+            enabled: None,
+            expires_on: None,
+            not_before: None,
+            tags: None,
+            groups: None,
+            note: None,
+            folder: None,
+        };
+        let result = backend
+            .attachment_keys()
+            .commit_retained_key("test-vault", request)
+            .await;
+        assert!(
+            matches!(result, Err(BackendError::AuthenticationFailed(_))),
+            "{result:?}"
+        );
+        assert_eq!(
+            auth.token_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
     }
 }

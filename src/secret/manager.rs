@@ -718,6 +718,103 @@ macro_rules! parse_restored_secret_properties {
     }};
 }
 
+// Shared production HTTP path; callers retain vault URL validation and authentication.
+async fn set_secret_http(
+    http_request: reqwest::RequestBuilder,
+    secret_url: &str,
+    sanitized_name: &str,
+    request: &SecretRequest,
+    tags: HashMap<String, String>,
+) -> Result<SecretProperties> {
+    // Create the request body
+    let mut body = serde_json::json!({
+        "value": request.value,
+    });
+
+    // Add tags if any
+    if !tags.is_empty() {
+        body["tags"] = serde_json::json!(tags);
+    }
+
+    // Add content type if specified
+    if let Some(content_type) = &request.content_type {
+        body["contentType"] = serde_json::json!(content_type);
+    }
+
+    // Add attributes
+    let mut attributes = serde_json::json!({});
+    if let Some(enabled) = request.enabled {
+        attributes["enabled"] = serde_json::json!(enabled);
+    }
+    if let Some(expires_on) = request.expires_on {
+        attributes["exp"] = serde_json::json!(expires_on.timestamp());
+    }
+    if let Some(not_before) = request.not_before {
+        attributes["nbf"] = serde_json::json!(not_before.timestamp());
+    }
+    if attributes.as_object().is_some_and(|obj| !obj.is_empty()) {
+        body["attributes"] = attributes;
+    }
+
+    // Make the REST API call
+    let response = http_request
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| classify_network_error(&e, secret_url))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_text = read_error_body(response).await;
+        return Err(CrosstacheError::azure_api(format!(
+            "Failed to set secret: HTTP {status} - {error_text}"
+        )));
+    }
+
+    // Parse the response and convert to SecretProperties. The PUT
+    // response is a full secret bundle (id, value, attributes, tags), so
+    // build the result from it directly instead of a confirmation GET —
+    // a follow-up GET would return HTTP 403 `SecretDisabled` when this
+    // write just disabled the secret (enabled=false), failing the
+    // operation *after* the write succeeded.
+    let json: serde_json::Value =
+        read_json_body(response, crate::utils::MAX_RESPONSE_BYTES).await?;
+    parse_secret_properties_bundle(&json, sanitized_name, true, "")
+}
+
+async fn get_secret_version_http(
+    http_request: reqwest::RequestBuilder,
+    secret_url: &str,
+    secret_name: &str,
+    version: &str,
+    include_value: bool,
+) -> Result<SecretProperties> {
+    let response = http_request
+        .send()
+        .await
+        .map_err(|e| classify_network_error(&e, secret_url))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        if status == 404 {
+            return Err(CrosstacheError::azure_api(format!(
+                "Secret version '{version}' not found for secret '{secret_name}'"
+            )));
+        }
+        let error_text = read_error_body(response).await;
+        return Err(CrosstacheError::azure_api(format!(
+            "Failed to get secret version: HTTP {} - {}",
+            status, error_text
+        )));
+    }
+
+    // Parse the JSON response
+    let json: serde_json::Value =
+        read_json_body(response, crate::utils::MAX_RESPONSE_BYTES).await?;
+
+    parse_secret_properties_bundle(&json, secret_name, include_value, version)
+}
+
 #[async_trait]
 impl SecretOperations for AzureSecretOperations {
     async fn set_secret(
@@ -738,36 +835,6 @@ impl SecretOperations for AzureSecretOperations {
             .get_token(&["https://vault.azure.net/.default"])
             .await?;
 
-        // Create the request body
-        let mut body = serde_json::json!({
-            "value": request.value,
-        });
-
-        // Add tags if any
-        if !tags.is_empty() {
-            body["tags"] = serde_json::json!(tags);
-        }
-
-        // Add content type if specified
-        if let Some(content_type) = &request.content_type {
-            body["contentType"] = serde_json::json!(content_type);
-        }
-
-        // Add attributes
-        let mut attributes = serde_json::json!({});
-        if let Some(enabled) = request.enabled {
-            attributes["enabled"] = serde_json::json!(enabled);
-        }
-        if let Some(expires_on) = request.expires_on {
-            attributes["exp"] = serde_json::json!(expires_on.timestamp());
-        }
-        if let Some(not_before) = request.not_before {
-            attributes["nbf"] = serde_json::json!(not_before.timestamp());
-        }
-        if attributes.as_object().is_some_and(|obj| !obj.is_empty()) {
-            body["attributes"] = attributes;
-        }
-
         // Create HTTP client with proper timeout configuration
         let network_config = NetworkConfig::default();
         let client = create_http_client(&network_config)?;
@@ -783,32 +850,14 @@ impl SecretOperations for AzureSecretOperations {
             reqwest::header::HeaderValue::from_static("application/json"),
         );
 
-        // Make the REST API call
-        let response = client
-            .put(&secret_url)
-            .headers(headers)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| classify_network_error(&e, &secret_url))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_text = read_error_body(response).await;
-            return Err(CrosstacheError::azure_api(format!(
-                "Failed to set secret: HTTP {status} - {error_text}"
-            )));
-        }
-
-        // Parse the response and convert to SecretProperties. The PUT
-        // response is a full secret bundle (id, value, attributes, tags), so
-        // build the result from it directly instead of a confirmation GET —
-        // a follow-up GET would return HTTP 403 `SecretDisabled` when this
-        // write just disabled the secret (enabled=false), failing the
-        // operation *after* the write succeeded.
-        let json: serde_json::Value =
-            read_json_body(response, crate::utils::MAX_RESPONSE_BYTES).await?;
-        parse_secret_properties_bundle(&json, &sanitized_name, true, "")
+        set_secret_http(
+            client.put(&secret_url).headers(headers),
+            &secret_url,
+            &sanitized_name,
+            request,
+            tags,
+        )
+        .await
     }
 
     async fn get_secret(
@@ -901,32 +950,14 @@ impl SecretOperations for AzureSecretOperations {
                 .map_err(|e| CrosstacheError::azure_api(format!("Invalid token format: {e}")))?,
         );
 
-        let response = http_client
-            .get(&secret_url)
-            .headers(headers)
-            .send()
-            .await
-            .map_err(|e| classify_network_error(&e, &secret_url))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            if status == 404 {
-                return Err(CrosstacheError::azure_api(format!(
-                    "Secret version '{version}' not found for secret '{secret_name}'"
-                )));
-            }
-            let error_text = read_error_body(response).await;
-            return Err(CrosstacheError::azure_api(format!(
-                "Failed to get secret version: HTTP {} - {}",
-                status, error_text
-            )));
-        }
-
-        // Parse the JSON response
-        let json: serde_json::Value =
-            read_json_body(response, crate::utils::MAX_RESPONSE_BYTES).await?;
-
-        parse_secret_properties_bundle(&json, secret_name, include_value, version)
+        get_secret_version_http(
+            http_client.get(&secret_url).headers(headers),
+            &secret_url,
+            secret_name,
+            version,
+            include_value,
+        )
+        .await
     }
 
     async fn list_secrets(
@@ -1993,3 +2024,7 @@ mod tests {
         assert_eq!(props.content_type, "text/plain");
     }
 }
+
+#[cfg(test)]
+#[path = "azure_retained_key_tests.rs"]
+mod azure_retained_key_tests;

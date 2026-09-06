@@ -23,6 +23,17 @@ pub trait AttachmentKeyStore: Send + Sync {
         version: &str,
         include_value: bool,
     ) -> Result<SecretProperties, BackendError>;
+    /// Commit a retained identity without replacing existing Local/AWS records.
+    /// Versioned providers must return the exact new immutable version.
+    async fn commit_retained_key(
+        &self,
+        _vault: &str,
+        _request: SecretRequest,
+    ) -> Result<SecretProperties, BackendError> {
+        Err(BackendError::Unsupported(
+            "retained attachment key commit".into(),
+        ))
+    }
     async fn set_secret(
         &self,
         vault: &str,
@@ -41,11 +52,40 @@ pub(crate) fn validate_name(name: &str) -> Result<(), BackendError> {
     Ok(())
 }
 
-pub(crate) struct RawAttachmentKeyStore<'a>(&'a dyn SecretBackend);
+pub(crate) fn validate_retained_request(request: &SecretRequest) -> Result<(), BackendError> {
+    if !matches!(
+        classify_reserved_name(&request.name),
+        ReservedClass::StrictRetainedRecord
+    ) || !crate::secret::attachment_key::is_marked_key_record(
+        request.content_type.as_deref().unwrap_or_default(),
+    ) {
+        return Err(BackendError::PermissionDenied(
+            "retained commit requires a marked canonical key record".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) struct RawAttachmentKeyStore<'a> {
+    secrets: &'a dyn SecretBackend,
+    versioned_set: bool,
+}
 
 impl<'a> RawAttachmentKeyStore<'a> {
     pub(crate) fn new(secrets: &'a dyn SecretBackend) -> Self {
-        Self(secrets)
+        Self {
+            secrets,
+            versioned_set: false,
+        }
+    }
+
+    /// Azure Key Vault Set creates an immutable provider version rather than
+    /// offering conditional name creation. Exact-version verification follows.
+    pub(crate) fn versioned(secrets: &'a dyn SecretBackend) -> Self {
+        Self {
+            secrets,
+            versioned_set: true,
+        }
     }
 }
 
@@ -58,7 +98,7 @@ impl AttachmentKeyStore for RawAttachmentKeyStore<'_> {
         include_value: bool,
     ) -> Result<SecretProperties, BackendError> {
         validate_name(name)?;
-        self.0.get_secret(vault, name, include_value).await
+        self.secrets.get_secret(vault, name, include_value).await
     }
     async fn get_secret_version(
         &self,
@@ -68,17 +108,36 @@ impl AttachmentKeyStore for RawAttachmentKeyStore<'_> {
         include_value: bool,
     ) -> Result<SecretProperties, BackendError> {
         validate_name(name)?;
-        self.0
+        self.secrets
             .get_secret_version(vault, name, version, include_value)
             .await
+    }
+    async fn commit_retained_key(
+        &self,
+        vault: &str,
+        request: SecretRequest,
+    ) -> Result<SecretProperties, BackendError> {
+        validate_retained_request(&request)?;
+        if self.versioned_set {
+            self.secrets.set_secret(vault, request).await
+        } else {
+            self.secrets.create_secret_if_absent(vault, request).await
+        }
     }
     async fn set_secret(
         &self,
         vault: &str,
         request: SecretRequest,
     ) -> Result<SecretProperties, BackendError> {
-        validate_name(&request.name)?;
-        self.0.set_secret(vault, request).await
+        if !matches!(
+            classify_reserved_name(&request.name),
+            ReservedClass::ActivePointer
+        ) {
+            return Err(BackendError::PermissionDenied(
+                "only the active attachment pointer may be upserted".into(),
+            ));
+        }
+        self.secrets.set_secret(vault, request).await
     }
 }
 
@@ -136,6 +195,11 @@ mod tests {
                 Err(BackendError::PermissionDenied(_))
             ));
             assert!(matches!(
+                keys.commit_retained_key("default", request(name, "overwritten"))
+                    .await,
+                Err(BackendError::PermissionDenied(_))
+            ));
+            assert!(matches!(
                 keys.set_secret("default", request(name, "overwritten"))
                     .await,
                 Err(BackendError::PermissionDenied(_))
@@ -152,4 +216,55 @@ mod tests {
             );
         }
     }
+    #[tokio::test]
+    async fn retained_commit_is_create_only_and_cannot_use_pointer_upsert() {
+        let tmp = tempfile::tempdir().unwrap();
+        let raw = LocalBackend::new(Some(&LocalConfig {
+            store_path: Some(tmp.path().join("store").display().to_string()),
+            key_file: Some(tmp.path().join("identity").display().to_string()),
+            default_vault: Some("default".into()),
+            ..Default::default()
+        }))
+        .unwrap();
+        let keys = raw.attachment_keys();
+        let identity = age::x25519::Identity::generate();
+        let key_id = crate::secret::attachment_key::AttachmentKeyId::derive(
+            &identity.to_public().to_string(),
+        );
+        let name = crate::secret::attachment_key::retained_record_name(&key_id);
+        use age::secrecy::ExposeSecret;
+        let mut req = request(&name, identity.to_string().expose_secret());
+        req.content_type = Some(crate::secret::attachment_key::KEY_RECORD_CONTENT_TYPE.into());
+        let mut unmarked = req.clone();
+        unmarked.content_type = None;
+        assert!(matches!(
+            keys.commit_retained_key("default", unmarked).await,
+            Err(BackendError::PermissionDenied(_))
+        ));
+        let committed = keys
+            .commit_retained_key("default", req.clone())
+            .await
+            .unwrap();
+        assert!(!committed.version.is_empty());
+        assert!(matches!(
+            keys.commit_retained_key("default", req.clone()).await,
+            Err(BackendError::Conflict(_))
+        ));
+        assert!(matches!(
+            keys.set_secret("default", req).await,
+            Err(BackendError::PermissionDenied(_))
+        ));
+        assert_eq!(
+            raw.secrets()
+                .list_versions("default", &name)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
 }
+
+#[cfg(all(test, feature = "aws"))]
+#[path = "attachment_key_aws_tests.rs"]
+mod aws_tests;
