@@ -840,6 +840,134 @@ async fn original_v2_envelope_migrates_without_changing_ciphertext_intent() {
         .starts_with(MAGIC_V2));
 }
 
+#[tokio::test]
+async fn original_v2_recovery_accepts_republished_retained_identity() {
+    let (_dir, b, recovery) = fixture().await;
+    FAIL_AT.with(|f| f.set(Some(0)));
+    assert!(apply(&b, &b, intent(), true, &recovery).await.is_err());
+    FAIL_AT.with(|f| f.set(None));
+    let id = recovery.list().unwrap()[0].id.clone();
+    {
+        let session = storage::Session::open(&recovery.root, false).unwrap();
+        let current = load(&session, &id).unwrap();
+        let old = JournalV2 {
+            schema: 2,
+            id: current.id,
+            plan: current.plan,
+            location: current.source_location,
+            source_revision: current.source_revision,
+            secret_commitment: current.secret_commitment,
+            destination_revision: current.destination_revision,
+            phase: current.phase,
+            files: current.files,
+            sequence: current.sequence,
+        };
+        old.validate().unwrap();
+        let encrypted = crate::backend::local::crypto::encrypt_bytes(
+            &serde_json::to_vec(&old).unwrap(),
+            &[session.identity.to_public()],
+        )
+        .unwrap();
+        let mut auth = mac(&session.identity, MAGIC_V2);
+        auth.update(&encrypted);
+        let mut bytes = MAGIC_V2.to_vec();
+        bytes.extend_from_slice(&auth.finalize().into_bytes());
+        bytes.extend(encrypted);
+        session.write(&format!("{id}.age"), &bytes).unwrap();
+    }
+    let binding = {
+        let session = storage::Session::open(&recovery.root, false).unwrap();
+        load(&session, &id).unwrap().plan.files[0]
+            .source_key
+            .clone()
+    };
+    let reference = key_reference(&binding).unwrap();
+    assert_eq!(
+        reference.slot,
+        super::super::attachment_key::KeySlot::Retained
+    );
+    let name = super::super::attachment_key::retained_record_name(&reference.key_id);
+    let current = b
+        .secrets()
+        .get_secret("default", &name, true)
+        .await
+        .unwrap();
+    let request = rename_request_from_properties(&name, &current).unwrap();
+    b.secrets().set_secret("default", request).await.unwrap();
+    let newer = b
+        .secrets()
+        .get_secret("default", &name, true)
+        .await
+        .unwrap();
+    assert_ne!(newer.version, binding.provider_version);
+    let historical = b
+        .secrets()
+        .get_secret_version("default", &name, &binding.provider_version, true)
+        .await
+        .unwrap();
+    assert!(historical.value == newer.value);
+    assert_eq!(historical.version, binding.provider_version);
+    assert!(
+        resume(&b, &b, intent(), &id, true, &recovery)
+            .await
+            .unwrap()
+            .complete
+    );
+    assert!(std::fs::read(recovery.root.join(format!("{id}.age")))
+        .unwrap()
+        .starts_with(MAGIC_V2));
+}
+
+#[tokio::test]
+async fn v3_recovery_refuses_republished_retained_identity() {
+    let (_dir, b, recovery) = fixture().await;
+    FAIL_AT.with(|f| f.set(Some(0)));
+    assert!(apply(&b, &b, intent(), true, &recovery).await.is_err());
+    FAIL_AT.with(|f| f.set(None));
+    let id = recovery.list().unwrap()[0].id.clone();
+    let binding = {
+        let session = storage::Session::open(&recovery.root, false).unwrap();
+        load(&session, &id).unwrap().plan.files[0]
+            .source_key
+            .clone()
+    };
+    let reference = key_reference(&binding).unwrap();
+    assert_eq!(
+        reference.slot,
+        super::super::attachment_key::KeySlot::Retained
+    );
+    let name = super::super::attachment_key::retained_record_name(&reference.key_id);
+    let current = b
+        .secrets()
+        .get_secret("default", &name, true)
+        .await
+        .unwrap();
+    let request = rename_request_from_properties(&name, &current).unwrap();
+    b.secrets().set_secret("default", request).await.unwrap();
+    let newer = b
+        .secrets()
+        .get_secret("default", &name, true)
+        .await
+        .unwrap();
+    assert_ne!(newer.version, binding.provider_version);
+    let historical = b
+        .secrets()
+        .get_secret_version("default", &name, &binding.provider_version, true)
+        .await
+        .unwrap();
+    assert!(historical.value == newer.value);
+    assert_eq!(historical.version, binding.provider_version);
+    assert!(resume(&b, &b, intent(), &id, true, &recovery)
+        .await
+        .is_err());
+    assert!(b
+        .secrets()
+        .get_secret("default", "db-new", false)
+        .await
+        .is_err());
+    assert_eq!(b.attachment_names("default", "db").await.unwrap().len(), 2);
+}
+
 // Real local storage with independently controlled secret capabilities models
 // cloud comparison-only snapshots without inventing CAS deletion authority.
 struct CapabilityBackend<'a> {

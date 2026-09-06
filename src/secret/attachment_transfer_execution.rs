@@ -1140,6 +1140,7 @@ async fn authenticate_saved(
     vault: &str,
     binding: &transfer::TransferKeyBinding,
     snapshot: &rewrap::Snapshot,
+    legacy_v2: bool,
 ) -> Result<Zeroizing<Vec<u8>>> {
     use super::attachment_key as key;
     let reference = key_reference(binding)?;
@@ -1152,7 +1153,7 @@ async fn authenticate_saved(
     if !current.enabled
         || (reference.slot == key::KeySlot::Retained
             && (!key::is_marked_key_record(&current.content_type)
-                || current.version != binding.provider_version))
+                || (!legacy_v2 && current.version != binding.provider_version)))
     {
         return Err(conflict());
     }
@@ -1317,7 +1318,14 @@ async fn verify(
             if !matches_file(&current, file, None, true) {
                 return Err(conflict());
             }
-            authenticate_saved(source, &i.source.vault, &file.source_key, &current).await?;
+            authenticate_saved(
+                source,
+                &i.source.vault,
+                &file.source_key,
+                &current,
+                journal.legacy_v2,
+            )
+            .await?;
         } else if !matches!(state, FileState::DeletePending { .. }) {
             return Err(conflict());
         }
@@ -1356,6 +1364,7 @@ async fn verify(
                     .as_ref()
                     .unwrap_or(&file.source_key),
                 &current,
+                journal.legacy_v2,
             )
             .await?;
             drop(current);
@@ -1371,9 +1380,14 @@ async fn verify(
                 if !matches_file(&original, file, None, true) {
                     return Err(conflict());
                 }
-                let source_plaintext =
-                    authenticate_saved(source, &i.source.vault, &file.source_key, &original)
-                        .await?;
+                let source_plaintext = authenticate_saved(
+                    source,
+                    &i.source.vault,
+                    &file.source_key,
+                    &original,
+                    journal.legacy_v2,
+                )
+                .await?;
                 if *plaintext != *source_plaintext {
                     return Err(conflict());
                 }
@@ -1488,9 +1502,14 @@ async fn execute(
                         if !matches_file(&current, &file, None, true) {
                             return Err(conflict());
                         }
-                        let plaintext =
-                            authenticate_saved(source, &i.source.vault, &file.source_key, &current)
-                                .await?;
+                        let plaintext = authenticate_saved(
+                            source,
+                            &i.source.vault,
+                            &file.source_key,
+                            &current,
+                            journal.legacy_v2,
+                        )
+                        .await?;
                         let mut metadata = file.metadata.clone();
                         let content = if let Some(binding) = &journal.plan.destination_key {
                             let reference = key_reference(binding)?;
