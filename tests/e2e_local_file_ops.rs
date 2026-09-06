@@ -23,6 +23,61 @@ use std::process::{Command, Output};
 use tempfile::TempDir;
 
 #[test]
+fn attachment_rewrap_cli_moves_old_files_and_retries_without_key_changes() {
+    let env = FileEnv::new();
+    std::fs::write(env.path().join("old.txt"), b"rewrap plaintext").unwrap();
+    env.ok(&["file", "upload", "old.txt", "--encrypt"]);
+    let status: serde_json::Value =
+        serde_json::from_str(&env.ok(&["attachment-key", "status", "--format", "json"])).unwrap();
+    let old = status["report"]["active_key_id"].as_str().unwrap();
+    env.ok(&[
+        "attachment-key",
+        "rotate",
+        "--from-key-id",
+        old,
+        "--apply",
+        "--offline",
+    ]);
+    let status: serde_json::Value =
+        serde_json::from_str(&env.ok(&["attachment-key", "status", "--format", "json"])).unwrap();
+    let target = status["report"]["active_key_id"].as_str().unwrap();
+    let keys_before = env.ok(&["attachment-key", "keys", "--format", "json"]);
+    env.ok(&["attachment-key", "rewrap", "--to-key-id", target]);
+    let inventory: serde_json::Value =
+        serde_json::from_str(&env.ok(&["attachment-key", "inventory", "--format", "json"]))
+            .unwrap();
+    assert_eq!(inventory["report"]["files"][0]["key_id"], old);
+    let args = [
+        "attachment-key",
+        "rewrap",
+        "--to-key-id",
+        target,
+        "--apply",
+        "--offline",
+        "--format",
+        "json",
+    ];
+    assert!(!env.ok(&args).contains("AGE-SECRET-KEY"));
+    let inventory: serde_json::Value =
+        serde_json::from_str(&env.ok(&["attachment-key", "inventory", "--format", "json"]))
+            .unwrap();
+    assert_eq!(inventory["report"]["files"][0]["key_id"], target);
+    env.ok(&args);
+    assert_eq!(
+        keys_before,
+        env.ok(&["attachment-key", "keys", "--format", "json"])
+    );
+    let after_status: serde_json::Value =
+        serde_json::from_str(&env.ok(&["attachment-key", "status", "--format", "json"])).unwrap();
+    assert_eq!(status, after_status);
+    env.ok(&["file", "download", "old.txt", "--output", "rewrapped.out"]);
+    assert_eq!(
+        std::fs::read(env.path().join("rewrapped.out")).unwrap(),
+        b"rewrap plaintext"
+    );
+}
+
+#[test]
 fn attachment_rotation_cli_preserves_reads_and_rejects_repeat_rotation() {
     let env = FileEnv::new();
     std::fs::write(env.path().join("before.txt"), b"before rotation").unwrap();

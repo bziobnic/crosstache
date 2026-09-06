@@ -75,8 +75,9 @@ Review, CI, merge as Task 1. Report all three PRs and validation evidence.
 
 ## Progress
 
-- Task 1: implemented; independent review and AWS fix re-review clean. Local
-  validation: 4,172 passed, 47 ignored; all-features/all-targets workspace Clippy
-  with warnings denied and formatting checks passed. PR checks/merge pending.
-- Task 2: pending Task 1 merge.
+- Task 1: merged as PR #433 (0528326) after clean independent review, Bugbot,
+  and Linux/Windows CI. Local validation: 4,172 passed, 47 ignored; Clippy/fmt clean.
+- Task 2: implemented and reviewed, including a partial-envelope regression fix.
+  Local validation: 4,191 passed, 47 ignored; all-features/all-targets workspace
+  Clippy with warnings denied and formatting checks passed. PR checks/merge pending.
 - Task 3: pending Task 2 merge.

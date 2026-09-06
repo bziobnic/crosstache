@@ -15,6 +15,8 @@ pub mod attachment_lifecycle;
 #[cfg(feature = "file-ops")]
 pub(crate) mod attachment_restore;
 #[cfg(feature = "file-ops")]
+pub(crate) mod attachment_rewrap;
+#[cfg(feature = "file-ops")]
 pub(crate) mod attachment_rotation;
 pub mod attachments;
 pub mod manager;

@@ -1363,6 +1363,10 @@ To rotate new uploads while retaining old reads, preview
 `xv attachment-key rotate --from-key-id OLD_ACTIVE_ID`, then apply with
 `--apply --offline` while writers are stopped.
 
+Then preview `xv attachment-key rewrap --to-key-id ACTIVE_KEY_ID` to move current
+attachments to that key; apply with `--apply --offline`. Interrupted retries skip
+verified completed files. Keep old keys for historical ciphertext and backups.
+
 `xv list` hides `xv-attachment-key`. Full workflow, sync/rename/migrate
 pitfalls, and Azure's `xv_encrypted` metadata key:
 [`docs/attachments.md`](docs/attachments.md).
