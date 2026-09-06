@@ -54,6 +54,7 @@ pub struct TransferReport {
     pub id: String,
     pub complete: bool,
 }
+#[cfg(any(feature = "ui", test))]
 #[derive(Debug, Serialize)]
 pub struct TransferSummary {
     pub id: String,
@@ -74,6 +75,7 @@ impl RecoveryStore {
             .ok_or_else(invalid)?
             .join("transfer-recovery"))
     }
+    #[cfg(any(feature = "ui", test))]
     pub fn list(&self) -> Result<Vec<TransferSummary>> {
         if !self.root.try_exists().map_err(|_| invalid())? {
             return Ok(vec![]);
