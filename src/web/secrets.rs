@@ -15,6 +15,11 @@ use crate::records::{
     ConversionPreview, ConversionRequest,
 };
 use crate::secret::manager::{DeletedSecretSummary, SecretProperties};
+#[cfg(feature = "file-ops")]
+use crate::secret::{
+    attachment_transfer::{TransferEndpoint, TransferIntent, TransferOperation},
+    attachment_transfer_execution::{self, TransferReport, TransferSummary},
+};
 
 use super::api::{ApiError, VaultQuery};
 use super::WebState;
@@ -63,6 +68,252 @@ pub(crate) struct ConversionPreviewResponse {
 #[serde(deny_unknown_fields)]
 pub(crate) struct RenameBody {
     new_name: String,
+}
+
+#[cfg(feature = "file-ops")]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AttachmentRenamePreviewBody {
+    new_name: String,
+}
+
+#[cfg(feature = "file-ops")]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AttachmentRenameApplyBody {
+    new_name: String,
+    offline: bool,
+}
+
+#[cfg(feature = "file-ops")]
+fn attachment_rename_intent(
+    target: &super::ScopedWebTarget,
+    source_name: String,
+    destination_name: String,
+) -> TransferIntent {
+    let endpoint = TransferEndpoint {
+        identity: target.context.backend.clone(),
+        vault: target.context.vault.clone(),
+    };
+    TransferIntent {
+        source: endpoint.clone(),
+        destination: endpoint,
+        source_name,
+        destination_name,
+        operation: TransferOperation::Move,
+        destination_key_id: None,
+    }
+}
+
+#[cfg(feature = "file-ops")]
+fn validate_attachment_rename(
+    target: &super::ScopedWebTarget,
+    source_name: &str,
+    destination_name: &str,
+) -> Result<(), ApiError> {
+    let capabilities = target.backend.capabilities();
+    validate_secret_name(source_name, &capabilities)?;
+    validate_secret_name(destination_name, &capabilities)?;
+    super::api::reject_reserved_attachment_key(source_name)?;
+    super::api::reject_reserved_attachment_key(destination_name)?;
+    if source_name == destination_name {
+        return Err(dynamic_validation_error(
+            "Enter a name that is different from the current name.",
+            "new_name",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "file-ops")]
+fn canonical_transfer_id(id: &str) -> Result<(), ApiError> {
+    let parsed = uuid::Uuid::parse_str(id)
+        .map_err(|_| dynamic_validation_error("Use the canonical recovery operation ID.", "id"))?;
+    if parsed.to_string() != id {
+        return Err(dynamic_validation_error(
+            "Use the canonical recovery operation ID.",
+            "id",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "file-ops")]
+fn transfer_recovery_id(error: &crate::error::CrosstacheError) -> Option<String> {
+    let crate::error::CrosstacheError::Conflict(message) = error else {
+        return None;
+    };
+    let remainder = message.strip_prefix("Attachment transfer ")?;
+    let (candidate, _) = remainder.split_once(" stopped;")?;
+    let id = uuid::Uuid::parse_str(candidate).ok()?;
+    (id.to_string() == candidate).then(|| candidate.to_string())
+}
+
+#[cfg(feature = "file-ops")]
+fn attachment_transfer_error(error: crate::error::CrosstacheError) -> ApiError {
+    let Some(id) = transfer_recovery_id(&error) else {
+        return ApiError::App(error);
+    };
+    ApiError::Structured {
+        status: StatusCode::CONFLICT,
+        error: Box::new(super::errors::ApiErrorBody::new(
+            "xv-attachment-transfer-incomplete",
+            "The attachment rename was interrupted before it completed.",
+            "Keep writers stopped and retry the recovery operation.",
+            None,
+            Some(serde_json::json!({ "recovery_id": id })),
+        )),
+    }
+}
+
+#[cfg(feature = "file-ops")]
+pub(crate) async fn preview_attachment_rename(
+    State(state): State<Arc<WebState>>,
+    Path(name): Path<String>,
+    Query(query): Query<VaultQuery>,
+    request: Request,
+) -> Result<Json<attachment_transfer_execution::OwnedExecutionPreview>, ApiError> {
+    let body: AttachmentRenamePreviewBody = bounded_json(
+        request,
+        MAX_RENAME_REQUEST_BYTES,
+        Some("new_name"),
+        "The attachment rename preview request could not be understood.",
+        "Enter only a valid new secret name and try again.",
+    )
+    .await?;
+    let target = query.target(&state)?;
+    validate_attachment_rename(&target, &name, &body.new_name)?;
+    let intent = attachment_rename_intent(&target, name, body.new_name);
+    Ok(Json(
+        attachment_transfer_execution::preview(
+            target.backend.as_ref(),
+            target.backend.as_ref(),
+            intent,
+        )
+        .await?,
+    ))
+}
+
+#[cfg(feature = "file-ops")]
+fn require_offline_confirmation(offline: bool) -> Result<(), ApiError> {
+    if !offline {
+        return Err(dynamic_validation_error(
+            "Attachment rename requires offline mode.",
+            "offline",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "file-ops")]
+pub(crate) async fn apply_attachment_rename(
+    State(state): State<Arc<WebState>>,
+    Path(name): Path<String>,
+    Query(query): Query<VaultQuery>,
+    request: Request,
+) -> Result<Json<TransferReport>, ApiError> {
+    let body: AttachmentRenameApplyBody = bounded_json(
+        request,
+        MAX_RENAME_REQUEST_BYTES,
+        Some("new_name"),
+        "The attachment rename request could not be understood.",
+        "Enter only the requested rename confirmation and try again.",
+    )
+    .await?;
+    require_offline_confirmation(body.offline)?;
+    let target = query.target(&state)?;
+    validate_attachment_rename(&target, &name, &body.new_name)?;
+    let intent = attachment_rename_intent(&target, name, body.new_name);
+    let report = attachment_transfer_execution::apply(
+        target.backend.as_ref(),
+        target.backend.as_ref(),
+        intent,
+        body.offline,
+        state.recovery_store.as_ref(),
+    )
+    .await
+    .map_err(attachment_transfer_error)?;
+    Ok(Json(report))
+}
+
+#[cfg(feature = "file-ops")]
+pub(crate) async fn resume_attachment_rename(
+    State(state): State<Arc<WebState>>,
+    Path((name, id)): Path<(String, String)>,
+    Query(query): Query<VaultQuery>,
+    request: Request,
+) -> Result<Json<TransferReport>, ApiError> {
+    canonical_transfer_id(&id)?;
+    let body: AttachmentRenameApplyBody = bounded_json(
+        request,
+        MAX_RENAME_REQUEST_BYTES,
+        Some("new_name"),
+        "The attachment rename recovery request could not be understood.",
+        "Enter only the requested recovery confirmation and try again.",
+    )
+    .await?;
+    require_offline_confirmation(body.offline)?;
+    let target = query.target(&state)?;
+    validate_attachment_rename(&target, &name, &body.new_name)?;
+    let intent = attachment_rename_intent(&target, name, body.new_name);
+    let report = attachment_transfer_execution::resume(
+        target.backend.as_ref(),
+        target.backend.as_ref(),
+        intent,
+        &id,
+        body.offline,
+        state.recovery_store.as_ref(),
+    )
+    .await
+    .map_err(attachment_transfer_error)?;
+    Ok(Json(report))
+}
+
+#[cfg(feature = "file-ops")]
+pub(crate) async fn list_attachment_rename_recovery(
+    State(state): State<Arc<WebState>>,
+    Query(query): Query<VaultQuery>,
+) -> Result<Json<Vec<TransferSummary>>, ApiError> {
+    let target = query.target(&state)?;
+    let endpoint = TransferEndpoint {
+        identity: target.context.backend,
+        vault: target.context.vault,
+    };
+    let mut visible = Vec::new();
+    for summary in state.recovery_store.list()? {
+        if summary.intent.operation != TransferOperation::Move
+            || summary.intent.source != endpoint
+            || summary.intent.destination != endpoint
+        {
+            continue;
+        }
+        let mut authorized = true;
+        for name in [
+            summary.intent.source_name.as_str(),
+            summary.intent.destination_name.as_str(),
+        ] {
+            match target.backend.attachment_names(&endpoint.vault, name).await {
+                Ok(_) => {}
+                Err(crate::backend::error::BackendError::PermissionDenied(_)) => {
+                    authorized = false;
+                    break;
+                }
+                Err(_) => {
+                    return Err(structured_error(
+                        StatusCode::BAD_GATEWAY,
+                        "xv-recovery-list-unavailable",
+                        "Pending attachment renames could not be verified safely.",
+                        "Check backend access and retry the recovery list.",
+                        None,
+                    ));
+                }
+            }
+        }
+        if authorized {
+            visible.push(summary);
+        }
+    }
+    Ok(Json(visible))
 }
 
 fn structured_error(
@@ -570,6 +821,8 @@ pub(crate) async fn purge(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "file-ops")]
+    use super::{attachment_transfer_error, ApiError};
     use std::sync::Arc;
 
     use axum::body::Body;
@@ -581,6 +834,99 @@ mod tests {
     use crate::config::settings::LocalConfig;
     use crate::web::api::tests::get_json;
     use crate::web::testutil;
+
+    #[cfg(feature = "file-ops")]
+    #[tokio::test]
+    async fn attachment_rename_apply_requires_offline_before_recovery_or_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let recovery = temp.path().join("recovery");
+        let app = crate::web::build_router(testutil::test_state_with_recovery(recovery.clone()));
+
+        let (status, error) = get_json(
+            app,
+            "POST",
+            "/api/secrets/source/attachment-rename/apply",
+            Some(json!({
+                "new_name": "destination",
+                "offline": false,
+            })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(error["error"]["field"], "offline");
+        assert!(!recovery.exists());
+    }
+
+    #[cfg(feature = "file-ops")]
+    #[tokio::test]
+    async fn attachment_rename_routes_reject_unknown_fields_and_noncanonical_ids() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = crate::web::build_router(testutil::test_state_with_recovery(
+            temp.path().join("recovery"),
+        ));
+
+        let (status, error) = get_json(
+            app.clone(),
+            "POST",
+            "/api/secrets/source/attachment-rename/preview",
+            Some(json!({"new_name":"destination", "backend":"client-chosen"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(error["error"]["field"], "new_name");
+
+        let (status, error) = get_json(
+            app,
+            "POST",
+            "/api/secrets/source/attachment-rename/00000000000000000000000000000000/resume",
+            Some(json!({
+                "new_name":"destination",
+                "offline":true
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(error["error"]["field"], "id");
+    }
+
+    #[cfg(feature = "file-ops")]
+    #[tokio::test]
+    async fn attachment_rename_recovery_listing_is_lazy_and_uses_the_test_store() {
+        let temp = tempfile::tempdir().unwrap();
+        let recovery = temp.path().join("recovery");
+        let app = crate::web::build_router(testutil::test_state_with_recovery(recovery.clone()));
+
+        let (status, summaries) = get_json(app, "GET", "/api/attachment-renames", None).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(summaries, json!([]));
+        assert!(!recovery.exists());
+    }
+
+    #[cfg(feature = "file-ops")]
+    #[test]
+    fn only_the_executor_recovery_message_exposes_a_recovery_id() {
+        let provider_id = "123e4567-e89b-42d3-a456-426614174000";
+        let provider = attachment_transfer_error(crate::error::CrosstacheError::conflict(format!(
+            "provider request {provider_id} failed"
+        )));
+        assert!(matches!(provider, ApiError::App(_)));
+
+        let executor = attachment_transfer_error(crate::error::CrosstacheError::conflict(format!(
+            "Attachment transfer {provider_id} stopped; retain both names"
+        )));
+        match executor {
+            ApiError::Structured { error, .. } => assert_eq!(
+                error
+                    .details
+                    .as_ref()
+                    .and_then(|details| details["recovery_id"].as_str()),
+                Some(provider_id),
+            ),
+            _ => panic!("executor recovery conflict must be structured"),
+        }
+    }
 
     fn real_local_state(temp: &tempfile::TempDir) -> Arc<crate::web::WebState> {
         let backend = LocalBackend::new(Some(&LocalConfig {

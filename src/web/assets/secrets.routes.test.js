@@ -1742,6 +1742,162 @@ function existingSecretApi(value = 'top-secret', clipboardTimeout = undefined) {
   };
 }
 
+test('attached rename previews before apply and requires the stopped-writers checkbox', async () => {
+  const calls = [];
+  const api = async (method, path, body) => {
+    calls.push({ method, path, body });
+    if (path === '/api/context') return {
+      vault: 'one', backend: 'test', workspace: { alias: 'primary' }, capabilities: { files: true, atomic_rename: true },
+    };
+    if (path === '/api/types') return { types: [] };
+    if (path === '/api/vaults') return { vaults: [{ name: 'one' }] };
+    if (method === 'GET' && path.startsWith('/api/attachment-renames?')) return [];
+    if (method === 'GET' && path.startsWith('/api/secrets/existing?')) {
+      return { tags: {}, content_type: '', enabled: true, not_before: null };
+    }
+    if (method === 'GET' && path.startsWith('/api/secrets?')) return [{ name: 'existing' }];
+    if (path.includes('/attachment-rename/preview')) return {
+      attachment_count: 2,
+      ciphertext_bytes: 4096,
+      execution_supported: true,
+      limitation: '',
+    };
+    if (path.includes('/attachment-rename/apply')) return {
+      id: '123e4567-e89b-42d3-a456-426614174000', complete: true,
+    };
+    return [];
+  };
+  const ui = await mountRouteUi({ apiImpl: api });
+  try {
+    await openExistingSecret(ui, 'existing');
+    await ui.elements.get('#rename-toggle').onclick();
+    ui.elements.get('#rename-name').value = 'destination';
+    await ui.elements.get('#rename-preview').onclick();
+
+    assert.match(ui.elements.get('#rename-summary').textContent, /2 attachments/);
+    assert.equal(ui.elements.get('#rename-apply').disabled, true);
+    assert.equal(calls.some(({ path }) => path.includes('/attachment-rename/apply')), false);
+
+    ui.elements.get('#rename-stopped-writers').checked = true;
+    ui.elements.get('#rename-stopped-writers').onchange();
+    assert.equal(ui.elements.get('#rename-apply').disabled, false);
+    await ui.elements.get('#rename-apply').onclick();
+
+    const apply = calls.find(({ path }) => path.includes('/attachment-rename/apply'));
+    assert.deepEqual(apply.body, {
+      new_name: 'destination', offline: true,
+    });
+    assert.match(ui.elements.get('#rename-result').textContent, /123e4567-e89b-42d3-a456-426614174000/);
+  } finally {
+    ui.restore();
+  }
+});
+
+test('pending attachment rename recovery is discoverable from the destination after source cleanup', async () => {
+  const recoveryId = '123e4567-e89b-42d3-a456-426614174000';
+  const calls = [];
+  const api = async (method, path, body) => {
+    calls.push({ method, path, body });
+    if (path === '/api/context') return {
+      vault: 'one', backend: 'test', workspace: { alias: 'primary' }, capabilities: { files: true, atomic_rename: true },
+    };
+    if (path === '/api/types') return { types: [] };
+    if (path === '/api/vaults') return { vaults: [{ name: 'one' }] };
+    if (method === 'GET' && path.startsWith('/api/attachment-renames?')) return [{
+      id: recoveryId,
+      complete: false,
+      intent: { source_name: 'existing', destination_name: 'destination' },
+    }];
+    if (method === 'GET' && path.startsWith('/api/secrets/destination?')) {
+      return { tags: {}, content_type: '', enabled: true, not_before: null };
+    }
+    if (method === 'GET' && path.startsWith('/api/secrets?')) return [{ name: 'destination' }];
+    if (path.includes(`/${recoveryId}/resume`)) return { id: recoveryId, complete: true };
+    return [];
+  };
+  const ui = await mountRouteUi({ apiImpl: api });
+  try {
+    await openExistingSecret(ui, 'destination');
+    await settleUntil(() => ui.elements.get('#rename-recovery-list').children.length === 1);
+    ui.elements.get('#rename-stopped-writers').checked = true;
+    ui.elements.get('#rename-stopped-writers').onchange();
+    const retry = ui.find('#rename-recovery-list', (element) => element.tagName === 'BUTTON');
+    await retry.onclick();
+    const resume = calls.find(({ path }) => path.includes(`/${recoveryId}/resume`));
+    assert.match(resume.path, /alias=primary/);
+    assert.match(resume.path, /backend=test/);
+    assert.match(resume.path, /vault=one/);
+    assert.deepEqual(resume.body, {
+      new_name: 'destination', offline: true,
+    });
+  } finally {
+    ui.restore();
+  }
+});
+
+test('attachment rename preview keeps the ordinary atomic route for a secret without attachments', async () => {
+  const calls = [];
+  const api = async (method, path, body) => {
+    calls.push({ method, path, body });
+    if (path === '/api/context') return {
+      vault: 'one', backend: 'test', capabilities: { files: true, atomic_rename: true },
+    };
+    if (path === '/api/types') return { types: [] };
+    if (path === '/api/vaults') return { vaults: [{ name: 'one' }] };
+    if (method === 'GET' && path.startsWith('/api/attachment-renames?')) return [];
+    if (method === 'GET' && path.startsWith('/api/secrets/existing?')) {
+      return { tags: {}, content_type: '', enabled: true, not_before: null };
+    }
+    if (method === 'GET' && path.startsWith('/api/secrets?')) return [{ name: 'existing' }];
+    if (path.includes('/attachment-rename/preview')) return {
+      attachment_count: 0, ciphertext_bytes: 0, execution_supported: true, limitation: '',
+    };
+    if (path.includes('/secrets/existing/rename?')) return { name: 'destination' };
+    return [];
+  };
+  const ui = await mountRouteUi({ apiImpl: api });
+  try {
+    await openExistingSecret(ui, 'existing');
+    ui.elements.get('#rename-name').value = 'destination';
+    await ui.elements.get('#rename-preview').onclick();
+    const ordinary = calls.find(({ path }) => path.includes('/secrets/existing/rename?'));
+    assert.deepEqual(ordinary.body, { new_name: 'destination' });
+    assert.equal(calls.some(({ path }) => path.includes('/attachment-rename/apply')), false);
+  } finally {
+    ui.restore();
+  }
+});
+
+test('rename on a backend without attachment visibility keeps the existing atomic route', async () => {
+  const calls = [];
+  const api = async (method, path, body) => {
+    calls.push({ method, path, body });
+    if (path === '/api/context') return {
+      vault: 'one', backend: 'test', capabilities: { files: false, atomic_rename: true },
+    };
+    if (path === '/api/types') return { types: [] };
+    if (path === '/api/vaults') return { vaults: [{ name: 'one' }] };
+    if (method === 'GET' && path.startsWith('/api/secrets/existing?')) {
+      return { tags: {}, content_type: '', enabled: true, not_before: null };
+    }
+    if (method === 'GET' && path.startsWith('/api/secrets?')) return [{ name: 'existing' }];
+    if (path.includes('/attachment-rename/preview')) throw new Error('preview must not run');
+    if (path.includes('/secrets/existing/rename?')) return { name: 'destination' };
+    return [];
+  };
+  const ui = await mountRouteUi({ apiImpl: api });
+  try {
+    await openExistingSecret(ui, 'existing');
+    ui.elements.get('#rename-name').value = 'destination';
+    await ui.elements.get('#rename-preview').onclick();
+    const ordinary = calls.find(({ path }) => path.includes('/secrets/existing/rename?'));
+    assert.deepEqual(ordinary.body, { new_name: 'destination' });
+    assert.equal(calls.some(({ path }) => path.includes('/attachment-rename/preview')), false);
+  } finally {
+    ui.restore();
+  }
+});
+
 function twoSecondPreferences() {
   const state = { exposure_timeout_seconds: 2 };
   return {

@@ -12,6 +12,27 @@ pub(crate) fn test_state_with_token(token: &str) -> Arc<WebState> {
     test_state_with_token_and_preferences(token, path, 30)
 }
 
+#[cfg(feature = "file-ops")]
+pub(crate) fn test_state_with_recovery(path: PathBuf) -> Arc<WebState> {
+    let preferences = path.parent().unwrap_or(&path).join("ui.json");
+    let backend: Arc<dyn crate::backend::Backend> = Arc::new(stub::StubBackend::new());
+    let context = test_context(backend.as_ref(), "default", 30);
+    let registry = Arc::new(crate::backend::BackendRegistry::new(backend.clone()));
+    Arc::new(
+        WebState::new(
+            backend,
+            context,
+            "test-token".into(),
+            crate::records::builtin_types(),
+            super::preferences::PreferenceStore::new(preferences, 30),
+            registry,
+        )
+        .with_recovery_store(
+            crate::secret::attachment_transfer_execution::RecoveryStore::new(path),
+        ),
+    )
+}
+
 fn test_state_with_token_and_preferences(
     token: &str,
     path: PathBuf,

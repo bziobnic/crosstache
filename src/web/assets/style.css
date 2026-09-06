@@ -392,6 +392,8 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline:0; b
 .attachment-link:hover { color:var(--color-accent-text-hover); }
 .attachment-link:focus-visible { outline:2px solid var(--color-focus); outline-offset:2px; border-radius:.25rem; }
 .attachment-size { flex-shrink:0; color:var(--color-text-muted); font-size:.75rem; }
+.recovery-list { list-style:none; margin:.5rem 0 0; padding:0; display:flex; flex-direction:column; gap:.5rem; }
+.recovery-list li { display:flex; align-items:center; justify-content:space-between; gap:.75rem; overflow-wrap:anywhere; }
 .toolbar { display:flex; align-items:center; gap:.55rem; margin-bottom:.875rem; }
 .toolbar-spacer { flex:1; }
 .search-field { min-height:2.375rem; flex:1; display:flex; align-items:center; gap:.55rem; padding:0 .7rem;
