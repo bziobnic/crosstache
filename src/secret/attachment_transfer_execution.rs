@@ -10,6 +10,63 @@ mod tests {
         assert!(!root.exists());
     }
     #[test]
+    fn recovery_parent_components_open_without_partial_creation() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("uncreated/../recovery");
+        let session = storage::Session::open(&root, true).unwrap();
+        assert!(!dir.path().join("uncreated").exists());
+        drop(session);
+        storage::Session::open(&dir.path().join("recovery"), false).unwrap();
+    }
+    #[test]
+    fn configured_recovery_falls_back_only_when_legacy_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().canonicalize().unwrap().join("config");
+        let data = dir.path().canonicalize().unwrap().join("data");
+        std::fs::create_dir(&config).unwrap();
+        assert_eq!(
+            resolve_configured_path(&config.join("xv.conf"), None, Some(data.clone())).unwrap(),
+            config.join("transfer-recovery")
+        );
+        std::fs::write(config.join(".git"), "gitdir: elsewhere").unwrap();
+        assert_eq!(
+            resolve_configured_path(&config.join("xv.conf"), None, Some(data.clone())).unwrap(),
+            data.join("crosstache/transfer-recovery")
+        );
+        std::fs::create_dir(config.join("transfer-recovery")).unwrap();
+        std::fs::write(
+            config.join("transfer-recovery/identity"),
+            "existing identity",
+        )
+        .unwrap();
+        let error = resolve_configured_path(&config.join("xv.conf"), None, Some(data))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("XV_TRANSFER_RECOVERY_DIR"));
+        assert!(error.contains("existing"));
+    }
+    #[test]
+    fn configured_recovery_requires_override_when_all_defaults_are_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::create_dir(home.join(".git")).unwrap();
+        let config = home.join(".config/xv.conf");
+        assert!(
+            resolve_configured_path(&config, None, Some(home.join("data")))
+                .unwrap_err()
+                .to_string()
+                .contains("XV_TRANSFER_RECOVERY_DIR")
+        );
+        let explicit = dir.path().canonicalize().unwrap().join("safe");
+        assert_eq!(
+            resolve_configured_path(&config, Some(explicit.clone()), None).unwrap(),
+            explicit
+        );
+        assert!(!explicit.exists());
+        assert!(resolve_configured_path(&config, Some(home.join("unsafe")), None).is_err());
+    }
+    #[test]
     fn operation_ids_are_canonical_and_path_safe() {
         assert!(valid_id("../../identity").is_err());
         assert!(valid_id("00000000000000000000000000000000").is_err());
@@ -54,7 +111,9 @@ pub struct TransferReport {
     pub id: String,
     pub complete: bool,
 }
-#[cfg(any(feature = "ui", test))]
+// The binary shares this module but only its UI uses recovery listing. Keep the
+// public library API available in ordinary file-ops builds.
+#[cfg_attr(not(any(feature = "ui", test)), allow(dead_code))]
 #[derive(Debug, Serialize)]
 pub struct TransferSummary {
     pub id: String,
@@ -64,23 +123,39 @@ pub struct TransferSummary {
 #[derive(Debug)]
 pub struct RecoveryStore {
     root: PathBuf,
+    config_path: Option<PathBuf>,
 }
 impl RecoveryStore {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            config_path: None,
+        }
     }
     pub fn default_path() -> Result<PathBuf> {
-        Ok(crate::config::settings::Config::get_config_path()?
-            .parent()
-            .ok_or_else(invalid)?
-            .join("transfer-recovery"))
+        configured_path(&crate::config::settings::Config::get_config_path()?)
     }
-    #[cfg(any(feature = "ui", test))]
+    #[cfg(feature = "ui")]
+    pub(crate) fn from_config_path(config_path: PathBuf) -> Self {
+        Self {
+            root: PathBuf::new(),
+            config_path: Some(config_path),
+        }
+    }
+    fn resolved_root(&self) -> Result<PathBuf> {
+        match &self.config_path {
+            Some(config) => configured_path(config),
+            None => crate::utils::recovery_path::resolve(&self.root),
+        }
+    }
+    // Used by UI and external library consumers, but not the non-UI binary.
+    #[cfg_attr(not(any(feature = "ui", test)), allow(dead_code))]
     pub fn list(&self) -> Result<Vec<TransferSummary>> {
-        if !self.root.try_exists().map_err(|_| invalid())? {
+        let root = self.resolved_root()?;
+        if !root.try_exists().map_err(|_| invalid())? {
             return Ok(vec![]);
         }
-        let session = storage::Session::open(&self.root, false)?;
+        let session = storage::Session::open(&root, false)?;
         let mut result = vec![];
         for name in session.names()? {
             let id = name.strip_suffix(".age").ok_or_else(invalid)?;
@@ -95,6 +170,70 @@ impl RecoveryStore {
         Ok(result)
     }
 }
+fn configured_path(config: &std::path::Path) -> Result<PathBuf> {
+    resolve_configured_path(
+        config,
+        std::env::var_os("XV_TRANSFER_RECOVERY_DIR").map(PathBuf::from),
+        dirs::data_local_dir(),
+    )
+}
+
+fn resolve_configured_path(
+    config: &std::path::Path,
+    override_path: Option<PathBuf>,
+    data_dir: Option<PathBuf>,
+) -> Result<PathBuf> {
+    use crate::utils::recovery_path::{in_git, resolve};
+    let outside_git = |path: PathBuf| -> Result<PathBuf> {
+        let resolved = resolve(&path)?;
+        if in_git(&resolved)? {
+            return Err(CrosstacheError::invalid_argument(
+                "Transfer recovery must be outside Git worktrees; set XV_TRANSFER_RECOVERY_DIR to a private directory outside Git and backend stores (or use CLI --recovery-dir)",
+            ));
+        }
+        Ok(resolved)
+    };
+    if let Some(path) = override_path {
+        return outside_git(path);
+    }
+    let legacy = resolve(
+        &config
+            .parent()
+            .ok_or_else(invalid)?
+            .join("transfer-recovery"),
+    )?;
+    if !in_git(&legacy)? {
+        return Ok(legacy);
+    }
+    // Never silently abandon an identity or journal when selecting a safe default.
+    match std::fs::read_dir(&legacy) {
+        Ok(mut entries) => {
+            if entries
+                .next()
+                .transpose()
+                .map_err(|error| {
+                    CrosstacheError::config(format!("Inspect existing recovery entry: {error}"))
+                })?
+                .is_some()
+            {
+                return Err(CrosstacheError::invalid_argument(format!(
+                "The existing recovery directory '{}' is inside Git. Move the entire directory, including its identity and journals, to a private location outside Git and backend stores, then set XV_TRANSFER_RECOVERY_DIR to that location (or use CLI --recovery-dir)", legacy.display()
+            )));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(CrosstacheError::config(format!(
+                "Inspect existing recovery directory: {error}"
+            )))
+        }
+    }
+    let data = data_dir.ok_or_else(|| CrosstacheError::invalid_argument(
+        "No safe recovery default is available; set XV_TRANSFER_RECOVERY_DIR to a private directory outside Git and backend stores",
+    ))?;
+    outside_git(data.join("crosstache/transfer-recovery"))
+}
+
 use super::{attachment_rewrap as rewrap, manager::SecretProperties};
 use crate::backend::{
     error::BackendError, secret::rename_request_from_properties, TransferLocation,
@@ -408,6 +547,7 @@ pub async fn apply(
     recovery: &RecoveryStore,
 ) -> Result<TransferReport> {
     offline_assertion(offline)?;
+    let root = recovery.resolved_root()?;
     let location = supported(source, destination, &intent).await?;
     let initial_secret = source
         .guarded_secrets()
@@ -415,12 +555,12 @@ pub async fn apply(
         .await?;
     let plan = transfer::plan(source, destination, intent).await?;
     source
-        .validate_transfer_recovery_path(&plan.intent.source.vault, &recovery.root)
+        .validate_transfer_recovery_path(&plan.intent.source.vault, &root)
         .await?;
     destination
-        .validate_transfer_recovery_path(&plan.intent.destination.vault, &recovery.root)
+        .validate_transfer_recovery_path(&plan.intent.destination.vault, &root)
         .await?;
-    let session = storage::Session::open(&recovery.root, true)?;
+    let session = storage::Session::open(&root, true)?;
     let secret = source
         .guarded_secrets()
         .get_secret_snapshot(&plan.intent.source.vault, &plan.intent.source_name, true)
@@ -463,16 +603,17 @@ pub async fn resume(
     recovery: &RecoveryStore,
 ) -> Result<TransferReport> {
     valid_id(id)?;
+    let root = recovery.resolved_root()?;
     let result = async {
         offline_assertion(offline)?;
         let location = supported(source, destination, &expected).await?;
         source
-            .validate_transfer_recovery_path(&expected.source.vault, &recovery.root)
+            .validate_transfer_recovery_path(&expected.source.vault, &root)
             .await?;
         destination
-            .validate_transfer_recovery_path(&expected.destination.vault, &recovery.root)
+            .validate_transfer_recovery_path(&expected.destination.vault, &root)
             .await?;
-        let session = storage::Session::open(&recovery.root, false)?;
+        let session = storage::Session::open(&root, false)?;
         let mut journal = load(&session, id)?;
         if journal.plan.intent != expected || journal.location != location {
             return Err(invalid());

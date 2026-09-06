@@ -26,6 +26,7 @@ pub mod output;
 pub mod pager;
 pub mod pagination;
 pub mod progress;
+pub(crate) mod recovery_path;
 pub mod resource_detector;
 pub mod retry;
 pub mod sanitizer;

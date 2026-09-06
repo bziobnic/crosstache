@@ -110,6 +110,8 @@ fn open_root(root: &Path) -> Result<File> {
 }
 impl Session {
     pub fn open(root: &Path, create: bool) -> Result<Self> {
+        let resolved = crate::utils::recovery_path::resolve(root)?;
+        let root = resolved.as_path();
         // The helper performs descriptor-relative no-follow traversal, including
         // private directory creation. Listing never calls this on an absent root.
         if !create && !root.exists() {

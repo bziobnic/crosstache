@@ -330,26 +330,22 @@ fn validate_recovery_path(
     recovery: &std::path::Path,
 ) -> Result<(), BackendError> {
     let store = resolved_recovery_path(store)?;
-    let recovery = resolved_recovery_path(recovery)?;
+    let recovery = crate::utils::recovery_path::resolve(recovery)
+        .map_err(|error| BackendError::InvalidArgument(error.to_string()))?;
+    // Compare canonical ancestors on both sides (including Windows device
+    // prefixes/casing). Storage still opens the no-follow normalized path.
+    let recovery = resolved_recovery_path(&recovery)?;
     if recovery.starts_with(&store) || store.starts_with(&recovery) {
         return Err(BackendError::InvalidArgument(
             "transfer recovery must be outside the backend store".into(),
         ));
     }
-    for ancestor in recovery.ancestors() {
-        match fs::symlink_metadata(ancestor.join(".git")) {
-            Ok(_) => {
-                return Err(BackendError::InvalidArgument(
-                    "transfer recovery must be outside Git worktrees".into(),
-                ))
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(BackendError::Internal(format!(
-                    "inspect recovery Git boundary: {error}"
-                )))
-            }
-        }
+    if crate::utils::recovery_path::in_git(&recovery)
+        .map_err(|error| BackendError::InvalidArgument(error.to_string()))?
+    {
+        return Err(BackendError::InvalidArgument(
+            "transfer recovery must be outside Git worktrees; use --recovery-dir or XV_TRANSFER_RECOVERY_DIR to select a private directory outside Git and backend stores".into(),
+        ));
     }
     Ok(())
 }
@@ -700,7 +696,8 @@ mod tests {
         std::fs::create_dir(&outside).unwrap();
         let alias = tmp.path().join("outside-alias");
         std::os::unix::fs::symlink(&outside, &alias).unwrap();
-        super::validate_recovery_path(&store, &alias.join("missing")).unwrap();
+        assert!(super::validate_recovery_path(&store, &alias.join("missing")).is_err());
+        assert!(super::validate_recovery_path(&store, &alias.join("../safe")).is_err());
         assert!(!outside.join("missing").exists());
     }
 

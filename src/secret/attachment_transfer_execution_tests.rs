@@ -384,3 +384,23 @@ async fn recovery_lock_serializes_sessions_and_missing_identity_never_regenerate
     assert!(storage::Session::open(&recovery.root, true).is_err());
     assert!(!recovery.root.join("identity").exists());
 }
+
+#[tokio::test]
+async fn parent_component_recovery_path_applies_lists_and_resumes() {
+    let (dir, backend, _) = fixture().await;
+    let recovery = RecoveryStore::new(dir.path().join("never-created/../recovery"));
+    let report = apply(&backend, &backend, intent(), true, &recovery)
+        .await
+        .unwrap();
+    assert!(report.complete);
+    assert!(!dir.path().join("never-created").exists());
+    let entries = recovery.list().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].id, report.id);
+    assert!(
+        resume(&backend, &backend, intent(), &report.id, true, &recovery)
+            .await
+            .unwrap()
+            .complete
+    );
+}

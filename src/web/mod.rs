@@ -180,12 +180,6 @@ impl WebState {
         preferences: preferences::PreferenceStore,
         registry: Arc<BackendRegistry>,
     ) -> Self {
-        #[cfg(feature = "file-ops")]
-        let recovery_root = context
-            .config_path
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."))
-            .join("transfer-recovery");
         Self {
             token,
             types,
@@ -194,7 +188,9 @@ impl WebState {
             registry,
             #[cfg(feature = "file-ops")]
             recovery_store: Arc::new(
-                crate::secret::attachment_transfer_execution::RecoveryStore::new(recovery_root),
+                crate::secret::attachment_transfer_execution::RecoveryStore::from_config_path(
+                    context.config_path.clone(),
+                ),
             ),
             #[cfg(feature = "file-ops")]
             archive_jobs: archive::archive_job_limiter(),
@@ -205,7 +201,7 @@ impl WebState {
         }
     }
 
-    #[cfg(feature = "file-ops")]
+    #[cfg(all(feature = "file-ops", test))]
     pub(crate) fn with_recovery_store(
         mut self,
         recovery_store: crate::secret::attachment_transfer_execution::RecoveryStore,
@@ -501,11 +497,6 @@ pub async fn prepare_web(
             types,
             preference_store,
             registry,
-        )
-        .with_recovery_store(
-            crate::secret::attachment_transfer_execution::RecoveryStore::new(
-                crate::secret::attachment_transfer_execution::RecoveryStore::default_path()?,
-            ),
         )
         .with_folder_tokens(folder_tokens),
     );

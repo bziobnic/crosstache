@@ -56,6 +56,7 @@ class Element {
     const visit = (element) => {
       for (const child of element.children || []) {
         if (typeof child !== 'object') continue;
+        if (selector === 'button' && child.tagName === 'BUTTON') matches.push(child);
         if (selector === 'input[data-field-kind="secret"]' && child.dataset?.fieldKind === 'secret') {
           matches.push(child);
         }
@@ -1787,13 +1788,18 @@ test('attached rename previews before apply and requires the stopped-writers che
     assert.deepEqual(apply.body, {
       new_name: 'destination', offline: true,
     });
-    assert.match(ui.elements.get('#rename-result').textContent, /123e4567-e89b-42d3-a456-426614174000/);
+    assert.equal(ui.elements.get('#drawer').hidden, true, 'completed rename closes the removed source');
+    const callsAfterRename = calls.length;
+    const form = ui.elements.get('#secret-form');
+    await form.onsubmit({ preventDefault() {}, target: form });
+    assert.equal(calls.length, callsAfterRename, 'stale Save cannot recreate the source');
   } finally {
     ui.restore();
   }
 });
 
-test('pending attachment rename recovery is discoverable from the destination after source cleanup', async () => {
+for (const selection of ['existing', 'destination']) {
+test(`pending attachment rename recovery from ${selection} survives edits and closes after completion`, async () => {
   const recoveryId = '123e4567-e89b-42d3-a456-426614174000';
   const calls = [];
   const api = async (method, path, body) => {
@@ -1808,21 +1814,29 @@ test('pending attachment rename recovery is discoverable from the destination af
       complete: false,
       intent: { source_name: 'existing', destination_name: 'destination' },
     }];
-    if (method === 'GET' && path.startsWith('/api/secrets/destination?')) {
+    if (method === 'GET' && path.startsWith(`/api/secrets/${selection}?`)) {
       return { tags: {}, content_type: '', enabled: true, not_before: null };
     }
-    if (method === 'GET' && path.startsWith('/api/secrets?')) return [{ name: 'destination' }];
+    if (method === 'GET' && path.startsWith('/api/secrets?')) return [{ name: selection }];
     if (path.includes(`/${recoveryId}/resume`)) return { id: recoveryId, complete: true };
     return [];
   };
   const ui = await mountRouteUi({ apiImpl: api });
   try {
-    await openExistingSecret(ui, 'destination');
+    await openExistingSecret(ui, selection);
     await settleUntil(() => ui.elements.get('#rename-recovery-list').children.length === 1);
+    ui.elements.get('#rename-name').value = 'another-name';
+    ui.elements.get('#rename-name').oninput();
+    assert.equal(ui.elements.get('#rename-confirmation').hidden, false, 'pending retry keeps acknowledgement visible after edits');
     ui.elements.get('#rename-stopped-writers').checked = true;
     ui.elements.get('#rename-stopped-writers').onchange();
     const retry = ui.find('#rename-recovery-list', (element) => element.tagName === 'BUTTON');
+    assert.equal(retry.disabled, false);
+    const pendingResume = retry.onclick();
     await retry.onclick();
+    await pendingResume;
+    assert.equal(calls.filter(({ path }) => path.includes(`/${recoveryId}/resume`)).length, 1, 'pending recovery cannot be submitted twice');
+    assert.equal(ui.elements.get('#drawer').hidden, true, 'completed recovery closes its drawer');
     const resume = calls.find(({ path }) => path.includes(`/${recoveryId}/resume`));
     assert.match(resume.path, /alias=primary/);
     assert.match(resume.path, /backend=test/);
@@ -1834,6 +1848,8 @@ test('pending attachment rename recovery is discoverable from the destination af
     ui.restore();
   }
 });
+
+}
 
 test('attachment rename preview keeps the ordinary atomic route for a secret without attachments', async () => {
   const calls = [];
