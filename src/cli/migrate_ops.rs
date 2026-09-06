@@ -25,8 +25,14 @@ enum MigrateOutcome {
 }
 
 struct MigrationDiff {
-    to_migrate: Vec<String>,
-    conflicts: Vec<String>,
+    to_migrate: Vec<MigrationName>,
+    conflicts: Vec<MigrationName>,
+}
+
+#[derive(Clone)]
+struct MigrationName {
+    source: String,
+    destination: String,
 }
 
 async fn compute_diff(
@@ -68,16 +74,29 @@ async fn compute_diff(
     let mut conflicts = Vec::new();
 
     for name in filtered {
+        let props = source
+            .secrets()
+            .get_secret(source_vault, &name, false)
+            .await?;
+        let name = MigrationName {
+            source: name,
+            destination: build_request_from_props(&props, source.name(), source_vault).name,
+        };
         if target_missing {
             to_migrate.push(name);
             continue;
         }
-        match target.secrets().secret_exists(target_vault, &name).await {
+        match target
+            .secrets()
+            .secret_exists(target_vault, &name.destination)
+            .await
+        {
             Ok(true) => conflicts.push(name),
             Ok(false) | Err(BackendError::VaultNotFound { .. }) => to_migrate.push(name),
             Err(e) => {
                 return Err(CrosstacheError::Unknown(format!(
-                    "Failed to determine whether target secret '{name}' exists: {e}"
+                    "Failed to determine whether target secret '{}' exists: {e}",
+                    name.destination
                 )));
             }
         }
@@ -158,6 +177,7 @@ fn build_request_from_props(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn migrate_one(
     source: &Arc<dyn Backend>,
     target: &Arc<dyn Backend>,
@@ -166,6 +186,7 @@ async fn migrate_one(
     name: &str,
     force_replace: bool,
     source_name_for_tag: &str,
+    planned_destination_name: &str,
 ) -> std::result::Result<MigrateOutcome, (String, String)> {
     // Fetch full props with value
     let props = source
@@ -189,9 +210,21 @@ async fn migrate_one(
         return Ok(MigrateOutcome::Skipped(name.to_string()));
     }
 
-    // Idempotency check
+    let request = build_request_from_props(&props, source_name_for_tag, source_vault);
+    if request.name != planned_destination_name {
+        return Err((
+            name.to_string(),
+            "destination name changed after migration preflight".into(),
+        ));
+    }
+
+    // Idempotency checks and writes must address the same planned name.
     if !force_replace {
-        match target.secrets().get_secret(target_vault, name, false).await {
+        match target
+            .secrets()
+            .get_secret(target_vault, &request.name, false)
+            .await
+        {
             Ok(existing) => {
                 if let Some(prev_from) = existing.tags.get(TAG_MIGRATED_FROM) {
                     let expected =
@@ -217,8 +250,12 @@ async fn migrate_one(
     // otherwise make every attachment already in the target unreadable.
     // Migrating the key into a vault that doesn't have one yet is fine —
     // that vault has no attachments depending on it.
-    if name == crate::secret::attachments::ATTACHMENT_KEY_SECRET {
-        match target.secrets().get_secret(target_vault, name, false).await {
+    if request.name == crate::secret::attachments::ATTACHMENT_KEY_SECRET {
+        match target
+            .secrets()
+            .get_secret(target_vault, &request.name, false)
+            .await
+        {
             Ok(_) => {
                 output::warn(&format!(
                     "skipping '{name}': target vault '{target_vault}' already has its own \
@@ -237,7 +274,6 @@ async fn migrate_one(
         }
     }
 
-    let request = build_request_from_props(&props, source_name_for_tag, source_vault);
     crate::backend::secret::validate_transfer_request(target.as_ref(), &request)
         .map_err(|error| (name.to_string(), format!("destination request: {error}")))?;
     target
@@ -407,12 +443,13 @@ pub(crate) async fn execute_migrate(
     }
     let mut names_to_process = Vec::new();
     let mut preflight_skipped = 0usize;
-    let mut destination_names = std::collections::HashSet::new();
+    let mut destination_names: Vec<String> = Vec::new();
     #[cfg(feature = "file-ops")]
     let mut attached_intents = Vec::new();
     // Complete read-only preflight. Even an error in the last selected item
     // precedes vault creation, recovery directories, and the first secret write.
-    for name in selected {
+    for selected_name in selected {
+        let name = selected_name.source;
         let props = source
             .secrets()
             .get_secret(&source_vault, &name, true)
@@ -424,12 +461,19 @@ pub(crate) async fn execute_migrate(
             preflight_skipped += 1;
             continue;
         }
+        let request = build_request_from_props(&props, source.name(), &source_vault);
+        if request.name != selected_name.destination {
+            return Err(CrosstacheError::conflict(
+                "destination name changed during migration preflight",
+            ));
+        }
+        let destination_name = &request.name;
         let existing = if target_missing {
             None
         } else {
             match target
                 .secrets()
-                .get_secret(&target_vault, &name, false)
+                .get_secret(&target_vault, destination_name, false)
                 .await
             {
                 Ok(props) => Some(props),
@@ -437,7 +481,9 @@ pub(crate) async fn execute_migrate(
                 Err(error) => return Err(error.into()),
             }
         };
-        if name == crate::secret::attachments::ATTACHMENT_KEY_SECRET && existing.is_some() {
+        if destination_name == crate::secret::attachments::ATTACHMENT_KEY_SECRET
+            && existing.is_some()
+        {
             output::warn(&format!(
                 "skipping '{name}': preserving target attachment key"
             ));
@@ -458,16 +504,17 @@ pub(crate) async fn execute_migrate(
             preflight_skipped += 1;
             continue;
         }
-        let canonical_name = if target.kind() == crate::backend::BackendKind::Azure {
-            crate::utils::sanitizer::sanitize_secret_name(&name)?.to_ascii_lowercase()
-        } else {
-            name.clone()
-        };
-        if !destination_names.insert(canonical_name) {
-            return Err(CrosstacheError::conflict(
-                "selected migration entries collide in the destination namespace",
-            ));
+        for previous in &destination_names {
+            if target
+                .transfer_secret_names_collide(&target_vault, previous, destination_name)
+                .await?
+            {
+                return Err(CrosstacheError::conflict(
+                    "selected migration entries collide in the destination namespace",
+                ));
+            }
         }
+        destination_names.push(destination_name.clone());
         if !target_missing {
             crate::cli::transfer_support::reject_self_target(
                 source.as_ref(),
@@ -475,10 +522,11 @@ pub(crate) async fn execute_migrate(
                 &name,
                 target.as_ref(),
                 &target_vault,
-                &name,
+                destination_name,
             )
             .await?;
-            crate::backend::ensure_no_attachments(target.as_ref(), &target_vault, &name).await?;
+            crate::backend::ensure_no_attachments(target.as_ref(), &target_vault, destination_name)
+                .await?;
         }
         let attached = !source
             .attachment_names(&source_vault, &name)
@@ -506,7 +554,7 @@ pub(crate) async fn execute_migrate(
                         vault: target_vault.clone(),
                     },
                     source_name: name.clone(),
-                    destination_name: name,
+                    destination_name: destination_name.clone(),
                     operation: TransferOperation::Copy,
                     destination_key_id: attachments.to_key_id.clone(),
                     destination_folder: None,
@@ -532,16 +580,15 @@ pub(crate) async fn execute_migrate(
                 "attachment transfers require a build with file-ops",
             ));
         } else {
-            if crate::secret::attachment_key::generic_mutation_blocked_canonical(&name) {
-                return Err(CrosstacheError::conflict(format!("migration destination name '{name}' is reserved for attachment custody; no changes were written")));
+            if crate::secret::attachment_key::generic_mutation_blocked_canonical(destination_name) {
+                return Err(CrosstacheError::conflict(format!("migration destination name '{destination_name}' is reserved for attachment custody; no changes were written")));
             }
-            let request = build_request_from_props(&props, source.name(), &source_vault);
             crate::backend::secret::validate_transfer_request(target.as_ref(), &request)?;
             target
                 .secrets()
                 .validate_transfer_metadata(&target_vault, &request)
                 .await?;
-            names_to_process.push(name);
+            names_to_process.push((name, destination_name.clone()));
         }
     }
     if dry_run {
@@ -613,23 +660,31 @@ pub(crate) async fn execute_migrate(
     let src_vault_clone = source_vault.clone();
     let tgt_vault_clone = target_vault.clone();
 
-    let results: Vec<_> =
-        stream::iter(
-            names_to_process.iter().map(|name| {
-                let source = source_arc.clone();
-                let target = target_arc.clone();
-                let sv = src_vault_clone.clone();
-                let tv = tgt_vault_clone.clone();
-                let name = name.clone();
-                let src_tag = source_name_tag.clone();
-                async move {
-                    migrate_one(&source, &target, &sv, &tv, &name, force_replace, &src_tag).await
-                }
-            }),
-        )
-        .buffer_unordered(concurrency)
-        .collect()
-        .await;
+    let results: Vec<_> = stream::iter(names_to_process.iter().map(|(name, destination_name)| {
+        let source = source_arc.clone();
+        let target = target_arc.clone();
+        let sv = src_vault_clone.clone();
+        let tv = tgt_vault_clone.clone();
+        let name = name.clone();
+        let destination_name = destination_name.clone();
+        let src_tag = source_name_tag.clone();
+        async move {
+            migrate_one(
+                &source,
+                &target,
+                &sv,
+                &tv,
+                &name,
+                force_replace,
+                &src_tag,
+                &destination_name,
+            )
+            .await
+        }
+    }))
+    .buffer_unordered(concurrency)
+    .collect()
+    .await;
 
     let mut migrated = attached_count;
     let mut skipped = preflight_skipped;
@@ -888,7 +943,7 @@ mod tests {
         );
 
         let error = migrate_one(
-            &source, &target, "default", "default", "existing", false, "local",
+            &source, &target, "default", "default", "existing", false, "local", "existing",
         )
         .await
         .unwrap_err();
@@ -1034,6 +1089,139 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(src.value, tgt.value);
+        }
+    }
+
+    #[tokio::test]
+    async fn migration_batch_rejects_duplicate_final_names_before_vault_creation() {
+        migration_batch_destination_names(["same", "same"], false, true).await;
+    }
+
+    #[tokio::test]
+    async fn migration_batch_rejects_duplicate_final_names_with_opaque_storage() {
+        migration_batch_destination_names(["same", "same"], true, true).await;
+    }
+
+    #[tokio::test]
+    async fn migration_batch_legacy_case_aliases_follow_filesystem_semantics() {
+        let probe = TempDir::new().unwrap();
+        std::fs::write(probe.path().join("case-probe"), b"probe").unwrap();
+        let case_insensitive = probe.path().join("CASE-PROBE").exists();
+        migration_batch_destination_names(["a", "A"], false, case_insensitive).await;
+    }
+
+    #[tokio::test]
+    async fn migration_batch_opaque_case_names_remain_distinct() {
+        migration_batch_destination_names(["a", "A"], true, false).await;
+    }
+
+    async fn migration_batch_destination_names(
+        final_names: [&str; 2],
+        opaque: bool,
+        expect_collision: bool,
+    ) {
+        let tmp = TempDir::new().unwrap();
+        let mut local = LocalConfig {
+            store_path: Some(tmp.path().join("store").to_string_lossy().into_owned()),
+            key_file: Some(tmp.path().join("key.txt").to_string_lossy().into_owned()),
+            default_vault: Some("source".into()),
+            encrypt_metadata: Some(false),
+            opaque_filenames: Some(false),
+            ..Default::default()
+        };
+        let source = crate::backend::local::LocalBackend::new(Some(&local)).unwrap();
+        // Provider lookup names and original names are separate persisted fields.
+        // AWS permits this through xv:original_name; Local plaintext metadata
+        // gives this regression the same real request-builder input without AWS.
+        for (lookup, original) in ["provider-one", "provider-two"]
+            .into_iter()
+            .zip(final_names)
+        {
+            source
+                .secrets()
+                .set_secret(
+                    "source",
+                    SecretRequest {
+                        name: lookup.into(),
+                        value: Zeroizing::new(format!("value-{lookup}")),
+                        content_type: None,
+                        enabled: None,
+                        expires_on: None,
+                        not_before: None,
+                        tags: None,
+                        groups: None,
+                        note: None,
+                        folder: None,
+                    },
+                )
+                .await
+                .unwrap();
+            let path = tmp
+                .path()
+                .join(format!("store/vaults/source/secrets/{lookup}.meta.json"));
+            let mut metadata: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            metadata["original_name"] = original.into();
+            std::fs::write(path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        }
+        // Opaque mode supports reading existing legacy source entries; newly
+        // created destination entries must use distinct keyed filename stems.
+        local.opaque_filenames = Some(opaque);
+        let result = execute_migrate(
+            "local:source".into(),
+            "local:target".into(),
+            None,
+            None,
+            false,
+            crate::cli::commands::OnConflict::Replace,
+            true,
+            1,
+            Default::default(),
+            Config {
+                backend: Some("local".into()),
+                local: Some(local.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
+        // Unknown mount semantics (for example Linux overlay) may safely refuse
+        // only the ambiguous legacy pair. This must still precede provisioning.
+        let unknown_case_semantics = !opaque
+            && final_names == ["a", "A"]
+            && matches!(&result, Err(CrosstacheError::InvalidArgument(message))
+                if message == "operation not supported: cannot establish destination filesystem case semantics for potentially aliasing names");
+        if unknown_case_semantics {
+            assert!(!tmp.path().join("store/vaults/target").exists());
+        } else if expect_collision {
+            let error =
+                result.expect_err("duplicate actual destination identities must fail preflight");
+            assert!(error.to_string().contains("collide"), "{error}");
+            assert!(
+                !tmp.path().join("store/vaults/target").exists(),
+                "collision must precede target vault creation"
+            );
+        } else {
+            result.unwrap();
+            let target = crate::backend::local::LocalBackend::new(Some(&local)).unwrap();
+            for (lookup, destination) in ["provider-one", "provider-two"]
+                .into_iter()
+                .zip(final_names)
+            {
+                let actual = target
+                    .secrets()
+                    .get_secret("target", destination, true)
+                    .await
+                    .unwrap();
+                assert_eq!(actual.value.unwrap().as_str(), format!("value-{lookup}"));
+            }
+        }
+        for lookup in ["provider-one", "provider-two"] {
+            let actual = source
+                .secrets()
+                .get_secret("source", lookup, true)
+                .await
+                .unwrap();
+            assert_eq!(actual.value.unwrap().as_str(), format!("value-{lookup}"));
         }
     }
 
@@ -1194,6 +1382,7 @@ mod tests {
             reserved,
             true,
             "local",
+            reserved,
         )
         .await
         .unwrap();
@@ -1215,6 +1404,7 @@ mod tests {
             reserved,
             false,
             "local",
+            reserved,
         )
         .await
         .unwrap();
