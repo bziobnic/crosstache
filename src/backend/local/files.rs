@@ -1341,6 +1341,22 @@ impl LocalFileBackend {
 
 #[async_trait]
 impl FileBackend for LocalFileBackend {
+    async fn get_file_restore_info(
+        &self,
+        vault: &str,
+        name: &str,
+    ) -> Result<FileInfo, BackendError> {
+        self.get_file_info(vault, name).await
+    }
+
+    async fn restore_file(
+        &self,
+        vault: &str,
+        request: FileUploadRequest,
+    ) -> Result<FileInfo, BackendError> {
+        self.upload_file(vault, request, None).await
+    }
+
     fn validate_file_name(&self, name: &str) -> Result<(), BackendError> {
         validate_logical_file_name(name)?;
         let stem = storage_stem(name)?;

@@ -359,6 +359,20 @@ impl AwsFileBackend {
         file_size: u64,
         reporter: &dyn ProgressReporter,
     ) -> Result<FileInfo, BackendError> {
+        self.upload_file_streaming_with_mode(vault, spec, reader, file_size, reporter, false)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn upload_file_streaming_with_mode<R: AsyncRead + Unpin>(
+        &self,
+        vault: &str,
+        spec: FileUploadSpec,
+        reader: &mut R,
+        file_size: u64,
+        reporter: &dyn ProgressReporter,
+        preserve_metadata: bool,
+    ) -> Result<FileInfo, BackendError> {
         let key = validated_key(vault, &spec.name)?;
 
         let content_type = spec.content_type.clone().unwrap_or_else(|| {
@@ -369,11 +383,13 @@ impl AwsFileBackend {
 
         // Object metadata, mirroring the Azure blob manager's conventions.
         let mut metadata = spec.metadata.clone();
-        if !spec.groups.is_empty() {
-            metadata.insert(METADATA_KEY_GROUPS.to_string(), spec.groups.join(","));
+        if !preserve_metadata {
+            if !spec.groups.is_empty() {
+                metadata.insert(METADATA_KEY_GROUPS.to_string(), spec.groups.join(","));
+            }
+            metadata.insert("uploaded_by".to_string(), "crosstache".to_string());
+            metadata.insert("uploaded_at".to_string(), Utc::now().to_rfc3339());
         }
-        metadata.insert("uploaded_by".to_string(), "crosstache".to_string());
-        metadata.insert("uploaded_at".to_string(), Utc::now().to_rfc3339());
 
         let tagging = encode_tagging(&spec.tags)?;
 
@@ -429,6 +445,75 @@ impl AwsFileBackend {
             groups: spec.groups,
             metadata,
             tags: spec.tags,
+        })
+    }
+
+    async fn get_file_info_with_mode(
+        &self,
+        vault: &str,
+        name: &str,
+        strict_tags: bool,
+    ) -> Result<FileInfo, BackendError> {
+        let key = validated_key(vault, name)?;
+
+        let head = self
+            .client
+            .head_object()
+            .bucket(&self.bucket)
+            .key(&key)
+            .send()
+            .await
+            .map_err(|e| errors::from_s3_head_object(name, e))?;
+
+        let metadata: HashMap<String, String> = head.metadata().cloned().unwrap_or_default();
+        let groups: Vec<String> = metadata
+            .get(METADATA_KEY_GROUPS)
+            .map(|g| g.split(',').map(|s| s.trim().to_string()).collect())
+            .unwrap_or_default();
+
+        // Tags need a separate call; degrade gracefully when the credentials
+        // lack s3:GetObjectTagging (mirrors the Azure 403 fallback).
+        let tags: HashMap<String, String> = match self
+            .client
+            .get_object_tagging()
+            .bucket(&self.bucket)
+            .key(&key)
+            .send()
+            .await
+        {
+            Ok(out) => out
+                .tag_set()
+                .iter()
+                .map(|t| (t.key().to_string(), t.value().to_string()))
+                .collect(),
+            Err(e) => {
+                let error = errors::from_s3_get_object_tagging(name, e);
+                if strict_tags {
+                    return Err(error);
+                }
+                match error {
+                    BackendError::PermissionDenied(_) => tracing::debug!(
+                        "Tag read for '{name}' was denied; tags will be empty. \
+                         Grant s3:GetObjectTagging to include them."
+                    ),
+                    other => tracing::warn!("Failed to fetch tags for '{name}': {other}"),
+                }
+                HashMap::new()
+            }
+        };
+
+        Ok(FileInfo {
+            name: name.to_string(),
+            size: head.content_length().unwrap_or(0).max(0) as u64,
+            content_type: head
+                .content_type()
+                .unwrap_or("application/octet-stream")
+                .to_string(),
+            last_modified: to_chrono(head.last_modified()),
+            etag: head.e_tag().unwrap_or_default().to_string(),
+            groups,
+            metadata,
+            tags,
         })
     }
 
@@ -974,63 +1059,34 @@ impl FileBackend for AwsFileBackend {
     }
 
     async fn get_file_info(&self, vault: &str, name: &str) -> Result<FileInfo, BackendError> {
-        let key = validated_key(vault, name)?;
+        self.get_file_info_with_mode(vault, name, false).await
+    }
 
-        let head = self
-            .client
-            .head_object()
-            .bucket(&self.bucket)
-            .key(&key)
-            .send()
-            .await
-            .map_err(|e| errors::from_s3_head_object(name, e))?;
+    async fn get_file_restore_info(
+        &self,
+        vault: &str,
+        name: &str,
+    ) -> Result<FileInfo, BackendError> {
+        self.get_file_info_with_mode(vault, name, true).await
+    }
 
-        let metadata: HashMap<String, String> = head.metadata().cloned().unwrap_or_default();
-        let groups: Vec<String> = metadata
-            .get(METADATA_KEY_GROUPS)
-            .map(|g| g.split(',').map(|s| s.trim().to_string()).collect())
-            .unwrap_or_default();
-
-        // Tags need a separate call; degrade gracefully when the credentials
-        // lack s3:GetObjectTagging (mirrors the Azure 403 fallback).
-        let tags: HashMap<String, String> = match self
-            .client
-            .get_object_tagging()
-            .bucket(&self.bucket)
-            .key(&key)
-            .send()
-            .await
-        {
-            Ok(out) => out
-                .tag_set()
-                .iter()
-                .map(|t| (t.key().to_string(), t.value().to_string()))
-                .collect(),
-            Err(e) => {
-                match errors::from_s3_get_object_tagging(name, e) {
-                    BackendError::PermissionDenied(_) => tracing::debug!(
-                        "Tag read for '{name}' was denied; tags will be empty. \
-                         Grant s3:GetObjectTagging to include them."
-                    ),
-                    other => tracing::warn!("Failed to fetch tags for '{name}': {other}"),
-                }
-                HashMap::new()
-            }
-        };
-
-        Ok(FileInfo {
-            name: name.to_string(),
-            size: head.content_length().unwrap_or(0).max(0) as u64,
-            content_type: head
-                .content_type()
-                .unwrap_or("application/octet-stream")
-                .to_string(),
-            last_modified: to_chrono(head.last_modified()),
-            etag: head.e_tag().unwrap_or_default().to_string(),
-            groups,
-            metadata,
-            tags,
-        })
+    async fn restore_file(
+        &self,
+        vault: &str,
+        request: FileUploadRequest,
+    ) -> Result<FileInfo, BackendError> {
+        let spec = FileUploadSpec::from(&request);
+        let file_size = request.content.len() as u64;
+        let mut reader = std::io::Cursor::new(request.content);
+        self.upload_file_streaming_with_mode(
+            vault,
+            spec,
+            &mut reader,
+            file_size,
+            &NoopReporter,
+            true,
+        )
+        .await
     }
 
     async fn list_files_hierarchical(
@@ -1304,3 +1360,7 @@ mod tests {
 #[cfg(test)]
 #[path = "files_snapshot_tests.rs"]
 mod snapshot_tests;
+
+#[cfg(test)]
+#[path = "files_restore_tests.rs"]
+mod restore_tests;

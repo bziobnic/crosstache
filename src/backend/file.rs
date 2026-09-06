@@ -33,6 +33,31 @@ pub struct FileDownloadSnapshot {
 /// [`list_files_hierarchical`]: FileBackend::list_files_hierarchical
 #[async_trait]
 pub trait FileBackend: Send + Sync {
+    /// Full metadata for offline restore. Unlike display-oriented info reads,
+    /// errors reading tags must propagate; missing permissions are not empty tags.
+    async fn get_file_restore_info(
+        &self,
+        _vault: &str,
+        _name: &str,
+    ) -> Result<FileInfo, BackendError> {
+        Err(BackendError::Unsupported(
+            "complete file metadata for restore".into(),
+        ))
+    }
+
+    /// Replace a verified file offline, preserving exactly the supplied metadata
+    /// and tags, including upload bookkeeping. Callers must stop writers and
+    /// check drift; this method does not imply conditional replacement.
+    async fn restore_file(
+        &self,
+        _vault: &str,
+        _request: FileUploadRequest,
+    ) -> Result<FileInfo, BackendError> {
+        Err(BackendError::Unsupported(
+            "metadata-preserving file restore".into(),
+        ))
+    }
+
     /// Validate a logical file key using this backend's actual storage rules.
     fn validate_file_name(&self, _name: &str) -> Result<(), BackendError> {
         Ok(())

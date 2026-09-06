@@ -90,6 +90,28 @@ impl FileBackend for AzureFileBackend {
         self.inner.delete_file(name).await.map_err(map_error)
     }
 
+    async fn get_file_restore_info(
+        &self,
+        _vault: &str,
+        name: &str,
+    ) -> Result<FileInfo, BackendError> {
+        self.inner
+            .get_file_restore_info(name)
+            .await
+            .map_err(map_error)
+    }
+
+    async fn restore_file(
+        &self,
+        _vault: &str,
+        request: FileUploadRequest,
+    ) -> Result<FileInfo, BackendError> {
+        self.inner
+            .upload_file_for_restore(request, &NoopReporter)
+            .await
+            .map_err(map_error)
+    }
+
     async fn get_file_info(&self, _vault: &str, name: &str) -> Result<FileInfo, BackendError> {
         self.inner.get_file_info(name).await.map_err(map_error)
     }

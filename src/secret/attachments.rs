@@ -456,6 +456,7 @@ pub async fn download_decrypted(
             let material = resolve_referenced_material(secrets, vault, &key_ref).await?;
             let identity = material
                 .expose_identity()
+                .trim()
                 .parse::<age::x25519::Identity>()
                 .map_err(|_| CrosstacheError::from(AttachmentError::KeyInvalid))?;
             let plaintext = crypto::decrypt_bytes(&data, &identity)

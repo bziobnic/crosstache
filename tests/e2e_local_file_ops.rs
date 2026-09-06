@@ -22,6 +22,118 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use tempfile::TempDir;
 
+#[test]
+fn attachment_key_encrypted_backup_restores_another_vault_through_cli() {
+    use age::secrecy::ExposeSecret;
+    use crosstache::backend::{local::LocalBackend, Backend};
+    use crosstache::blob::models::FileUploadRequest;
+    use crosstache::config::settings::LocalConfig;
+    let source = FileEnv::new();
+    let target = FileEnv::new();
+    std::fs::write(source.path().join("payload.txt"), b"private backup payload").unwrap();
+    source.ok(&["file", "upload", "payload.txt", "--encrypt"]);
+    let identity = age::x25519::Identity::generate();
+    let recipient = identity.to_public().to_string();
+    let bundle_path = source.path().join("keys.age");
+    let identity_path = target.path().join("recovery.agekey");
+    std::fs::write(
+        &identity_path,
+        format!("# recovery key\n{}\n", identity.to_string().expose_secret()),
+    )
+    .unwrap();
+    let export_args = [
+        "attachment-key",
+        "export",
+        "--recipient",
+        &recipient,
+        "--output",
+        bundle_path.to_str().unwrap(),
+        "--offline",
+        "--format",
+        "json",
+    ];
+    let report = source.ok(&export_args);
+    assert!(!report.contains("AGE-SECRET-KEY"));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&report).unwrap()["report"]["files"],
+        1
+    );
+    let ciphertext = std::fs::read(&bundle_path).unwrap();
+    assert!(ciphertext.starts_with(b"age-encryption.org/v1"));
+    assert!(!source.run(&export_args).status.success());
+    assert_eq!(
+        std::fs::read(&bundle_path).unwrap(),
+        ciphertext,
+        "export never overwrites an existing backup"
+    );
+
+    let backend = |env: &FileEnv| {
+        LocalBackend::new(Some(&LocalConfig {
+            store_path: Some(env.path().join("store").display().to_string()),
+            key_file: Some(env.path().join("key.txt").display().to_string()),
+            default_vault: Some("default".into()),
+            ..Default::default()
+        }))
+        .unwrap()
+    };
+    let src_backend = backend(&source);
+    let dst_backend = backend(&target);
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let snapshot = src_backend
+            .files()
+            .unwrap()
+            .download_file_snapshot("default", "payload.txt", None)
+            .await
+            .unwrap();
+        dst_backend
+            .files()
+            .unwrap()
+            .upload_file(
+                "default",
+                FileUploadRequest {
+                    name: "payload.txt".into(),
+                    content: snapshot.content,
+                    metadata: snapshot.metadata,
+                    content_type: None,
+                    groups: vec![],
+                    tags: Default::default(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+    });
+    let restore_args = [
+        "attachment-key",
+        "restore",
+        "--input",
+        bundle_path.to_str().unwrap(),
+        "--identity-file",
+        identity_path.to_str().unwrap(),
+        "--format",
+        "json",
+    ];
+    let preview: serde_json::Value = serde_json::from_str(&target.ok(&restore_args)).unwrap();
+    assert_eq!(preview["report"]["outcome"], "ready");
+    let mut apply = restore_args.to_vec();
+    apply.extend(["--apply", "--offline"]);
+    let applied = target.ok(&apply);
+    assert!(!applied.contains("AGE-SECRET-KEY"));
+    assert!(!applied.contains("private backup payload"));
+    target.ok(&apply);
+    target.ok(&[
+        "file",
+        "download",
+        "payload.txt",
+        "--output",
+        "restored.txt",
+    ]);
+    assert_eq!(
+        std::fs::read(target.path().join("restored.txt")).unwrap(),
+        b"private backup payload"
+    );
+}
+
 /// Isolated local-backend environment that also exposes the on-disk store so
 /// tests can assert *where* files land (`store/vaults/<vault>/files/`).
 struct FileEnv {

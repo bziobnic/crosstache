@@ -1351,6 +1351,14 @@ xv file download license.key                     # decrypts transparently
 ```
 
 `xv delete db-cert` cascades the secret's attachments after confirmation.
+`xv attachment-key export --recipient age1... --output keys.age --offline`
+backs up verified attachment keys and a current-file manifest in an encrypted
+bundle. `xv attachment-key restore --input keys.age --identity-file recovery.agekey`
+previews recovery into the selected vault; applying requires `--apply --offline`.
+Back up ciphertext and metadata separately. Restore preserves ciphertext while
+rebinding exact key versions, including across vaults. Use `--repair-pointer`
+explicitly when repairing a malformed destination pointer.
+
 `xv list` hides `xv-attachment-key`. Full workflow, sync/rename/migrate
 pitfalls, and Azure's `xv_encrypted` metadata key:
 [`docs/attachments.md`](docs/attachments.md).
@@ -2069,8 +2077,10 @@ xv attachments db-cert --get cert.pem
 # → wrong or rotated attachment key
 ```
 
-Re-attaching mints a **new** key and will not recover old ciphertext. Prefer
-restoring the original `xv-attachment-key` secret. Sync deliberately skips
+Re-attaching cannot recover ciphertext whose original key is lost. Use
+`xv attachment-key recover` when verified retained keys still exist, or
+`xv attachment-key restore` with a previously exported encrypted key bundle and
+the separately backed-up ciphertext. Sync deliberately skips
 encrypted attachment blobs — use `xv attach` / `xv attachments --get` instead.
 See [`docs/attachments.md`](docs/attachments.md).
 

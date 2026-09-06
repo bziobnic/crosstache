@@ -69,11 +69,11 @@ pub(crate) async fn restore(keys: &dyn AttachmentKeyStore, files: &dyn FileBacke
 **Files:** Create src/secret/attachment_backup_codec.rs with inline tests.
 **Produces:** Bundle DTOs and validate/encrypt/decrypt above. Zeroizing serde field can use custom serde conversion to avoid dependency feature changes. Every DTO also derives Serialize/Deserialize; SourceRef derives the stated extra traits.
 
-- [ ] Write round-trip and rejection tests before implementation. Example assertion:
+- [x] Write round-trip and rejection tests before implementation. Example assertion:
   `assert!(decrypt(&ciphertext, &age::x25519::Identity::generate()).is_err());`
-- [ ] Observe RED using `cargo test --lib attachment_backup_codec`.
-- [ ] Implement bounded recipient-only age codec. Reject duplicate JSON object fields through serde structs, unknown fields, extra bytes, unknown schemas, ID/identity mismatch, duplicates, dangling refs/bindings, unsafe file names, malformed SHA-256/version strings. For opaque versions reuse metadata reference validation. Require each source reference key in identities and each manifest reference in references; pre-schema key equals explicit legacy binding. Reject ambiguous source slot/version bindings with different IDs. Bound decryption via Read::take(MAX+1); reject passphrase age before work-factor processing. Never expose parser errors containing source data.
-- [ ] Test authenticated truncation/tampering, empty/oversized input and plaintext, duplicate and inconsistent manifests, same encrypted bytes round trip without plaintext leakage; run focused tests and report.
+- [x] Observe RED using `cargo test --lib attachment_backup_codec`.
+- [x] Implement bounded recipient-only age codec. Reject duplicate JSON object fields through serde structs, unknown fields, extra bytes, unknown schemas, ID/identity mismatch, duplicates, dangling refs/bindings, unsafe file names, malformed SHA-256/version strings. For opaque versions reuse metadata reference validation. Require each source reference key in identities and each manifest reference in references; pre-schema key equals explicit legacy binding. Reject legacy pointer version bindings with different IDs; retained versions are scoped by the key-ID-derived record name. Bound decryption via Read::take(MAX+1); reject passphrase age before work-factor processing. Never expose parser errors containing source data.
+- [x] Test authenticated truncation/tampering, empty/oversized input and plaintext, duplicate and inconsistent manifests, same encrypted bytes round trip without plaintext leakage; run focused tests and report.
 
 ### Task 2: Offline restore and retry
 
@@ -81,24 +81,44 @@ pub(crate) async fn restore(keys: &dyn AttachmentKeyStore, files: &dyn FileBacke
 **Consumes:** Codec Bundle interface above, existing custody/FileBackend traits.
 **Produces:** restore signature above and public safe Serialize RestoreReport with outcome, key IDs/version mappings and per-file outcomes (no private values).
 
-- [ ] Write Local cross-vault test with different version tokens before implementation. Copy ciphertext/metadata separately; assert preview creates nothing; apply preserves ciphertext and ordinary download returns original bytes.
-- [ ] Observe RED with `cargo test --lib attachment_restore`.
-- [ ] Implement full spec preflight (bundle validate before provider access; all target names; all keys/files/pointer before writes). Reject extra managed files; verify ciphertext hash plus authenticated decrypt, source metadata exact ref or already rebound exact destination identity. Refuse V1 or conflicting parsed V2 and allow malformed only with repair flag. Reject missing value/disabled records and empty/mismatched returned versions.
-- [ ] Commit missing retained keys, exact-verify conflict winners, derive destination refs, reread file drift before upload, preserve all metadata/tags/groups/content type and ciphertext. Confirm snapshots and normal decryption. Pointer compare version+value and publish last, idempotently. No portable CAS claims.
-- [ ] Cover missing keys+malformed pointer, collisions zero writes, disabled keys, wrong ciphertext, changed refs, different legacy, interrupted/repeated restore, pointer/file drift, readback failure, and metadata preservation. Use fault-injecting trait wrappers where necessary.
+- [x] Write Local cross-vault test with different version tokens before implementation. Copy ciphertext/metadata separately; assert preview creates nothing; apply preserves ciphertext and ordinary download returns original bytes.
+- [x] Observe RED with `cargo test --lib attachment_restore`.
+- [x] Implement full spec preflight (bundle validate before provider access; all target names; all keys/files/pointer before writes). Reject extra managed files; verify ciphertext hash plus authenticated decrypt, source metadata exact ref or already rebound exact destination identity. Refuse V1 or conflicting parsed V2 and allow malformed only with repair flag. Reject missing value/disabled records and empty/mismatched returned versions.
+- [x] Commit missing retained keys, exact-verify conflict winners, derive destination refs, reread file drift before upload, preserve all metadata/tags/groups/content type and ciphertext. Confirm snapshots and normal decryption. Pointer compare version+value and publish last, idempotently. No portable CAS claims.
+- [x] Cover missing keys+malformed pointer, collisions zero writes, disabled keys, wrong ciphertext, changed refs, different legacy, interrupted/repeated restore, pointer/file drift, readback failure, and metadata preservation. Use fault-injecting trait wrappers where necessary.
 
 ### Task 3: Export collection, CLI, and user documentation
 
 **Files:** Create src/secret/attachment_backup.rs; modify src/cli/attachment_key_ops.rs, src/secret/mod.rs, docs/attachments.md, README.md, CHANGELOG.md, ROADMAP.md; extend tests/e2e_local_file_ops.rs.
 **Consumes:** Codec and restore interfaces above.
 
-- [ ] Add collection and CLI tests proving V1/V2, historical exact refs, distinct active/legacy, encryption round-trip, no clobber and required offline flags.
-- [ ] Implement collect with enabled/current/exact custody checks, managed snapshot authentication, source-ref deduplication, SHA-256 manifest, and final set/pointer/snapshot drift checks.
-- [ ] Add export/restore CLI resolving existing workspace/backend policy wrappers. Parse recipient/recovery key safely before provider I/O, read input with a size cap, zeroize identity file contents, create no-clobber ciphertext files with tempfile and flush. No key data in reports. Keep human/JSON/YAML existing render behavior.
-- [ ] Document key bundle vs separate payload backup, stopped writers, repair flag, current-visible scope, and no rotation. Run CLI round-trip on Local.
+- [x] Add collection and CLI tests proving V1/V2, historical exact refs, distinct active/legacy, encryption round-trip, no clobber and required offline flags.
+- [x] Implement collect with enabled/current/exact custody checks, managed snapshot authentication, source-ref deduplication, SHA-256 manifest, and final set/pointer/snapshot drift checks.
+- [x] Add export/restore CLI resolving existing workspace/backend policy wrappers. Parse recipient/recovery key safely before provider I/O, read input with a size cap, zeroize identity file contents, create no-clobber ciphertext files with tempfile and flush. No key data in reports. Keep human/JSON/YAML existing render behavior.
+- [x] Document key bundle vs separate payload backup, stopped writers, repair flag, current-visible scope, and no rotation. Run CLI round-trip on Local.
 
 ### Task 4: Integration review and verification
 
-- [ ] Review codec, restore, and collector separately for spec compliance and quality, then whole branch for interactions. Fix verified findings.
-- [ ] Run `cargo fmt --all --check`, `cargo clippy --all-features --workspace --all-targets -- -D warnings`, `cargo test --all-features --workspace`, and `cargo check --no-default-features`.
-- [ ] Record actual verification results and limits. Commit, pull --rebase, push implementation branch and create a reviewable PR; never merge automatically.
+- [x] Implement review-required strict file restore adapters: FileBackend get_file_restore_info/restore_file default Unsupported; Local preserves its existing exact request metadata; AWS/Azure strict info propagates tag failures and restore upload preserves supplied bookkeeping/tags. Add injected SDK tests. Custody preflight_set_secret checks configured Set policy for every planned write before mutation; actual writes retain authorization checks. Refresh destination listing metadata and retain only per-file hashes/info across restore passes.
+- [x] Review codec, restore, and collector separately for spec compliance and quality, then whole branch for interactions. Fix verified findings.
+- [x] Run `cargo fmt --all --check`, `cargo clippy --all-features --workspace --all-targets -- -D warnings`, `cargo test --all-features --workspace`, and `cargo check --no-default-features`.
+- [x] Record actual verification results and limits. Publish the verified implementation through the session completion workflow; never merge automatically.
+
+
+## Verification and review results — 2026-09-06
+
+- Full all-features workspace suite: 4,149 passed, 0 failed, 47 ignored.
+- All-features workspace/all-targets Clippy with `-D warnings`: passed.
+- No-default-features build: passed (existing feature-gated dead-code warnings).
+- Formatting and whitespace checks: passed.
+- Local CLI cross-vault restore, historical V1/current V2 file recovery, and
+  injected Azure/AWS transport preservation tests passed.
+- Independent task and final reviews completed; verified findings fixed:
+  record-scoped version validation, metadata/tag preservation, refreshed listing
+  metadata, Set/raw-Get policy preflight, malformed V1-prefix repair, and identity
+  whitespace compatibility. Exported provider identities are canonicalized;
+  ordinary schema-1 downloads now trim as custody validation already does.
+- Source/destination drift tests and interrupted apply/readback retries passed.
+- Cloud verification used injected SDK HTTP transports, not live customer vaults.
+  Offline operation and separate ciphertext backups remain required. Azure
+  separate-copy recovery needs a separately configured storage container/account.
