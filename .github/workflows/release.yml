@@ -45,30 +45,11 @@ jobs:
         with:
           fetch-depth: 0
       
-      - name: Generate changelog
-        id: changelog
+      - name: Render release notes from CHANGELOG.md
         run: |
-          # Get the latest two tags
-          CURRENT_TAG=${GITHUB_REF#refs/tags/}
-          PREVIOUS_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
-          
-          # Generate changelog
-          if [ -n "$PREVIOUS_TAG" ]; then
-            CHANGELOG=$(git log --pretty=format:"- %s" $PREVIOUS_TAG..HEAD | head -20)
-          else
-            CHANGELOG=$(git log --pretty=format:"- %s" HEAD | head -20)
-          fi
-          
-          # Create multiline output
-          {
-            echo "changelog<<EOF"
-            echo "## What's Changed"
-            echo ""
-            echo "$CHANGELOG"
-            echo ""
-            echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREVIOUS_TAG}...${CURRENT_TAG}"
-            echo "EOF"
-          } >> $GITHUB_OUTPUT
+          scripts/release-notes.sh "${GITHUB_REF_NAME}" "${GITHUB_REPOSITORY}" > release-notes.md
+          echo "--- release notes ---"
+          cat release-notes.md
 
       - name: Create Release
         id: create_release
@@ -76,7 +57,7 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
-          body: ${{ steps.changelog.outputs.changelog }}
+          body_path: release-notes.md
           draft: false
           prerelease: false
         env:
