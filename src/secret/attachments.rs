@@ -246,7 +246,7 @@ async fn publish_v2_pointer(
 /// strict name causes the candidate to be discarded and a fresh one generated —
 /// the user secret is never modified.
 #[cfg(feature = "file-ops")]
-async fn initialize_v2(
+pub(crate) async fn initialize_v2(
     secrets: &dyn AttachmentKeyStore,
     vault: &str,
     generate: &mut dyn FnMut() -> Zeroizing<String>,

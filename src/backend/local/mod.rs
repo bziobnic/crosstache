@@ -21,15 +21,18 @@
 //! Key files (`key.txt`, `recipients.txt`) are stored alongside the store
 //! or at a user-configured path.
 
+mod anchored;
 pub mod audit;
 pub mod config;
 pub mod crypto;
 #[cfg(feature = "file-ops")]
 pub mod files;
 pub mod git;
+mod name_collision;
 pub mod opaque;
 pub mod paths;
 pub mod secrets;
+mod transfer_namespace;
 pub mod vaults;
 
 use std::fs;
@@ -86,33 +89,49 @@ impl LocalBackend {
     pub fn new(
         raw_config: Option<&crate::config::settings::LocalConfig>,
     ) -> Result<Self, BackendError> {
+        Self::construct(raw_config, true)
+    }
+
+    fn construct(
+        raw_config: Option<&crate::config::settings::LocalConfig>,
+        initialize: bool,
+    ) -> Result<Self, BackendError> {
         let config = ResolvedLocalConfig::from_raw(raw_config);
         config.validate()?;
 
-        // Ensure store directory exists
-        fs::create_dir_all(&config.store_path).map_err(|e| {
-            BackendError::Internal(format!(
-                "create store directory {}: {e}",
-                config.store_path.display()
-            ))
-        })?;
-        crypto::set_dir_permissions(&config.store_path)?;
+        if initialize {
+            // Ensure store directory exists
+            fs::create_dir_all(&config.store_path).map_err(|e| {
+                BackendError::Internal(format!(
+                    "create store directory {}: {e}",
+                    config.store_path.display()
+                ))
+            })?;
+            crypto::set_dir_permissions(&config.store_path)?;
 
-        // Ensure vaults directory exists
-        let vaults_dir = paths::vaults_dir(&config.store_path);
-        create_private_dir(&vaults_dir).map_err(|e| {
-            BackendError::Internal(format!(
-                "create vaults directory {}: {e}",
-                vaults_dir.display()
-            ))
-        })?;
+            // Ensure vaults directory exists
+            let vaults_dir = paths::vaults_dir(&config.store_path);
+            create_private_dir(&vaults_dir).map_err(|e| {
+                BackendError::Internal(format!(
+                    "create vaults directory {}: {e}",
+                    vaults_dir.display()
+                ))
+            })?;
+        } else if anchored::open_configured_store_with_mode(&config.store_path, false, false)?
+            .is_none()
+        {
+            return Err(BackendError::Unsupported(
+                "local store does not exist; initialize it explicitly before attachment transfer"
+                    .into(),
+            ));
+        }
 
         // Resolve identity and recipients
-        let (identity, recipients) = Self::resolve_keys(&config)?;
+        let (identity, recipients) = Self::resolve_keys(&config, initialize)?;
 
         // Create default vault if it doesn't exist
         let default_vault_dir = paths::vault_dir(&config.store_path, &config.default_vault)?;
-        if !default_vault_dir.join(".vault.json").exists() {
+        if initialize && !default_vault_dir.join(".vault.json").exists() {
             create_private_dir(default_vault_dir.join("secrets"))
                 .map_err(|e| BackendError::Internal(format!("create default vault: {e}")))?;
             let meta = serde_json::json!({
@@ -154,7 +173,9 @@ impl LocalBackend {
             // Initialize eagerly so a misconfiguration (e.g. key_file inside the
             // store, or git missing from PATH) surfaces at startup rather than
             // midway through the first write.
-            git.ensure_repo()?;
+            if initialize {
+                git.ensure_repo()?;
+            }
             secret_backend = secret_backend.with_git_store(Arc::clone(&git));
             Some(git)
         } else {
@@ -175,6 +196,13 @@ impl LocalBackend {
             audit_log,
             git_store,
         })
+    }
+
+    /// Open configured local custody without initializing directories or keys.
+    pub fn open_existing(
+        raw_config: Option<&crate::config::settings::LocalConfig>,
+    ) -> Result<Self, BackendError> {
+        Self::construct(raw_config, false)
     }
 
     /// The hash-chained audit log, when `[local].audit` is enabled.
@@ -232,6 +260,7 @@ impl LocalBackend {
     /// Resolve age identity and recipients from env vars or files.
     fn resolve_keys(
         config: &ResolvedLocalConfig,
+        initialize: bool,
     ) -> Result<(age::x25519::Identity, Vec<age::x25519::Recipient>), BackendError> {
         // 1. AGE_KEY env var — inline identity string
         if let Ok(key_str) = std::env::var("AGE_KEY") {
@@ -265,6 +294,8 @@ impl LocalBackend {
                 vec![identity.to_public()]
             };
             Ok((identity, recipients))
+        } else if !initialize {
+            Err(BackendError::Unsupported("local identity is missing; initialize local custody explicitly before attachment transfer".into()))
         } else {
             // 4. Generate new keypair
             crypto::generate_keypair(key_path, &config.recipients_file)
@@ -365,17 +396,48 @@ impl Backend for LocalBackend {
         &self,
         vault: &str,
     ) -> Result<super::TransferLocation, BackendError> {
-        #[cfg(feature = "file-ops")]
-        {
-            files::transfer_location(&self.config.store_path, vault)
+        transfer_namespace::transfer_location(&self.config.store_path, vault)
+    }
+
+    async fn transfer_secret_namespace(&self, vault: &str) -> Result<String, BackendError> {
+        transfer_namespace::secret_namespace(&self.config.store_path, vault)
+    }
+
+    async fn transfer_secret_physical_namespace(
+        &self,
+        vault: &str,
+    ) -> Result<String, BackendError> {
+        transfer_namespace::physical_secret_namespace(&self.config.store_path, vault)
+    }
+
+    async fn transfer_file_physical_namespace(&self, vault: &str) -> Result<String, BackendError> {
+        transfer_namespace::physical_file_namespace(&self.config.store_path, vault)
+    }
+
+    async fn transfer_secret_names_collide(
+        &self,
+        vault: &str,
+        left: &str,
+        right: &str,
+    ) -> Result<bool, BackendError> {
+        paths::validate_vault_name(vault)?;
+        let left = self.secret_backend.active_stem(left);
+        let right = self.secret_backend.active_stem(right);
+        if left == right {
+            return Ok(true);
         }
-        #[cfg(not(feature = "file-ops"))]
-        {
-            let _ = vault;
-            Err(BackendError::Unsupported(
-                "local transfer namespaces require file operations".into(),
-            ))
+        if self.config.opaque_filenames || !left.eq_ignore_ascii_case(&right) {
+            return Ok(false);
         }
+        name_collision::case_insensitive(&self.config.store_path, vault)
+    }
+
+    async fn prepare_transfer_destination(
+        &self,
+        vault: &str,
+        expected: &super::TransferLocation,
+    ) -> Result<super::TransferLocation, BackendError> {
+        transfer_namespace::prepare(&self.config.store_path, vault, expected)
     }
 
     fn name(&self) -> &'static str {
@@ -705,6 +767,53 @@ mod tests {
     use crate::config::settings::LocalConfig;
     use tempfile::TempDir;
 
+    #[test]
+    fn transfer_open_existing_missing_store_never_initializes() {
+        let tmp = TempDir::new().unwrap();
+        let config = make_config(&tmp);
+        assert!(LocalBackend::open_existing(Some(&config)).is_err());
+        assert!(!tmp.path().join("store").exists());
+        assert!(!tmp.path().join("key.txt").exists());
+    }
+
+    #[test]
+    fn transfer_open_existing_missing_identity_never_generates_custody() {
+        let tmp = TempDir::new().unwrap();
+        let config = make_config(&tmp);
+        fs::create_dir(tmp.path().join("store")).unwrap();
+        assert!(LocalBackend::open_existing(Some(&config)).is_err());
+        assert!(!tmp.path().join("key.txt").exists());
+        assert!(!tmp.path().join("store/vaults").exists());
+        assert!(fs::read_dir(tmp.path().join("store"))
+            .unwrap()
+            .next()
+            .is_none());
+    }
+
+    #[test]
+    fn transfer_open_existing_never_initializes_git_or_repairs_modes() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = make_config(&tmp);
+        LocalBackend::new(Some(&config)).unwrap();
+        config.git = Some(true);
+        let store = std::path::Path::new(config.store_path.as_ref().unwrap());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(store, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        LocalBackend::open_existing(Some(&config)).unwrap();
+        assert!(!store.join(".git").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(store).unwrap().permissions().mode() & 0o777,
+                0o755
+            );
+        }
+    }
+
     fn make_config(tmp: &TempDir) -> LocalConfig {
         LocalConfig {
             store_path: Some(tmp.path().join("store").to_string_lossy().to_string()),
@@ -727,6 +836,38 @@ mod tests {
         assert!(tmp.path().join("key.txt").exists());
         assert_eq!(backend.name(), "local");
         assert_eq!(backend.kind(), BackendKind::Local);
+    }
+
+    #[tokio::test]
+    async fn transfer_name_collisions_match_layout_and_filesystem_without_provisioning() {
+        for opaque in [false, true] {
+            let tmp = TempDir::new().unwrap();
+            let mut raw = make_config(&tmp);
+            raw.opaque_filenames = Some(opaque);
+            let backend = LocalBackend::new(Some(&raw)).unwrap();
+            // The fixture may probe; the production operation must remain read-only.
+            let parent = tmp.path().join("store/vaults");
+            fs::write(parent.join("case-probe"), b"").unwrap();
+            let insensitive = parent.join("CASE-PROBE").exists();
+            fs::remove_file(parent.join("case-probe")).unwrap();
+            match backend
+                .transfer_secret_names_collide("absent", "a", "A")
+                .await
+            {
+                Ok(collides) => assert_eq!(collides, !opaque && insensitive),
+                Err(BackendError::Unsupported(_)) if !opaque && !cfg!(target_os = "macos") => {}
+                other => panic!("unexpected collision result: {other:?}"),
+            }
+            assert!(backend
+                .transfer_secret_names_collide("absent", "a", "a")
+                .await
+                .unwrap());
+            assert!(!backend
+                .transfer_secret_names_collide("absent", "a", "b")
+                .await
+                .unwrap());
+            assert!(!parent.join("absent").exists());
+        }
     }
 
     #[test]

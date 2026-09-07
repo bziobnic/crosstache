@@ -9,7 +9,9 @@ Spec: `docs/superpowers/specs/2026-09-06-attachment-transfer-design.md`.
 - Preserve source data until the destination is independently verified. Fail closed
   on errors, collisions, drift, unsupported capabilities and ambiguous storage aliases.
 - Manifest contains no secret values, private keys or decrypted attachments. Progress
-  alone cannot authorize deletion. Preview performs no mutations; apply is offline.
+  alone cannot authorize deletion. Preview performs no planned provisioning or data
+  mutations; existing read auditing, locks and transaction recovery remain enabled.
+  Apply is offline.
 - Preserve custody guards and policy checks. No reserved-record generic transfer.
 - Reuse strict snapshot/authentication helpers and private atomic file helpers.
 - Use regression tests first, independent task review and whole-branch review.
@@ -61,5 +63,5 @@ with the expected head SHA. Record merged PRs and validation below.
 ## Progress
 
 - Task 1: merged PR #436 at 78369d4; 4,282 tests passed, 47 ignored; Linux/Windows CI and Bugbot clean.
-- Task 2: in progress from 78369d4; local offline rename and recovery.
-- Task 3: pending Task 2 merge.
+- Task 2: merged PR #437 at acfe750; 4,352 tests passed, 47 ignored; 283 JS tests; Linux/Windows CI and actual Bugbot clean.
+- Task 3: in progress from acfe750; cross-vault transfers and explicit destination key initialization.

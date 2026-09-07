@@ -68,9 +68,19 @@ pub struct TransferIntent {
     pub destination_name: String,
     pub operation: TransferOperation,
     pub destination_key_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_folder: Option<String>,
 }
 impl TransferIntent {
     pub fn validate(&self) -> Result<()> {
+        if let Some(folder) = &self.destination_folder {
+            if folder != "/" {
+                crate::utils::helpers::validate_folder_path(folder)?;
+                if folder.split('/').any(|part| !component(part)) {
+                    return Err(invalid());
+                }
+            }
+        }
         for endpoint in [&self.source, &self.destination] {
             if endpoint.identity.trim().is_empty()
                 || endpoint.identity.len() > 4096
@@ -96,7 +106,7 @@ impl TransferIntent {
         Ok(())
     }
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TransferKeyBinding {
     pub key_id: String,
@@ -117,7 +127,7 @@ impl From<&key::AttachmentKeyRef> for TransferKeyBinding {
     }
 }
 impl TransferKeyBinding {
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         if key::AttachmentKeyId::parse(&self.key_id).is_none()
             || !matches!(self.slot.as_str(), "legacy" | "retained")
             || self.provider_version.is_empty()
@@ -235,6 +245,43 @@ async fn absent(backend: &dyn Backend, endpoint: &TransferEndpoint, name: &str) 
     }
     Ok(())
 }
+/// Transfer execution is deliberately one-file, in-memory, not streaming.
+/// Ciphertext, plaintext and output may coexist, plus provider buffers.
+pub const MAX_SOURCE_CIPHERTEXT_BYTES: u64 = 256 * 1024 * 1024;
+pub const MAX_OUTPUT_CIPHERTEXT_BYTES: u64 = MAX_SOURCE_CIPHERTEXT_BYTES + 64 * 1024;
+pub(crate) async fn snapshot(
+    files: &dyn crate::backend::FileBackend,
+    vault: &str,
+    name: &str,
+) -> Result<rewrap::Snapshot> {
+    snapshot_with_limit(files, vault, name, MAX_SOURCE_CIPHERTEXT_BYTES).await
+}
+pub(crate) async fn destination_snapshot(
+    files: &dyn crate::backend::FileBackend,
+    vault: &str,
+    name: &str,
+) -> Result<rewrap::Snapshot> {
+    snapshot_with_limit(files, vault, name, MAX_OUTPUT_CIPHERTEXT_BYTES).await
+}
+async fn snapshot_with_limit(
+    files: &dyn crate::backend::FileBackend,
+    vault: &str,
+    name: &str,
+    limit: u64,
+) -> Result<rewrap::Snapshot> {
+    let before = files.get_file_restore_info(vault, name).await?;
+    if before.size > limit {
+        return Err(BackendError::Unsupported(
+            "Attachment exceeds the 256 MiB transfer memory limit".into(),
+        )
+        .into());
+    }
+    let current = rewrap::snapshot(files, vault, name).await?;
+    if !rewrap::same_info(&before, &current.info) || current.info.size > limit {
+        return Err(conflict());
+    }
+    Ok(current)
+}
 /// Authenticates every current attachment, takes full metadata and ciphertext
 /// fingerprints, and rechecks inventory and source version. Performs only reads.
 pub async fn plan(
@@ -299,24 +346,53 @@ pub async fn plan(
                         "cross-vault preview requires an explicit destination active key ID".into(),
                     )
                 })?;
-            let dest_ring =
-                rewrap::Ring::load(dest_keys.as_ref(), &i.destination.vault, &expected).await?;
+            let dest_ring = rewrap::Ring::load(dest_keys.as_ref(), &i.destination.vault, &expected)
+                .await
+                .map_err(|error| CrosstacheError::invalid_argument(format!(
+                    "Destination needs an existing healthy attachment key ring matching --to-key-id: {error}. Use attachment-key initialize --apply --offline for an empty ring, or attachment-key upgrade/recover for an existing unhealthy ring."
+                )))?;
             result.destination_key = Some((&dest_ring.target).into());
             destination_ring = Some(dest_ring);
         }
         let prefix = format!("attachments/{}/", i.source_name);
+        let mut evidence_bytes = serde_json::to_vec(&result).map_err(|_| invalid())?.len();
         for name in &names {
             files.validate_file_name(name)?;
             let suffix = name.strip_prefix(&prefix).ok_or_else(invalid)?;
-            destination_files
-                .validate_file_name(&format!("attachments/{}/{suffix}", i.destination_name))?;
-            let snap = rewrap::snapshot(files, &i.source.vault, name).await?;
+            let destination_name = format!("attachments/{}/{suffix}", i.destination_name);
+            destination_files.validate_file_name(&destination_name)?;
+            for previous in &result.files {
+                if destination_files
+                    .transfer_file_names_collide(
+                        &i.destination.vault,
+                        &previous.destination_name,
+                        &destination_name,
+                    )
+                    .await?
+                {
+                    return Err(CrosstacheError::conflict(
+                        "planned attachments collide in the destination object namespace",
+                    ));
+                }
+            }
+            if files
+                .get_file_restore_info(&i.source.vault, name)
+                .await?
+                .size
+                > MAX_SOURCE_CIPHERTEXT_BYTES
+            {
+                return Err(BackendError::Unsupported(
+                    "Attachment exceeds the 256 MiB transfer memory limit".into(),
+                )
+                .into());
+            }
+            let snap = snapshot(files, &i.source.vault, name).await?;
             let reference = rewrap::source_ref(&ring, &snap)?;
             let _plaintext =
                 rewrap::authenticate(keys.as_ref(), &i.source.vault, &reference, &snap).await?;
-            result.files.push(TransferFile {
+            let evidence = TransferFile {
                 source_name: name.clone(),
-                destination_name: format!("attachments/{}/{suffix}", i.destination_name),
+                destination_name,
                 size: snap.info.size,
                 content_type: snap.info.content_type,
                 last_modified: snap.info.last_modified,
@@ -326,10 +402,20 @@ pub async fn plan(
                 tags: snap.info.tags,
                 ciphertext_sha256: hex::encode(Sha256::digest(&snap.data.content)),
                 source_key: (&reference).into(),
-            });
+            };
+            evidence_bytes = evidence_bytes
+                .checked_add(serde_json::to_vec(&evidence).map_err(|_| invalid())?.len() + 1)
+                .ok_or_else(invalid)?;
+            if evidence_bytes > MAX_PLAINTEXT_BYTES {
+                return Err(BackendError::Unsupported(
+                    "Transfer metadata exceeds the recovery journal budget".into(),
+                )
+                .into());
+            }
+            result.files.push(evidence);
         }
         for saved in &result.files {
-            let current = rewrap::snapshot(files, &i.source.vault, &saved.source_name).await?;
+            let current = snapshot(files, &i.source.vault, &saved.source_name).await?;
             if current.info.size != saved.size
                 || current.info.content_type != saved.content_type
                 || current.info.last_modified != saved.last_modified

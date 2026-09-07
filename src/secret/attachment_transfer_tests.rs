@@ -13,6 +13,7 @@ fn intent() -> TransferIntent {
         destination_name: "db-new".into(),
         operation: TransferOperation::Move,
         destination_key_id: None,
+        destination_folder: None,
     }
 }
 fn manifest() -> TransferPlan {

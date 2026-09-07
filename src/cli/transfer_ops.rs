@@ -24,6 +24,9 @@ pub struct TransferOptions {
     /// Expected destination active attachment key ID for cross-vault transfers
     #[arg(long)]
     pub to_key_id: Option<String>,
+    /// Destination folder override; / explicitly clears to root
+    #[arg(long)]
+    pub to_folder: Option<String>,
     /// Apply the transfer after verifying source and destination
     #[arg(long, requires = "offline")]
     pub apply: bool,
@@ -90,6 +93,11 @@ pub(crate) async fn execute(
             TransferOperation::Copy
         },
         destination_key_id: options.to_key_id,
+        destination_folder: options
+            .to_folder
+            .as_deref()
+            .map(super::transfer_support::folder_override)
+            .transpose()?,
     };
     if options.apply || options.resume.is_some() {
         let root = match options.recovery_dir {
@@ -129,6 +137,64 @@ pub(crate) async fn execute(
 mod tests {
     use crate::cli::{Cli, Commands};
     use clap::Parser;
+
+    #[test]
+    fn generic_transfer_options_and_saved_folder_parse() {
+        for verb in ["copy", "move"] {
+            assert!(Cli::try_parse_from([
+                "xv",
+                verb,
+                "cert",
+                "--from",
+                "a",
+                "--to",
+                "b",
+                "--with-attachments",
+                "--offline",
+                "--to-key-id",
+                "key",
+                "--recovery-dir",
+                "recovery"
+            ])
+            .is_ok());
+        }
+        assert!(Cli::try_parse_from([
+            "xv",
+            "mv",
+            "a:cert",
+            "b:folder/",
+            "--with-attachments",
+            "--dry-run",
+            "--to-key-id",
+            "key"
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from([
+            "xv",
+            "migrate",
+            "--from",
+            "local:a",
+            "--to",
+            "local:b",
+            "--with-attachments",
+            "--offline",
+            "--to-key-id",
+            "key"
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from([
+            "xv",
+            "transfer",
+            "cert",
+            "--from",
+            "a",
+            "--to",
+            "b",
+            "--to-folder",
+            "/"
+        ])
+        .is_ok());
+    }
 
     #[test]
     fn transfer_preview_parses_explicit_endpoints_and_binding() {

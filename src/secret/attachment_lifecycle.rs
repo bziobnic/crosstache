@@ -12,6 +12,111 @@ use serde::Serialize;
 use zeroize::Zeroizing;
 
 #[derive(Debug, Serialize)]
+pub struct InitializeReport {
+    pub schema_version: u32,
+    pub operation: &'static str,
+    pub outcome: &'static str,
+    pub active_key_id: Option<String>,
+    pub retained_version: Option<String>,
+}
+
+/// Explicit empty-ring initialization. Preview never generates a key; apply
+/// requires stopped writers, which the CLI enforces through --apply --offline.
+/// Existing managed files or retained-only custody require recovery instead.
+pub async fn initialize(
+    keys: &dyn AttachmentKeyStore,
+    files: &dyn crate::backend::FileBackend,
+    vault: &str,
+    apply: bool,
+) -> Result<InitializeReport> {
+    use super::attachment_rewrap::{inventory, Ring};
+    use age::secrecy::ExposeSecret;
+
+    keys.assert_complete_visibility(vault).await?;
+    let observed = pointer(keys, vault).await?;
+    if let Some(existing) = &observed {
+        if !existing.enabled || existing.version.is_empty() {
+            return Err(CrosstacheError::conflict(
+                "The attachment pointer is unhealthy; use attachment-key recover instead of initialize.",
+            ));
+        }
+        let active = match value(existing).and_then(key::parse_pointer_value) {
+            Some(PointerKind::V2 { active, .. }) => active,
+            Some(PointerKind::V1RawIdentity) => return Err(CrosstacheError::conflict(
+                "A legacy attachment identity exists; use attachment-key upgrade instead of initialize.",
+            )),
+            _ => return Err(CrosstacheError::conflict(
+                "The attachment pointer is malformed; use attachment-key recover instead of initialize.",
+            )),
+        };
+        let ring = Ring::load(keys, vault, &active).await?;
+        return Ok(InitializeReport {
+            schema_version: 1,
+            operation: "initialize",
+            outcome: "already_initialized",
+            active_key_id: Some(active.as_str().into()),
+            retained_version: Some(ring.target.provider_version.as_str().into()),
+        });
+    }
+    refuse_retained_only_initialization(keys, vault).await?;
+    let inventory = inventory(files, vault).await?;
+    if !inventory.managed.is_empty() {
+        return Err(CrosstacheError::conflict(
+            "Managed attachments exist without an active pointer; recover the original keys before initialization.",
+        ));
+    }
+    if !apply {
+        return Ok(InitializeReport {
+            schema_version: 1,
+            operation: "initialize",
+            outcome: "would_initialize",
+            active_key_id: None,
+            retained_version: None,
+        });
+    }
+    keys.preflight_set_secret(vault, key::ACTIVE_POINTER_SECRET)
+        .await?;
+    let identity = age::x25519::Identity::generate();
+    let id = AttachmentKeyId::derive(&identity.to_public().to_string());
+    let candidate = Zeroizing::new(identity.to_string().expose_secret().to_string());
+    keys.preflight_set_secret(vault, &key::retained_record_name(&id))
+        .await?;
+    inventory.recheck(files, vault).await?;
+    unchanged(keys, vault, &observed).await?;
+    refuse_retained_only_initialization(keys, vault).await?;
+    // Reuse the upload initializer's immutable retained commit and exact readback.
+    // Keep this preflighted candidate fixed: a collision fails rather than trying
+    // another candidate whose custody permissions have not been checked.
+    let material =
+        super::attachments::initialize_v2(keys, vault, &mut || candidate.clone()).await?;
+    let ring = Ring::load(keys, vault, &id).await?;
+    if ring.target != *material.reference() || ring.legacy.is_some() {
+        return Err(CrosstacheError::conflict(
+            "Attachment initialization could not verify its published binding; inspect attachment-key status and recover retained custody.",
+        ));
+    }
+    Ok(InitializeReport {
+        schema_version: 1,
+        operation: "initialize",
+        outcome: "initialized",
+        active_key_id: Some(id.as_str().into()),
+        retained_version: Some(ring.target.provider_version.as_str().into()),
+    })
+}
+
+async fn refuse_retained_only_initialization(
+    keys: &dyn AttachmentKeyStore,
+    vault: &str,
+) -> Result<()> {
+    if !keys.list_retained_keys(vault).await?.is_empty() {
+        return Err(CrosstacheError::conflict(
+            "Retained attachment keys exist without an active pointer; use attachment-key recover with an explicit key ID.",
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
 pub struct LifecycleReport {
     pub schema_version: u32,
     pub operation: &'static str,
@@ -395,6 +500,164 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn initialize_preview_is_read_only_and_apply_is_idempotent_without_files() {
+        let (dir, backend) = fixture();
+        let keys = backend.attachment_keys();
+        let files = backend.files().unwrap();
+        let file_dir = dir.path().join("store/vaults/default/files");
+        let preview = initialize(keys.as_ref(), files, "default", false)
+            .await
+            .unwrap();
+        assert_eq!(preview.outcome, "would_initialize");
+        assert!(preview.active_key_id.is_none());
+        assert!(pointer(keys.as_ref(), "default").await.unwrap().is_none());
+        assert!(keys.list_retained_keys("default").await.unwrap().is_empty());
+        assert!(!file_dir.exists());
+        let applied = initialize(keys.as_ref(), files, "default", true)
+            .await
+            .unwrap();
+        assert_eq!(applied.outcome, "initialized");
+        let original = pointer(keys.as_ref(), "default").await.unwrap().unwrap();
+        let again = initialize(keys.as_ref(), files, "default", true)
+            .await
+            .unwrap();
+        assert_eq!(again.outcome, "already_initialized");
+        assert_eq!(again.active_key_id, applied.active_key_id);
+        assert_eq!(again.retained_version, applied.retained_version);
+        assert_eq!(
+            pointer(keys.as_ref(), "default")
+                .await
+                .unwrap()
+                .unwrap()
+                .version,
+            original.version
+        );
+        assert_eq!(keys.list_retained_keys("default").await.unwrap().len(), 1);
+        assert!(
+            !file_dir.exists(),
+            "key initialization must not create file storage"
+        );
+        let json = serde_json::to_string(&applied).unwrap();
+        assert!(!json.contains("AGE-SECRET-KEY"));
+    }
+
+    #[tokio::test]
+    async fn initialize_refuses_retained_only_custody_and_managed_files() {
+        let (_dir, backend) = fixture();
+        let keys = backend.attachment_keys();
+        let identity = age::x25519::Identity::generate();
+        let id = key::AttachmentKeyId::derive(&identity.to_public().to_string());
+        keys.commit_retained_key(
+            "default",
+            request(
+                &key::retained_record_name(&id),
+                identity.to_string().expose_secret(),
+                true,
+            ),
+        )
+        .await
+        .unwrap();
+        for apply in [false, true] {
+            let error = initialize(keys.as_ref(), backend.files().unwrap(), "default", apply)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("recover"));
+            assert!(pointer(keys.as_ref(), "default").await.unwrap().is_none());
+            assert_eq!(keys.list_retained_keys("default").await.unwrap().len(), 1);
+        }
+        let (_dir, backend) = fixture();
+        backend
+            .secrets()
+            .set_secret("default", request("lost", "owner", false))
+            .await
+            .unwrap();
+        let files = backend.files().unwrap();
+        files
+            .upload_file(
+                "default",
+                blob(
+                    "attachments/lost/proof",
+                    b"unrecoverable old ciphertext".to_vec(),
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+        let keys = backend.attachment_keys();
+        for apply in [false, true] {
+            let error = initialize(keys.as_ref(), files, "default", apply)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("recover"));
+            assert!(pointer(keys.as_ref(), "default").await.unwrap().is_none());
+            assert!(keys.list_retained_keys("default").await.unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn initialize_refuses_legacy_invalid_and_disabled_pointers_without_writes() {
+        for raw in [
+            age::x25519::Identity::generate()
+                .to_string()
+                .expose_secret()
+                .to_string(),
+            "invalid-pointer-canary".into(),
+        ] {
+            let (_dir, backend) = fixture();
+            let keys = backend.attachment_keys();
+            let original = keys
+                .set_secret("default", request(key::ACTIVE_POINTER_SECRET, &raw, false))
+                .await
+                .unwrap();
+            for apply in [false, true] {
+                let error = initialize(keys.as_ref(), backend.files().unwrap(), "default", apply)
+                    .await
+                    .unwrap_err();
+                assert!(
+                    error.to_string().contains("upgrade") || error.to_string().contains("recover")
+                );
+                assert!(!error.to_string().contains(&raw));
+                assert_eq!(
+                    pointer(keys.as_ref(), "default")
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .version,
+                    original.version
+                );
+                assert!(keys.list_retained_keys("default").await.unwrap().is_empty());
+            }
+        }
+        let (_dir, backend) = fixture();
+        let keys = backend.attachment_keys();
+        initialize(keys.as_ref(), backend.files().unwrap(), "default", true)
+            .await
+            .unwrap();
+        let mut disabled = crate::backend::secret::rename_request_from_properties(
+            key::ACTIVE_POINTER_SECRET,
+            &pointer(keys.as_ref(), "default").await.unwrap().unwrap(),
+        )
+        .unwrap();
+        disabled.enabled = Some(false);
+        let original = keys.set_secret("default", disabled).await.unwrap();
+        assert!(
+            initialize(keys.as_ref(), backend.files().unwrap(), "default", true)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("recover")
+        );
+        assert_eq!(
+            pointer(keys.as_ref(), "default")
+                .await
+                .unwrap()
+                .unwrap()
+                .version,
+            original.version
+        );
+    }
+
+    #[tokio::test]
     async fn upgrade_keeps_unversioned_pinned_and_new_attachments_readable() {
         let (_dir, backend) = fixture();
         let keys = backend.attachment_keys();
@@ -582,10 +845,41 @@ mod tests {
         drift_at: Option<usize>,
         pointer_reads: std::sync::atomic::AtomicUsize,
         wrong_version: bool,
+        deny_pointer_preflight: bool,
+        deny_retained_preflight: bool,
     }
 
     #[async_trait::async_trait]
     impl AttachmentKeyStore for FaultKeys<'_> {
+        async fn assert_complete_visibility(
+            &self,
+            vault: &str,
+        ) -> std::result::Result<(), BackendError> {
+            self.inner.assert_complete_visibility(vault).await
+        }
+        async fn list_retained_keys(
+            &self,
+            vault: &str,
+        ) -> std::result::Result<
+            Vec<crate::backend::attachment_keys::RetainedKeySummary>,
+            BackendError,
+        > {
+            self.inner.list_retained_keys(vault).await
+        }
+        async fn preflight_set_secret(
+            &self,
+            vault: &str,
+            name: &str,
+        ) -> std::result::Result<(), BackendError> {
+            if (self.deny_pointer_preflight && name == key::ACTIVE_POINTER_SECRET)
+                || (self.deny_retained_preflight && name != key::ACTIVE_POINTER_SECRET)
+            {
+                return Err(BackendError::PermissionDenied(
+                    "test custody preflight denied".into(),
+                ));
+            }
+            self.inner.preflight_set_secret(vault, name).await
+        }
         async fn get_secret(
             &self,
             vault: &str,
@@ -656,6 +950,72 @@ mod tests {
             drift_at,
             pointer_reads: std::sync::atomic::AtomicUsize::new(0),
             wrong_version,
+            deny_pointer_preflight: false,
+            deny_retained_preflight: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn initialize_preflights_pointer_and_retained_custody_before_any_write() {
+        for deny_pointer in [false, true] {
+            let (_dir, backend) = fixture();
+            let mut keys = faulty(&backend, false, None, false);
+            keys.deny_pointer_preflight = deny_pointer;
+            keys.deny_retained_preflight = !deny_pointer;
+            assert!(matches!(
+                initialize(&keys, backend.files().unwrap(), "default", true).await,
+                Err(CrosstacheError::PermissionDenied(_))
+            ));
+            assert!(pointer(keys.inner.as_ref(), "default")
+                .await
+                .unwrap()
+                .is_none());
+            assert!(keys
+                .inner
+                .list_retained_keys("default")
+                .await
+                .unwrap()
+                .is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn initialize_interruption_preserves_retained_custody_and_requires_explicit_recovery() {
+        for wrong_version in [false, true] {
+            let (_dir, backend) = fixture();
+            let keys = faulty(&backend, !wrong_version, None, wrong_version);
+            assert!(initialize(&keys, backend.files().unwrap(), "default", true)
+                .await
+                .is_err());
+            assert!(pointer(keys.inner.as_ref(), "default")
+                .await
+                .unwrap()
+                .is_none());
+            assert_eq!(
+                keys.inner
+                    .list_retained_keys("default")
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+            let error = initialize(
+                keys.inner.as_ref(),
+                backend.files().unwrap(),
+                "default",
+                true,
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("recover"));
+            assert_eq!(
+                keys.inner
+                    .list_retained_keys("default")
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
         }
     }
 

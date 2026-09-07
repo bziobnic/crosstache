@@ -4914,11 +4914,14 @@ pub(crate) async fn execute_diff_command(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_secret_copy_direct(
     name: &str,
     from_vault: &str,
     to_vault: &str,
     new_name: Option<String>,
+    attachments: crate::cli::transfer_support::AttachmentTransferOptions,
+    dry_run: bool,
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
@@ -4934,7 +4937,23 @@ pub(crate) async fn execute_secret_copy_direct(
         }
     };
 
-    execute_secret_copy(reg, name, from_vault, to_vault, new_name, false, &config).await?;
+    execute_secret_copy(
+        reg,
+        name,
+        from_vault,
+        to_vault,
+        new_name,
+        false,
+        false,
+        &attachments,
+        dry_run,
+        &config,
+    )
+    .await?;
+
+    if dry_run {
+        return Ok(());
+    }
 
     // Invalidate the secrets list cache for both source and destination
     // vaults, each keyed by ITS OWN resolved backend name — a workspace
@@ -4964,12 +4983,15 @@ pub(crate) async fn execute_secret_copy_direct(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_secret_move_direct(
     name: &str,
     from_vault: &str,
     to_vault: &str,
     new_name: Option<String>,
     force: bool,
+    attachments: crate::cli::transfer_support::AttachmentTransferOptions,
+    dry_run: bool,
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
@@ -4985,7 +5007,22 @@ pub(crate) async fn execute_secret_move_direct(
         }
     };
 
-    execute_secret_move(reg, name, from_vault, to_vault, new_name, force, &config).await?;
+    execute_secret_move(
+        reg,
+        name,
+        from_vault,
+        to_vault,
+        new_name,
+        force,
+        &attachments,
+        dry_run,
+        &config,
+    )
+    .await?;
+
+    if dry_run {
+        return Ok(());
+    }
 
     // Invalidate the secrets list cache for both source and destination
     // vaults — same reasoning as `execute_secret_copy_direct` above: keyed
@@ -5939,22 +5976,7 @@ pub(crate) fn check_dest_tag_budget(
     dest: &dyn crate::backend::Backend,
     request: &crate::secret::manager::SecretRequest,
 ) -> Result<()> {
-    let reserved = crate::backend::ALWAYS_WRITTEN_TAGS.len()
-        + usize::from(request.groups.as_ref().is_some_and(|g| !g.is_empty()))
-        + usize::from(request.note.is_some())
-        + usize::from(request.folder.is_some());
-    let user_tags: std::collections::BTreeMap<String, String> = request
-        .tags
-        .clone()
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
-    crate::records::check_tag_budget(
-        &dest.capabilities(),
-        reserved,
-        &std::collections::BTreeMap::new(),
-        &user_tags,
-    )
+    crate::backend::secret::validate_transfer_request(dest, request)
 }
 
 /// Resolve a `{{ secret:TOKEN }}` template reference whose `TOKEN` carries a
@@ -7193,6 +7215,14 @@ async fn execute_secret_inject(
     Ok(())
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum CopyOutcome {
+    Copied,
+    Handled,
+    Aborted,
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn execute_secret_copy(
     reg: &BackendRegistry,
     name: &str,
@@ -7200,8 +7230,11 @@ async fn execute_secret_copy(
     to_vault: &str,
     new_name: Option<String>,
     force: bool,
+    move_source: bool,
+    attachments: &crate::cli::transfer_support::AttachmentTransferOptions,
+    dry_run: bool,
     config: &Config,
-) -> Result<()> {
+) -> Result<CopyOutcome> {
     use crate::backend::secret::rename_request_from_properties;
 
     // Determine target name (use new_name if provided, otherwise use original)
@@ -7212,7 +7245,7 @@ async fn execute_secret_copy(
     // identity — same guard as `xv mv`'s rename path.
     if !confirm_reserved_key_write(target_name, force, "Copying to", "--force")? {
         output::info("Aborted; secret not copied.");
-        return Ok(());
+        return Ok(CopyOutcome::Aborted);
     }
 
     println!(
@@ -7227,7 +7260,7 @@ async fn execute_secret_copy(
     // `xv copy secret --from vault-a --to vault-b` with no workspace (or
     // no alias match) behaves exactly as before.
     let (ws, ws_registry) = crate::cli::helpers::resolve_workspace_and_registry(config).await?;
-    let (from_backend, _from_backend_name, from_vault_resolved) =
+    let (from_backend, from_backend_name, from_vault_resolved) =
         crate::cli::helpers::resolve_vault_ref_with_workspace(
             from_vault,
             ws.as_ref(),
@@ -7246,10 +7279,67 @@ async fn execute_secret_copy(
         )
         .await?;
 
-    crate::backend::ensure_no_attachments(from_backend.as_ref(), &from_vault_resolved, name)
+    crate::cli::transfer_support::reject_self_target(
+        from_backend.as_ref(),
+        &from_vault_resolved,
+        name,
+        to_backend.as_ref(),
+        &to_vault_resolved,
+        target_name,
+    )
+    .await?;
+    let source_attachments = from_backend
+        .attachment_names(&from_vault_resolved, name)
         .await?;
     crate::backend::ensure_no_attachments(to_backend.as_ref(), &to_vault_resolved, target_name)
         .await?;
+    if !source_attachments.is_empty() {
+        if !attachments.with_attachments {
+            return Err(
+                crate::backend::BackendError::AttachmentsPresent { name: name.into() }.into(),
+            );
+        }
+        #[cfg(feature = "file-ops")]
+        {
+            use crate::secret::attachment_transfer::{
+                TransferEndpoint, TransferIntent, TransferOperation,
+            };
+            let intent = TransferIntent {
+                source: TransferEndpoint {
+                    identity: from_backend_name,
+                    vault: from_vault_resolved,
+                },
+                destination: TransferEndpoint {
+                    identity: to_backend_name,
+                    vault: to_vault_resolved,
+                },
+                source_name: name.into(),
+                destination_name: target_name.into(),
+                operation: if move_source {
+                    TransferOperation::Move
+                } else {
+                    TransferOperation::Copy
+                },
+                destination_key_id: attachments.to_key_id.clone(),
+                destination_folder: None,
+            };
+            crate::cli::transfer_support::run_attached(
+                from_backend.as_ref(),
+                to_backend.as_ref(),
+                intent,
+                attachments,
+                dry_run,
+            )
+            .await?;
+            return Ok(CopyOutcome::Handled);
+        }
+        #[cfg(not(feature = "file-ops"))]
+        return Err(CrosstacheError::config(
+            "attachment transfers require a build with file-ops",
+        ));
+    }
+    #[cfg(not(feature = "file-ops"))]
+    let _ = (move_source, from_backend_name);
 
     let source_secret = from_backend
         .secrets()
@@ -7287,7 +7377,15 @@ async fn execute_secret_copy(
     // cross-vault copy/move up front rather than letting the API reject
     // it mid-flight, leaving nothing written but a confusing error.
     check_dest_tag_budget(to_backend.as_ref(), &secret_request)?;
+    to_backend
+        .secrets()
+        .validate_transfer_metadata(&to_vault_resolved, &secret_request)
+        .await?;
 
+    if dry_run {
+        output::info("Secret transfer preflight passed (dry run)");
+        return Ok(CopyOutcome::Handled);
+    }
     let copied_secret = to_backend
         .secrets()
         .set_secret(&to_vault_resolved, secret_request)
@@ -7308,9 +7406,10 @@ async fn execute_secret_copy(
         println!("   Expires: {}", format_datetime(Some(expires_on)));
     }
 
-    Ok(())
+    Ok(CopyOutcome::Copied)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_secret_move(
     reg: &BackendRegistry,
     name: &str,
@@ -7318,6 +7417,8 @@ async fn execute_secret_move(
     to_vault: &str,
     new_name: Option<String>,
     force: bool,
+    attachments: &crate::cli::transfer_support::AttachmentTransferOptions,
+    dry_run: bool,
     config: &Config,
 ) -> Result<()> {
     use crate::utils::interactive::InteractivePrompt;
@@ -7360,7 +7461,7 @@ async fn execute_secret_move(
     }
 
     // Confirmation prompt if not forced
-    if !force {
+    if !force && !dry_run {
         let prompt = InteractivePrompt::new();
         let message = format!(
             "This will delete secret '{}' from vault '{}' after copying it to vault '{}'. Continue?",
@@ -7373,16 +7474,23 @@ async fn execute_secret_move(
     }
 
     // First copy the secret (source is only deleted after this succeeds)
-    execute_secret_copy(
+    let outcome = execute_secret_copy(
         reg,
         name,
         from_vault,
         to_vault,
         new_name.clone(),
         force,
+        true,
+        attachments,
+        dry_run,
         config,
     )
     .await?;
+
+    if outcome != CopyOutcome::Copied {
+        return Ok(());
+    }
 
     // Then delete from source
     println!(

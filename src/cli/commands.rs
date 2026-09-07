@@ -943,6 +943,8 @@ pub enum Commands {
         /// Skip the confirmation prompt for bulk folder moves
         #[arg(long, short = 'y')]
         yes: bool,
+        #[command(flatten)]
+        attachments: crate::cli::transfer_support::AttachmentTransferOptions,
     },
     /// Compare secrets between two vaults
     Diff {
@@ -976,6 +978,11 @@ pub enum Commands {
         /// New name for the secret in the destination vault (optional, defaults to original name)
         #[arg(long)]
         new_name: Option<String>,
+        #[command(flatten)]
+        attachments: crate::cli::transfer_support::AttachmentTransferOptions,
+        /// Preview without changing secrets or attachments
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Move a secret from one vault to another (copy then delete from source)
     Move {
@@ -993,6 +1000,11 @@ pub enum Commands {
         /// Force move without confirmation
         #[arg(short, long)]
         force: bool,
+        #[command(flatten)]
+        attachments: crate::cli::transfer_support::AttachmentTransferOptions,
+        /// Preview without changing secrets or attachments
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Permanently delete (purge) a secret from the current vault context
     Purge {
@@ -1238,6 +1250,8 @@ pub enum Commands {
         /// Concurrent transfers (default 8)
         #[arg(long, default_value = "8")]
         concurrency: usize,
+        #[command(flatten)]
+        attachments: crate::cli::transfer_support::AttachmentTransferOptions,
     },
     /// Open the read-only terminal browser. Requires --features tui at build time.
     #[cfg(feature = "tui")]
@@ -2317,6 +2331,7 @@ impl Cli {
                 .await
             }
             Commands::Mv {
+                attachments,
                 operands,
                 filter,
                 dry_run,
@@ -2340,8 +2355,17 @@ impl Cli {
                         [source, dest, ..] => (Some(source.clone()), Some(dest.clone())),
                     }
                 };
-                crate::cli::mv_ops::execute_mv(source, dest, filter, dry_run, yes, config, registry)
-                    .await
+                crate::cli::mv_ops::execute_mv(
+                    source,
+                    dest,
+                    filter,
+                    dry_run,
+                    yes,
+                    attachments,
+                    config,
+                    registry,
+                )
+                .await
             }
             Commands::Diff {
                 vault1,
@@ -2364,17 +2388,28 @@ impl Cli {
                 crate::cli::transfer_ops::execute(options, config, registry).await
             }
             Commands::Copy {
+                attachments,
+                dry_run,
                 name,
                 from,
                 to,
                 new_name,
             } => {
                 crate::cli::secret_ops::execute_secret_copy_direct(
-                    &name, &from, &to, new_name, config, registry,
+                    &name,
+                    &from,
+                    &to,
+                    new_name,
+                    attachments,
+                    dry_run,
+                    config,
+                    registry,
                 )
                 .await
             }
             Commands::Move {
+                attachments,
+                dry_run,
                 name,
                 from,
                 to,
@@ -2382,7 +2417,15 @@ impl Cli {
                 force,
             } => {
                 crate::cli::secret_ops::execute_secret_move_direct(
-                    &name, &from, &to, new_name, force, config, registry,
+                    &name,
+                    &from,
+                    &to,
+                    new_name,
+                    force,
+                    attachments,
+                    dry_run,
+                    config,
+                    registry,
                 )
                 .await
             }
@@ -2544,6 +2587,7 @@ impl Cli {
                 .await
             }
             Commands::Migrate {
+                attachments,
                 from,
                 to,
                 vault,
@@ -2562,6 +2606,7 @@ impl Cli {
                     on_conflict,
                     force_replace,
                     concurrency,
+                    attachments,
                     config,
                 )
                 .await
@@ -2932,6 +2977,7 @@ mod tests {
                 on_conflict,
                 force_replace,
                 concurrency,
+                ..
             } => {
                 assert_eq!(from, "azure");
                 assert_eq!(to, "local");
@@ -2961,6 +3007,7 @@ mod tests {
                 on_conflict,
                 force_replace,
                 concurrency,
+                ..
             } => {
                 assert_eq!(from, "local");
                 assert_eq!(to, "azure");
@@ -3281,6 +3328,7 @@ mod tests {
                 filter,
                 dry_run,
                 yes,
+                ..
             } => {
                 assert_eq!(operands, vec!["db/pass".to_string(), "app/".to_string()]);
                 assert_eq!(filter, None);

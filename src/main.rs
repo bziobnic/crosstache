@@ -302,6 +302,22 @@ Rebuild with `cargo build --features aws` or install an AWS-enabled binary.",
         ));
     }
 
+    // Attachment preflight and explicit key initialization must never bootstrap
+    // a Local store while resolving endpoints. Propagate this runtime-only flag
+    // through eager and lazy/named registry construction.
+    config.runtime_open_existing_local = match &cli.command {
+        crate::cli::Commands::Copy { attachments, .. }
+        | crate::cli::Commands::Move { attachments, .. }
+        | crate::cli::Commands::Mv { attachments, .. }
+        | crate::cli::Commands::Migrate { attachments, .. } => attachments.with_attachments,
+        #[cfg(feature = "file-ops")]
+        crate::cli::Commands::Transfer { .. }
+        | crate::cli::Commands::AttachmentKey {
+            command: crate::cli::attachment_key_ops::AttachmentKeyCommands::Initialize { .. },
+        } => true,
+        _ => false,
+    };
+
     // Commands that never talk to a secrets backend (this `matches!` is the
     // source of truth for exactly which ones) must not be validated against
     // one. Computed BEFORE validation (moved up from its original position

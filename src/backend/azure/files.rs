@@ -24,6 +24,10 @@ pub struct AzureFileBackend {
 }
 
 impl AzureFileBackend {
+    pub(super) fn transfer_namespace(&self) -> Result<String, BackendError> {
+        self.inner.transfer_namespace().map_err(map_error)
+    }
+
     /// Wrap an existing `BlobManager`.
     pub(crate) fn new(inner: Arc<BlobManager>) -> Self {
         Self { inner }
@@ -34,6 +38,26 @@ impl AzureFileBackend {
 /// not per vault, so the `vault` argument is ignored.
 #[async_trait]
 impl FileBackend for AzureFileBackend {
+    fn validate_file_name(&self, name: &str) -> Result<(), BackendError> {
+        self.inner
+            .transfer_file_identity(name)
+            .map(|_| ())
+            .map_err(map_error)
+    }
+
+    async fn transfer_file_names_collide(
+        &self,
+        _vault: &str,
+        left: &str,
+        right: &str,
+    ) -> Result<bool, BackendError> {
+        Ok(self.inner.transfer_file_identity(left).map_err(map_error)?
+            == self
+                .inner
+                .transfer_file_identity(right)
+                .map_err(map_error)?)
+    }
+
     async fn upload_file(
         &self,
         _vault: &str,

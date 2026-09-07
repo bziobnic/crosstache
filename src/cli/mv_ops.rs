@@ -175,12 +175,14 @@ fn dest_collides(secrets: &[SecretSummary], dest_name: &str) -> bool {
         .any(|s| display_name(s) == dest_name || s.name == dest_name)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_mv(
     source: Option<String>,
     dest: Option<String>,
     filter: Option<String>,
     dry_run: bool,
     yes: bool,
+    attachments: crate::cli::transfer_support::AttachmentTransferOptions,
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
@@ -312,6 +314,7 @@ pub(crate) async fn execute_mv(
                             dest_name,
                             dry_run,
                             yes,
+                            &attachments,
                         )
                         .await
                     }
@@ -349,6 +352,7 @@ pub(crate) async fn execute_mv(
                 &dst_path,
                 dry_run,
                 yes,
+                &attachments,
             )
             .await;
         }
@@ -433,6 +437,7 @@ pub(crate) async fn execute_mv(
                 dest_name,
                 dry_run,
                 yes,
+                &attachments,
             )
             .await
         }
@@ -476,6 +481,7 @@ async fn execute_cross_vault_alias_mv(
     dst_path: &str,
     dry_run: bool,
     yes: bool,
+    attachments: &crate::cli::transfer_support::AttachmentTransferOptions,
 ) -> Result<()> {
     let plan = parse_mv(src_path, dst_path)?;
     let (src_folder, src_name, dest_folder, dest_name) = match plan {
@@ -521,10 +527,70 @@ async fn execute_cross_vault_alias_mv(
         )));
     };
 
-    crate::backend::ensure_no_attachments(src_backend.as_ref(), &src_entry.vault, &found.name)
-        .await?;
+    crate::cli::transfer_support::reject_self_target(
+        src_backend.as_ref(),
+        &src_entry.vault,
+        &found.name,
+        dst_backend.as_ref(),
+        &dst_entry.vault,
+        &dest_name,
+    )
+    .await?;
+    let attached = !src_backend
+        .attachment_names(&src_entry.vault, &found.name)
+        .await?
+        .is_empty();
     crate::backend::ensure_no_attachments(dst_backend.as_ref(), &dst_entry.vault, &dest_name)
         .await?;
+    if attached {
+        if !attachments.with_attachments {
+            return Err(crate::backend::BackendError::AttachmentsPresent {
+                name: found.name.clone(),
+            }
+            .into());
+        }
+        #[cfg(feature = "file-ops")]
+        {
+            use crate::secret::attachment_transfer::{
+                TransferEndpoint, TransferIntent, TransferOperation,
+            };
+            let intent = TransferIntent {
+                source: TransferEndpoint {
+                    identity: src_entry.backend.clone(),
+                    vault: src_entry.vault.clone(),
+                },
+                destination: TransferEndpoint {
+                    identity: dst_entry.backend.clone(),
+                    vault: dst_entry.vault.clone(),
+                },
+                source_name: found.name.clone(),
+                destination_name: dest_name,
+                operation: TransferOperation::Move,
+                destination_key_id: attachments.to_key_id.clone(),
+                destination_folder: Some(crate::cli::transfer_support::folder_override(
+                    dest_folder.as_deref().unwrap_or("/"),
+                )?),
+            };
+            crate::cli::transfer_support::run_attached(
+                src_backend.as_ref(),
+                dst_backend.as_ref(),
+                intent,
+                attachments,
+                dry_run,
+            )
+            .await?;
+            if dry_run {
+                return Ok(());
+            }
+            invalidate_trait_secret_cache(config, &src_entry.backend, &src_entry.vault);
+            invalidate_trait_secret_cache(config, &dst_entry.backend, &dst_entry.vault);
+            return Ok(());
+        }
+        #[cfg(not(feature = "file-ops"))]
+        return Err(CrosstacheError::config(
+            "attachment transfers require a build with file-ops",
+        ));
+    }
 
     // Destination collision pre-check — before any mutation, mirroring
     // `execute_secret_mv`'s same-vault ordering. `xv mv` has no `--force`
@@ -583,6 +649,10 @@ async fn execute_cross_vault_alias_mv(
 
     // Destination tag-budget check BEFORE any write.
     crate::cli::secret_ops::check_dest_tag_budget(dst_backend.as_ref(), &secret_request)?;
+    dst_backend
+        .secrets()
+        .validate_transfer_metadata(&dst_entry.vault, &secret_request)
+        .await?;
 
     dst_backend
         .secrets()
@@ -635,6 +705,7 @@ async fn execute_secret_mv(
     dest_name: String,
     dry_run: bool,
     yes: bool,
+    attachments: &crate::cli::transfer_support::AttachmentTransferOptions,
 ) -> Result<()> {
     let src_folder_norm = norm_folder(src_folder.as_deref());
 
@@ -662,6 +733,53 @@ async fn execute_secret_mv(
             "'{source}' is already at '{dest}' — nothing to do"
         ));
         return Ok(());
+    }
+
+    if dest_name != src_name
+        && attachments.with_attachments
+        && !backend
+            .attachment_names(vault_name, &found.name)
+            .await?
+            .is_empty()
+    {
+        #[cfg(feature = "file-ops")]
+        {
+            use crate::secret::attachment_transfer::{
+                TransferEndpoint, TransferIntent, TransferOperation,
+            };
+            let endpoint = TransferEndpoint {
+                identity: backend_name.into(),
+                vault: vault_name.into(),
+            };
+            let intent = TransferIntent {
+                source: endpoint.clone(),
+                destination: endpoint,
+                source_name: found.name.clone(),
+                destination_name: dest_name,
+                operation: TransferOperation::Move,
+                destination_key_id: attachments.to_key_id.clone(),
+                destination_folder: Some(crate::cli::transfer_support::folder_override(
+                    dest_folder.as_deref().unwrap_or("/"),
+                )?),
+            };
+            crate::cli::transfer_support::run_attached(
+                backend.as_ref(),
+                backend.as_ref(),
+                intent,
+                attachments,
+                dry_run,
+            )
+            .await?;
+            if dry_run {
+                return Ok(());
+            }
+            invalidate_trait_secret_cache(config, backend_name, vault_name);
+            return Ok(());
+        }
+        #[cfg(not(feature = "file-ops"))]
+        return Err(CrosstacheError::config(
+            "attachment transfers require a build with file-ops",
+        ));
     }
 
     if dest_name != src_name {
@@ -1574,6 +1692,7 @@ mod tests {
             "destination".to_string(),
             false,
             true,
+            &Default::default(),
         )
         .await
         .expect_err("unsupported rename must fail before the folder update");
@@ -1605,6 +1724,7 @@ mod tests {
             "destination".to_string(),
             true,
             true,
+            &Default::default(),
         )
         .await
         .expect_err("generic rename cannot transfer attached objects");

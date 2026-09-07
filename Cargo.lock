@@ -2010,6 +2010,7 @@ dependencies = [
  "aws-smithy-http-client",
  "aws-smithy-mocks-experimental",
  "aws-smithy-runtime-api",
+ "aws-types",
  "axum",
  "azure_core",
  "azure_identity",

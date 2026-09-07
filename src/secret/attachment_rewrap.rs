@@ -9,7 +9,7 @@ use crate::secret::attachment_key::{
     self as key, AttachmentKeyId, AttachmentKeyRef, KeySlot, PointerKind, SecretVersion,
 };
 use crate::secret::manager::SecretProperties;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use zeroize::Zeroizing;
@@ -98,6 +98,40 @@ async fn pointer(keys: &dyn AttachmentKeyStore, vault: &str) -> Result<SecretPro
     }
     Ok(p)
 }
+/// Public custody evidence only. Never contains a private key or plaintext hash.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SavedRingBinding {
+    pub(crate) target: super::attachment_transfer::TransferKeyBinding,
+    pub(crate) pointer_version: String,
+    pub(crate) active_id: String,
+    pub(crate) legacy_id: Option<String>,
+}
+impl SavedRingBinding {
+    pub(crate) fn validate(&self) -> Result<()> {
+        self.target.validate()?;
+        if self.pointer_version.is_empty()
+            || self.target.slot != "retained"
+            || self.active_id != self.target.key_id
+            || self
+                .legacy_id
+                .as_ref()
+                .is_some_and(|id| AttachmentKeyId::parse(id).is_none())
+        {
+            return Err(conflict());
+        }
+        Ok(())
+    }
+    pub(crate) async fn recheck(&self, keys: &dyn AttachmentKeyStore, vault: &str) -> Result<Ring> {
+        self.validate()?;
+        let id = AttachmentKeyId::parse(&self.active_id).ok_or_else(conflict)?;
+        let ring = Ring::load(keys, vault, &id).await?;
+        if ring.saved() != *self {
+            return Err(conflict());
+        }
+        Ok(ring)
+    }
+}
 /// Pinned current and exact bindings, including the explicit pre-schema legacy ID.
 pub(crate) struct Ring {
     pointer: SecretProperties,
@@ -105,6 +139,14 @@ pub(crate) struct Ring {
     pub(crate) legacy: Option<AttachmentKeyRef>,
 }
 impl Ring {
+    pub(crate) fn saved(&self) -> SavedRingBinding {
+        SavedRingBinding {
+            target: (&self.target).into(),
+            pointer_version: self.pointer.version.clone(),
+            active_id: self.target.key_id.as_str().into(),
+            legacy_id: self.legacy.as_ref().map(|r| r.key_id.as_str().into()),
+        }
+    }
     pub(crate) async fn load(
         keys: &dyn AttachmentKeyStore,
         vault: &str,

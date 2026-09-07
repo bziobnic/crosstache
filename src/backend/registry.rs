@@ -107,7 +107,8 @@ impl BackendRegistry {
 
         // Resolve named-backend entry first if applicable
         if let Some(entry) = config.named_backends.get(backend_name) {
-            let mut registry = Self::from_named_entry(backend_name, entry)?;
+            let mut registry =
+                Self::from_named_entry(backend_name, entry, config.runtime_open_existing_local)?;
             registry.apply_agent_policy(preflight);
             return Ok(registry);
         }
@@ -125,7 +126,11 @@ impl BackendRegistry {
                 Ok::<Self, BackendError>(registry)
             }
             BackendKind::Local => {
-                let backend = super::local::LocalBackend::new(config.local.as_ref())?;
+                let backend = if config.runtime_open_existing_local {
+                    super::local::LocalBackend::open_existing(config.local.as_ref())?
+                } else {
+                    super::local::LocalBackend::new(config.local.as_ref())?
+                };
                 Ok::<Self, BackendError>(Self::raw_registry(Arc::new(backend)))
             }
             #[cfg(feature = "aws")]
@@ -161,6 +166,7 @@ impl BackendRegistry {
     fn from_named_entry(
         name: &str,
         entry: &crate::config::settings::NamedBackendEntry,
+        open_existing: bool,
     ) -> Result<Self, BackendError> {
         use crate::config::settings::NamedBackendEntry as NBE;
         // `name` is used in the not(feature = "aws") error path below.
@@ -186,7 +192,11 @@ impl BackendRegistry {
                 "named backend '{name}' is aws but binary built without --features aws"
             ))),
             NBE::Local(local_cfg) => {
-                let backend = super::local::LocalBackend::new(Some(local_cfg))?;
+                let backend = if open_existing {
+                    super::local::LocalBackend::open_existing(Some(local_cfg))?
+                } else {
+                    super::local::LocalBackend::new(Some(local_cfg))?
+                };
                 Ok(Self::raw_registry(Arc::new(backend)))
             }
         }
@@ -400,7 +410,7 @@ impl BackendRegistry {
     /// [`materialize`](Self::materialize).
     fn construct_named(name: &str, config: &Config) -> Result<Arc<dyn Backend>, BackendError> {
         if let Some(entry) = config.named_backends.get(name) {
-            return match Self::from_named_entry(name, entry) {
+            return match Self::from_named_entry(name, entry, config.runtime_open_existing_local) {
                 Ok(registry) => Ok(registry.backends[registry.default].clone()),
                 Err(e) => Err(e),
             };
@@ -424,7 +434,11 @@ impl BackendRegistry {
                 Ok(Arc::new(backend))
             }
             BackendKind::Local => {
-                let backend = super::local::LocalBackend::new(config.local.as_ref())?;
+                let backend = if config.runtime_open_existing_local {
+                    super::local::LocalBackend::open_existing(config.local.as_ref())?
+                } else {
+                    super::local::LocalBackend::new(config.local.as_ref())?
+                };
                 Ok(Arc::new(backend))
             }
             #[cfg(feature = "aws")]
@@ -521,7 +535,11 @@ impl BackendRegistry {
                 std::sync::Arc::new(backend) as Arc<dyn Backend>
             }
             BackendKind::Local => {
-                let backend = super::local::LocalBackend::new(config.local.as_ref())?;
+                let backend = if config.runtime_open_existing_local {
+                    super::local::LocalBackend::open_existing(config.local.as_ref())?
+                } else {
+                    super::local::LocalBackend::new(config.local.as_ref())?
+                };
                 std::sync::Arc::new(backend) as Arc<dyn Backend>
             }
             #[cfg(feature = "aws")]

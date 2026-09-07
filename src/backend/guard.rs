@@ -95,6 +95,42 @@ impl Backend for GuardedBackend {
         self.inner.transfer_location(vault).await
     }
 
+    async fn transfer_secret_namespace(&self, vault: &str) -> Result<String, BackendError> {
+        self.inner.transfer_secret_namespace(vault).await
+    }
+
+    async fn transfer_secret_physical_namespace(
+        &self,
+        vault: &str,
+    ) -> Result<String, BackendError> {
+        self.inner.transfer_secret_physical_namespace(vault).await
+    }
+
+    async fn transfer_file_physical_namespace(&self, vault: &str) -> Result<String, BackendError> {
+        self.inner.transfer_file_physical_namespace(vault).await
+    }
+
+    async fn transfer_secret_names_collide(
+        &self,
+        vault: &str,
+        left: &str,
+        right: &str,
+    ) -> Result<bool, BackendError> {
+        self.inner
+            .transfer_secret_names_collide(vault, left, right)
+            .await
+    }
+
+    async fn prepare_transfer_destination(
+        &self,
+        vault: &str,
+        expected: &crate::backend::TransferLocation,
+    ) -> Result<crate::backend::TransferLocation, BackendError> {
+        self.inner
+            .prepare_transfer_destination(vault, expected)
+            .await
+    }
+
     fn name(&self) -> &'static str {
         self.inner.name()
     }
@@ -152,6 +188,26 @@ impl<'a> GuardedSecretBackend<'a> {
 #[async_trait]
 impl SecretBackend for GuardedSecretBackend<'_> {
     // -- Mutations: guarded before delegating -------------------------------
+
+    async fn validate_transfer_metadata(
+        &self,
+        vault: &str,
+        request: &SecretRequest,
+    ) -> Result<(), BackendError> {
+        self.ensure_mutable(&request.name)?;
+        self.inner
+            .secrets()
+            .validate_transfer_metadata(vault, request)
+            .await
+    }
+
+    async fn validate_transfer_delete(&self, vault: &str, name: &str) -> Result<(), BackendError> {
+        self.ensure_mutable(name)?;
+        self.inner
+            .secrets()
+            .validate_transfer_delete(vault, name)
+            .await
+    }
 
     fn supports_atomic_create(&self) -> bool {
         self.inner.secrets().supports_atomic_create()
@@ -350,6 +406,18 @@ impl SecretBackend for GuardedSecretBackend<'_> {
         self.inner
             .secrets()
             .get_secret_snapshot(vault, name, include_value)
+            .await
+    }
+
+    async fn get_transfer_snapshot(
+        &self,
+        vault: &str,
+        name: &str,
+        include_value: bool,
+    ) -> Result<SecretSnapshot, BackendError> {
+        self.inner
+            .secrets()
+            .get_transfer_snapshot(vault, name, include_value)
             .await
     }
 

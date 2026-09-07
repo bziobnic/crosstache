@@ -17,9 +17,11 @@ safety. Generic operations without the transfer engine must refuse attached sour
 and destinations before modifying secrets, including combined rename/metadata updates
 and bulk migration. Feature-disabled builds must not silently assume no attachments.
 
-Preview performs reads only and reports endpoints, names, attachment count and bytes,
-key bindings, collisions and any unsupported capability. Apply requires an explicit
-stopped-writers assertion. This is a recoverable offline operation, not a portable
+Preview reports endpoints, names, attachment count and bytes, key bindings,
+collisions and any unsupported capability. It does not provision stores, keys, vaults or Git,
+or perform planned secret/file mutations. Existing read auditing, operational locks
+and recovery of earlier local transactions retain their normal behavior.
+Apply requires an explicit stopped-writers assertion. This is a recoverable offline operation, not a portable
 transaction across secrets and blob stores. Provider permissions must remain enforced;
 generic transfer cannot copy reserved key records or expose raw custody interfaces.
 

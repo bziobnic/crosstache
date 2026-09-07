@@ -268,6 +268,54 @@ pub trait Backend: Send + Sync {
         ))
     }
 
+    /// Resolve recovery-compatible secret namespace evidence without file storage.
+    /// Use `transfer_secret_physical_namespace` for physical alias decisions.
+    async fn transfer_secret_namespace(&self, vault: &str) -> Result<String, BackendError> {
+        Ok(self.transfer_location(vault).await?.secrets)
+    }
+
+    /// Physical secret-directory identity, independent of the path used to
+    /// reach it. Recovery location evidence may include additional ancestors.
+    /// Available without attachment storage; never creates directories.
+    async fn transfer_secret_physical_namespace(
+        &self,
+        vault: &str,
+    ) -> Result<String, BackendError> {
+        self.transfer_secret_namespace(vault).await
+    }
+
+    /// Actual object-storage identity, independent of recovery ancestor evidence.
+    /// A missing Local child is identified by its anchored creation parent.
+    async fn transfer_file_physical_namespace(&self, vault: &str) -> Result<String, BackendError> {
+        Ok(self.transfer_location(vault).await?.files)
+    }
+
+    /// Compare final destination names without creating a vault or probing by writes.
+    /// Providers must fail closed when a potential alias cannot be resolved.
+    async fn transfer_secret_names_collide(
+        &self,
+        _vault: &str,
+        left: &str,
+        right: &str,
+    ) -> Result<bool, BackendError> {
+        Ok(left == right)
+    }
+
+    /// Prepare a destination only while its read-only namespace evidence matches.
+    async fn prepare_transfer_destination(
+        &self,
+        vault: &str,
+        expected: &TransferLocation,
+    ) -> Result<TransferLocation, BackendError> {
+        let actual = self.transfer_location(vault).await?;
+        if &actual != expected {
+            return Err(BackendError::Conflict(
+                "transfer destination namespace changed".into(),
+            ));
+        }
+        Ok(actual)
+    }
+
     /// Human-readable backend name, e.g. `"azure"`, `"local"`.
     fn name(&self) -> &'static str;
 
