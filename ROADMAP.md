@@ -1,6 +1,6 @@
 # Crosstache Roadmap
 
-> **Baseline:** `v0.38.0` · **Scope:** open work only
+> **Baseline:** `v0.39.0` · **Scope:** open work only
 
 This is the canonical backlog for work not yet shipped. Released behavior and
 completed work belong in [`CHANGELOG.md`](./CHANGELOG.md); retained designs under
@@ -15,129 +15,6 @@ Priority is a risk/order signal, not a release commitment:
 - **P3** — useful expansion or polish
 
 ## Safety and correctness
-
-### P0 — Race-free attachment-key lifecycle
-
-Design: `2026-09-03-xv-race-free-attachment-key-lifecycle-design.md`
-(immutable per-key records + non-secret active pointer + exact-version blob
-binding). Staged as PR 1 (integrity foundation) → PR 2 (lifecycle) → PR 3
-(rewrap/retirement).
-
-**PR 1 — merged:**
-
-- `src/secret/attachment_key.rs`: portable `ak1-` key IDs derived from the
-  public recipient (§7.1); reserved schema-1 crypto metadata that overwrites
-  caller-supplied reserved keys (§7.3); V1/V2 active-pointer model and strict
-  `ak1-` parsing with no fallback on malformed values (§10.1); non-`Debug`,
-  non-`Serialize` `AttachmentKeyMaterial` that derives its ID from the parsed
-  identity and verifies it (§7.4, I6/I9); the pure download-classification
-  decision table (§11 / §D order 1–7); and the structural reserved-name
-  classifier (exact pointer vs. strict record vs. ordinary — the broad prefix
-  stays unreserved) (§8 / §E).
-- `src/secret/attachments.rs`: uploads dispatch on the vault's mode — an empty
-  vault **initializes directly to V2** (generate candidate → inspect the exact
-  strict record name → commit a *marked* immutable retained record → re-read the
-  exact version and verify the derived key ID → publish and confirm the
-  non-secret V2 pointer), an existing raw V1 vault stays V1 (legacy slot), and a
-  valid V2 pointer resolves the active retained record. Uploads bind the key
-  identity **and** exact provider version from one response and stamp schema-1
-  metadata; an unmarked user secret colliding with a strict record name is never
-  modified. Downloads route through the classifier — managed-namespace
-  non-ciphertext fails closed, foreign/ordinary bytes pass through, and a
-  schema-1 blob is decrypted through its **pinned exact version** with derived-ID
-  verification, so replacing the active key no longer orphans existing blobs (the
-  §4.1 loss is closed on the read path). Broken/unknown references never fall
-  back (I7). Two-initializer concurrency (§10.3) is proven: distinct generations
-  each yield a decryptable blob regardless of which pointer wins.
-- Structural reserved-guard adoption across generic surfaces (§8/§E): the exact
-  active pointer **and** every strict-format retained record (`xv-attachment-key-
-  ak1-<hash>`) are now hard-blocked (no `--force`) from generic mutation — CLI
-  `set`/`mv`/rename/rollback/update/rotate/copy/`delete`/bulk-set, web
-  PUT/PATCH/DELETE, `.env` import, and vault import. List/display hides the
-  pointer and *marked* key records while keeping unmarked strict-format user
-  collisions visible; generic migration skips marked custody records. The broad
-  `xv-attachment-key-*` prefix stays fully usable for ordinary secrets.
-
-- Provider-canonical name mapping (`CanonicalSecretName`, `canonicalize_secret_name`)
-  runs before reserved classification, so alias spellings — `xv_attachment_key`,
-  `xv--attachment--key`, `XV-ATTACHMENT-KEY` — that address the same provider
-  secret cannot bypass the guard; the CLI/Web guard sites use the
-  `*_canonical` variants (§8).
-- The generic facade is mandatory at registry construction: eager/default,
-  lazy/named, cloned, and cross-backend factory handles all expose guarded
-  secret operations. Generic CLI/Web/import/migration callers cannot obtain
-  the raw provider handle through the registry. Folder-only Web moves of
-  reserved records are refused too; ordinary CRUD remains available.
-- Attachment encryption uses a separate `AttachmentKeyStore` with only
-  canonical custody reads, exact-version reads, and writes. It exposes no raw
-  backend handle. The agent wrapper applies policy, raw-disclosure checks, and
-  redacted decision/audit context before provider access, including when policy
-  and guard wrappers are nested in either order. The unused legacy first-use
-  upsert helper has been removed; existing legacy attachment reads remain.
-- Attachment downloads now consume a single-generation `download_file_snapshot`
-  (§11, I4). Local reads retain the file lock and directory handles across both
-  metadata and ciphertext; AWS reads one GetObject response; Azure pins every
-  download page to the properties ETag. Missing snapshot support is refused,
-  and cloud downloads reject oversized or truncated bodies.
-
-- Retained key commits now use a dedicated custody operation: Local/AWS use
-  atomic create-only writes; Azure uses versioned Set and exact-version
-  verification. Racing create conflicts retry without overwriting the occupant.
-  Policy and audit enforcement cover commits as well as pointer publication.
-- Local key ciphertext/metadata pairs now use durable journaled transactions
-  for initial creation and pointer replacement. Reads recover interrupted writes
-  before returning data; retained history is preserved, and unexplained half-pairs
-  are refused. Fault-injection tests cover write and recovery interruptions.
-- Provider tests exercise concurrent AWS creates and Azure interleaved versioned
-  writes/readback using hermetic transport seams.
-
-- Attachment domain failures use typed, data-free error variants (§20), stable
-  `xv-attachment-*` codes and safe recovery hints across CLI and Web. Existing
-  exit/status behavior is preserved; provider authentication and network errors
-  retain their own classifications. Azure missing exact versions remain typed
-  not-found failures before attachment classification.
-
-**PR 1 integrity foundation is merged through PR #428.**
-
-**PR 2 — status/file-reference inventory merged in PR #429:** read-only
-`xv attachment-key status` diagnoses the pointer and active identity;
-`xv attachment-key inventory` reports per-file metadata references. Inventory
-does not verify ciphertext, enumerate unreferenced retained keys, or authorize
-retirement.
-
-**PR 2 — merged in PR #430:** marked retained-key enumeration
-(`attachment-key keys`), offline V1→V2 upgrade preserving the original identity
-and pinned versions, explicit V2 legacy fallback reads, and pointer recovery
-from existing verified retained keys. Upgrade/recovery preview by default;
-application requires stopped writers and `--apply --offline`.
-
-**PR 2 — merged in PR #432:** encrypted key bundles and offline
-cross-vault restore following the design merged in PR #431. Restore verifies
-current ciphertext, imports retained identities, rebinds provider-version
-references, and publishes the pointer last; malformed-pointer repair is explicit.
-Payload backups and historical blob versions are separate.
-
-**PR 3 — rotation merged in PR #433:** offline
-rotation previews and verifies an expected V2 active ID before creating and
-publishing a new retained identity. Existing reads and legacy bindings survive.
-
-**PR 3 — rewrap merged in PR #434:** authenticate
-the complete visible current managed inventory, re-encrypt to the active retained
-key, preserve file metadata, and verify replacements with interrupted retries.
-
-**PR 3 — logical retirement:** authenticate the complete current inventory and
-mark unused retained keys without deleting or disabling them. Active and explicit
-legacy bindings remain protected; historical versions stay readable.
-
-### P1 — Make rename and migration attachment-aware
-
-Attachments are associated by `attachments/<secret-name>/<filename>`. The shared
-transfer preflight now refuses generic copy/move/rename/migration when either
-attachment prefix is occupied or cannot be inspected. `xv transfer` offers a
-read-only authenticated preview; the encrypted manifest foundation is in place.
-Next: enable recoverable same-vault rename, then cross-vault/backend transfers
-with explicit destination key bindings. Verify the destination before source
-cleanup and make interrupted operations resumable without orphaning blobs.
 
 ### P1 — Persist a scheduled target manifest
 
@@ -185,9 +62,10 @@ flag-day rewrite.
 Define portable conditional secret mutation semantics (create-if-absent and
 update-if-version/etag-matches) across Azure, AWS, and local. Use provider-native
 preconditions where available and a fail-closed local implementation. Attachment
-key initialization is the first required consumer; rotation and other concurrent
-workflows should reuse the same contract rather than inventing command-specific
-locks.
+key custody already implements these semantics per provider (create-only writes
+on Local/AWS, versioned Set with exact-version verification on Azure) behind its
+own interface; lift that into a shared backend contract so rotation and other
+concurrent workflows reuse it instead of inventing command-specific locks.
 
 ### P2 — Rotation workflow and rollout coordination
 
