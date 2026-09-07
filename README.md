@@ -1829,7 +1829,7 @@ jobs:
     steps:
       - uses: bziobnic/crosstache@v1
         with:
-          version: v0.38.0
+          version: v0.39.0
           vault: myproj-prod-kv
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}

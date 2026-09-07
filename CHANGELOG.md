@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.39.0 — Attachment key lifecycle (2026-09-06)
 
 ### Added
 

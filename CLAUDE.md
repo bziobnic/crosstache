@@ -7,7 +7,7 @@ behavior belongs in `README.md` and `docs/`; shipped history belongs in
 ## Project overview
 
 Crosstache is a cross-platform secrets manager written in Rust. The binary is
-`xv`. The current release baseline is **v0.38.0**.
+`xv`. The current release baseline is **v0.39.0**.
 
 Supported backends:
 
