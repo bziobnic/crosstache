@@ -1,5 +1,9 @@
 # Offline attachment lifecycle: rotation, rewrap, retirement
 
+> **Status:** ✅ Shipped in **v0.39.0** (PRs #433 rotation, #434 rewrap, #435
+> retirement). Operator guide:
+> [`docs/attachments.md`](../../attachments.md#offline-key-rotation).
+
 > Use superpowers:subagent-driven-development for implementation and independent
 > task review. User authorized three sequential PRs, clean reviews/CI, and merge
 > of each before implementing the next. Do not merge a failing/unreviewed head.

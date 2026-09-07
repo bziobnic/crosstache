@@ -29,6 +29,19 @@
   output, backend/vault context, safe key diagnostics, and file metadata
   references. Inventory does not download payloads or establish retirement safety.
 
+- `xv attachment-key initialize` previews and applies an empty V2 ring without
+  uploading a dummy file. Transfers never initialize destination keys implicitly;
+  apply with `--apply --offline` and pass the reported active ID as `--to-key-id`.
+
+- Recoverable attachment transfers: `xv transfer` previews by default and applies
+  with `--apply --offline`; interrupted operations resume by ID. Same-vault
+  rename preserves ciphertext; cross-vault transfers re-encrypt to an explicit
+  destination key ID. Generic `copy`/`move`/`mv`/`migrate --with-attachments`
+  use the same engine. Supported routes: Local→Local copy/move, Local→AWS
+  copy/move, AWS→Local/AWS copy, Azure→Local/AWS copy when exact ownership and
+  snapshots verify. AWS/Azure source moves and any Azure destination remain
+  refused. Destination vaults must already exist with a healthy V2 ring.
+
 ### Fixed
 
 - Azure metadata-only secret updates preserve unrelated creator/name tags and

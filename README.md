@@ -14,7 +14,9 @@ xv scan install                        # block secret leaks before commit
 xv backend add local                   # configure a second backend alongside the active one
 ```
 
-**v0.38 highlights:** manage Azure, AWS, and local backends side by side with
+**v0.39 highlights:** attachment-key lifecycle (status, backup/restore, rotate,
+rewrap, retire) and recoverable attachment transfers (`xv transfer`,
+`--with-attachments`) · manage Azure, AWS, and local backends side by side with
 `xv backend` and multi-vault workspaces · six built-in structured record types,
 Keeper JSON import/export, encrypted attachments, and `xv totp` · rotation
 policies with OS-native scheduling · local audit and git history · leak scanning,
@@ -1247,16 +1249,30 @@ xv diff vault-a vault-b --format json              # script-friendly
 ```bash
 xv copy API_KEY --from vault-a --to vault-b
 xv copy API_KEY --from vault-a --to vault-b --new-name API_KEY_V2
-xv copy --group production --from vault-a --to vault-b   # bulk
 
 xv move API_KEY --from vault-a --to vault-b
 xv move API_KEY --from vault-a --to vault-b --force      # overwrite an existing target and skip confirmation
 ```
 
+Attached secrets refuse generic copy/move until you opt into the recoverable
+transfer engine. Preview with `--dry-run`; applying requires `--offline` after
+other writers have stopped. Cross-vault attachments also need the destination's
+active key ID. `xv transfer` is the dedicated preview/apply/resume command:
+
+```bash
+xv copy cert --from work --to stage --with-attachments --to-key-id DEST_ID --dry-run
+xv copy cert --from work --to stage --with-attachments --to-key-id DEST_ID --offline
+xv transfer cert --from work --to work --new-name certificate --move --apply --offline
+```
+
+Azure destinations and AWS/Azure source moves are refused. Full matrix and
+resume: [`docs/attachments.md`](docs/attachments.md#rename-and-move).
+
 Without `--force`, `xv move` refuses when the destination already has a secret
 with that name; with it, the target is overwritten (the source is deleted only
 after the copy succeeds). `xv copy` always refuses to overwrite — there is no
-`--force` on copy.
+`--force` on copy. Attached transfers never overwrite an existing destination
+secret or attachment prefix, even with `--force`.
 
 ### Find across vaults
 
@@ -1372,9 +1388,13 @@ mark; apply with `--apply --offline`. Active, legacy-bound, or currently referen
 keys are refused. The mark never deletes keys or disables historical reads.
 
 `xv transfer NAME --from VAULT --to VAULT --new-name NEW --move` previews a
-secret-and-attachment transfer without changing data. Generic rename, copy, move
-and migration refuse attached prefixes until the recoverable transfer is applied
-through a supported workflow; this preview does not yet execute transfers.
+secret-and-attachment transfer. Apply with `--apply --offline`; resume an
+interrupted operation with `--resume ID --offline`. Generic rename, copy, move,
+and migration refuse attached prefixes unless they opt into the same engine
+(`--with-attachments --offline`, plus `--to-key-id` across vaults). Destination
+vaults must already exist with a healthy V2 ring
+(`xv attachment-key initialize --apply --offline`). Azure destinations and
+AWS/Azure source moves remain refused.
 
 `xv list` hides `xv-attachment-key`. Full workflow, sync/rename/migrate
 pitfalls, and Azure's `xv_encrypted` metadata key:
@@ -2100,6 +2120,18 @@ Re-attaching cannot recover ciphertext whose original key is lost. Use
 the separately backed-up ciphertext. Sync deliberately skips
 encrypted attachment blobs — use `xv attach` / `xv attachments --get` instead.
 See [`docs/attachments.md`](docs/attachments.md).
+
+### Interrupted attachment transfer
+
+Preserve both endpoints and the recovery directory. Inspect the reported
+operation ID and resume with the same intent:
+
+```bash
+xv transfer cert --from work --to work --new-name certificate --move --resume TRANSFER_ID --offline
+```
+
+Do not delete destination files to force completion. Recovery paths:
+[`docs/attachments.md`](docs/attachments.md#rename-and-move).
 
 ### `error[xv-backend-unavailable]` — stale workspace entry
 

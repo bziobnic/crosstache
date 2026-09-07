@@ -1,5 +1,8 @@
 # Consistent file-download snapshots
 
+> **Status:** ✅ Shipped in **v0.39.0** (PR #426 / follow-on snapshot work).
+> Operator notes: [`docs/attachments.md`](../../attachments.md#how-it-works).
+
 User-authorized continuation of the attachment integrity work; execute inline with the existing TDD and verification workflow.
 
 ## Design

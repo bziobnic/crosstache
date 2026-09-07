@@ -1,5 +1,8 @@
 # Retained-key enumeration, upgrade, and recovery
 
+> **Status:** ✅ Shipped in **v0.39.0** (PRs #429, #430). Operator guide:
+> [`docs/attachments.md`](../../attachments.md#inspecting-key-status-and-file-references).
+
 **Goal:** Enumerate retained custody records, upgrade a V1 vault without breaking old attachments, and repair a missing/broken pointer using existing retained keys.
 **Architecture:** Expand the narrow custody API with metadata-only retained enumeration, retaining policy enforcement. A lifecycle module verifies exact versions and identities before publishing pointers. CLI previews changes by default; --apply --offline acknowledges paused writers and applies.
 **Spec:** This contract supplements the existing attachment_key types and ROADMAP; the original external lifecycle design is unavailable.

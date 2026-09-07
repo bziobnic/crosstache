@@ -18,3 +18,16 @@ Before merging documentation for a release or feature:
       and document unsupported combinations explicitly.
 - [ ] Validate links and copy-paste examples, and search for stale version numbers,
       renamed commands, metadata keys, and obsolete limitations.
+
+## 2026-09-07 docs run
+
+Verified against `src/cli/transfer_ops.rs`, `transfer_support.rs`,
+`attachment_key_ops.rs`, `migrate_ops.rs`, `src/secret/attachment_transfer_execution.rs`,
+and provider `supports_atomic_create` / `supports_conditional_delete`.
+
+- [x] Truth-up README transfer/copy/move (execution is not preview-only)
+- [x] Truth-up `docs/migration.md` (`--with-attachments` is shipped)
+- [x] Add FEATURES command rows for `xv transfer` and `attachment-key`
+- [x] Record transfers in CHANGELOG v0.39.0; drop shipped P0 from ROADMAP
+- [x] Mark attachment specs/plans shipped; note remaining cloud-route limits
+- [x] Cache pitfall: vault delete does not yet call `on_vault_removed`

@@ -1,5 +1,8 @@
 # Encrypted attachment-key backup and offline restore
 
+> **Status:** ✅ Shipped in **v0.39.0** (design PR #431, implementation PR #432).
+> Operator guide: [`docs/attachments.md`](../../attachments.md#encrypted-key-backups-and-offline-restore).
+
 Status: implementation contract, incorporating the design merged in PR #431.
 
 ## Outcome and scope

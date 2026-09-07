@@ -1,5 +1,8 @@
 # Structured attachment errors
 
+> **Status:** ✅ Shipped in **v0.39.0** (PR #428). Codes:
+> [`docs/attachments.md`](../../attachments.md#structured-attachment-errors).
+
 Continue the approved integrity foundation from merged PR #427 on feat/attachment-errors.
 
 ## Contract

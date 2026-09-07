@@ -1,5 +1,10 @@
 # Attachment transfer and recovery
 
+> **Status:** ✅ Shipped in **v0.39.0** (PRs #436, #437, #438). Operator
+> guide: [`docs/attachments.md`](../../attachments.md#rename-and-move).
+> Remaining Azure destinations, AWS/Azure source moves, and
+> `xv update --rename` live in [`ROADMAP.md`](../../../ROADMAP.md).
+
 ## Approved scope
 
 Deliver three sequential PRs: transfer safety and recovery foundation, attachment-aware

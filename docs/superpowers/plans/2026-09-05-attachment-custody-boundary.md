@@ -1,5 +1,8 @@
 # Attachment custody boundary implementation plan
 
+> **Status:** ✅ Shipped in **v0.39.0**. Generic reserved-record guards and the
+> narrow `AttachmentKeyStore` are in the registry path.
+
 > Execute inline using the executing-plans workflow. The user approved this continuation on 2026-09-05.
 
 **Goal:** Make generic registry secret access guarded and preserve authorized attachment access through a narrow, audited key-store interface.
