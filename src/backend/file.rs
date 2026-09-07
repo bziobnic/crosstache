@@ -24,10 +24,13 @@ pub struct FileDownloadSnapshot {
 pub struct FileTransferRequest<'a> {
     pub vault: &'a str,
     pub name: &'a str,
+    #[cfg_attr(not(feature = "aws"), allow(dead_code))]
     pub content_type: Option<&'a str>,
     pub groups: &'a [String],
     pub metadata: &'a std::collections::HashMap<String, String>,
+    #[cfg_attr(not(feature = "aws"), allow(dead_code))]
     pub tags: &'a std::collections::HashMap<String, String>,
+    #[cfg_attr(not(feature = "aws"), allow(dead_code))]
     pub size: u64,
 }
 
