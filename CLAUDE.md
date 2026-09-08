@@ -217,9 +217,9 @@ settings; do not silently migrate or destroy a store or its age identity.
 
 Use `ROADMAP.md` as the authoritative backlog. Important current themes include:
 
-- attachment-key first-use concurrency and attachment-aware rename/migration
+- remaining cloud attachment-transfer routes (Azure destinations, AWS/Azure moves)
 - scheduled-rotation target pinning
-- metadata-cache filesystem hardening, invalidation, and diagnostics
+- cache invalidation on vault removal (v5 filesystem hardening shipped)
 - provider compare-and-swap guarantees
 - AWS file sync/streaming parity
 - off-box local-audit durability
@@ -251,7 +251,8 @@ exact flags, exit codes, and metadata keys. User-facing narrative lives in
 - **Config recovery**: `xv doctor` diagnoses/repairs global `xv.conf` before normal config load (timestamped backup, exit 3 when manual steps remain). See `docs/doctor.md`.
 - **Leak Scanner**: `xv scan` pre-commit scanner, shipped v0.7.0-rc.1.
 - **Self-update**: `xv upgrade`, shipped v0.5.1.
-- **Secret File Attachments**: `xv attach`/`xv attachments`/`xv detach` plus `xv file upload --encrypt` — client-side age encryption with per-vault key custody in the vault's secret store (`xv-attachment-key`); see `docs/superpowers/specs/2026-07-21-secret-file-attachments-design.md`.
+- **Secret File Attachments**: `xv attach`/`xv attachments`/`xv detach` plus `xv file upload --encrypt` — client-side age encryption with per-vault key custody in the vault's secret store (`xv-attachment-key`); V2 key ring plus `xv attachment-key status|inventory|keys|initialize|upgrade|recover|export|restore|rotate|rewrap|retire`. See `docs/attachments.md`.
+- **Attachment transfers**: `xv transfer` previews by default and applies with `--apply --offline` (resume with `--resume ID`); generic `copy`/`move`/`mv`/`migrate --with-attachments --offline` share the engine. Same-vault rename preserves ciphertext; cross-vault re-encrypts to `--to-key-id`. Azure destinations and AWS/Azure source moves are refused. See `docs/attachments.md` and `docs/migration.md`.
 - **Rotation policies (all backends)**: `xv:rotate_every` + `xv:rotated_at` tags, `xv update --rotate-every`, `xv rotate --every/--due/--check` (exit 51 `xv-rotation-due`). AWS `--native` is still the only *server-side* rotation. See `src/secret/rotation.rs`, `docs/rotation.md`.
 - **Automatic rotation scheduling**: `xv schedule install|status|uninstall` manages a per-user job in the OS scheduler (launchd / systemd user timer / Task Scheduler) running `xv rotate --due --force`. No daemon, nothing system-wide. `--print` renders without installing. Units carry no credentials; `HOME`/`XDG_CONFIG_HOME` are pinned so the scheduled run resolves the same config. Lifecycle logic is tested against a fake `CommandRunner` — no test registers a real job. See `src/schedule/mod.rs`, `src/cli/schedule_ops.rs`.
 - **Local audit trail** (`[local].audit`): hash-chained append-only JSONL, `xv audit --verify` (exit 52 `xv-audit-chain-broken`). Fail-closed appends; `has_audit` reflects the flag. Tamper-*evident* only — the age-identity holder can rewrite it. Records **failures as well as successes**, with status tokens from a closed set keyed off the error variant (`DecryptionFailed`, `NotFound`, …) — never from error messages. `BackendError::Decryption` exists to make failed decryption its own status. See `src/backend/local/audit.rs`, `docs/git-versioning.md`.

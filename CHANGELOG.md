@@ -28,6 +28,19 @@
   before marking an unused retained key. Active and legacy-bound keys remain
   protected; identities, versions, enabled state, and historical reads are
   preserved (#435).
+- **`xv attachment-key initialize` creates an empty V2 ring.** Preview or apply
+  without uploading a dummy file. Transfers never initialize destination keys
+  implicitly; apply with `--apply --offline` and pass the reported active ID as
+  `--to-key-id` (#438).
+- **Recoverable attachment transfers.** `xv transfer` previews by default and
+  applies with `--apply --offline`; interrupted operations resume by ID.
+  Same-vault rename preserves ciphertext; cross-vault transfers re-encrypt to an
+  explicit destination key ID. Generic `copy`/`move`/`mv`/`migrate` with
+  `--with-attachments` use the same engine. Supported routes: Local→Local
+  copy/move, Local→AWS copy/move, AWS→Local/AWS copy, and Azure→Local/AWS copy
+  when exact ownership and snapshots verify. AWS/Azure source moves and any
+  Azure destination remain refused. Destination vaults must already exist with
+  a healthy V2 ring (#436, #437, #438).
 - **Agent identity and policy enforcement foundation.** Optional `[agent]`
   configuration resolves GitHub Actions OIDC, Entra workload identity, or an
   explicitly unverified `XV_AGENT_ID`; applies deny-by-default, per-secret

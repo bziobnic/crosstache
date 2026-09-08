@@ -46,11 +46,23 @@
 | `xv schedule install` | Install a per-user job in the OS scheduler (launchd / systemd user timer / Task Scheduler) that runs `xv rotate --due --force` on a cadence. `--interval hourly\|daily\|weekly`, `--at HH:MM`, `--vault`, `--log-file`, `--print` to render without installing, `--force` to skip confirmation. No daemon; nothing system-wide |
 | `xv schedule status` | Whether a schedule is installed, what the scheduler reports, and where the log is |
 | `xv schedule uninstall` | Remove the schedule; succeeds when none is installed |
-| `xv copy <name>` | Copy a secret between vaults (`--from`, `--to`) |
-| `xv move <name>` | Move a secret between vaults (`--from`, `--to`) |
+| `xv copy <name>` | Copy a secret between vaults (`--from`, `--to`, `--new-name`, `--dry-run`). Attached sources require `--with-attachments`; applying needs `--offline` (plus `--to-key-id` across vaults). See [attachments.md](attachments.md#rename-and-move) |
+| `xv move <name>` | Move a secret between vaults (`--from`, `--to`, `--force`, `--dry-run`). Same attachment flags as copy. For attached secrets, AWS/Azure source moves and Azure destinations are refused |
+| `xv transfer <name>` | Preview, apply, or resume a secret-and-attachment transfer (`--from`, `--to`, `--new-name`, `--move`, `--to-key-id`, `--to-folder`, `--apply --offline`, `--resume ID`). Dedicated engine used by copy/move/mv/migrate |
 | `xv attach <secret> <file>` | Age-encrypt and attach a file to a secret (`--name` overrides the stored basename). Requires file storage. See [attachments.md](attachments.md) |
 | `xv attachments <secret>` | List a secret's attachments, or `--get <name>` to download decrypted (`-o/--output` path; refuses overwrite) |
 | `xv detach <secret> <name>` | Remove one attachment (`--force` skips confirmation) |
+| `xv attachment-key status` | Diagnose the active pointer and key ID; never mutates. JSON/YAML `report` object; CSV/template unsupported |
+| `xv attachment-key inventory` | Metadata-only file-reference report; does not verify ciphertext or retirement safety |
+| `xv attachment-key keys` | List visible marked retained-key records (no private values) |
+| `xv attachment-key initialize` | Preview/apply an empty V2 ring (`--apply --offline`). Transfers never initialize destination keys implicitly |
+| `xv attachment-key upgrade` | Offline V1→V2 conversion preserving the original identity |
+| `xv attachment-key recover` | Repair a missing/broken pointer from existing retained keys (`--key-id`, `--legacy-key-id` or `--no-legacy`) |
+| `xv attachment-key export` | Encrypted key bundle + current-file manifest (`--recipient`, `--output`, `--offline`). Payloads are backed up separately |
+| `xv attachment-key restore` | Offline restore from a bundle (`--input`, `--identity-file`, `--apply --offline`, optional `--repair-pointer`) |
+| `xv attachment-key rotate` | New active identity for future uploads (`--from-key-id`, `--apply --offline`); existing reads kept |
+| `xv attachment-key rewrap` | Re-encrypt current managed files to the active key (`--to-key-id`, `--apply --offline`) |
+| `xv attachment-key retire` | Advisory unused-key mark (`--key-id`, `--apply --offline`); never deletes keys |
 | `xv group list` | List secret groups with member counts, derived from the `groups` metadata (`--no-cache`; full `--format`/`--columns` support) |
 
 ### Metadata & Organization
@@ -386,10 +398,12 @@ readable.
 - `--dry-run` — preview without changes
 - `--filter "<glob>"` — restrict to matching names
 - `--concurrency N` — bounded parallel transfers (default 8)
+- `--with-attachments --offline` — include attachments via the recoverable transfer engine (plus `--to-key-id` for a healthy destination V2 ring). Omit `--offline` and pass `--dry-run` to preflight only. Destination vaults with attachments must already exist; attached entries run sequentially with individual recovery IDs. Azure destinations and AWS/Azure source moves remain refused.
 - Idempotent: re-runs detect previously-migrated secrets via `xv:migrated_from` tag
 - Exponential backoff on rate limiting
 
-See [migration.md](migration.md) for the full guide.
+See [migration.md](migration.md) for the full guide. Attachment matrix:
+[attachments.md](attachments.md#rename-and-move).
 
 ---
 

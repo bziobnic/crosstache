@@ -98,6 +98,14 @@ layout. It is advisory only and does not change doctor's exit status — a
 degraded cache is non-fatal and self-heals on the next command (modes are
 re-tightened, missed entries are re-fetched).
 
+## Common pitfalls
+
+| Symptom | Cause / fix |
+|---------|-------------|
+| Vault list is gone after delete, but `xv ls --vault OLD` still looks populated | Vault create/delete/purge currently invalidate only the vault list. That vault's secret/file listing files can linger until TTL expiry. `xv cache clear --vault OLD` drops the current identity's entries for that name; `xv cache clear` with no vault resets every identity. |
+| Switching Azure tenants or AWS profiles still shows the previous listing | Pre-v5 caches keyed only on backend name. v5 scopes paths by identity fingerprint; a miss is expected, then a live fetch. |
+| Agent-enforced `xv ls` never hits cache | Enforcement disables the client cache entirely. |
+
 ## What the cache never does
 
 - It never stores secret **values** — only listing metadata (names, folders,

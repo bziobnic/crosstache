@@ -1,5 +1,8 @@
 # Attachment provider commits and local recovery
 
+> **Status:** ✅ Shipped in **v0.39.0**. Create-only Local/AWS commits, Azure
+> versioned Set plus exact-version verification, and local journaled key pairs.
+
 User-authorized continuation from the completed snapshot chunk (b16b12a).
 
 ## Contract

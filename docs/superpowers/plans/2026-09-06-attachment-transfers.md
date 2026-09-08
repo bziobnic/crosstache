@@ -1,5 +1,10 @@
 # Attachment transfers implementation plan
 
+> **Status:** ✅ Shipped in **v0.39.0** (PR #436 foundation, #437 same-vault
+> rename, #438 cross-vault execution). Remaining provider refusals:
+> [`ROADMAP.md`](../../../ROADMAP.md). Do not treat the progress notes below
+> as the current backlog.
+
 Spec: `docs/superpowers/specs/2026-09-06-attachment-transfer-design.md`.
 
 ## Global constraints

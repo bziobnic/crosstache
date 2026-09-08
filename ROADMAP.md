@@ -16,6 +16,25 @@ Priority is a risk/order signal, not a release commitment:
 
 ## Safety and correctness
 
+### P1 — Finish attachment-aware transfers on remaining cloud routes
+
+Recoverable same-vault rename and the supported cross-vault routes shipped in
+v0.39.0 (`xv transfer`, generic `--with-attachments` on copy/move/mv/migrate).
+Remaining provider and surface gaps:
+
+- Azure destinations: Key Vault cannot atomically create destination secrets, so
+  any→Azure attached transfers are refused.
+- AWS and Azure source moves: those providers cannot conditionally delete source
+  secrets. Copy is supported when snapshots and exact ownership verify.
+- `xv update --rename` still refuses attached secrets; use `xv transfer --move`
+  or the local web rename flow.
+- Web attached rename is local-only; other backends keep the rename guard.
+- Azure source copy still refuses ambiguous sanitized/case-insensitive attachment
+  ownership and missing snapshots.
+
+Operator matrix: [`docs/attachments.md`](./docs/attachments.md#rename-and-move).
+Design history: [`2026-09-06-attachment-transfer-design.md`](./docs/superpowers/specs/2026-09-06-attachment-transfer-design.md).
+
 ### P1 — Persist a scheduled target manifest
 
 `xv schedule` embeds an explicit `--vault` when supplied and otherwise pins the

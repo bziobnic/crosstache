@@ -1,5 +1,8 @@
 # Attachment status and inventory implementation plan
 
+> **Status:** ✅ Shipped in **v0.39.0** (PR #429). Operator guide:
+> [`docs/attachments.md`](../../attachments.md#inspecting-key-status-and-file-references).
+
 > **For agentic workers:** Use superpowers:subagent-driven-development for the domain task and review; CLI integration runs locally.
 
 **Goal:** Add read-only CLI observations of the current attachment key and file metadata references.

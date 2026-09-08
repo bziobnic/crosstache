@@ -1,5 +1,8 @@
 # Attachment key backup and restore implementation plan
 
+> **Status:** ✅ Shipped in **v0.39.0** (PR #432). Operator guide:
+> [`docs/attachments.md`](../../attachments.md#encrypted-key-backups-and-offline-restore).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task.
 
 **Goal:** Export encrypted key recovery bundles and restore verified keys and current file references offline.

@@ -309,8 +309,9 @@ same decrypt path as `xv file download`. See [`web-ui.md`](web-ui.md).
 ## Related
 
 - Design: [`superpowers/specs/2026-07-21-secret-file-attachments-design.md`](superpowers/specs/2026-07-21-secret-file-attachments-design.md)
+- Transfer design: [`superpowers/specs/2026-09-06-attachment-transfer-design.md`](superpowers/specs/2026-09-06-attachment-transfer-design.md)
 - File storage overview: [`FEATURES.md`](FEATURES.md#file-storage)
-- Cross-cloud secret migration (secrets only): [`migration.md`](migration.md)
+- Cross-cloud migration, including `--with-attachments`: [`migration.md`](migration.md)
 
 ## Structured attachment errors
 
