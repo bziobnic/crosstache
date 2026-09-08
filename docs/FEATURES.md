@@ -47,7 +47,7 @@
 | `xv schedule status` | Whether a schedule is installed, what the scheduler reports, and where the log is |
 | `xv schedule uninstall` | Remove the schedule; succeeds when none is installed |
 | `xv copy <name>` | Copy a secret between vaults (`--from`, `--to`, `--new-name`, `--dry-run`). Attached sources require `--with-attachments`; applying needs `--offline` (plus `--to-key-id` across vaults). See [attachments.md](attachments.md#rename-and-move) |
-| `xv move <name>` | Move a secret between vaults (`--from`, `--to`, `--force`, `--dry-run`). Same attachment flags as copy. AWS/Azure source moves and Azure destinations are refused |
+| `xv move <name>` | Move a secret between vaults (`--from`, `--to`, `--force`, `--dry-run`). Same attachment flags as copy. For attached secrets, AWS/Azure source moves and Azure destinations are refused |
 | `xv transfer <name>` | Preview, apply, or resume a secret-and-attachment transfer (`--from`, `--to`, `--new-name`, `--move`, `--to-key-id`, `--to-folder`, `--apply --offline`, `--resume ID`). Dedicated engine used by copy/move/mv/migrate |
 | `xv attach <secret> <file>` | Age-encrypt and attach a file to a secret (`--name` overrides the stored basename). Requires file storage. See [attachments.md](attachments.md) |
 | `xv attachments <secret>` | List a secret's attachments, or `--get <name>` to download decrypted (`-o/--output` path; refuses overwrite) |

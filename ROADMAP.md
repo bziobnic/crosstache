@@ -81,9 +81,10 @@ flag-day rewrite.
 Define portable conditional secret mutation semantics (create-if-absent and
 update-if-version/etag-matches) across Azure, AWS, and local. Use provider-native
 preconditions where available and a fail-closed local implementation. Attachment
-key initialization is the first required consumer; rotation and other concurrent
-workflows should reuse the same contract rather than inventing command-specific
-locks.
+key custody already implements these semantics per provider (create-only writes
+on Local/AWS, versioned Set with exact-version verification on Azure) behind its
+own interface; lift that into a shared backend contract so rotation and other
+concurrent workflows reuse it instead of inventing command-specific locks.
 
 ### P2 — Rotation workflow and rollout coordination
 

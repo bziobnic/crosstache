@@ -4,80 +4,43 @@
 
 ### Added
 
-- Logical attachment-key retirement verifies complete current-file usage before
-  marking an unused retained key. Active and legacy-bound keys remain protected;
-  identities, versions, enabled state, and historical reads are preserved.
-
-- Offline attachment rewrap authenticates current managed files before replacing
-  them with ciphertext under the active retained key, preserving file metadata
-  and supporting retries without deleting historical keys.
-
-- Offline attachment-key rotation with preview, expected-active-ID protection,
-  exact key verification, and preservation of existing file reads and legacy keys.
-
-- Encrypted attachment-key export and offline restore for current visible files,
-  including cross-vault key-version rebinding, preview, safe retry, and explicit
-  malformed-pointer repair. Ciphertext payloads require separate backups.
-
-- `xv attachment-key keys` enumerates visible marked retained-key records.
-  Offline `upgrade` preserves the V1 identity and old attachment reads when
-  converting to V2; `recover` repairs missing/broken pointers from existing
-  verified retained keys. Both preview by default and require `--apply --offline`
-  to write. Cross-vault key backup/restore is not included.
-
-- Read-only `xv attachment-key status` and `inventory` reports with JSON/YAML
-  output, backend/vault context, safe key diagnostics, and file metadata
-  references. Inventory does not download payloads or establish retirement safety.
-
-- `xv attachment-key initialize` previews and applies an empty V2 ring without
-  uploading a dummy file. Transfers never initialize destination keys implicitly;
-  apply with `--apply --offline` and pass the reported active ID as `--to-key-id`.
-
-- Recoverable attachment transfers: `xv transfer` previews by default and applies
-  with `--apply --offline`; interrupted operations resume by ID. Same-vault
-  rename preserves ciphertext; cross-vault transfers re-encrypt to an explicit
-  destination key ID. Generic `copy`/`move`/`mv`/`migrate --with-attachments`
-  use the same engine. Supported routes: Local→Local copy/move, Local→AWS
-  copy/move, AWS→Local/AWS copy, Azure→Local/AWS copy when exact ownership and
-  snapshots verify. AWS/Azure source moves and any Azure destination remain
-  refused. Destination vaults must already exist with a healthy V2 ring.
-
-### Fixed
-
-- Azure metadata-only secret updates preserve unrelated creator/name tags and
-  unchanged group text, including when adding an attachment retirement marker.
-
-- AWS exact-version reads retain record metadata for strict attachment key
-  verification and report the version returned with the secret value.
-
-- AWS secret listings preserve content-type metadata so retained attachment keys
-  appear in `attachment-key keys` and stay hidden from generic secret listings.
-
-- Attachment integrity failures now expose specific `xv-attachment-*` error
-  codes and safe recovery hints in CLI/Web responses. Azure missing key versions
-  retain their not-found classification. Attachment domain failures continue to
-  use exit status 2 and HTTP 400. Single-file upload/download progress goes to
-  stderr so failed operations preserve clean JSON error output.
-
-- Attachment key initialization now uses create-only retained records on Local
-  and AWS, verified versioned writes on Azure, and retries racing name conflicts.
-  Local key/pointer pairs are durably journaled and recover interrupted writes
-  before reads; unexplained half-pairs fail closed.
-
-- Attachment downloads now read ciphertext and crypto metadata from one file
-  generation: locked local reads, a single S3 GetObject response, or ETag-pinned
-  Azure chunks. Concurrent Azure replacement, unsupported snapshot backends,
-  and oversized or truncated cloud responses fail without returning mixed data.
-
-- Generic secret access from the backend registry now always protects reserved
-  attachment-key records, including named backends, imports, migration, and
-  Web folder moves. Attachment encryption uses a narrow key-store interface
-  that retains agent policy, disclosure checks, and redacted audit logging.
-  Generic opaque backup restore is refused because its destination cannot be
-  checked before mutation.
-
-### Added
-
+- **`xv attachment-key status` and `inventory` report key state without touching
+  payloads.** Read-only, with JSON/YAML output, backend/vault context, safe key
+  diagnostics, and file metadata references. Inventory does not download payloads
+  or establish retirement safety (#429).
+- **`xv attachment-key keys`, `upgrade`, and `recover` manage retained-key
+  records.** `keys` enumerates visible marked retained-key records. Offline
+  `upgrade` preserves the V1 identity and old attachment reads when converting to
+  V2; `recover` repairs missing or broken pointers from existing verified
+  retained keys. Both preview by default and require `--apply --offline` to
+  write. Cross-vault key backup/restore is not included (#430).
+- **Encrypted attachment-key export and offline restore.** Covers current visible
+  files, including cross-vault key-version rebinding, preview, safe retry, and
+  explicit malformed-pointer repair. Ciphertext payloads require separate
+  backups (#432).
+- **Offline attachment-key rotation.** Previews the change, protects an expected
+  active ID, verifies the exact key, and preserves existing file reads and legacy
+  keys (#433).
+- **Offline attachment rewrap.** Authenticates current managed files before
+  replacing them with ciphertext under the active retained key, preserving file
+  metadata and supporting retries without deleting historical keys (#434).
+- **Logical attachment-key retirement.** Verifies complete current-file usage
+  before marking an unused retained key. Active and legacy-bound keys remain
+  protected; identities, versions, enabled state, and historical reads are
+  preserved (#435).
+- **`xv attachment-key initialize` creates an empty V2 ring.** Preview or apply
+  without uploading a dummy file. Transfers never initialize destination keys
+  implicitly; apply with `--apply --offline` and pass the reported active ID as
+  `--to-key-id` (#438).
+- **Recoverable attachment transfers.** `xv transfer` previews by default and
+  applies with `--apply --offline`; interrupted operations resume by ID.
+  Same-vault rename preserves ciphertext; cross-vault transfers re-encrypt to an
+  explicit destination key ID. Generic `copy`/`move`/`mv`/`migrate` with
+  `--with-attachments` use the same engine. Supported routes: Local→Local
+  copy/move, Local→AWS copy/move, AWS→Local/AWS copy, and Azure→Local/AWS copy
+  when exact ownership and snapshots verify. AWS/Azure source moves and any
+  Azure destination remain refused. Destination vaults must already exist with
+  a healthy V2 ring (#436, #437, #438).
 - **Agent identity and policy enforcement foundation.** Optional `[agent]`
   configuration resolves GitHub Actions OIDC, Entra workload identity, or an
   explicitly unverified `XV_AGENT_ID`; applies deny-by-default, per-secret
@@ -97,6 +60,36 @@
   are scoped by config/account fingerprint; invalidation is centralized;
   corruption is quarantined; and strict mode can surface failures. Agent-policy
   enforcement disables the client cache entirely (#421).
+
+### Fixed
+
+- **Attachment key initialization no longer races.** It uses create-only retained
+  records on Local and AWS, verified versioned writes on Azure, and retries
+  racing name conflicts. Local key/pointer pairs are durably journaled and
+  recover interrupted writes before reads; unexplained half-pairs fail closed.
+- **Attachment downloads read one file generation.** Ciphertext and crypto
+  metadata come from locked local reads, a single S3 GetObject response, or
+  ETag-pinned Azure chunks. Concurrent Azure replacement, unsupported snapshot
+  backends, and oversized or truncated cloud responses fail without returning
+  mixed data.
+- **Reserved attachment-key records are protected on every generic path.**
+  Generic secret access from the backend registry now always guards them,
+  including named backends, imports, migration, and Web folder moves. Attachment
+  encryption uses a narrow key-store interface that retains agent policy,
+  disclosure checks, and redacted audit logging. Generic opaque backup restore is
+  refused because its destination cannot be checked before mutation.
+- **Attachment integrity failures expose specific `xv-attachment-*` error codes**
+  and safe recovery hints in CLI/Web responses. Azure missing key versions retain
+  their not-found classification. Attachment domain failures continue to use exit
+  status 2 and HTTP 400. Single-file upload/download progress goes to stderr so
+  failed operations preserve clean JSON error output.
+- **Azure metadata-only secret updates preserve unrelated creator/name tags** and
+  unchanged group text, including when adding an attachment retirement marker.
+- **AWS exact-version reads retain record metadata** for strict attachment key
+  verification and report the version returned with the secret value.
+- **AWS secret listings preserve content-type metadata** so retained attachment
+  keys appear in `attachment-key keys` and stay hidden from generic secret
+  listings.
 
 ## v0.38.0 — TOTP codes and UI connection monitoring (2026-08-15)
 

@@ -1389,12 +1389,13 @@ keys are refused. The mark never deletes keys or disables historical reads.
 
 `xv transfer NAME --from VAULT --to VAULT --new-name NEW --move` previews a
 secret-and-attachment transfer. Apply with `--apply --offline`; resume an
-interrupted operation with `--resume ID --offline`. Generic rename, copy, move,
-and migration refuse attached prefixes unless they opt into the same engine
-(`--with-attachments --offline`, plus `--to-key-id` across vaults). Destination
+interrupted operation with `--resume ID --offline`. Generic `copy`, `move`,
+workspace `mv`, and `migrate` refuse attached prefixes unless they opt into the
+same engine (`--with-attachments --offline`, plus `--to-key-id` across vaults). Destination
 vaults must already exist with a healthy V2 ring
 (`xv attachment-key initialize --apply --offline`). Azure destinations and
-AWS/Azure source moves remain refused.
+AWS/Azure source moves remain refused. `xv update --rename` still refuses attached
+secrets; use `xv transfer --move` for a supported rename.
 
 `xv list` hides `xv-attachment-key`. Full workflow, sync/rename/migrate
 pitfalls, and Azure's `xv_encrypted` metadata key:
