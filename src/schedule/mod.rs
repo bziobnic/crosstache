@@ -55,6 +55,9 @@ pub mod manifest;
 pub mod ownership;
 pub mod preview;
 pub mod target;
+/// Debug-only scheduler stand-in for tests that run the real binary.
+#[cfg(debug_assertions)]
+pub mod testing;
 
 /// Test-only fixture path shaping.
 ///

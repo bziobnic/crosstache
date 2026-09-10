@@ -25,8 +25,44 @@ fn xv_cmd_for(store: &std::path::Path) -> std::process::Command {
         .env("XV_NO_PARENT_CONFIG", "1")
         .env("XV_BACKEND", "local")
         .env("NO_COLOR", "1")
+        // See `fake_scheduler`: nothing here may reach the real launchd,
+        // systemd or Task Scheduler.
+        .env("XV_SCHEDULE_RUNNER", "fake")
         .current_dir(root);
     cmd
+}
+
+/// Point a spawned `xv` at a fake scheduler that records what it was asked to
+/// run, and return the log path.
+///
+/// `launchctl`, `systemctl --user` and `schtasks` act on the invoking user's
+/// live session under a fixed global job name — `HOME` does not sandbox them —
+/// so a test that let `xv schedule uninstall` reach the real scheduler would
+/// deregister the developer's own rotation schedule. The binary honors
+/// `XV_SCHEDULE_RUNNER=fake` in debug builds only; the switch is compiled out
+/// of a release build (`src/schedule/testing.rs`, `schedule_runner()` in
+/// `src/cli/schedule_ops.rs`), so it cannot change what a shipped `xv` does.
+fn fake_scheduler(cmd: &mut std::process::Command, log: &std::path::Path) {
+    cmd.env("XV_SCHEDULE_RUNNER", "fake")
+        .env("XV_SCHEDULE_RUNNER_LOG", log);
+}
+
+/// Every line the fake scheduler recorded.
+fn scheduler_calls(log: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+/// The deregistration invocation `uninstall` must issue on this platform.
+fn expected_deregistration(platform: Platform) -> &'static str {
+    match platform {
+        Platform::Launchd => "launchctl bootout gui/",
+        Platform::Systemd => "systemctl --user disable --now xv-rotate.timer",
+        Platform::Schtasks => "schtasks /Delete /TN crosstache-xv-rotate /F",
+    }
 }
 
 /// Bring the isolated local store into existence the way a user does: by
@@ -795,6 +831,7 @@ fn xv_cmd_in(root: &std::path::Path) -> std::process::Command {
         .env("XDG_CONFIG_HOME", root.join(".config"))
         .env("XV_NO_PARENT_CONFIG", "1")
         .env("NO_COLOR", "1")
+        .env("XV_SCHEDULE_RUNNER", "fake")
         .current_dir(root);
     cmd
 }
@@ -1697,7 +1734,10 @@ fn uninstall_removes_the_manifest_and_keeps_every_other_file() {
         Some(path)
     };
 
-    let out = xv_cmd_in(&fixture.root)
+    let log = fixture.root.join("scheduler-calls.log");
+    let mut cmd = xv_cmd_in(&fixture.root);
+    fake_scheduler(&mut cmd, &log);
+    let out = cmd
         .env("XV_BACKEND", "local")
         .env("XV_STATE_HOME", &fixture.state)
         .args(["schedule", "uninstall"])
@@ -1709,6 +1749,16 @@ fn uninstall_removes_the_manifest_and_keeps_every_other_file() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(out.status.success(), "{combined}");
+
+    // The scheduler was still *asked* — the fake proves the command and its
+    // arguments without letting them reach the real one.
+    let calls = scheduler_calls(&log);
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.contains(expected_deregistration(platform))),
+        "uninstall did not deregister: {calls:?}"
+    );
 
     assert!(
         !fixture.manifest.exists(),
@@ -1756,7 +1806,10 @@ fn uninstall_removes_a_legacy_unit() {
     let state = root.join("state");
     let units = seed_legacy_units(platform, &root, "payments-production");
 
-    let out = xv_cmd_in(&root)
+    let log = root.join("scheduler-calls.log");
+    let mut cmd = xv_cmd_in(&root);
+    fake_scheduler(&mut cmd, &log);
+    let out = cmd
         .env("XV_BACKEND", "local")
         .env("XV_STATE_HOME", &state)
         .args(["schedule", "uninstall"])
@@ -1771,4 +1824,50 @@ fn uninstall_removes_a_legacy_unit() {
     for unit in units {
         assert!(!unit.exists(), "{} survived: {combined}", unit.display());
     }
+    let calls = scheduler_calls(&log);
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.contains(expected_deregistration(platform))),
+        "uninstall did not deregister the legacy job: {calls:?}"
+    );
+}
+
+#[test]
+fn status_names_the_missing_manifest_of_a_pinned_unit() {
+    // A pinned unit whose manifest is gone is `legacy-unpinned` — its target
+    // cannot be proven — but it is *not* the pre-manifest command, so status
+    // may not say the unit recorded no target. It recorded one, at a path it
+    // can name.
+    let Some(platform) = host_platform() else {
+        return;
+    };
+    if platform == Platform::Schtasks {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let state = root.join("state");
+    let manifest = state
+        .join("xv")
+        .join("schedules")
+        .join("rotation-default")
+        .join("manifest.json");
+    seed_pinned_units(platform, &root, &manifest);
+    assert!(!manifest.exists(), "the manifest must be missing");
+
+    let out = schedule_status(&root, &state);
+
+    assert!(out.contains("Ownership: legacy-unpinned"), "{out}");
+    assert!(
+        out.contains(&format!(
+            "Target:    unverified (the recorded manifest {} is missing)",
+            manifest.display()
+        )),
+        "{out}"
+    );
+    assert!(
+        !out.contains("does not record backend or account identity"),
+        "this unit did record a target; status must not say otherwise: {out}"
+    );
 }

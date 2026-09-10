@@ -49,6 +49,32 @@ pub(crate) async fn execute_schedule_command(
     }
 }
 
+/// The scheduler this process should talk to.
+///
+/// Always the real one in a release build: the whole switch below is behind
+/// `cfg(debug_assertions)`, so a shipped `xv` contains no fake runner and reads
+/// no environment variable to choose one.
+///
+/// In a debug build `XV_SCHEDULE_RUNNER=fake` swaps in
+/// [`crate::schedule::testing::RecordingRunner`]. That exists because
+/// `launchctl`, `systemctl --user` and `schtasks` act on the invoking user's
+/// live session under a fixed global job name — `HOME` does not sandbox them —
+/// so a CLI test that spawned `xv schedule uninstall` for real would deregister
+/// the developer's own rotation schedule.
+#[cfg(debug_assertions)]
+fn schedule_runner() -> Box<dyn schedule::CommandRunner> {
+    use crate::schedule::testing;
+    match std::env::var(testing::RUNNER_VAR).as_deref() {
+        Ok(testing::FAKE) => Box::new(testing::RecordingRunner::from_env()),
+        _ => Box::new(ProcessRunner),
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn schedule_runner() -> Box<dyn schedule::CommandRunner> {
+    Box::new(ProcessRunner)
+}
+
 /// Home directory used for both the unit location and the scheduled process's
 /// `HOME`.
 fn home_dir() -> Result<PathBuf> {
@@ -363,7 +389,7 @@ async fn execute_install(
     // the transaction ends, so a second installer cannot interleave with this
     // one.
     let mut store = RealOwnedScheduleStore::open(&state_paths)?;
-    let report = install_transactional(&plan, &mut store, &ProcessRunner, now)?;
+    let report = install_transactional(&plan, &mut store, schedule_runner().as_ref(), now)?;
     let manifest_path = report.manifest_path.clone();
 
     output::success(&format!(
@@ -890,7 +916,12 @@ async fn execute_status() -> Result<()> {
     let unit_paths = UnitPaths::for_platform(platform, &home);
     let state_paths = manifest::resolve_from_process_env()?;
 
-    let report = ownership::inspect_ownership(platform, &unit_paths, &state_paths, &ProcessRunner)?;
+    let report = ownership::inspect_ownership(
+        platform,
+        &unit_paths,
+        &state_paths,
+        schedule_runner().as_ref(),
+    )?;
 
     // Read the recorded target *before* the headline: a managed schedule whose
     // target has drifted will refuse tonight, and announcing it as healthy and
@@ -1084,7 +1115,12 @@ async fn execute_uninstall() -> Result<()> {
 
     let report = {
         let mut store = RealOwnedScheduleStore::open(&state_paths)?;
-        uninstall_owned(platform, &unit_paths, &mut store, &ProcessRunner)?
+        uninstall_owned(
+            platform,
+            &unit_paths,
+            &mut store,
+            schedule_runner().as_ref(),
+        )?
         // The store is dropped here, releasing `install.lock`.
     };
 
