@@ -47,6 +47,7 @@ use std::path::{Path, PathBuf};
 use crate::error::{CrosstacheError, Result};
 
 pub mod manifest;
+pub mod preview;
 pub mod target;
 
 /// launchd job label and systemd/Task Scheduler unit name.
@@ -198,13 +199,61 @@ fn parse_hhmm(at: &str) -> Result<(u32, u32)> {
 // The schedule
 // ---------------------------------------------------------------------------
 
+/// What the scheduler is told to invoke.
+///
+/// One renderer serves both shapes so the platform-specific quoting —
+/// systemd's per-argument quoting, launchd's XML escaping, `schtasks`'
+/// command line — is written once and cannot drift between them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScheduleCommand {
+    /// The historical unattended sweep: `rotate --due --force [--vault V]`.
+    ///
+    /// It re-resolves its target at run time from whatever the environment
+    /// then says, which is exactly what the pinned manifest replaces.
+    LegacyRotateDue {
+        /// Vault to sweep. `None` leaves the scheduled run to resolve the
+        /// config default, which is a common source of surprise.
+        vault: Option<String>,
+    },
+    /// The pinned runner: `schedule run --manifest <absolute manifest path>`.
+    ///
+    /// Everything the run may touch comes from that file, so the unit carries
+    /// no target selection of its own.
+    ManifestRun { manifest: PathBuf },
+}
+
+impl ScheduleCommand {
+    /// The arguments after the binary path, unquoted.
+    pub fn args(&self) -> Vec<String> {
+        match self {
+            Self::LegacyRotateDue { vault } => {
+                let mut args = vec![
+                    "rotate".to_string(),
+                    "--due".to_string(),
+                    "--force".to_string(),
+                ];
+                if let Some(vault) = vault {
+                    args.push("--vault".to_string());
+                    args.push(vault.clone());
+                }
+                args
+            }
+            Self::ManifestRun { manifest } => vec![
+                "schedule".to_string(),
+                "run".to_string(),
+                "--manifest".to_string(),
+                manifest.to_string_lossy().to_string(),
+            ],
+        }
+    }
+}
+
 /// Everything needed to render and install a rotation schedule.
 #[derive(Debug, Clone)]
 pub struct RotationSchedule {
     pub interval: ScheduleInterval,
-    /// Vault to sweep. `None` leaves the scheduled run to resolve the config
-    /// default, which is a common source of surprise — the CLI warns.
-    pub vault: Option<String>,
+    /// What the scheduler invokes.
+    pub command: ScheduleCommand,
     /// Absolute path to the `xv` binary the unit invokes.
     pub binary: PathBuf,
     /// File the scheduled run's output is appended to.
@@ -216,22 +265,14 @@ pub struct RotationSchedule {
 }
 
 impl RotationSchedule {
-    /// The arguments the scheduler invokes: an unattended due-rotation sweep.
+    /// The arguments the scheduler invokes.
     ///
-    /// `--force` is required: there is no terminal to confirm at. `--due` alone
-    /// keeps the blast radius to secrets that already carry a policy and are
-    /// already past it.
+    /// For the legacy sweep `--force` is required — there is no terminal to
+    /// confirm at — and `--due` alone keeps the blast radius to secrets that
+    /// already carry a policy and are already past it. For the pinned runner
+    /// the manifest carries all of that instead.
     pub fn command_args(&self) -> Vec<String> {
-        let mut args = vec![
-            "rotate".to_string(),
-            "--due".to_string(),
-            "--force".to_string(),
-        ];
-        if let Some(vault) = &self.vault {
-            args.push("--vault".to_string());
-            args.push(vault.clone());
-        }
-        args
+        self.command.args()
     }
 
     /// The full command line, for display and for Task Scheduler's `/TR`.
@@ -871,7 +912,9 @@ mod tests {
                 hour: 3,
                 minute: 30,
             },
-            vault: Some("prod-kv".into()),
+            command: ScheduleCommand::LegacyRotateDue {
+                vault: Some("prod-kv".into()),
+            },
             binary: PathBuf::from("/usr/local/bin/xv"),
             log_path: PathBuf::from("/home/u/.local/state/xv/rotate.log"),
             home: PathBuf::from("/home/u"),
@@ -1012,8 +1055,70 @@ mod tests {
     #[test]
     fn command_omits_vault_when_unset() {
         let mut s = schedule();
-        s.vault = None;
+        s.command = ScheduleCommand::LegacyRotateDue { vault: None };
         assert_eq!(s.command_args(), vec!["rotate", "--due", "--force"]);
+    }
+
+    #[test]
+    fn manifest_run_command_carries_only_the_manifest_path() {
+        let mut s = schedule();
+        s.command = ScheduleCommand::ManifestRun {
+            manifest: PathBuf::from(
+                "/home/u/.local/state/xv/schedules/rotation-default/manifest.json",
+            ),
+        };
+        assert_eq!(
+            s.command_args(),
+            vec![
+                "schedule",
+                "run",
+                "--manifest",
+                "/home/u/.local/state/xv/schedules/rotation-default/manifest.json"
+            ]
+        );
+        // No target selection of its own: everything comes from the manifest.
+        assert!(!s.command_args().contains(&"--vault".to_string()));
+    }
+
+    #[test]
+    fn systemd_quotes_a_manifest_path_with_spaces() {
+        let mut s = schedule();
+        s.command = ScheduleCommand::ManifestRun {
+            manifest: PathBuf::from("/home/my user/manifest.json"),
+        };
+        let service = render(Platform::Systemd, &s, &paths())[0].contents.clone();
+        assert!(
+            service.contains("\"/home/my user/manifest.json\""),
+            "{service}"
+        );
+    }
+
+    #[test]
+    fn launchd_escapes_a_manifest_path() {
+        let mut s = schedule();
+        s.command = ScheduleCommand::ManifestRun {
+            manifest: PathBuf::from("/home/a & b/manifest.json"),
+        };
+        let body = render(Platform::Launchd, &s, &paths())[0].contents.clone();
+        assert!(
+            body.contains("<string>/home/a &amp; b/manifest.json</string>"),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn schtasks_keeps_a_spaced_manifest_path_as_one_argument() {
+        let mut s = schedule();
+        s.command = ScheduleCommand::ManifestRun {
+            manifest: PathBuf::from("/home/my user/manifest.json"),
+        };
+        let args = schtasks_create_args(&s);
+        let tr = args
+            .iter()
+            .position(|a| a == "/TR")
+            .map(|i| args[i + 1].clone())
+            .expect("schtasks carries /TR");
+        assert!(tr.contains("\"/home/my user/manifest.json\""), "{tr}");
     }
 
     #[test]
@@ -1073,7 +1178,9 @@ mod tests {
         // A vault name with an ampersand would otherwise produce invalid XML and
         // a job launchd silently refuses to load.
         let mut s = schedule();
-        s.vault = Some("prod&stage<\"'>".into());
+        s.command = ScheduleCommand::LegacyRotateDue {
+            vault: Some("prod&stage<\"'>".into()),
+        };
         let body = render(Platform::Launchd, &s, &paths())[0].contents.clone();
         assert!(
             body.contains("prod&amp;stage&lt;&quot;&apos;&gt;"),
@@ -1125,7 +1232,9 @@ mod tests {
     #[test]
     fn systemd_quotes_arguments_so_a_spaced_vault_stays_one_argument() {
         let mut s = schedule();
-        s.vault = Some("my vault".into());
+        s.command = ScheduleCommand::LegacyRotateDue {
+            vault: Some("my vault".into()),
+        };
         let service = render(Platform::Systemd, &s, &paths())[0].contents.clone();
         assert!(service.contains("\"my vault\""), "{service}");
     }

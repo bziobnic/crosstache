@@ -53,6 +53,62 @@ fn print_schedule(store: &std::path::Path, extra: &[&str]) -> (bool, String) {
     )
 }
 
+/// The value of a `# label:` header line in the preview, trimmed.
+fn header_value<'a>(out: &'a str, label: &str) -> &'a str {
+    let prefix = format!("# {label}:");
+    out.lines()
+        .find(|l| l.starts_with(&prefix))
+        .unwrap_or_else(|| panic!("preview has no '{prefix}' line:\n{out}"))
+        .split_once(':')
+        .expect("header line has a colon")
+        .1
+        .trim()
+}
+
+/// Every regular file under `root`, as `(relative path, len, mtime, contents
+/// hash)`. Used to prove `--print` is byte-for-byte write-free: a preview that
+/// created, touched or rewrote anything shows up as a difference here.
+fn snapshot_tree(root: &std::path::Path) -> Vec<(String, u64, std::time::SystemTime, u64)> {
+    fn walk(
+        dir: &std::path::Path,
+        root: &std::path::Path,
+        out: &mut Vec<(String, u64, std::time::SystemTime, u64)>,
+    ) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if meta.is_dir() {
+                walk(&path, root, out);
+                continue;
+            }
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .to_string();
+            let hash = std::fs::read(&path)
+                .map(|bytes| {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    bytes.hash(&mut h);
+                    h.finish()
+                })
+                .unwrap_or(0);
+            let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+            out.push((rel, meta.len(), mtime, hash));
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    out.sort();
+    out
+}
+
 #[test]
 fn print_renders_a_unit_without_installing_anything() {
     let (_cmd, tmp, store) = xv_isolated_local_with_opts(false, false);
@@ -60,15 +116,29 @@ fn print_renders_a_unit_without_installing_anything() {
     let (ok, out) = print_schedule(&store, &["--vault", "prod-kv"]);
     assert!(ok, "{out}");
 
-    // The command the scheduler will run.
+    // The command the scheduler will run: the pinned manifest runner, never an
+    // ambient `rotate --due`.
+    let command = header_value(&out, "command");
     assert!(
-        out.contains("rotate --due --force --vault prod-kv"),
-        "{out}"
+        command.contains("schedule run --manifest "),
+        "{command}\n{out}"
     );
+    assert!(command.ends_with("manifest.json"), "{command}\n{out}");
+    assert!(!out.contains("rotate --due --force"), "{out}");
     // A log destination, so a failed 3am run is diagnosable.
     assert!(out.contains("rotate.log"), "{out}");
     // The default cadence.
     assert!(out.contains("daily at 03:00"), "{out}");
+    // The manifest that would be written, previewed verbatim.
+    assert!(
+        out.contains("# --- manifest.json (preview; installed_at is assigned during install) ---"),
+        "{out}"
+    );
+    assert!(
+        out.contains("\"installed_at\": \"<set-at-install>\""),
+        "{out}"
+    );
+    assert!(out.contains("\"schema_version\": 1"), "{out}");
 
     // Nothing may have been written to the unit directory.
     for candidate in [
@@ -167,25 +237,139 @@ fn invalid_interval_is_rejected_by_clap() {
 }
 
 #[test]
-fn the_scheduled_command_is_bounded_to_due_secrets() {
-    // The single most important property: an unattended job must never rotate
-    // secrets that have no policy, and must never redefine a policy.
+fn the_previewed_command_runs_the_pinned_manifest() {
+    // The single most important property: an unattended job acts only on the
+    // target recorded in the manifest, and never redefines a rotation policy.
     let (_cmd, _tmp, store) = xv_isolated_local_with_opts(false, false);
     use_the_store_once(&store);
     let (ok, out) = print_schedule(&store, &["--vault", "v"]);
     assert!(ok, "{out}");
 
-    let command_line = out
-        .lines()
-        .find(|l| l.starts_with("# command:"))
-        .expect("print shows the command");
-    assert!(command_line.contains("--due"), "{command_line}");
-    assert!(command_line.contains("--force"), "{command_line}");
+    let command_line = header_value(&out, "command");
+    assert!(
+        command_line.contains("schedule run --manifest "),
+        "{command_line}"
+    );
     assert!(
         !command_line.contains("--every"),
         "a schedule must not redefine policies: {command_line}"
     );
     assert!(!command_line.contains("--native"), "{command_line}");
+    assert!(!command_line.contains("--due"), "{command_line}");
+}
+
+#[test]
+fn print_headers_follow_the_golden_order_and_labels() {
+    let (_cmd, _tmp, store) = xv_isolated_local_with_opts(false, false);
+    use_the_store_once(&store);
+    let (ok, out) = print_schedule(&store, &["--vault", "prod-kv"]);
+    assert!(ok, "{out}");
+
+    let headers: Vec<&str> = out
+        .lines()
+        .take_while(|l| l.starts_with("# ") && !l.starts_with("# ---"))
+        .collect();
+    let labels: Vec<String> = headers
+        .iter()
+        .map(|l| {
+            l.split_once(':')
+                .unwrap()
+                .0
+                .trim_start_matches("# ")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        labels,
+        vec![
+            "scheduler",
+            "schedule",
+            "target",
+            "backend",
+            "config",
+            "project",
+            "cwd",
+            "command",
+            "log"
+        ],
+        "{out}"
+    );
+    // Values are column-aligned: every label pads to the same width.
+    for line in &headers {
+        let value_col = line.find(':').unwrap() + 1;
+        let padding = line[value_col..].len() - line[value_col..].trim_start().len();
+        assert_eq!(value_col + padding, 13, "misaligned header: {line}");
+    }
+
+    // Degenerate workspace: no alias, so the real vault names both sides.
+    assert_eq!(
+        header_value(&out, "target"),
+        "prod-kv -> local/prod-kv",
+        "{out}"
+    );
+    let backend = header_value(&out, "backend");
+    assert!(
+        backend.starts_with("local (local, sha256:"),
+        "{backend}\n{out}"
+    );
+    assert_eq!(header_value(&out, "project"), "(none)", "{out}");
+    assert!(header_value(&out, "config").ends_with("xv.conf"), "{out}");
+}
+
+#[test]
+fn print_writes_nothing_and_creates_no_state_root() {
+    // Invariant 7: `--print` is a read-only preview. It creates no directory,
+    // manifest, result, lock or native unit, and it touches no existing file.
+    let (_cmd, tmp, store) = xv_isolated_local_with_opts(false, false);
+    use_the_store_once(&store);
+    let root = store.parent().unwrap();
+    let state_home = tmp.path().join("state-home");
+
+    let before = snapshot_tree(tmp.path());
+    assert!(!before.is_empty(), "fixture should have created files");
+
+    let out = xv_cmd_in(root)
+        .env("XV_BACKEND", "local")
+        .env("XV_STATE_HOME", &state_home)
+        .args(["schedule", "install", "--print", "--vault", "prod-kv"])
+        .output()
+        .unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{combined}");
+
+    // The preview names the state root it would use...
+    let command = header_value(&combined, "command");
+    assert!(
+        command.contains(&state_home.to_string_lossy().to_string()),
+        "XV_STATE_HOME must drive the previewed manifest path: {command}"
+    );
+    // ...but must not have brought it into being.
+    assert!(
+        !state_home.exists(),
+        "--print created the state root {}",
+        state_home.display()
+    );
+
+    // And nothing else changed either: no unit, no log, no touched file.
+    assert_eq!(
+        before,
+        snapshot_tree(tmp.path()),
+        "--print modified the tree"
+    );
+    for candidate in [
+        tmp.path().join("Library/LaunchAgents"),
+        tmp.path().join(".config/systemd/user"),
+    ] {
+        assert!(
+            !candidate.exists(),
+            "--print must not create {}",
+            candidate.display()
+        );
+    }
 }
 
 #[test]
@@ -332,12 +516,16 @@ fn print_shows_the_real_vault_behind_an_attached_alias() {
 
     let (ok, out) = print_schedule(&store, &["--vault", "payments"]);
     assert!(ok, "{out}");
-    // The scheduled command must carry the vault the alias resolves to, not
-    // the alias — the scheduled run does not re-resolve a workspace.
-    assert!(
-        out.contains("rotate --due --force --vault payments-production"),
+    // The manifest must pin the vault the alias resolves to — the scheduled
+    // run does not re-resolve a workspace — while the summary still shows the
+    // alias the user typed.
+    assert_eq!(
+        header_value(&out, "target"),
+        "payments -> local/payments-production",
         "{out}"
     );
+    assert!(out.contains("\"workspace_alias\": \"payments\""), "{out}");
+    assert!(out.contains("\"vault\": \"payments-production\""), "{out}");
 }
 
 #[test]
@@ -366,7 +554,7 @@ fn an_unattached_vault_name_is_rejected_with_the_attached_aliases() {
     assert!(combined.contains("payments"), "{combined}");
     assert!(combined.contains("billing"), "{combined}");
     // Nothing may have been rendered, let alone installed.
-    assert!(!combined.contains("rotate --due --force"), "{combined}");
+    assert!(!combined.contains("# --- manifest.json"), "{combined}");
 }
 
 #[test]
@@ -397,7 +585,7 @@ fn a_missing_global_config_file_fails_before_the_scheduler_is_touched() {
 
     assert!(!out.status.success(), "{combined}");
     assert!(combined.contains("xv.conf"), "{combined}");
-    assert!(!combined.contains("rotate --due --force"), "{combined}");
+    assert!(!combined.contains("# --- manifest.json"), "{combined}");
 }
 
 /// Write an isolated `xv.conf` whose local store and key do **not** exist yet,
@@ -472,7 +660,7 @@ fn schedule_never_creates_a_local_store_or_age_key() {
     );
     // It also must not pretend the target is fine: verification fails closed.
     assert!(!print.status.success(), "{combined}");
-    assert!(!combined.contains("rotate --due --force"), "{combined}");
+    assert!(!combined.contains("# --- manifest.json"), "{combined}");
 
     let status = xv_cmd_in(tmp.path())
         .args(["schedule", "status"])
@@ -510,5 +698,5 @@ fn an_unsaved_ambient_backend_is_refused() {
     assert!(!out.status.success(), "{combined}");
     assert!(combined.contains("azure"), "{combined}");
     assert!(combined.contains("XV_BACKEND"), "{combined}");
-    assert!(!combined.contains("rotate --due --force"), "{combined}");
+    assert!(!combined.contains("# --- manifest.json"), "{combined}");
 }

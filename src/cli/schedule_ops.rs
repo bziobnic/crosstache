@@ -9,9 +9,13 @@ use std::path::{Path, PathBuf};
 use crate::cli::commands::ScheduleCommands;
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
+use crate::schedule::manifest::{
+    self as manifest, ManifestCadence, ManifestExecution, ScheduleManifestV1,
+};
+use crate::schedule::preview::render_install_preview;
 use crate::schedule::target::{resolve_install_target, ResolvedScheduleTarget};
 use crate::schedule::{
-    self, Platform, ProcessRunner, RotationSchedule, ScheduleInterval, UnitPaths,
+    self, Platform, ProcessRunner, RotationSchedule, ScheduleCommand, ScheduleInterval, UnitPaths,
 };
 use crate::utils::output;
 
@@ -53,25 +57,41 @@ fn default_log_path(home: &Path) -> PathBuf {
         .join("rotate.log")
 }
 
-/// Build the schedule from flags plus the current process's environment.
-fn build_schedule(
-    interval: ScheduleInterval,
-    vault: Option<String>,
-    log_file: Option<String>,
-) -> Result<RotationSchedule> {
-    let home = home_dir()?;
-
-    // The absolute path of *this* binary, so the unit keeps working when PATH
-    // changes or the user's shell init is not sourced.
-    let binary = std::env::current_exe().map_err(|e| {
+/// The path of *this* binary, so the unit keeps working when PATH changes or
+/// the user's shell init is not sourced.
+fn current_exe() -> Result<PathBuf> {
+    std::env::current_exe().map_err(|e| {
         CrosstacheError::config(format!(
             "could not determine the path to the running xv binary: {e}"
         ))
-    })?;
+    })
+}
+
+/// The same path with symlinks and `.`/`..` resolved. The manifest records
+/// this form so a later run can compare it against its own executable without
+/// two spellings of the same file looking like drift.
+fn canonical_exe() -> Result<PathBuf> {
+    let exe = current_exe()?;
+    std::fs::canonicalize(&exe).map_err(|e| {
+        CrosstacheError::config(format!(
+            "could not resolve the path to the running xv binary '{}': {e}",
+            exe.display()
+        ))
+    })
+}
+
+/// Build the schedule from flags plus the current process's environment.
+fn build_schedule(
+    interval: ScheduleInterval,
+    command: ScheduleCommand,
+    log_file: Option<String>,
+) -> Result<RotationSchedule> {
+    let home = home_dir()?;
+    let binary = current_exe()?;
 
     Ok(RotationSchedule {
         interval,
-        vault,
+        command,
         binary,
         log_path: log_file
             .map(PathBuf::from)
@@ -104,29 +124,45 @@ async fn execute_install(
     // the same backend, rather than leaving the scheduled run to re-resolve a
     // context that may since have changed.
     let resolved = resolve_target(vault.as_deref(), config).await?;
-    let vault = Some(resolved.target.vault.clone());
-
-    let schedule = build_schedule(interval, vault.clone(), log_file)?;
-    let paths = UnitPaths::for_platform(platform, &schedule.home);
 
     if print {
-        // Dry run: show exactly what would be installed, write nothing.
-        println!("# scheduler: {}", platform.name());
-        println!("# schedule:  {}", schedule.interval.describe());
-        println!("# command:   {}", schedule.command_line());
-        println!("# log:       {}", schedule.log_path.display());
-        for unit in schedule::render(platform, &schedule, &paths) {
-            println!("\n# --- {} ---", unit.path.display());
-            print!("{}", unit.contents);
-        }
-        if platform == Platform::Schtasks {
-            println!(
-                "\n# --- schtasks invocation ---\nschtasks {}",
-                schedule::schtasks_create_args(&schedule).join(" ")
-            );
-        }
+        // Dry run: show exactly what installation would write — the pinned
+        // manifest and the units that read it — and write nothing at all.
+        // `resolve_from_process_env` only computes paths; it creates nothing.
+        let state_paths = manifest::resolve_from_process_env()?;
+        let manifest_path = state_paths.manifest_path();
+        let schedule = RotationSchedule {
+            // The preview and the manifest must agree on one spelling of the
+            // executable, and the manifest's is the canonical one.
+            binary: canonical_exe()?,
+            ..build_schedule(
+                interval,
+                ScheduleCommand::ManifestRun {
+                    manifest: manifest_path.clone(),
+                },
+                log_file,
+            )?
+        };
+        let paths = UnitPaths::for_platform(platform, &schedule.home);
+        let manifest = build_manifest(&schedule, &resolved)?;
+        print!(
+            "{}",
+            render_install_preview(platform, &schedule, &paths, &manifest)
+        );
         return Ok(());
     }
+
+    // Until the pinned runner ships, the *installed* command is still the
+    // legacy sweep against the resolved real vault. Nothing is written to the
+    // schedule state directory, so there is no manifest for a runner to read.
+    let schedule = build_schedule(
+        interval,
+        ScheduleCommand::LegacyRotateDue {
+            vault: Some(resolved.target.vault.clone()),
+        },
+        log_file,
+    )?;
+    let paths = UnitPaths::for_platform(platform, &schedule.home);
 
     if !force {
         output::warn(&format!(
@@ -177,6 +213,50 @@ async fn execute_install(
          whether the scheduler is happy.",
     );
     Ok(())
+}
+
+/// Assemble the manifest installation would write for this schedule and
+/// target. `installed_at` is a placeholder: the real value is stamped by the
+/// write itself, and the preview renders it as `<set-at-install>`.
+fn build_manifest(
+    schedule: &RotationSchedule,
+    resolved: &ResolvedScheduleTarget,
+) -> Result<ScheduleManifestV1> {
+    let (kind, hour, minute) = match schedule.interval {
+        ScheduleInterval::Hourly { minute } => ("hourly", 0, minute),
+        ScheduleInterval::Daily { hour, minute } => ("daily", hour, minute),
+        ScheduleInterval::Weekly { hour, minute, .. } => ("weekly", hour, minute),
+    };
+
+    let path_string = |field: &str, path: &Path| -> Result<String> {
+        path.to_str().map(str::to_string).ok_or_else(|| {
+            CrosstacheError::config(format!(
+                "schedule manifest field '{field}' cannot be recorded: '{}' is not valid UTF-8",
+                path.display()
+            ))
+        })
+    };
+
+    Ok(ScheduleManifestV1 {
+        schema_version: 1,
+        schedule_id: manifest::SCHEDULE_ID.to_string(),
+        installed_at: String::new(),
+        cadence: ManifestCadence {
+            kind: kind.to_string(),
+            hour: hour as u8,
+            minute: minute as u8,
+        },
+        execution: ManifestExecution {
+            binary_path: path_string("execution.binary_path", &schedule.binary)?,
+            installed_version: env!("CARGO_PKG_VERSION").to_string(),
+            working_directory: path_string(
+                "execution.working_directory",
+                &resolved.working_directory,
+            )?,
+            log_path: path_string("execution.log_path", &schedule.log_path)?,
+        },
+        target: resolved.target.clone(),
+    })
 }
 
 /// Resolve the schedule target from the *saved* configuration.
