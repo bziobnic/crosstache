@@ -401,6 +401,22 @@ fn print_writes_nothing_and_creates_no_state_root() {
     }
 }
 
+/// Canonicalize a fixture path the way the manifest records it: resolved,
+/// and without the Windows `\\?\` verbatim prefix.
+fn manifest_path(path: &std::path::Path) -> std::path::PathBuf {
+    let canonical = std::fs::canonicalize(path).unwrap();
+    let text = canonical.to_string_lossy();
+    match text.strip_prefix(r"\\?\") {
+        Some(stripped) if cfg!(windows) => std::path::PathBuf::from(stripped),
+        _ => canonical,
+    }
+}
+
+/// The JSON string literal the manifest preview prints for `path`.
+fn manifest_path_json(path: &std::path::Path) -> String {
+    serde_json::to_string(&manifest_path(path).to_string_lossy().into_owned()).unwrap()
+}
+
 #[test]
 fn print_pins_the_config_file_rather_than_a_config_environment() {
     // The classic failure: the job runs but resolves a different config than
@@ -414,9 +430,9 @@ fn print_pins_the_config_file_rather_than_a_config_environment() {
     assert!(ok, "{out}");
 
     let config = tmp.path().join(".config").join("xv").join("xv.conf");
-    let config = std::fs::canonicalize(&config).unwrap();
+    let config = manifest_path(&config);
     assert!(
-        out.contains(&format!("\"config_path\": \"{}\"", config.display())),
+        out.contains(&format!("\"config_path\": {}", manifest_path_json(&config))),
         "the manifest must pin the config file ({}): {out}",
         config.display()
     );
@@ -427,9 +443,12 @@ fn print_pins_the_config_file_rather_than_a_config_environment() {
     );
 
     // And it starts where the manifest says resolution happened.
-    let cwd = std::fs::canonicalize(tmp.path()).unwrap();
+    let cwd = manifest_path(tmp.path());
     assert!(
-        out.contains(&format!("\"working_directory\": \"{}\"", cwd.display())),
+        out.contains(&format!(
+            "\"working_directory\": {}",
+            manifest_path_json(&cwd)
+        )),
         "{out}"
     );
     assert_eq!(header_value(&out, "cwd"), cwd.to_string_lossy(), "{out}");
