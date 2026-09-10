@@ -958,10 +958,10 @@ async fn execute_status() -> Result<()> {
                     command_line
                 }
             ));
-            output::info(
-                "  Target:    unverified (the legacy unit does not record backend or account \
-                 identity)",
-            );
+            output::info(&format!(
+                "  Target:    {}",
+                ownership::unverified_target_note(command_line)
+            ));
             output::hint(
                 "Replace it explicitly with 'xv schedule install --vault <alias-or-vault>'.",
             );
@@ -1122,12 +1122,20 @@ async fn execute_uninstall() -> Result<()> {
 
     remove_schedule_dir_if_empty(&state_paths);
 
-    if let Some(detail) = report.scheduler_error {
-        // Not absence, and not something to paper over: the files may be gone
-        // while the scheduler still holds a registration.
-        return Err(CrosstacheError::config(format!(
+    if let Some(detail) = report.scheduler_error.clone() {
+        // Not absence, and not something to paper over. What is true depends on
+        // what actually happened: with the files gone the scheduler may still
+        // hold a registration; with nothing removed we simply do not know what
+        // is installed.
+        let situation = if report.removed_anything() {
             "the rotation schedule's files were removed but the scheduler could not be asked to \
-             deregister it ({detail}). Check the scheduler and re-run 'xv schedule uninstall'."
+             deregister it"
+        } else {
+            "nothing was removed and the scheduler could not be asked whether anything is \
+             registered"
+        };
+        return Err(CrosstacheError::config(format!(
+            "{situation} ({detail}). Check the scheduler and re-run 'xv schedule uninstall'."
         )));
     }
     Ok(())

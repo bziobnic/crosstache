@@ -890,6 +890,10 @@ pub(crate) enum DeregisterOutcome {
 
 /// Deregister the schedule from the platform scheduler, converging on absent.
 ///
+/// A host with no user service manager counts as absent here — there is no
+/// registered user timer to remove — even though `status` reports the same
+/// failure as an error, because the two are answering different questions.
+///
 /// A scheduler that reports "no such job" is the outcome this wants, not a
 /// failure — both uninstall and an install rollback have to reach "absent"
 /// from any starting state. But a scheduler that failed for *another* reason
@@ -924,7 +928,7 @@ pub(crate) fn unregister_native_reporting(
     };
     Ok(if out.ok() {
         DeregisterOutcome::Removed
-    } else if ownership::says_absent(&out) {
+    } else if ownership::says_absent(&out) || ownership::says_user_bus_unavailable(&out) {
         DeregisterOutcome::Absent
     } else {
         DeregisterOutcome::Failed(format!("{what} failed (exit {})", out.status))
@@ -1799,6 +1803,22 @@ mod tests {
                 "{platform:?} claimed to remove a job that was not there"
             );
         }
+    }
+
+    #[test]
+    fn a_missing_user_bus_lets_deregistration_converge() {
+        // Uninstall's question is "is anything left to remove?", and with no
+        // user manager the answer is no. Status asks a different question and
+        // reports the same failure as an error.
+        let no_bus = FakeRunner {
+            fail_containing: Some(String::new()),
+            failure_stderr: Some("Failed to connect to bus: No such file or directory".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            unregister_native_reporting(Platform::Systemd, &no_bus).unwrap(),
+            DeregisterOutcome::Absent
+        );
     }
 
     #[test]

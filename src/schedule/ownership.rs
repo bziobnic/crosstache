@@ -253,12 +253,34 @@ pub fn probe_scheduler(platform: Platform, runner: &dyn CommandRunner) -> Schedu
 /// A non-zero exit is absence only when the scheduler said so in the words it
 /// uses for "no such entry"; anything else is an error we must not launder
 /// into "not installed".
+///
+/// An unreachable user bus is deliberately an *error* here even though
+/// deregistration converges on absent for it: a `systemctl` that could not talk
+/// to the user manager did not tell us whether a timer is enabled, and status
+/// exists to say what is true rather than what is convenient.
 fn classify_failure(what: &str, out: &CommandOutput) -> SchedulerProbe {
-    if says_absent(out) {
+    if says_user_bus_unavailable(out) {
+        SchedulerProbe::Error(format!(
+            "{what} failed (exit {}): user bus unavailable",
+            out.status
+        ))
+    } else if says_absent(out) {
         SchedulerProbe::Absent
     } else {
         SchedulerProbe::Error(format!("{what} failed (exit {})", out.status))
     }
+}
+
+/// Whether the failure was "there is no user service manager to ask".
+///
+/// For *uninstall* this is convergence — no user manager, no registered user
+/// timer, nothing to remove — so
+/// [`crate::schedule::unregister_native_reporting`] treats it as absence. For
+/// `status` it is a question that went unanswered.
+pub(crate) fn says_user_bus_unavailable(out: &CommandOutput) -> bool {
+    format!("{} {}", out.stdout, out.stderr)
+        .to_ascii_lowercase()
+        .contains("failed to connect to bus")
 }
 
 /// The phrases each scheduler uses for "there is no such entry".
@@ -268,16 +290,13 @@ fn classify_failure(what: &str, out: &CommandOutput) -> SchedulerProbe {
 /// process", `systemctl --user disable` answers "does not exist", and
 /// `schtasks` answers "cannot find the file specified" / "does not exist".
 pub(crate) fn says_absent(out: &CommandOutput) -> bool {
-    const ABSENT_PHRASES: [&str; 7] = [
+    const ABSENT_PHRASES: [&str; 6] = [
         "could not find service",
         "no such process",
         "no such file or directory",
         "does not exist",
         "cannot find the file specified",
         "not loaded",
-        // No user service manager (a container, or a session that never got
-        // one) means there is no user timer registered to find or remove.
-        "failed to connect to bus",
     ];
     let haystack = format!("{} {}", out.stdout, out.stderr).to_ascii_lowercase();
     ABSENT_PHRASES
@@ -368,6 +387,35 @@ fn classify_command_line(command_line: &str) -> CommandShape {
         return CommandShape::ManifestRun;
     }
     CommandShape::Unrecognized
+}
+
+/// What `status` may honestly say about the target of an unpinned entry.
+///
+/// [`Ownership::LegacyUnpinned`] covers two different situations and they need
+/// two different sentences. The pre-manifest `rotate --due --force` command
+/// never recorded a target at all. A `schedule run --manifest` command did —
+/// the manifest is simply gone, and saying "the legacy unit does not record
+/// backend or account identity" about it would be false: it recorded one, at a
+/// path we can name.
+pub fn unverified_target_note(command_line: &str) -> String {
+    match classify_command_line(command_line) {
+        CommandShape::ManifestRun => match manifest_argument(command_line) {
+            Some(path) => format!("unverified (the recorded manifest {path} is missing)"),
+            None => "unverified (the recorded manifest is missing)".to_string(),
+        },
+        _ => "unverified (the legacy unit does not record backend or account identity)".to_string(),
+    }
+}
+
+/// The value after `--manifest` in a command line, if there is one.
+fn manifest_argument(command_line: &str) -> Option<String> {
+    let after = command_line.split_once("--manifest")?.1.trim_start();
+    let value = if let Some(quoted) = after.strip_prefix('"') {
+        quoted.split_once('"').map(|(value, _)| value)?
+    } else {
+        after.split_whitespace().next()?
+    };
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 fn join_argv(argv: &[String]) -> String {
@@ -866,13 +914,42 @@ mod tests {
     }
 
     #[test]
-    fn a_host_without_a_user_service_manager_reports_absence() {
-        // `systemctl --user` on a host with no user bus cannot be reporting a
-        // registered user timer, so this is absence, not a broken scheduler.
+    fn a_host_without_a_user_service_manager_is_an_error_not_absence() {
+        // `systemctl --user` that could not reach the user manager did not say
+        // the timer is absent; it said nothing at all. Status must not turn
+        // that into "no schedule is installed".
         let f = fixture();
         let runner = FakeRunner::new().otherwise(1, "", "Failed to connect to bus: No such file");
         let report = inspect_ownership(Platform::Systemd, &f.units, &f.state, &runner).unwrap();
-        assert_eq!(report.scheduler, SchedulerProbe::Absent);
+        assert_eq!(
+            report.scheduler,
+            SchedulerProbe::Error(
+                "systemctl --user show failed (exit 1): user bus unavailable".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn the_unverified_target_note_names_a_missing_manifest() {
+        // Two situations under one ownership label, and only one of them may
+        // claim the unit recorded no target.
+        assert_eq!(
+            unverified_target_note("/bin/xv rotate --due --force --vault v"),
+            "unverified (the legacy unit does not record backend or account identity)"
+        );
+        assert_eq!(
+            unverified_target_note("/bin/xv schedule run --manifest /s/manifest.json"),
+            "unverified (the recorded manifest /s/manifest.json is missing)"
+        );
+        assert_eq!(
+            unverified_target_note("\"/o p/xv\" schedule run --manifest \"/s p/manifest.json\""),
+            "unverified (the recorded manifest /s p/manifest.json is missing)"
+        );
+        // An entry whose command the scheduler would not report.
+        assert_eq!(
+            unverified_target_note(""),
+            "unverified (the legacy unit does not record backend or account identity)"
+        );
     }
 
     #[test]
