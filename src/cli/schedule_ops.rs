@@ -111,6 +111,88 @@ fn recorded_binary_path() -> Result<PathBuf> {
     Ok(crate::utils::helpers::lexically_normalize_from(&base, &exe))
 }
 
+/// True when `metadata` describes a Windows reparse point.
+///
+/// Windows has more redirection primitives than `is_symlink()` reports. A
+/// *directory junction* (`mklink /J`, creatable without elevation) is a
+/// reparse point that `Path::exists` follows but that `FileType::is_symlink`
+/// does not flag, so a junction planted anywhere along the log path would
+/// silently redirect an unattended write. `FILE_ATTRIBUTE_REPARSE_POINT`
+/// covers junctions, mount points, and symlinks alike.
+#[cfg(windows)]
+fn is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+/// Non-Windows platforms have no reparse points; `is_symlink()` is the whole
+/// story there.
+#[cfg(not(windows))]
+fn is_reparse_point(_metadata: &std::fs::Metadata) -> bool {
+    false
+}
+
+/// A path made up solely of a prefix and/or the root (`/`, `C:\`, `\\?\C:\`,
+/// a UNC share root). Those cannot themselves be redirected and are not
+/// meaningfully inspectable, so the ancestor walk skips them.
+fn is_root_or_prefix(path: &Path) -> bool {
+    use std::path::Component;
+    path.components()
+        .all(|component| matches!(component, Component::Prefix(_) | Component::RootDir))
+}
+
+/// Refuse the log destination if *any* existing directory component on the way
+/// to it is a symlink or a Windows reparse point.
+///
+/// Checking only the nearest existing ancestor is not enough: `exists()` walks
+/// straight through an intermediate symlink, so `/tmp/link/sub/rotate.log`
+/// would report `/tmp/link/sub` as a perfectly ordinary directory while the
+/// write still lands wherever `link` points. Every component from the leaf's
+/// parent up to (but excluding) the root is inspected with `symlink_metadata`,
+/// which never follows.
+///
+/// Fail closed: a component that exists but cannot be inspected is a refusal,
+/// not a pass. Only `NotFound` — the components below the nearest existing
+/// ancestor, which the caller has already accounted for — is ignored.
+fn reject_redirected_ancestors(resolved: &Path) -> Result<()> {
+    for ancestor in resolved.ancestors().skip(1) {
+        if is_root_or_prefix(ancestor) {
+            continue;
+        }
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(metadata) => {
+                let symlink = metadata.file_type().is_symlink();
+                if symlink || is_reparse_point(&metadata) {
+                    let kind = if symlink {
+                        "symlink"
+                    } else {
+                        "reparse point (junction or mount point)"
+                    };
+                    return Err(CrosstacheError::config(format!(
+                        "the log destination '{}' is reached through the {kind} '{}'. A \
+                         scheduled run writes there unattended, so pin a real directory \
+                         instead.",
+                        resolved.display(),
+                        ancestor.display()
+                    )));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(CrosstacheError::config(format!(
+                    "could not inspect '{}' on the way to the log destination '{}': {error}. \
+                     Refusing to install a schedule that writes through a directory xv cannot \
+                     verify.",
+                    ancestor.display(),
+                    resolved.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Resolve a `--log-file` value into the absolute, normalized form the
 /// manifest schema requires.
 ///
@@ -121,9 +203,11 @@ fn recorded_binary_path() -> Result<PathBuf> {
 /// verbatim prefix stripped.
 ///
 /// The file itself need not exist yet, but per the design its nearest existing
-/// ancestor must not be reached through a symlink: a log destination that is a
-/// symlinked directory lets whoever controls the link redirect an unattended
-/// root-less write somewhere the user never chose.
+/// ancestor must resolve without symlinks — and that is enforced over *every*
+/// existing component of the path, not just the nearest one, because
+/// `exists()` walks straight through an intermediate link. A log destination
+/// reached through a symlink (or a Windows junction) lets whoever controls the
+/// link redirect an unattended root-less write somewhere the user never chose.
 fn resolve_log_path(log_file: &str) -> Result<PathBuf> {
     let raw = PathBuf::from(log_file);
     let base = if raw.is_absolute() {
@@ -133,28 +217,18 @@ fn resolve_log_path(log_file: &str) -> Result<PathBuf> {
     };
     let resolved = crate::utils::helpers::lexically_normalize_from(&base, &raw);
 
-    let ancestor = resolved
+    if !resolved
         .ancestors()
         .skip(1)
-        .find(|candidate| candidate.exists())
-        .ok_or_else(|| {
-            CrosstacheError::config(format!(
-                "the log destination '{}' has no existing parent directory. Create it before \
-                 installing a schedule, so a failed unattended run has somewhere to report.",
-                resolved.display()
-            ))
-        })?;
-    if std::fs::symlink_metadata(ancestor)
-        .map(|meta| meta.file_type().is_symlink())
-        .unwrap_or(false)
+        .any(|candidate| candidate.exists())
     {
         return Err(CrosstacheError::config(format!(
-            "the log destination '{}' is reached through the symlink '{}'. A scheduled run \
-             writes there unattended, so pin a real directory instead.",
-            resolved.display(),
-            ancestor.display()
+            "the log destination '{}' has no existing parent directory. Create it before \
+             installing a schedule, so a failed unattended run has somewhere to report.",
+            resolved.display()
         )));
     }
+    reject_redirected_ancestors(&resolved)?;
     Ok(resolved)
 }
 
@@ -619,16 +693,107 @@ mod tests {
 
     /// A log destination reached through a symlinked directory is refused:
     /// whoever controls the link would otherwise redirect an unattended write.
+    ///
+    /// The temp root is canonicalized first: on macOS `tempfile` hands back a
+    /// path under `/var`, which is itself a symlink to `/private/var`, and the
+    /// ancestor walk would refuse for that unrelated reason.
     #[cfg(unix)]
     #[test]
     fn a_log_path_under_a_symlinked_directory_is_refused() {
         let dir = tempfile::tempdir().unwrap();
-        let real = dir.path().join("real");
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let real = root.join("real");
         std::fs::create_dir_all(&real).unwrap();
-        let link = dir.path().join("linked");
+        let link = root.join("linked");
         std::os::unix::fs::symlink(&real, &link).unwrap();
 
         let error = resolve_log_path(link.join("rotate.log").to_str().unwrap()).unwrap_err();
-        assert!(error.to_string().contains("symlink"), "{error}");
+        let message = error.to_string();
+        assert!(message.contains("symlink"), "{message}");
+        assert!(
+            message.contains(link.to_str().unwrap()),
+            "the offending component must be named: {message}"
+        );
+    }
+
+    /// The bug this guards: checking only the *nearest existing* ancestor
+    /// misses a symlink further up. `exists()` walks straight through
+    /// `linked/`, so `linked/sub` looks like an ordinary directory while the
+    /// unattended write still lands wherever `linked` points.
+    #[cfg(unix)]
+    #[test]
+    fn a_log_path_under_an_intermediate_symlinked_component_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let real = root.join("real");
+        std::fs::create_dir_all(real.join("sub")).unwrap();
+        let link = root.join("linked");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let nested = link.join("sub").join("rotate.log");
+        // The nearest existing ancestor is not itself a symlink...
+        assert!(nested.parent().unwrap().exists());
+        assert!(!std::fs::symlink_metadata(nested.parent().unwrap())
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        // ...but the path still reaches it through one, so it is refused.
+        let error = resolve_log_path(nested.to_str().unwrap()).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("symlink"), "{message}");
+        assert!(
+            message.contains(link.to_str().unwrap()),
+            "the offending component must be named: {message}"
+        );
+    }
+
+    /// The walk must not become a blanket refusal: a plainly nested real
+    /// directory whose leaf file does not exist yet is still accepted.
+    #[test]
+    fn a_plain_nested_log_path_with_a_missing_leaf_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        // `canonical_path_for_manifest` both resolves macOS's `/var` symlink
+        // and strips Windows' verbatim prefix, which is the exact spelling
+        // `resolve_log_path` returns.
+        let root = canonical_path_for_manifest(dir.path()).unwrap();
+        std::fs::create_dir_all(root.join("a").join("b")).unwrap();
+
+        let target = root.join("a").join("b").join("rotate.log");
+        assert!(!target.exists());
+        assert_eq!(resolve_log_path(target.to_str().unwrap()).unwrap(), target);
+    }
+
+    /// A Windows directory *junction* is a reparse point that `exists()`
+    /// follows but `is_symlink()` does not report, so it needs the
+    /// `FILE_ATTRIBUTE_REPARSE_POINT` check rather than the symlink check.
+    /// `mklink /J` works without elevation, unlike `mklink /D`.
+    #[cfg(windows)]
+    #[test]
+    fn a_log_path_under_a_directory_junction_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let junction = root.join("linked");
+
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&real)
+            .status();
+        match status {
+            Ok(status) if status.success() => {}
+            // No `cmd`, or the filesystem refused the junction: nothing to
+            // assert about a reparse point that does not exist.
+            _ => return,
+        }
+        assert!(
+            is_reparse_point(&std::fs::symlink_metadata(&junction).unwrap()),
+            "mklink /J must produce a reparse point"
+        );
+
+        let error = resolve_log_path(junction.join("rotate.log").to_str().unwrap()).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("reparse point"), "{message}");
     }
 }
