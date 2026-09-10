@@ -10,10 +10,13 @@ use crate::cli::commands::ScheduleCommands;
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
 use crate::schedule::drift;
-use crate::schedule::install::{install_transactional, InstallPlan, RealOwnedScheduleStore};
+use crate::schedule::install::{
+    install_transactional, uninstall_owned, InstallPlan, RealOwnedScheduleStore,
+};
 use crate::schedule::manifest::{
     self as manifest, ManifestCadence, ManifestExecution, ScheduleManifestV1,
 };
+use crate::schedule::ownership::{self, Ownership, SchedulerProbe};
 use crate::schedule::preview::render_install_preview;
 use crate::schedule::target::{
     canonical_path_for_manifest, manifest_path_string, resolve_install_target,
@@ -40,7 +43,7 @@ pub(crate) async fn execute_schedule_command(
             print,
             force,
         } => execute_install(&interval, &at, vault, log_file, print, force, &config).await,
-        ScheduleCommands::Status => execute_status(&config).await,
+        ScheduleCommands::Status => execute_status().await,
         ScheduleCommands::Uninstall => execute_uninstall().await,
         ScheduleCommands::Run { manifest } => execute_run(&manifest).await,
     }
@@ -874,79 +877,275 @@ async fn run_recorded_sweep(manifest: &ScheduleManifestV1) -> RunOutcomeDraft {
     }
 }
 
-async fn execute_status(config: &Config) -> Result<()> {
+/// Read-only diagnosis of what is installed.
+///
+/// Two independent answers, kept apart on purpose: what the scheduler says,
+/// and what is on disk. It contacts no provider — vault verification belongs
+/// to install and to the run itself — and it never claims a target it cannot
+/// read from the manifest. PR 3 replaces this rendering with the design's full
+/// seven-dimension view; what is here is the honest subset.
+async fn execute_status() -> Result<()> {
     let platform = Platform::detect()?;
     let home = home_dir()?;
-    let paths = UnitPaths::for_platform(platform, &home);
+    let unit_paths = UnitPaths::for_platform(platform, &home);
+    let state_paths = manifest::resolve_from_process_env()?;
 
-    let status = schedule::status(platform, &paths, &ProcessRunner)?;
+    let report = ownership::inspect_ownership(platform, &unit_paths, &state_paths, &ProcessRunner)?;
 
-    if status.installed {
-        output::success(&format!(
+    // Read the recorded target *before* the headline: a managed schedule whose
+    // target has drifted will refuse tonight, and announcing it as healthy and
+    // then contradicting that four lines later is not a diagnosis.
+    let recorded = match report.state {
+        Ownership::Managed | Ownership::OrphanedManifest => {
+            Some(read_recorded_target(&state_paths).await?)
+        }
+        _ => None,
+    };
+    let refuses = matches!(
+        recorded,
+        Some(RecordedTarget::Read { ref drift, .. }) if drift.is_refused()
+    );
+
+    match &report.state {
+        Ownership::Managed if refuses => output::error(&format!(
+            "The installed {} rotation schedule is unsafe to run.",
+            platform.name()
+        )),
+        Ownership::Managed => output::success(&format!(
             "A {} rotation schedule is installed.",
             platform.name()
-        ));
-    } else {
-        output::info(&format!(
-            "No {} rotation schedule is installed.",
+        )),
+        Ownership::LegacyUnpinned { .. } => output::warn(&format!(
+            "A legacy {} rotation schedule is installed.",
             platform.name()
-        ));
+        )),
+        Ownership::OrphanedManifest => output::warn(&format!(
+            "A rotation manifest exists but no {} is installed.",
+            platform.name()
+        )),
+        Ownership::Foreign { .. } => output::warn(&format!(
+            "Something xv did not write is at a path the {} rotation schedule owns.",
+            platform.name()
+        )),
+        // A scheduler that would not answer is not evidence of absence.
+        Ownership::Absent => match &report.scheduler {
+            SchedulerProbe::Error(_) => output::warn(&format!(
+                "Could not determine whether a {} rotation schedule is installed.",
+                platform.name()
+            )),
+            _ => output::info(&format!(
+                "No {} rotation schedule is installed.",
+                platform.name()
+            )),
+        },
     }
-    output::info(&format!("  {}", status.detail));
 
-    for unit in schedule::unit_paths_for(platform, &paths) {
-        output::info(&format!(
-            "  Unit:    {} ({})",
-            unit.display(),
-            if unit.exists() { "present" } else { "absent" }
-        ));
+    if let Some(label) = report.state.label() {
+        output::info(&format!("  Ownership: {label}"));
+    }
+    match &report.scheduler {
+        SchedulerProbe::Error(detail) => output::error(&format!("  Scheduler: error ({detail})")),
+        probe => output::info(&format!("  Scheduler: {}", probe.describe())),
     }
 
-    let log = default_log_path(&home);
-    output::info(&format!(
-        "  Log:     {} ({})",
-        log.display(),
-        if log.exists() {
-            "present"
-        } else {
-            "not yet written"
+    match &report.state {
+        Ownership::LegacyUnpinned { command_line } => {
+            output::info(&format!(
+                "  Command:   {}",
+                if command_line.is_empty() {
+                    "unknown (the scheduler did not report one)"
+                } else {
+                    command_line
+                }
+            ));
+            output::info(
+                "  Target:    unverified (the legacy unit does not record backend or account \
+                 identity)",
+            );
+            output::hint(
+                "Replace it explicitly with 'xv schedule install --vault <alias-or-vault>'.",
+            );
         }
-    ));
-
-    if !status.installed {
-        output::hint("Install one with 'xv schedule install --vault <vault>'.");
-        return Ok(());
+        Ownership::Managed | Ownership::OrphanedManifest => {
+            if let Some(recorded) = recorded {
+                recorded.report();
+            }
+            if matches!(report.state, Ownership::OrphanedManifest) {
+                output::hint(
+                    "Run 'xv schedule install --vault <alias-or-vault>' to repair the schedule, \
+                     or 'xv schedule uninstall' to remove the manifest.",
+                );
+            } else if refuses {
+                output::hint(
+                    "Review the changes, then run 'xv schedule install --vault <alias-or-vault>' \
+                     to accept the new target.",
+                );
+            }
+        }
+        Ownership::Foreign { paths } => {
+            for path in paths {
+                output::info(&format!("  Path:      {}", path.display()));
+            }
+            output::hint(
+                "xv will not overwrite or remove a file it did not write. Move it aside, then \
+                 run 'xv schedule install --vault <alias-or-vault>'.",
+            );
+        }
+        Ownership::Absent => {
+            output::hint("Install one with 'xv schedule install --vault <alias-or-vault>'.");
+        }
     }
 
-    // What the schedule will actually act on, so status answers the real
-    // question — "will anything rotate tonight?" — not just "is a job present?".
-    let vault_hint = if config.default_vault.is_empty() {
-        "<resolved from context at run time>".to_string()
-    } else {
-        config.default_vault.clone()
-    };
-    output::info(&format!("  Vault:   {vault_hint}"));
-    output::hint("Run 'xv rotate --check' to see which secrets the next sweep would rotate.");
     Ok(())
 }
 
+/// What `status` could learn from `manifest.json`.
+enum RecordedTarget {
+    /// The manifest is there but unusable; the message says why.
+    Unreadable(String),
+    /// The recorded target and what recomputing it says today.
+    Read {
+        summary: String,
+        drift: drift::DriftReport,
+    },
+}
+
+impl RecordedTarget {
+    /// Print the `Target:` and `Drift:` lines.
+    fn report(&self) {
+        match self {
+            Self::Unreadable(detail) => {
+                output::error(&format!("  Target:    unreadable ({detail})"));
+                output::hint("Reinstall the schedule with 'xv schedule install' to regenerate it.");
+            }
+            Self::Read { summary, drift } => {
+                output::info(&format!("  Target:    {summary}"));
+                output::info(&format!(
+                    "  Drift:     {}",
+                    match drift.verdict {
+                        drift::DriftVerdict::Valid => "valid",
+                        drift::DriftVerdict::Warning => "warning",
+                        drift::DriftVerdict::Refuse => "refused",
+                    }
+                ));
+                for reason in drift.warnings.iter().chain(drift.reasons.iter()) {
+                    output::info(&format!("  - {}", reason.detail));
+                }
+            }
+        }
+    }
+}
+
+/// Read the recorded target and recompute it.
+///
+/// Reads files only: the same recomputation a scheduled run performs before it
+/// constructs anything, which is what lets `status` say "this would refuse
+/// tonight" without touching the provider.
+async fn read_recorded_target(
+    state_paths: &manifest::ScheduleStatePaths,
+) -> Result<RecordedTarget> {
+    let manifest::ScheduleManifest::V1(recorded) = match manifest::load_manifest(state_paths) {
+        Ok(manifest) => manifest,
+        Err(error) => return Ok(RecordedTarget::Unreadable(error.to_string())),
+    };
+
+    let alias = recorded
+        .target
+        .workspace_alias
+        .clone()
+        .unwrap_or_else(|| recorded.target.vault.clone());
+    let summary = format!(
+        "{alias} -> {}/{}",
+        recorded.target.backend_name, recorded.target.vault
+    );
+
+    let drift = drift::validate_recorded_target(
+        &recorded,
+        &recorded_binary_path()?,
+        env!("CARGO_PKG_VERSION"),
+    )
+    .await;
+    Ok(RecordedTarget::Read { summary, drift })
+}
+
+/// Remove the schedule and the manifest, and nothing else.
+///
+/// Runs under the same `install.lock` an install takes, so an uninstall cannot
+/// interleave with a reinstall. What it may remove is fixed by the design's
+/// ownership table; every other file in the state directory — the last
+/// outcome, both lock inodes, `recovery/`, the log, anything the user left
+/// there — is retained, and so is anything at an owned path that xv did not
+/// write.
 async fn execute_uninstall() -> Result<()> {
     let platform = Platform::detect()?;
     let home = home_dir()?;
-    let paths = UnitPaths::for_platform(platform, &home);
+    let unit_paths = UnitPaths::for_platform(platform, &home);
+    let state_paths = manifest::resolve_from_process_env()?;
 
-    if schedule::uninstall(platform, &paths, &ProcessRunner)? {
+    let report = {
+        let mut store = RealOwnedScheduleStore::open(&state_paths)?;
+        uninstall_owned(platform, &unit_paths, &mut store, &ProcessRunner)?
+        // The store is dropped here, releasing `install.lock`.
+    };
+
+    if report.removed_anything() {
         output::success(&format!(
             "Removed the {} rotation schedule.",
             platform.name()
         ));
-    } else {
+        if report.removed_manifest {
+            output::info(&format!(
+                "  Removed:   {}",
+                state_paths.manifest_path().display()
+            ));
+        }
+        for unit in &report.removed_units {
+            output::info(&format!("  Removed:   {}", unit.display()));
+        }
+        output::info(
+            "  Retained:  the last-run record, both lock files, recovery evidence and the \
+             rotation log.",
+        );
+    } else if report.scheduler_error.is_none() {
         output::info(&format!(
             "No {} rotation schedule was installed; nothing to remove.",
             platform.name()
         ));
     }
+
+    for path in &report.foreign {
+        output::warn(&format!(
+            "  Retained:  {} (xv did not write it, so it was left alone)",
+            path.display()
+        ));
+    }
+
+    remove_schedule_dir_if_empty(&state_paths);
+
+    if let Some(detail) = report.scheduler_error {
+        // Not absence, and not something to paper over: the files may be gone
+        // while the scheduler still holds a registration.
+        return Err(CrosstacheError::config(format!(
+            "the rotation schedule's files were removed but the scheduler could not be asked to \
+             deregister it ({detail}). Check the scheduler and re-run 'xv schedule uninstall'."
+        )));
+    }
     Ok(())
+}
+
+/// Remove the schedule's own directory once nothing is left in it.
+///
+/// In practice `install.lock` is retained and keeps it non-empty; this exists
+/// so a directory that *is* empty — an install that never got past its lock
+/// being cleaned up by hand — does not linger. The parent `schedules/`
+/// directory is never touched, and a failure here is not worth an error: the
+/// schedule is already gone.
+fn remove_schedule_dir_if_empty(paths: &manifest::ScheduleStatePaths) {
+    if let Ok(mut entries) = std::fs::read_dir(paths.root()) {
+        if entries.next().is_none() {
+            let _ = std::fs::remove_dir(paths.root());
+        }
+    }
 }
 
 #[cfg(test)]

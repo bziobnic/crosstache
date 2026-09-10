@@ -53,8 +53,9 @@ use crate::error::{CrosstacheError, Result};
 use crate::schedule::manifest::{self, ScheduleStatePaths, SCHEDULE_ID};
 use crate::schedule::{
     launchd_domain_target, register_native, render, unit_paths_for, unregister_native,
-    CommandRunner, Platform, RotationSchedule, ScheduleCommand, ScheduleInterval, UnitFile,
-    UnitPaths, LAUNCHD_LABEL, SCHTASKS_NAME, SYSTEMD_UNIT,
+    unregister_native_reporting, CommandRunner, DeregisterOutcome, Platform, RotationSchedule,
+    ScheduleCommand, ScheduleInterval, UnitFile, UnitPaths, LAUNCHD_LABEL, SCHTASKS_NAME,
+    SYSTEMD_UNIT,
 };
 use crate::utils::helpers::{
     atomic_write_file_no_follow, create_private_dir, open_private_lock_file_no_follow,
@@ -118,6 +119,8 @@ pub(crate) trait OwnedScheduleStore {
     fn write_task_definition_temp(&mut self, bytes: &[u8]) -> Result<PathBuf>;
     /// Best-effort removal of that temporary file.
     fn remove_task_definition_temp(&mut self);
+    /// Where `manifest.json` lives, for reporting.
+    fn manifest_path(&self) -> PathBuf;
 }
 
 /// The real store: owned paths under the schedule state directory plus the
@@ -243,29 +246,43 @@ fn classify_manifest_bytes(path: &Path, bytes: Vec<u8>) -> ArtifactState {
     ArtifactState::Owned(bytes)
 }
 
+/// Classify `manifest.json` at `path` without taking the install lock.
+///
+/// Shared with [`crate::schedule::ownership`] so `status` decides what is ours
+/// by exactly the rules a reinstall uses to decide what it may replace. Both
+/// must agree: a file `status` calls managed but `install` calls foreign would
+/// send the user in a circle.
+pub(crate) fn classify_owned_manifest(path: &Path) -> Result<ArtifactState> {
+    Ok(match classify_path(path, "schedule manifest")? {
+        ArtifactState::Owned(bytes) => classify_manifest_bytes(path, bytes),
+        other => other,
+    })
+}
+
+/// Classify an owned unit file at `path` without taking the install lock.
+pub(crate) fn classify_owned_unit(path: &Path) -> Result<ArtifactState> {
+    Ok(match classify_path(path, "schedule unit file")? {
+        ArtifactState::Owned(bytes) => {
+            if String::from_utf8_lossy(&bytes).contains(MANAGED_MARKER) {
+                ArtifactState::Owned(bytes)
+            } else {
+                ArtifactState::Foreign(format!(
+                    "'{}' was not written by xv (it carries no '{MANAGED_MARKER}' marker)",
+                    path.display()
+                ))
+            }
+        }
+        other => other,
+    })
+}
+
 impl OwnedScheduleStore for RealOwnedScheduleStore {
     fn read_manifest(&self) -> Result<ArtifactState> {
-        let path = self.paths.manifest_path();
-        Ok(match classify_path(&path, "schedule manifest")? {
-            ArtifactState::Owned(bytes) => classify_manifest_bytes(&path, bytes),
-            other => other,
-        })
+        classify_owned_manifest(&self.paths.manifest_path())
     }
 
     fn read_unit(&self, path: &Path) -> Result<ArtifactState> {
-        Ok(match classify_path(path, "schedule unit file")? {
-            ArtifactState::Owned(bytes) => {
-                if String::from_utf8_lossy(&bytes).contains(MANAGED_MARKER) {
-                    ArtifactState::Owned(bytes)
-                } else {
-                    ArtifactState::Foreign(format!(
-                        "'{}' was not written by xv (it carries no '{MANAGED_MARKER}' marker)",
-                        path.display()
-                    ))
-                }
-            }
-            other => other,
-        })
+        classify_owned_unit(path)
     }
 
     fn write_manifest(&mut self, bytes: &[u8]) -> Result<()> {
@@ -342,6 +359,10 @@ impl OwnedScheduleStore for RealOwnedScheduleStore {
 
     fn remove_task_definition_temp(&mut self) {
         let _ = std::fs::remove_file(self.paths.root().join(TASK_RESTORE_FILE));
+    }
+
+    fn manifest_path(&self) -> PathBuf {
+        self.paths.manifest_path()
     }
 }
 
@@ -702,12 +723,10 @@ fn verify_registration(
 /// `StartBoundary` are the same on every Windows display language, so this
 /// cannot refuse a correct install because the host is not English.
 ///
-/// The NUL stripping is not cosmetic — `schtasks /XML` emits UTF-16, which
-/// reaches us as ASCII text interleaved with NUL bytes once the runner has
-/// lossily decoded it.
-fn verify_schtasks_cadence(raw_xml: &str, interval: ScheduleInterval) -> Result<()> {
-    let xml = raw_xml.replace('\0', "");
-
+/// `schtasks /XML` emits UTF-16LE; [`crate::schedule::decode_console_output`]
+/// has already turned that into ordinary text by the time it reaches here, so
+/// this matches on the tags directly.
+fn verify_schtasks_cadence(xml: &str, interval: ScheduleInterval) -> Result<()> {
     let (expected_time, required): (String, Vec<&str>) = match interval {
         // `/SC HOURLY /ST 00:MM` registers a trigger that starts at :MM and
         // repeats every hour, so the repetition interval is what proves the
@@ -744,7 +763,7 @@ fn verify_schtasks_cadence(raw_xml: &str, interval: ScheduleInterval) -> Result<
         }
     }
 
-    let Some(start) = start_boundary_time_of_day(&xml) else {
+    let Some(start) = start_boundary_time_of_day(xml) else {
         return Err(verification_error(
             "the registered task has no readable <StartBoundary>, so its start time cannot be \
              confirmed",
@@ -811,7 +830,7 @@ fn systemd_timer_properties(runner: &dyn CommandRunner) -> Result<HashMap<String
 
 /// Whether systemd currently has our timer at all. `show` exits 0 even for a
 /// unit that does not exist, so the properties are the only real answer.
-fn systemd_is_registered(properties: &HashMap<String, String>) -> bool {
+pub(crate) fn systemd_is_registered(properties: &HashMap<String, String>) -> bool {
     if properties.get("LoadState").map(String::as_str) != Some("loaded") {
         return false;
     }
@@ -825,7 +844,7 @@ fn systemd_is_registered(properties: &HashMap<String, String>) -> bool {
     enabled || running
 }
 
-fn parse_systemd_properties(stdout: &str) -> HashMap<String, String> {
+pub(crate) fn parse_systemd_properties(stdout: &str) -> HashMap<String, String> {
     stdout
         .lines()
         .filter_map(|line| line.split_once('='))
@@ -981,6 +1000,97 @@ fn incomplete_rollback_error(
          with 'xv schedule install' to get back to a known state.",
     );
     CrosstacheError::config(message)
+}
+
+// ---------------------------------------------------------------------------
+// Uninstall
+// ---------------------------------------------------------------------------
+
+/// What uninstall removed, kept and could not do.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct UninstallReport {
+    /// Owned unit files that were removed.
+    pub(crate) removed_units: Vec<PathBuf>,
+    /// Whether `manifest.json` was removed.
+    pub(crate) removed_manifest: bool,
+    /// Whether the scheduler actually deregistered something.
+    pub(crate) deregistered: bool,
+    /// Owned paths holding something `xv` did not write. Reported, retained,
+    /// never touched.
+    pub(crate) foreign: Vec<PathBuf>,
+    /// A scheduler command that failed for a reason other than "no such job".
+    /// Sanitized to the command name and its exit status.
+    pub(crate) scheduler_error: Option<String>,
+}
+
+impl UninstallReport {
+    /// Whether anything at all was removed.
+    pub(crate) fn removed_anything(&self) -> bool {
+        self.deregistered || self.removed_manifest || !self.removed_units.is_empty()
+    }
+}
+
+/// Remove the schedule, and only the schedule.
+///
+/// The owned set is fixed by the design's "Files and ownership" table: the
+/// platform's unit file(s) or task entry, plus `manifest.json`. Everything else
+/// in the schedule state directory is somebody's evidence — `last-run.json` is
+/// the record of what the last sweep did, `run.lock` and `install.lock` are
+/// lock *inodes* that other processes may be holding right now, `recovery/`
+/// holds the bytes of an install that could not be undone, and the log is what
+/// a person reads to find out why a rotation failed. None of it is recreated by
+/// reinstalling, so uninstall must not take it.
+///
+/// A foreign or symlinked artifact at an owned path is reported and left
+/// exactly as it is: uninstall removes files `xv` wrote, and it decides that
+/// from the bytes, not from the path.
+///
+/// Absence is success — teardown scripts run this against hosts that never had
+/// a schedule — but a *scheduler failure* is not absence and is carried back in
+/// [`UninstallReport::scheduler_error`] for the caller to report.
+pub(crate) fn uninstall_owned(
+    platform: Platform,
+    unit_paths: &UnitPaths,
+    store: &mut dyn OwnedScheduleStore,
+    runner: &dyn CommandRunner,
+) -> Result<UninstallReport> {
+    let mut report = UninstallReport::default();
+
+    // Deregister first: a unit file removed while the scheduler still holds
+    // the job leaves a registration pointing at nothing.
+    match unregister_native_reporting(platform, runner)? {
+        DeregisterOutcome::Removed => report.deregistered = true,
+        DeregisterOutcome::Absent => {}
+        DeregisterOutcome::Failed(detail) => report.scheduler_error = Some(detail),
+    }
+
+    for path in unit_paths_for(platform, unit_paths) {
+        match store.read_unit(&path)? {
+            ArtifactState::Absent => {}
+            ArtifactState::Owned(_) => {
+                store.remove_unit(&path)?;
+                report.removed_units.push(path);
+            }
+            ArtifactState::Foreign(_) => report.foreign.push(path),
+        }
+    }
+
+    match store.read_manifest()? {
+        ArtifactState::Absent => {}
+        ArtifactState::Owned(_) => {
+            store.remove_manifest()?;
+            report.removed_manifest = true;
+        }
+        ArtifactState::Foreign(_) => report.foreign.push(store.manifest_path()),
+    }
+
+    if platform == Platform::Systemd && !report.removed_units.is_empty() {
+        // Best effort: the units are gone either way, and a reload that fails
+        // does not make them come back.
+        let _ = runner.run("systemctl", &["--user", "daemon-reload"]);
+    }
+
+    Ok(report)
 }
 
 /// The fixed snapshot name for an owned unit path.
@@ -1216,6 +1326,10 @@ mod tests {
         fn remove_task_definition_temp(&mut self) {
             self.task_temp = None;
         }
+
+        fn manifest_path(&self) -> PathBuf {
+            self.manifest_path.clone()
+        }
     }
 
     // -- fake runner --------------------------------------------------------
@@ -1248,6 +1362,12 @@ mod tests {
         reports_trigger: String,
         /// The `<StartBoundary>` Task Scheduler reports for it.
         reports_start_boundary: String,
+        /// Emit `/Query /XML` output the way real `schtasks` does — UTF-16LE
+        /// with a BOM, decoded by the runner seam.
+        emits_utf16_xml: bool,
+        /// stderr a failing call emits. Uninstall reads it to tell "no such
+        /// job" apart from a scheduler that is actually broken.
+        failure_stderr: String,
     }
 
     impl Default for FakeRunner {
@@ -1268,6 +1388,8 @@ mod tests {
                                   </ScheduleByDay></CalendarTrigger>"
                     .to_string(),
                 reports_start_boundary: "2026-09-10T03:30:00".to_string(),
+                emits_utf16_xml: false,
+                failure_stderr: "not found".to_string(),
             }
         }
     }
@@ -1317,7 +1439,7 @@ mod tests {
                 return Ok(CommandOutput {
                     status: 1,
                     stdout: String::new(),
-                    stderr: "boom".to_string(),
+                    stderr: self.failure_stderr.clone(),
                 });
             }
 
@@ -1368,7 +1490,14 @@ mod tests {
                     ),
                 ),
                 ("schtasks", j) if j.contains("/XML") && j.contains("/Query") => {
-                    if registration_happened {
+                    if self.emits_utf16_xml {
+                        (
+                            0,
+                            crate::schedule::decode_console_output(&utf16le_with_bom(
+                                &self.task_xml(),
+                            )),
+                        )
+                    } else if registration_happened {
                         (0, self.task_xml())
                     } else if self.prior_registered {
                         (0, "<Task><Exec>previous</Exec></Task>\n".to_string())
@@ -1391,10 +1520,149 @@ mod tests {
                 stderr: if status == 0 {
                     String::new()
                 } else {
-                    "not found".to_string()
+                    self.failure_stderr.clone()
                 },
             })
         }
+    }
+
+    // -- uninstall ----------------------------------------------------------
+
+    /// A store holding a complete prior schedule *plus* everything uninstall
+    /// must leave behind.
+    fn store_with_schedule_and_evidence(platform: Platform) -> (FakeStore, Vec<PathBuf>) {
+        let mut store = FakeStore::with_prior(platform);
+        let dir = manifest_path().parent().unwrap().to_path_buf();
+        let retained = vec![
+            dir.join("last-run.json"),
+            dir.join("run.lock"),
+            dir.join("install.lock"),
+            dir.join("recovery").join("20260909T000000Z-manifest.json"),
+            dir.join("notes-the-user-left.txt"),
+            schedule().log_path,
+        ];
+        for (n, path) in retained.iter().enumerate() {
+            store
+                .files
+                .insert(path.clone(), format!("evidence {n}").into_bytes());
+        }
+        (store, retained)
+    }
+
+    /// A scheduler that answers "no such job" the way each platform does.
+    fn runner_with_nothing_registered() -> FakeRunner {
+        FakeRunner {
+            fail_containing: Some(String::new()),
+            failure_stderr: "No such process".to_string(),
+            ..FakeRunner::default()
+        }
+    }
+
+    #[test]
+    fn uninstall_removes_the_owned_artifacts_and_keeps_every_other_file() {
+        for platform in platforms() {
+            let (mut store, retained) = store_with_schedule_and_evidence(platform);
+            let runner = FakeRunner::with_prior();
+
+            let report = uninstall_owned(platform, &unit_dir(), &mut store, &runner)
+                .unwrap_or_else(|e| panic!("{platform:?}: {e}"));
+
+            assert!(report.removed_anything(), "{platform:?}");
+            assert!(report.removed_manifest, "{platform:?}");
+            assert!(report.deregistered, "{platform:?}");
+            assert_eq!(
+                report.removed_units,
+                unit_paths_for(platform, &unit_dir()),
+                "{platform:?}"
+            );
+            assert!(store.get(&manifest_path()).is_none(), "{platform:?}");
+            for unit in unit_paths_for(platform, &unit_dir()) {
+                assert!(store.get(&unit).is_none(), "{platform:?}: {unit:?}");
+            }
+            for (n, path) in retained.iter().enumerate() {
+                assert_eq!(
+                    store.get(path),
+                    Some(&format!("evidence {n}").into_bytes()),
+                    "{platform:?}: uninstall took {path:?}"
+                );
+            }
+            assert!(report.foreign.is_empty(), "{platform:?}");
+            assert!(report.scheduler_error.is_none(), "{platform:?}");
+        }
+    }
+
+    #[test]
+    fn uninstall_retains_and_reports_a_foreign_artifact() {
+        let platform = Platform::Systemd;
+        let plan = plan(platform);
+        let mut store = FakeStore::with_prior(platform);
+        let victim = plan.units[0].path.clone();
+        store
+            .files
+            .insert(victim.clone(), b"# my own timer\n".to_vec());
+        store
+            .foreign
+            .insert(victim.clone(), "not written by xv".to_string());
+        let runner = FakeRunner::with_prior();
+
+        let report = uninstall_owned(platform, &unit_dir(), &mut store, &runner).unwrap();
+
+        assert_eq!(report.foreign, vec![victim.clone()]);
+        assert_eq!(
+            store.get(&victim),
+            Some(&b"# my own timer\n".to_vec()),
+            "uninstall touched a file xv did not write"
+        );
+        assert!(!report.removed_units.contains(&victim));
+        // The other, genuinely owned unit is still removed.
+        assert!(store.get(&plan.units[1].path).is_none());
+    }
+
+    #[test]
+    fn uninstall_converges_on_absent_when_nothing_is_installed() {
+        for platform in platforms() {
+            let mut store = FakeStore::new();
+            let runner = runner_with_nothing_registered();
+
+            let report = uninstall_owned(platform, &unit_dir(), &mut store, &runner)
+                .unwrap_or_else(|e| panic!("{platform:?}: {e}"));
+
+            assert!(!report.removed_anything(), "{platform:?}");
+            assert!(report.scheduler_error.is_none(), "{platform:?}");
+            assert!(report.foreign.is_empty(), "{platform:?}");
+        }
+    }
+
+    #[test]
+    fn uninstall_reports_a_broken_scheduler_instead_of_claiming_absence() {
+        let mut store = FakeStore::new();
+        let runner = FakeRunner {
+            fail_containing: Some(String::new()),
+            failure_stderr: "Bad request.".to_string(),
+            ..FakeRunner::default()
+        };
+        let report = uninstall_owned(Platform::Launchd, &unit_dir(), &mut store, &runner).unwrap();
+        assert_eq!(
+            report.scheduler_error,
+            Some("launchctl bootout failed (exit 1)".to_string())
+        );
+        assert!(!report.deregistered);
+    }
+
+    #[test]
+    fn uninstall_removes_a_legacy_unit_the_way_it_always_did() {
+        let platform = Platform::Systemd;
+        let mut store = FakeStore::new();
+        for (path, bytes) in legacy_units(platform) {
+            store.files.insert(path, bytes);
+        }
+        let runner = FakeRunner::with_prior();
+
+        let report = uninstall_owned(platform, &unit_dir(), &mut store, &runner).unwrap();
+
+        assert_eq!(report.removed_units, unit_paths_for(platform, &unit_dir()));
+        assert!(store.files.is_empty(), "{:?}", store.files);
+        assert!(!report.removed_manifest, "there was no manifest to remove");
     }
 
     fn platforms() -> [Platform; 3] {
@@ -1529,6 +1797,101 @@ mod tests {
         )
         .expect_err("must refuse");
         assert!(err.to_string().contains("unpinned"), "{err}");
+    }
+
+    /// The units an older `xv` installed: the same renderer, the legacy
+    /// command. Used as the *prior* state a reinstall has to replace.
+    fn legacy_units(platform: Platform) -> Vec<(PathBuf, Vec<u8>)> {
+        let legacy = RotationSchedule {
+            command: ScheduleCommand::LegacyRotateDue {
+                vault: Some("payments-production".into()),
+            },
+            ..schedule()
+        };
+        render(platform, &legacy, &unit_dir())
+            .into_iter()
+            .map(|unit| (unit.path, unit.contents.into_bytes()))
+            .collect()
+    }
+
+    #[test]
+    fn a_reinstall_replaces_a_legacy_unit_that_has_no_manifest() {
+        // The supported migration: an explicit `xv schedule install` over a
+        // pre-manifest schedule. The legacy unit carries the managed marker,
+        // so it is a *prior owned* artifact — replaced through the ordinary
+        // transaction, never adopted and never migrated behind the user's back.
+        for platform in [Platform::Launchd, Platform::Systemd] {
+            let plan = plan(platform);
+            let mut store = FakeStore::new();
+            for (path, bytes) in legacy_units(platform) {
+                store.files.insert(path, bytes);
+            }
+            let runner = FakeRunner::with_prior();
+
+            let report = install_transactional(&plan, &mut store, &runner, now())
+                .unwrap_or_else(|e| panic!("{platform:?}: {e}"));
+
+            assert!(
+                report.replaced_prior_schedule,
+                "{platform:?}: a legacy unit is a prior schedule"
+            );
+            assert_eq!(
+                store.get(&manifest_path()),
+                Some(&MANIFEST_BYTES.to_vec()),
+                "{platform:?}"
+            );
+            for unit in &plan.units {
+                assert_eq!(
+                    store
+                        .get(&unit.path)
+                        .map(|b| String::from_utf8_lossy(b).to_string()),
+                    Some(unit.contents.clone()),
+                    "{platform:?}: the legacy unit was not replaced"
+                );
+                assert!(
+                    !store
+                        .get(&unit.path)
+                        .map(|b| String::from_utf8_lossy(b).contains("--due"))
+                        .unwrap_or(false),
+                    "{platform:?}: the legacy command survived the reinstall"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_failed_reinstall_over_a_legacy_unit_puts_the_legacy_bytes_back() {
+        // Replacing a legacy schedule must be no more destructive than
+        // replacing a pinned one: if the new install cannot be registered, the
+        // user is left with the schedule they had.
+        let platform = Platform::Systemd;
+        let plan = plan(platform);
+        let mut store = FakeStore::new();
+        for (path, bytes) in legacy_units(platform) {
+            store.files.insert(path, bytes);
+        }
+        // Verification fails rather than registration: the rollback's own
+        // re-registration must be able to succeed, or this would test the
+        // incomplete-rollback path instead.
+        let runner = FakeRunner {
+            reports_active: "failed".to_string(),
+            ..FakeRunner::with_prior()
+        };
+
+        let err = install_transactional(&plan, &mut store, &runner, now()).expect_err("must fail");
+        assert!(!err.to_string().contains("also failed"), "{err}");
+        for (path, bytes) in legacy_units(platform) {
+            assert_eq!(
+                store.get(&path),
+                Some(&bytes),
+                "the legacy unit was not restored byte for byte"
+            );
+        }
+        assert!(
+            store.get(&manifest_path()).is_none(),
+            "a manifest survived a rolled-back install over a legacy schedule"
+        );
+        assert!(store.snapshots.is_empty());
     }
 
     // -- ownership refusals -------------------------------------------------
@@ -1927,16 +2290,26 @@ mod tests {
         assert!(store.files.is_empty(), "{:?}", store.files);
     }
 
+    /// The bytes `schtasks /Query /XML` actually writes: UTF-16LE with a BOM.
+    fn utf16le_with_bom(text: &str) -> Vec<u8> {
+        let mut bytes = vec![0xFF, 0xFE];
+        for unit in text.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        bytes
+    }
+
     #[test]
     fn schtasks_cadence_is_read_from_utf16_xml_and_matched_per_interval() {
-        // schtasks emits UTF-16; lossily decoded it arrives with NULs between
-        // the ASCII characters, and the check has to see through that.
-        let utf16ish = |xml: &str| -> String { xml.chars().flat_map(|c| [c, '\0']).collect() };
+        // schtasks emits UTF-16LE; the runner decodes it before it gets here.
+        let decoded = |xml: &str| -> String {
+            crate::schedule::decode_console_output(&utf16le_with_bom(xml))
+        };
 
         let hourly = "<Task><Triggers><CalendarTrigger><Repetition><Interval>PT1H</Interval>\
                       </Repetition><StartBoundary>2026-09-10T00:15:00</StartBoundary>\
                       </CalendarTrigger></Triggers></Task>";
-        verify_schtasks_cadence(&utf16ish(hourly), ScheduleInterval::Hourly { minute: 15 })
+        verify_schtasks_cadence(&decoded(hourly), ScheduleInterval::Hourly { minute: 15 })
             .expect("an hourly repetition starting at :15 is what /SC HOURLY /ST 00:15 makes");
         assert!(
             verify_schtasks_cadence(hourly, ScheduleInterval::Hourly { minute: 45 }).is_err(),
@@ -1986,6 +2359,30 @@ mod tests {
         )
         .expect_err("no StartBoundary");
         assert!(err.to_string().contains("StartBoundary"), "{err}");
+    }
+
+    #[test]
+    fn the_prior_task_definition_is_stored_as_clean_utf8_xml() {
+        // The rollback hands this straight back to `schtasks /Create /XML`. If
+        // the UTF-16LE that Task Scheduler emits were stored as lossily
+        // decoded bytes, the restored file would be NUL-riddled and the undo
+        // would fail exactly when it is needed most.
+        let runner = FakeRunner {
+            emits_utf16_xml: true,
+            ..FakeRunner::default()
+        };
+        let (registered, definition) =
+            capture_registration(Platform::Schtasks, &runner).expect("query must succeed");
+        assert!(registered);
+        let definition = definition.expect("Task Scheduler's definition must be captured");
+        assert!(
+            !definition.contains(&0u8),
+            "the stored definition still carries UTF-16 NUL bytes"
+        );
+        assert_eq!(
+            String::from_utf8(definition).expect("clean UTF-8"),
+            runner.task_xml()
+        );
     }
 
     #[test]

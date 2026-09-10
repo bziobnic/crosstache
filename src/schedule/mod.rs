@@ -52,6 +52,7 @@ use crate::error::{CrosstacheError, Result};
 pub mod drift;
 pub mod install;
 pub mod manifest;
+pub mod ownership;
 pub mod preview;
 pub mod target;
 
@@ -134,9 +135,63 @@ impl CommandRunner for ProcessRunner {
             })?;
         Ok(CommandOutput {
             status: out.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&out.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+            stdout: decode_console_output(&out.stdout),
+            stderr: decode_console_output(&out.stderr),
         })
+    }
+}
+
+/// Decode a scheduler's captured output, UTF-16LE included.
+///
+/// `schtasks /Query /XML` emits UTF-16LE with a byte-order mark. Decoding that
+/// as UTF-8 does not merely look wrong — it produces ASCII interleaved with NUL
+/// bytes, and the install transaction *stores* that text as the prior task
+/// definition it would hand back to `schtasks /Create /XML` during a rollback.
+/// A rollback that restored a NUL-riddled XML file would fail, or worse, half
+/// succeed. So the decode happens once, here, at the only place that sees the
+/// raw bytes.
+///
+/// Everything else these schedulers print is UTF-8 (or the local ANSI code
+/// page, which `from_utf8_lossy` handles as well as anything can), so UTF-16 is
+/// detected rather than assumed.
+pub(crate) fn decode_console_output(bytes: &[u8]) -> String {
+    match utf16le_body(bytes) {
+        Some(body) => {
+            let units: Vec<u16> = body
+                .chunks_exact(2)
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .collect();
+            String::from_utf16_lossy(&units)
+        }
+        None => String::from_utf8_lossy(bytes).to_string(),
+    }
+}
+
+/// The UTF-16LE payload of `bytes` (past any BOM), or `None` if this is not
+/// UTF-16LE.
+///
+/// A BOM is conclusive. Without one, the signature is an even length whose
+/// odd-indexed bytes are overwhelmingly NUL and whose even-indexed bytes are
+/// not — which is what Latin-script UTF-16LE looks like and what no valid UTF-8
+/// text looks like.
+fn utf16le_body(bytes: &[u8]) -> Option<&[u8]> {
+    if bytes.len() < 2 || !bytes.len().is_multiple_of(2) {
+        return None;
+    }
+    if bytes.starts_with(&[0xFF, 0xFE]) {
+        return Some(&bytes[2..]);
+    }
+    let sample = &bytes[..bytes.len().min(512)];
+    let pairs = sample.len() / 2;
+    if pairs == 0 {
+        return None;
+    }
+    let high_nuls = (0..pairs).filter(|i| sample[i * 2 + 1] == 0).count();
+    let low_nuls = (0..pairs).filter(|i| sample[i * 2] == 0).count();
+    if high_nuls * 2 >= pairs && low_nuls == 0 {
+        Some(bytes)
+    } else {
+        None
     }
 }
 
@@ -767,14 +822,6 @@ fn schtasks_weekday(d: u32) -> &'static str {
 // Lifecycle
 // ---------------------------------------------------------------------------
 
-/// Whether a schedule is currently registered, and what the OS says about it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ScheduleStatus {
-    pub installed: bool,
-    /// The scheduler's own description, for display.
-    pub detail: String,
-}
-
 /// Register the rendered units with the platform scheduler.
 ///
 /// Assumes the unit files are already on disk: the file write and the
@@ -829,19 +876,38 @@ pub(crate) fn register_native(
     }
 }
 
+/// What deregistration achieved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DeregisterOutcome {
+    /// The scheduler removed our entry.
+    Removed,
+    /// The scheduler said there was nothing to remove.
+    Absent,
+    /// The scheduler failed for some other reason. Sanitized: the command name
+    /// and its exit status, never the raw output.
+    Failed(String),
+}
+
 /// Deregister the schedule from the platform scheduler, converging on absent.
 ///
 /// A scheduler that reports "no such job" is the outcome this wants, not a
 /// failure — both uninstall and an install rollback have to reach "absent"
-/// from any starting state. Only a runner that cannot run at all is an error.
-/// Returns whether something was actually removed.
-pub(crate) fn unregister_native(platform: Platform, runner: &dyn CommandRunner) -> Result<bool> {
-    let removed = match platform {
-        Platform::Launchd => runner
-            .run("launchctl", &["bootout", &launchd_domain_target()])?
-            .ok(),
-        Platform::Systemd => runner
-            .run(
+/// from any starting state. But a scheduler that failed for *another* reason
+/// has not converged on anything, and saying "nothing was installed" there
+/// would be a lie the user acts on. Those two are separate outcomes, and only
+/// a runner that cannot run at all is an `Err`.
+pub(crate) fn unregister_native_reporting(
+    platform: Platform,
+    runner: &dyn CommandRunner,
+) -> Result<DeregisterOutcome> {
+    let (what, out) = match platform {
+        Platform::Launchd => (
+            "launchctl bootout",
+            runner.run("launchctl", &["bootout", &launchd_domain_target()])?,
+        ),
+        Platform::Systemd => (
+            "systemctl --user disable --now",
+            runner.run(
                 "systemctl",
                 &[
                     "--user",
@@ -849,91 +915,31 @@ pub(crate) fn unregister_native(platform: Platform, runner: &dyn CommandRunner) 
                     "--now",
                     &format!("{SYSTEMD_UNIT}.timer"),
                 ],
-            )?
-            .ok(),
-        Platform::Schtasks => runner
-            .run("schtasks", &["/Delete", "/TN", SCHTASKS_NAME, "/F"])?
-            .ok(),
+            )?,
+        ),
+        Platform::Schtasks => (
+            "schtasks /Delete",
+            runner.run("schtasks", &["/Delete", "/TN", SCHTASKS_NAME, "/F"])?,
+        ),
     };
-    Ok(removed)
+    Ok(if out.ok() {
+        DeregisterOutcome::Removed
+    } else if ownership::says_absent(&out) {
+        DeregisterOutcome::Absent
+    } else {
+        DeregisterOutcome::Failed(format!("{what} failed (exit {})", out.status))
+    })
 }
 
-/// Report whether the schedule is registered.
-pub fn status(
-    platform: Platform,
-    paths: &UnitPaths,
-    runner: &dyn CommandRunner,
-) -> Result<ScheduleStatus> {
-    match platform {
-        Platform::Launchd => {
-            let out = runner.run("launchctl", &["print", &launchd_domain_target()])?;
-            Ok(ScheduleStatus {
-                installed: out.ok(),
-                detail: if out.ok() {
-                    summarize_launchd(&out.stdout)
-                } else {
-                    format!(
-                        "not registered with launchd (plist {} {})",
-                        paths.launchd_plist().display(),
-                        if paths.launchd_plist().exists() {
-                            "exists but is not loaded"
-                        } else {
-                            "does not exist"
-                        }
-                    )
-                },
-            })
-        }
-        Platform::Systemd => {
-            let timer = format!("{SYSTEMD_UNIT}.timer");
-            let active = runner.run("systemctl", &["--user", "is-active", &timer])?;
-            let listed = runner.run("systemctl", &["--user", "list-timers", "--all", &timer])?;
-            Ok(ScheduleStatus {
-                installed: active.stdout.trim() == "active",
-                detail: if active.stdout.trim() == "active" {
-                    listed.stdout.trim().to_string()
-                } else {
-                    format!("timer {timer} is {}", active.stdout.trim())
-                },
-            })
-        }
-        Platform::Schtasks => {
-            let out = runner.run("schtasks", &["/Query", "/TN", SCHTASKS_NAME])?;
-            Ok(ScheduleStatus {
-                installed: out.ok(),
-                detail: if out.ok() {
-                    out.stdout.trim().to_string()
-                } else {
-                    format!("task {SCHTASKS_NAME} is not registered")
-                },
-            })
-        }
-    }
-}
-
-/// Remove the schedule. Succeeds when nothing was installed.
-pub fn uninstall(
-    platform: Platform,
-    paths: &UnitPaths,
-    runner: &dyn CommandRunner,
-) -> Result<bool> {
-    let mut removed = unregister_native(platform, runner)?;
-
-    for unit in unit_paths_for(platform, paths) {
-        if unit.exists() {
-            std::fs::remove_file(&unit).map_err(|e| {
-                CrosstacheError::config(format!("failed to remove {}: {e}", unit.display()))
-            })?;
-            removed = true;
-        }
-    }
-
-    if platform == Platform::Systemd {
-        // Reload so the removed units leave systemd's view too.
-        let _ = runner.run("systemctl", &["--user", "daemon-reload"]);
-    }
-
-    Ok(removed)
+/// Deregister, collapsing "it was not there" and "it would not say" into
+/// "nothing was removed".
+///
+/// This is the install rollback's view: rollback converges on absent and has a
+/// separate, louder story for a scheduler that will not cooperate (the
+/// incomplete-rollback error). Uninstall wants the fuller answer and calls
+/// [`unregister_native_reporting`] directly.
+pub(crate) fn unregister_native(platform: Platform, runner: &dyn CommandRunner) -> Result<bool> {
+    Ok(unregister_native_reporting(platform, runner)? == DeregisterOutcome::Removed)
 }
 
 /// Unit files this platform owns, whether or not they exist.
@@ -980,25 +986,6 @@ fn current_uid() -> u32 {
     #[cfg(not(unix))]
     {
         0
-    }
-}
-
-/// Pull the interesting lines out of `launchctl print` output.
-fn summarize_launchd(stdout: &str) -> String {
-    let mut wanted = Vec::new();
-    for line in stdout.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("state =")
-            || trimmed.starts_with("last exit code =")
-            || trimmed.starts_with("runs =")
-        {
-            wanted.push(trimmed.to_string());
-        }
-    }
-    if wanted.is_empty() {
-        "registered with launchd".to_string()
-    } else {
-        wanted.join("; ")
     }
 }
 
@@ -1050,14 +1037,41 @@ mod tests {
         calls: std::sync::Mutex<Vec<(String, Vec<String>)>>,
         /// Exit code returned for any call whose args contain this substring.
         fail_containing: Option<String>,
+        /// stderr for a failing call. `None` means "the words a scheduler uses
+        /// when the job simply is not there", which is the common case.
+        failure_stderr: Option<String>,
+        /// Exit status for a failing call. `0` means the default `1`.
+        failure_status: i32,
+    }
+
+    #[test]
+    fn console_output_decodes_utf16le_and_leaves_utf8_alone() {
+        let xml = "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n<Task><Triggers/></Task>";
+        let mut utf16 = vec![0xFF, 0xFE];
+        for unit in xml.encode_utf16() {
+            utf16.extend_from_slice(&unit.to_le_bytes());
+        }
+        assert_eq!(decode_console_output(&utf16), xml);
+        // The same payload without a BOM: schtasks writes one, but the NUL
+        // signature has to be enough on its own.
+        assert_eq!(decode_console_output(&utf16[2..]), xml);
+        // Ordinary UTF-8 output is untouched, including non-ASCII.
+        assert_eq!(
+            decode_console_output(b"LoadState=loaded\n"),
+            "LoadState=loaded\n"
+        );
+        assert_eq!(
+            decode_console_output("tâche planifiée".as_bytes()),
+            "tâche planifiée"
+        );
+        assert_eq!(decode_console_output(b""), "");
+        // An odd length cannot be UTF-16.
+        assert_eq!(decode_console_output(b"abc"), "abc");
     }
 
     impl FakeRunner {
         fn calls(&self) -> Vec<(String, Vec<String>)> {
             self.calls.lock().unwrap().clone()
-        }
-        fn programs(&self) -> Vec<String> {
-            self.calls().into_iter().map(|(p, _)| p).collect()
         }
         fn flat(&self) -> Vec<String> {
             self.calls()
@@ -1080,14 +1094,24 @@ mod tests {
                 .as_ref()
                 .is_some_and(|needle| joined.contains(needle));
             Ok(CommandOutput {
-                status: if fail { 1 } else { 0 },
+                status: if fail {
+                    if self.failure_status == 0 {
+                        1
+                    } else {
+                        self.failure_status
+                    }
+                } else {
+                    0
+                },
                 stdout: if program == "systemctl" && joined.contains("is-active") {
                     "active\n".to_string()
                 } else {
                     String::new()
                 },
                 stderr: if fail {
-                    "boom".to_string()
+                    self.failure_stderr
+                        .clone()
+                        .unwrap_or_else(|| "No such process".to_string())
                 } else {
                     String::new()
                 },
@@ -1742,6 +1766,7 @@ mod tests {
     fn register_reports_scheduler_failure() {
         let runner = FakeRunner {
             fail_containing: Some("enable".to_string()),
+            failure_stderr: Some("boom".to_string()),
             ..Default::default()
         };
         let err = register_native(Platform::Systemd, &schedule(), &paths(), &runner)
@@ -1777,67 +1802,28 @@ mod tests {
     }
 
     #[test]
-    fn uninstall_removes_units_and_deregisters() {
-        let tmp = tempfile::tempdir().unwrap();
-        let p = UnitPaths {
-            dir: tmp.path().join("units"),
-        };
-        std::fs::create_dir_all(&p.dir).unwrap();
-        for unit in render(Platform::Systemd, &schedule(), &p) {
-            std::fs::write(&unit.path, &unit.contents).unwrap();
-        }
-        let runner = FakeRunner::default();
-
-        let removed = uninstall(Platform::Systemd, &p, &runner).unwrap();
-        assert!(removed);
-        assert!(!p.dir.join("xv-rotate.timer").exists());
-        assert!(!p.dir.join("xv-rotate.service").exists());
-        let flat = runner.flat();
-        assert!(flat.iter().any(|c| c.contains("disable --now")), "{flat:?}");
-    }
-
-    #[test]
-    fn uninstall_converges_when_nothing_is_installed() {
-        let tmp = tempfile::tempdir().unwrap();
-        let p = UnitPaths {
-            dir: tmp.path().join("units"),
-        };
-        // Every scheduler call fails, as it would with no job registered.
-        let runner = FakeRunner {
+    fn deregistration_distinguishes_absence_from_a_broken_scheduler() {
+        // "No such job" is convergence; anything else is a failure the user
+        // must be told about rather than being shown "nothing to remove".
+        let absent = FakeRunner {
             fail_containing: Some(String::new()),
             ..Default::default()
         };
-        let removed = uninstall(Platform::Launchd, &p, &runner).unwrap();
-        assert!(!removed, "nothing was there to remove");
-    }
-
-    #[test]
-    fn status_reports_installed_for_each_platform() {
-        let tmp = tempfile::tempdir().unwrap();
-        let p = UnitPaths {
-            dir: tmp.path().to_path_buf(),
-        };
-        let runner = FakeRunner::default();
-
-        assert!(status(Platform::Launchd, &p, &runner).unwrap().installed);
-        assert!(status(Platform::Systemd, &p, &runner).unwrap().installed);
-        assert!(status(Platform::Schtasks, &p, &runner).unwrap().installed);
-        assert_eq!(runner.programs().len(), 4, "systemd needs two queries");
-    }
-
-    #[test]
-    fn status_reports_absent_when_the_scheduler_says_no() {
-        let tmp = tempfile::tempdir().unwrap();
-        let p = UnitPaths {
-            dir: tmp.path().to_path_buf(),
-        };
-        let runner = FakeRunner {
+        assert_eq!(
+            unregister_native_reporting(Platform::Launchd, &absent).unwrap(),
+            DeregisterOutcome::Absent
+        );
+        let broken = FakeRunner {
             fail_containing: Some(String::new()),
+            failure_stderr: Some("Bad request.".to_string()),
+            failure_status: 74,
             ..Default::default()
         };
-        let s = status(Platform::Launchd, &p, &runner).unwrap();
-        assert!(!s.installed);
-        assert!(s.detail.contains("does not exist"), "{}", s.detail);
+        assert_eq!(
+            unregister_native_reporting(Platform::Launchd, &broken).unwrap(),
+            DeregisterOutcome::Failed("launchctl bootout failed (exit 74)".to_string())
+        );
+        assert!(!unregister_native(Platform::Launchd, &broken).unwrap());
     }
 
     #[test]
@@ -1860,19 +1846,6 @@ mod tests {
         // user, without access to their credentials or config.
         assert!(launchd_domain().starts_with("gui/"));
         assert!(launchd_domain_target().ends_with("/com.crosstache.xv-rotate"));
-    }
-
-    #[test]
-    fn summarize_launchd_extracts_the_useful_lines() {
-        let out = "\tstate = running\n\tlast exit code = 0\n\truns = 12\n\tnoise = x\n";
-        let summary = summarize_launchd(out);
-        assert!(summary.contains("state = running"));
-        assert!(summary.contains("last exit code = 0"));
-        assert!(!summary.contains("noise"));
-        assert_eq!(
-            summarize_launchd("nothing useful"),
-            "registered with launchd"
-        );
     }
 
     #[test]

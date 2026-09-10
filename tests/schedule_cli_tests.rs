@@ -1457,3 +1457,318 @@ fn a_changed_backend_identity_refuses_the_run() {
 fn json_path(path: &std::path::Path) -> String {
     path.to_string_lossy().replace('\\', "\\\\")
 }
+
+// ---------------------------------------------------------------------------
+// Ownership: `xv schedule status` and `xv schedule uninstall`
+//
+// These write unit files into a temp `HOME` and a manifest into an
+// `XV_STATE_HOME` sandbox, which is all `status` and `uninstall` read to decide
+// ownership. **No test registers a real job**: the scheduler is only ever
+// *queried*, and `uninstall`'s deregistration is a no-op against a job that was
+// never created.
+// ---------------------------------------------------------------------------
+
+use crosstache::schedule::{
+    render, Platform, RotationSchedule, ScheduleCommand, ScheduleInterval, UnitPaths,
+};
+
+/// The platform this host schedules on, or `None` when it has no scheduler we
+/// manage (a container without systemd) — where these tests have nothing to
+/// say and `xv` correctly refuses before looking at anything.
+fn host_platform() -> Option<Platform> {
+    Platform::detect().ok()
+}
+
+/// A schedule shaped like the one an install would render, for `home`.
+fn a_schedule(home: &std::path::Path, command: ScheduleCommand) -> RotationSchedule {
+    RotationSchedule {
+        interval: ScheduleInterval::Daily {
+            hour: 3,
+            minute: 30,
+        },
+        command,
+        binary: home.join("bin").join("xv"),
+        log_path: home.join(".local/state/xv/rotate.log"),
+        home: home.to_path_buf(),
+        state_home: None,
+    }
+}
+
+/// Write the units an *older* `xv` installed: the same renderer, the
+/// pre-manifest `rotate --due --force` command.
+fn seed_legacy_units(
+    platform: Platform,
+    home: &std::path::Path,
+    vault: &str,
+) -> Vec<std::path::PathBuf> {
+    let paths = UnitPaths::for_platform(platform, home);
+    std::fs::create_dir_all(&paths.dir).unwrap();
+    let schedule = a_schedule(
+        home,
+        ScheduleCommand::LegacyRotateDue {
+            vault: Some(vault.to_string()),
+        },
+    );
+    render(platform, &schedule, &paths)
+        .into_iter()
+        .map(|unit| {
+            std::fs::write(&unit.path, &unit.contents).unwrap();
+            unit.path
+        })
+        .collect()
+}
+
+/// Write the units a current `xv` installs, pointing at `manifest`.
+fn seed_pinned_units(
+    platform: Platform,
+    home: &std::path::Path,
+    manifest: &std::path::Path,
+) -> Vec<std::path::PathBuf> {
+    let paths = UnitPaths::for_platform(platform, home);
+    std::fs::create_dir_all(&paths.dir).unwrap();
+    let schedule = a_schedule(
+        home,
+        ScheduleCommand::ManifestRun {
+            manifest: manifest.to_path_buf(),
+            working_directory: home.to_path_buf(),
+        },
+    );
+    render(platform, &schedule, &paths)
+        .into_iter()
+        .map(|unit| {
+            std::fs::write(&unit.path, &unit.contents).unwrap();
+            unit.path
+        })
+        .collect()
+}
+
+fn schedule_status(root: &std::path::Path, state: &std::path::Path) -> String {
+    let out = xv_cmd_in(root)
+        .env("XV_BACKEND", "local")
+        .env("XV_STATE_HOME", state)
+        .args(["schedule", "status"])
+        .output()
+        .unwrap();
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+#[test]
+fn status_labels_a_legacy_unit_and_refuses_to_vouch_for_its_target() {
+    let Some(platform) = host_platform() else {
+        return;
+    };
+    if platform == Platform::Schtasks {
+        // Task Scheduler holds the command itself; there is no unit file to
+        // seed, and this test may not register a real task.
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let state = root.join("state");
+    seed_legacy_units(platform, &root, "payments-production");
+
+    let out = schedule_status(&root, &state);
+
+    assert!(out.contains("Ownership: legacy-unpinned"), "{out}");
+    assert!(
+        out.contains("rotate --due --force --vault payments-production"),
+        "the actual installed command must be reported: {out}"
+    );
+    assert!(
+        out.contains("Target:    unverified"),
+        "a legacy unit records no target, and status may not invent one: {out}"
+    );
+    assert!(
+        !out.contains("Drift:"),
+        "there is no recorded target to compare against: {out}"
+    );
+}
+
+#[test]
+fn status_labels_a_manifest_with_no_unit_as_orphaned() {
+    if host_platform().is_none() {
+        return;
+    }
+    let fixture = pinned_run_fixture(&[], |_| {});
+
+    let out = schedule_status(&fixture.root, &fixture.state);
+
+    assert!(out.contains("Ownership: orphaned-manifest"), "{out}");
+    assert!(out.contains("Target:    "), "{out}");
+    assert!(out.contains("Drift:     valid"), "{out}");
+    assert!(
+        out.contains("uninstall"),
+        "the repair hints are missing: {out}"
+    );
+}
+
+#[test]
+fn status_reports_a_managed_schedule_and_the_drift_it_would_refuse_on() {
+    let Some(platform) = host_platform() else {
+        return;
+    };
+    if platform == Platform::Schtasks {
+        return;
+    }
+    let fixture = pinned_run_fixture(&[], |_| {});
+    seed_pinned_units(platform, &fixture.root, &fixture.manifest);
+
+    let clean = schedule_status(&fixture.root, &fixture.state);
+    assert!(clean.contains("Ownership: managed"), "{clean}");
+    assert!(clean.contains("Drift:     valid"), "{clean}");
+
+    // Change the pinned configuration file. Status must say the next run would
+    // refuse — without contacting the provider to find out.
+    let conf = fixture.config_path();
+    let body = std::fs::read_to_string(&conf).unwrap();
+    std::fs::write(&conf, format!("{body}\n# a later edit\n")).unwrap();
+
+    let drifted = schedule_status(&fixture.root, &fixture.state);
+    assert!(drifted.contains("Ownership: managed"), "{drifted}");
+    assert!(drifted.contains("Drift:     refused"), "{drifted}");
+    assert!(
+        drifted.contains("unsafe to run"),
+        "a schedule that will refuse tonight may not be announced as healthy: {drifted}"
+    );
+    assert!(drifted.contains("config_digest"), "{drifted}");
+}
+
+#[test]
+fn status_reports_a_foreign_file_at_an_owned_path_without_touching_it() {
+    let Some(platform) = host_platform() else {
+        return;
+    };
+    if platform == Platform::Schtasks {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let state = root.join("state");
+    let victim = seed_legacy_units(platform, &root, "v")[0].clone();
+    let mine = "# my own job, not xv's\n";
+    std::fs::write(&victim, mine).unwrap();
+
+    let out = schedule_status(&root, &state);
+
+    assert!(out.contains("Ownership: foreign"), "{out}");
+    assert!(out.contains(&victim.display().to_string()), "{out}");
+    assert_eq!(
+        std::fs::read_to_string(&victim).unwrap(),
+        mine,
+        "status must never modify a file it did not write"
+    );
+}
+
+#[test]
+fn uninstall_removes_the_manifest_and_keeps_every_other_file() {
+    let Some(platform) = host_platform() else {
+        return;
+    };
+    let fixture = pinned_run_fixture(&[], |_| {});
+    let dir = fixture.manifest.parent().unwrap().to_path_buf();
+
+    // Everything the design says uninstall retains.
+    let last_run = dir.join("last-run.json");
+    let run_lock = dir.join("run.lock");
+    let recovery = dir.join("recovery").join("20260909T000000Z-manifest.json");
+    let unrelated = dir.join("notes.txt");
+    std::fs::create_dir_all(recovery.parent().unwrap()).unwrap();
+    for (path, body) in [
+        (&last_run, "{\"state\":\"success\"}"),
+        (&run_lock, ""),
+        (&recovery, "{\"prior\":true}"),
+        (&unrelated, "mine"),
+    ] {
+        std::fs::write(path, body).unwrap();
+    }
+
+    // A file xv did not write, at a path it owns.
+    let foreign = if platform == Platform::Schtasks {
+        None
+    } else {
+        let paths = UnitPaths::for_platform(platform, &fixture.root);
+        std::fs::create_dir_all(&paths.dir).unwrap();
+        let path = seed_legacy_units(platform, &fixture.root, "v")[0].clone();
+        std::fs::write(&path, "# my own job\n").unwrap();
+        Some(path)
+    };
+
+    let out = xv_cmd_in(&fixture.root)
+        .env("XV_BACKEND", "local")
+        .env("XV_STATE_HOME", &fixture.state)
+        .args(["schedule", "uninstall"])
+        .output()
+        .unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{combined}");
+
+    assert!(
+        !fixture.manifest.exists(),
+        "the manifest is owned and must be removed: {combined}"
+    );
+    for path in [&last_run, &run_lock, &recovery, &unrelated] {
+        assert!(
+            path.exists(),
+            "uninstall took {}: {combined}",
+            path.display()
+        );
+    }
+    assert_eq!(std::fs::read_to_string(&unrelated).unwrap(), "mine");
+    assert_eq!(
+        std::fs::read_to_string(&recovery).unwrap(),
+        "{\"prior\":true}"
+    );
+    // The lock inode survives: deleting it would stop it excluding anything.
+    assert!(dir.join("install.lock").exists(), "{combined}");
+    assert!(
+        dir.exists(),
+        "the state directory still holds retained files"
+    );
+
+    if let Some(foreign) = foreign {
+        assert_eq!(
+            std::fs::read_to_string(&foreign).unwrap(),
+            "# my own job\n",
+            "uninstall touched a file xv did not write: {combined}"
+        );
+        assert!(combined.contains("Retained"), "{combined}");
+    }
+}
+
+#[test]
+fn uninstall_removes_a_legacy_unit() {
+    let Some(platform) = host_platform() else {
+        return;
+    };
+    if platform == Platform::Schtasks {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let state = root.join("state");
+    let units = seed_legacy_units(platform, &root, "payments-production");
+
+    let out = xv_cmd_in(&root)
+        .env("XV_BACKEND", "local")
+        .env("XV_STATE_HOME", &state)
+        .args(["schedule", "uninstall"])
+        .output()
+        .unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{combined}");
+    for unit in units {
+        assert!(!unit.exists(), "{} survived: {combined}", unit.display());
+    }
+}
