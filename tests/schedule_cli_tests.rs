@@ -29,6 +29,19 @@ fn xv_cmd_for(store: &std::path::Path) -> std::process::Command {
     cmd
 }
 
+/// Bring the isolated local store into existence the way a user does: by
+/// using it. A schedule is only installed against a target that already
+/// exists, so resolution refuses a store that has never been opened.
+fn use_the_store_once(store: &std::path::Path) {
+    let out = xv_cmd_for(store).args(["list"]).output().unwrap();
+    assert!(
+        out.status.success(),
+        "fixture setup failed: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// Run `xv schedule install --print ...` and return stdout.
 fn print_schedule(store: &std::path::Path, extra: &[&str]) -> (bool, String) {
     let mut args = vec!["schedule", "install", "--print"];
@@ -43,6 +56,7 @@ fn print_schedule(store: &std::path::Path, extra: &[&str]) -> (bool, String) {
 #[test]
 fn print_renders_a_unit_without_installing_anything() {
     let (_cmd, tmp, store) = xv_isolated_local_with_opts(false, false);
+    use_the_store_once(&store);
     let (ok, out) = print_schedule(&store, &["--vault", "prod-kv"]);
     assert!(ok, "{out}");
 
@@ -72,6 +86,7 @@ fn print_renders_a_unit_without_installing_anything() {
 #[test]
 fn print_respects_interval_and_time() {
     let (_cmd, _tmp, store) = xv_isolated_local_with_opts(false, false);
+    use_the_store_once(&store);
 
     let (ok, out) = print_schedule(&store, &["--interval", "hourly", "--at", "00:15"]);
     assert!(ok, "{out}");
@@ -85,6 +100,7 @@ fn print_respects_interval_and_time() {
 #[test]
 fn print_output_contains_a_loadable_unit_for_this_platform() {
     let (_cmd, _tmp, store) = xv_isolated_local_with_opts(false, false);
+    use_the_store_once(&store);
     let (ok, out) = print_schedule(&store, &["--vault", "v"]);
     assert!(ok, "{out}");
 
@@ -155,6 +171,7 @@ fn the_scheduled_command_is_bounded_to_due_secrets() {
     // The single most important property: an unattended job must never rotate
     // secrets that have no policy, and must never redefine a policy.
     let (_cmd, _tmp, store) = xv_isolated_local_with_opts(false, false);
+    use_the_store_once(&store);
     let (ok, out) = print_schedule(&store, &["--vault", "v"]);
     assert!(ok, "{out}");
 
@@ -176,6 +193,7 @@ fn print_carries_the_config_environment_into_the_unit() {
     // The classic failure: the job runs but resolves a different config than the
     // user tested with, so it sweeps the wrong vault or none at all.
     let (_cmd, tmp, store) = xv_isolated_local_with_opts(false, false);
+    use_the_store_once(&store);
     let (ok, out) = print_schedule(&store, &["--vault", "v"]);
     assert!(ok, "{out}");
 
@@ -309,6 +327,7 @@ fn attach_workspace(root: &std::path::Path) {
 #[test]
 fn print_shows_the_real_vault_behind_an_attached_alias() {
     let (_cmd, tmp, store) = xv_isolated_local_with_opts(false, false);
+    use_the_store_once(&store);
     attach_workspace(tmp.path());
 
     let (ok, out) = print_schedule(&store, &["--vault", "payments"]);
@@ -378,5 +397,118 @@ fn a_missing_global_config_file_fails_before_the_scheduler_is_touched() {
 
     assert!(!out.status.success(), "{combined}");
     assert!(combined.contains("xv.conf"), "{combined}");
+    assert!(!combined.contains("rotate --due --force"), "{combined}");
+}
+
+/// Write an isolated `xv.conf` whose local store and key do **not** exist yet,
+/// and return `(root, store_path, key_path)`.
+fn fresh_unopened_store(tmp: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let config_dir = tmp.join(".config");
+    std::fs::create_dir_all(config_dir.join("xv")).unwrap();
+    let store = tmp.join("never-opened-store");
+    let key = tmp.join("never-opened-key.txt");
+    let config = format!(
+        r#"backend = "local"
+debug = false
+subscription_id = ""
+default_vault = "default"
+default_resource_group = ""
+default_location = ""
+tenant_id = ""
+output_json = false
+no_color = true
+cache_enabled = false
+cache_ttl_secs = 0
+clipboard_timeout = 0
+
+[local]
+store_path = "{store}"
+key_file = "{key}"
+default_vault = "default"
+"#,
+        store = store.display(),
+        key = key.display(),
+    );
+    std::fs::write(config_dir.join("xv").join("xv.conf"), config).unwrap();
+    (store, key)
+}
+
+fn xv_cmd_in(root: &std::path::Path) -> std::process::Command {
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_xv"));
+    cmd.env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", root)
+        .env("XDG_CONFIG_HOME", root.join(".config"))
+        .env("XV_NO_PARENT_CONFIG", "1")
+        .env("NO_COLOR", "1")
+        .current_dir(root);
+    cmd
+}
+
+#[test]
+fn schedule_never_creates_a_local_store_or_age_key() {
+    // Scheduling rotation must describe a target that already exists. Neither
+    // the preview nor `status` may bring a store, an identity, or a vault into
+    // being — an unattended job pointed at a store xv just invented would
+    // rotate nothing, forever, and quietly.
+    let tmp = tempfile::tempdir().unwrap();
+    let (store, key) = fresh_unopened_store(tmp.path());
+
+    let print = xv_cmd_in(tmp.path())
+        .args(["schedule", "install", "--print", "--vault", "prod-kv"])
+        .output()
+        .unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&print.stdout),
+        String::from_utf8_lossy(&print.stderr)
+    );
+
+    assert!(
+        !store.exists() && !key.exists(),
+        "preview created local state: store={} key={}\n{combined}",
+        store.exists(),
+        key.exists()
+    );
+    // It also must not pretend the target is fine: verification fails closed.
+    assert!(!print.status.success(), "{combined}");
+    assert!(!combined.contains("rotate --due --force"), "{combined}");
+
+    let status = xv_cmd_in(tmp.path())
+        .args(["schedule", "status"])
+        .output()
+        .unwrap();
+    let _ = status;
+    assert!(
+        !store.exists() && !key.exists(),
+        "status created local state: store={} key={}",
+        store.exists(),
+        key.exists()
+    );
+}
+
+#[test]
+fn an_unsaved_ambient_backend_is_refused() {
+    // `XV_BACKEND` is set on the child process only — never on this test
+    // process. A scheduled run inherits no environment, so a schedule
+    // installed under an ambient backend would sweep a different one.
+    let (_cmd, _tmp, store) = xv_isolated_local_with_opts(false, false);
+    use_the_store_once(&store);
+    let root = store.parent().unwrap();
+
+    let out = xv_cmd_in(root)
+        .env("XV_BACKEND", "azure")
+        .args(["schedule", "install", "--print", "--vault", "v"])
+        .output()
+        .unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(!out.status.success(), "{combined}");
+    assert!(combined.contains("azure"), "{combined}");
+    assert!(combined.contains("XV_BACKEND"), "{combined}");
     assert!(!combined.contains("rotate --due --force"), "{combined}");
 }

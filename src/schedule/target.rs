@@ -372,8 +372,15 @@ fn workspace_source_label(source: WorkspaceSource) -> &'static str {
 /// folded in. An unattended run replays a *saved* configuration, so the
 /// recorded digest and the recorded target have to describe the same file.
 ///
+/// `ambient_backend`, when given, is the backend name the *invoking shell*
+/// resolves to (`XV_BACKEND`, `--backend`). It is compared against the backend
+/// the saved configuration resolves to and a mismatch is refused: a scheduled
+/// run inherits none of that environment, so installing anyway would pin a
+/// target the user never tested.
+///
 /// Reads the context file for `cwd` through the same loader normal commands
 /// use, then defers to [`resolve_install_target_from`].
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn resolve_install_target(
     config: &Config,
     config_path: &Path,
@@ -381,6 +388,7 @@ pub(crate) async fn resolve_install_target(
     cwd: &Path,
     vault: Option<&str>,
     cli_env: Option<&str>,
+    ambient_backend: Option<&str>,
 ) -> Result<ResolvedScheduleTarget> {
     let context = crate::config::ContextManager::load_for_cwd(cwd).await?;
     resolve_install_target_from(
@@ -391,6 +399,7 @@ pub(crate) async fn resolve_install_target(
         &context,
         vault,
         cli_env,
+        ambient_backend,
     )
     .await
 }
@@ -408,6 +417,7 @@ async fn resolve_install_target_from(
     context: &crate::config::ContextManager,
     vault: Option<&str>,
     cli_env: Option<&str>,
+    ambient_backend: Option<&str>,
 ) -> Result<ResolvedScheduleTarget> {
     // 1. The exact global config file.
     let config_path = canonical_path_for_manifest(config_path)?;
@@ -437,10 +447,35 @@ async fn resolve_install_target_from(
         effective.backend = Some(backend);
     }
 
+    // The shell's backend and the saved one must agree. `XV_BACKEND` and
+    // `--backend` are ambient: the scheduled run inherits neither, so a
+    // schedule installed under one of them would sweep a different backend
+    // than the one the user just tested. Refuse rather than silently pinning
+    // the saved backend. A `.xv.toml` profile backend is NOT ambient — it is
+    // folded above and replayed from the recorded project file.
+    if let Some(ambient) = ambient_backend {
+        let saved = effective.effective_backend_name();
+        if ambient != saved {
+            return Err(CrosstacheError::invalid_argument(format!(
+                "this shell resolves the backend '{ambient}', but the saved configuration this \
+                 schedule would replay resolves '{saved}'. A scheduled run inherits no \
+                 environment, so it would sweep '{saved}'. Save the backend you are testing \
+                 ('xv backend add' or 'xv init'), or unset XV_BACKEND, before installing a \
+                 schedule."
+            )));
+        }
+    }
+
     // 4. The active workspace, resolved once from those exact inputs.
     let snapshot = crate::workspace::resolve_workspace_snapshot(&effective, &cwd, context).await?;
     let workspace = snapshot.workspace;
     let (entry, workspace_alias) = select_entry(&workspace, &effective, vault)?;
+
+    // A degenerate target built from an explicit `--vault` discards whatever
+    // vault the context supplied, so the context did not contribute to the
+    // recorded target and must not be pinned as if it had.
+    let context_contributed = snapshot.context_contributed
+        && !(workspace.source == WorkspaceSource::Degenerate && vault.is_some());
 
     // 5. The selected registry entry's kind and identity.
     let identity = selected_backend_identity(&effective, &entry.backend)?;
@@ -448,7 +483,7 @@ async fn resolve_install_target_from(
     // 6. Materialize only that backend and verify it read-only.
     verify_selected_target(&effective, &entry).await?;
 
-    let (context_path, context_digest) = if snapshot.context_contributed {
+    let (context_path, context_digest) = if context_contributed {
         let path = context
             .source_path()
             .map(canonical_path_for_manifest)
@@ -519,7 +554,9 @@ fn select_entry(
             ))
         })?,
         Some(requested) => WorkspaceEntry {
-            alias: requested.to_string(),
+            // Label it exactly as the workspace layer labels a degenerate
+            // entry, so the alias never collides with a registry backend name.
+            alias: crate::workspace::degenerate_alias_for(config, requested),
             backend: config.effective_backend_name().to_string(),
             vault: requested.to_string(),
             default: true,
@@ -566,8 +603,9 @@ fn target_unavailable(
 ) -> CrosstacheError {
     CrosstacheError::config(format!(
         "cannot verify the schedule target vault '{}' on backend '{}': {error}. \
-         A schedule is only installed against a target this machine can already read.",
-        entry.vault, entry.backend
+         A schedule is only installed against a target this machine can already read — use the \
+         vault once (for example 'xv list --vault {}') before scheduling rotation for it.",
+        entry.vault, entry.backend, entry.vault
     ))
 }
 
@@ -1227,6 +1265,24 @@ mod resolve_tests {
         ContextManager::load_at(&path).await.unwrap()
     }
 
+    /// Write a real context file carrying only a current vault (no workspace)
+    /// and load it back through the production reader.
+    async fn context_with_current_vault(dir: &Path, vault: &str) -> ContextManager {
+        let context_dir = dir.join(".xv");
+        std::fs::create_dir_all(&context_dir).unwrap();
+        let manager = ContextManager {
+            current: Some(crate::config::context::VaultContext::new(
+                vault.to_string(),
+                None,
+                None,
+            )),
+            ..Default::default()
+        };
+        let path = context_dir.join("context");
+        std::fs::write(&path, serde_json::to_vec(&manager).unwrap()).unwrap();
+        ContextManager::load_at(&path).await.unwrap()
+    }
+
     fn config_bytes() -> &'static [u8] {
         b"backend = \"local\"\n"
     }
@@ -1259,6 +1315,7 @@ mod resolve_tests {
             root,
             &context,
             Some("stage"),
+            None,
             None,
         )
         .await
@@ -1308,6 +1365,7 @@ mod resolve_tests {
             &context,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1340,6 +1398,7 @@ mod resolve_tests {
             &context,
             Some("work"),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1350,6 +1409,7 @@ mod resolve_tests {
             root,
             &context,
             Some("stage"),
+            None,
             None,
         )
         .await
@@ -1386,6 +1446,7 @@ mod resolve_tests {
             &context,
             Some("work-vault"),
             None,
+            None,
         )
         .await
         .expect_err("a raw vault name must not resolve inside a configured workspace");
@@ -1411,6 +1472,7 @@ mod resolve_tests {
             root,
             &context,
             Some("raw-vault"),
+            None,
             None,
         )
         .await
@@ -1441,6 +1503,7 @@ mod resolve_tests {
             &context,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1465,6 +1528,7 @@ mod resolve_tests {
             config_bytes(),
             &missing,
             &context,
+            None,
             None,
             None,
         )
@@ -1502,6 +1566,7 @@ vaults = [
             &context,
             None,
             Some("prod"),
+            None,
         )
         .await
         .unwrap();
@@ -1548,6 +1613,7 @@ vaults = [
             &context,
             Some("work"),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1567,6 +1633,126 @@ vaults = [
             .working_directory
             .to_string_lossy()
             .contains("work dir with spaces"));
+    }
+
+    #[tokio::test]
+    async fn degenerate_workspace_with_an_explicit_vault_pins_no_context_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let mut config = config_with_two_named_locals(root);
+        // Nothing else supplies a vault, so the degenerate chain would take
+        // the context's current vault — which an explicit `--vault` discards.
+        config.default_vault = String::new();
+        let config_path = write_config(root);
+        let context = context_with_current_vault(root, "context-vault").await;
+        assert!(context.source_path().is_some(), "fixture must read a file");
+
+        let resolved = resolve_install_target_from(
+            &config,
+            &config_path,
+            config_bytes(),
+            root,
+            &context,
+            Some("explicit-vault"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resolved.target.vault, "explicit-vault");
+        assert_eq!(resolved.target.workspace_source, "degenerate");
+        // The context supplied nothing that survived into the target, so
+        // pinning its digest would make the runner refuse on an edit that
+        // cannot affect this schedule.
+        assert_eq!(resolved.target.context_path, None);
+        assert_eq!(resolved.target.context_digest, None);
+    }
+
+    #[tokio::test]
+    async fn degenerate_workspace_without_a_vault_still_pins_the_context_it_used() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let mut config = config_with_two_named_locals(root);
+        config.default_vault = String::new();
+        let config_path = write_config(root);
+        let context = context_with_current_vault(root, "context-vault").await;
+
+        let resolved = resolve_install_target_from(
+            &config,
+            &config_path,
+            config_bytes(),
+            root,
+            &context,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resolved.target.vault, "context-vault");
+        assert!(resolved.target.context_path.is_some());
+        assert!(resolved.target.context_digest.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_degenerate_alias_never_collides_with_a_registry_backend_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let config = config_with_two_named_locals(root);
+        let config_path = write_config(root);
+        let context = ContextManager::default();
+
+        // A raw vault literally named after a registry backend: the workspace
+        // layer would never alias an entry that way.
+        let resolved = resolve_install_target_from(
+            &config,
+            &config_path,
+            config_bytes(),
+            root,
+            &context,
+            Some("local-a"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resolved.target.vault, "local-a");
+        assert_eq!(resolved.target.workspace_alias, None);
+        assert_ne!(resolved.entry.alias, "local-a");
+        assert_eq!(
+            resolved.entry.alias,
+            crate::workspace::degenerate_alias_for(&config, "local-a")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ambient_backend_that_differs_from_the_saved_one_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let config = config_with_two_named_locals(root);
+        let config_path = write_config(root);
+        let context = ContextManager::default();
+
+        let error = resolve_install_target_from(
+            &config,
+            &config_path,
+            config_bytes(),
+            root,
+            &context,
+            Some("raw-vault"),
+            None,
+            Some("azure"),
+        )
+        .await
+        .expect_err("an unsaved ambient backend cannot be replayed by a scheduled run");
+
+        let rendered = error.to_string();
+        assert!(rendered.contains("azure"), "{rendered}");
+        assert!(rendered.contains("local"), "{rendered}");
+        assert!(rendered.contains("XV_BACKEND"), "{rendered}");
     }
 
     // -----------------------------------------------------------------

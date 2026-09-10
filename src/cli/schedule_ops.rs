@@ -210,6 +210,9 @@ async fn resolve_target(vault: Option<&str>, config: &Config) -> Result<Resolved
         &cwd,
         vault,
         config.env_flag.as_deref(),
+        // The process config already has `--backend`/`XV_BACKEND` folded in;
+        // the resolver refuses if that disagrees with the saved file.
+        Some(config.effective_backend_name()),
     )
     .await
 }

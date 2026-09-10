@@ -469,6 +469,18 @@ async fn resolve_workspace_snapshot_from(
     })
 }
 
+/// The alias the degenerate workspace-of-one would use for `vault` under
+/// `config`.
+///
+/// Schedule-target resolution builds a degenerate entry directly from an
+/// explicit `--vault` and must label it exactly the way this module would,
+/// rather than inventing a second aliasing rule.
+pub(crate) fn degenerate_alias_for(config: &Config, vault: &str) -> String {
+    let backend_names = known_backend_names(config);
+    let backend_name_refs: Vec<&str> = backend_names.iter().map(|s| s.as_str()).collect();
+    degenerate_alias(vault, &backend_name_refs)
+}
+
 /// Pick the degenerate workspace-of-one's single alias.
 ///
 /// Prefers the vault name so natural `xv get <vault>:name` addressing works,
