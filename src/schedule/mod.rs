@@ -1224,6 +1224,27 @@ mod tests {
         );
     }
 
+    /// The working directory is rendered into its own `<string>` element, so
+    /// it needs the same escaping the argument array gets — an unescaped `&`
+    /// in a project path produces invalid XML and a job launchd silently
+    /// refuses to load.
+    #[test]
+    fn launchd_escapes_the_working_directory() {
+        let mut s = schedule();
+        s.command = ScheduleCommand::ManifestRun {
+            manifest: PathBuf::from("/home/u/manifest.json"),
+            working_directory: PathBuf::from("/home/a & b/<work>/\"q\"/'p'"),
+        };
+        let body = render(Platform::Launchd, &s, &paths())[0].contents.clone();
+        assert!(
+            body.contains(
+                "<key>WorkingDirectory</key>\n    <string>/home/a &amp; b/&lt;work&gt;/&quot;q&quot;/&apos;p&apos;</string>"
+            ),
+            "{body}"
+        );
+        assert!(!body.contains("/home/a & b"), "{body}");
+    }
+
     #[test]
     fn schtasks_keeps_a_spaced_manifest_path_as_one_argument() {
         let mut s = schedule();

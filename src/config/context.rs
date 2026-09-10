@@ -236,7 +236,6 @@ impl ContextManager {
 
     /// The context file this manager was parsed from, or `None` when it read
     /// nothing from disk.
-    #[allow(dead_code)]
     pub(crate) fn source_path(&self) -> Option<&Path> {
         self.loaded_from
             .as_ref()
@@ -245,7 +244,6 @@ impl ContextManager {
 
     /// `sha256:<hex>` over the exact bytes of [`Self::source_path`], or
     /// `None` when this manager read nothing from disk.
-    #[allow(dead_code)]
     pub(crate) fn source_digest(&self) -> Option<&str> {
         self.loaded_from
             .as_ref()

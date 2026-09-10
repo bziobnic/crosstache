@@ -402,9 +402,6 @@ pub(crate) async fn resolve_workspace_from(
 #[derive(Debug)]
 pub(crate) struct ResolvedWorkspaceSnapshot {
     pub(crate) workspace: Workspace,
-    // Read by the scheduled-rotation target resolver (`schedule::target`),
-    // which lands in the next task of this spec.
-    #[allow(dead_code)]
     pub(crate) context_contributed: bool,
 }
 
@@ -416,7 +413,6 @@ pub(crate) struct ResolvedWorkspaceSnapshot {
 /// re-read part-way through resolution, so the recorded inputs and the
 /// resolved workspace cannot disagree. Never returns `None` for the same
 /// reason [`resolve_workspace`] does not.
-#[allow(dead_code)]
 pub(crate) async fn resolve_workspace_snapshot(
     config: &Config,
     cwd: &std::path::Path,
@@ -1016,6 +1012,10 @@ vaults = [
     /// contribute even though a context workspace exists.
     #[tokio::test]
     async fn snapshot_reports_no_context_contribution_for_a_project_overlay() {
+        // The overlay's environment is selected through `resolve_env`, which
+        // lets `XV_ENV` beat everything else.
+        let _env = crate::config::project::test_support::XvEnvGuard::acquire();
+        std::env::remove_var("XV_ENV");
         let temp = tempfile::tempdir().unwrap();
         let toml = r#"
 default_env = "dev"

@@ -445,9 +445,6 @@ pub(crate) fn resolve_env_with_source<'a>(
 /// Produced by [`resolve_project_at`] at schedule-install time and by
 /// [`load_project_at`] at run time; the run-time form must reproduce the
 /// install-time one for a target to be considered undrifted.
-// Used by the scheduled-rotation target resolver (`schedule::target`),
-// which lands in the next task of this spec.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedProject {
     /// Canonical path of the `.xv.toml` that was parsed.
@@ -480,7 +477,6 @@ impl ResolvedProject {
 /// purpose: the resolved name is what gets recorded and replayed.
 ///
 /// Returns `Ok(None)` when no `.xv.toml` governs `start_dir`.
-#[allow(dead_code)]
 pub(crate) async fn resolve_project_at(
     start_dir: &Path,
     cli_env: Option<&str>,
@@ -536,7 +532,6 @@ pub(crate) async fn load_project_at(
     })
 }
 
-#[allow(dead_code)]
 fn canonicalize_project_path(path: &Path) -> Result<PathBuf> {
     std::fs::canonicalize(path).map_err(|e| {
         CrosstacheError::config(format!("failed to canonicalize {}: {e}", path.display()))
@@ -576,14 +571,56 @@ pub(crate) fn reset_cross_boundary_notice_for_test() {
     CROSS_BOUNDARY_NOTICE_EMITTED.store(false, Ordering::SeqCst);
 }
 
+/// Test-only synchronization for the process-global `XV_ENV` variable.
+///
+/// `resolve_env` reads `XV_ENV` and lets it beat `--env`, so any test that
+/// sets it — or that reaches `resolve_env` and would be wrong if someone else
+/// had set it — has to hold the same lock. That includes tests in other
+/// modules (`schedule::target`, `workspace`) which resolve an environment, so
+/// the lock is `pub(crate)` rather than private to this module's tests.
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Mutex;
+pub(crate) mod test_support {
+    use std::sync::{Mutex, MutexGuard};
 
     /// Guards tests that read or write the global `XV_ENV` env var so they
     /// don't race each other under cargo's default parallel test runner.
-    static XV_ENV_LOCK: Mutex<()> = Mutex::new(());
+    pub(crate) static XV_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Take the `XV_ENV` lock and restore the variable's original value when
+    /// the guard drops — including on a panic, so one failing test cannot
+    /// leak `XV_ENV` into every test that runs after it.
+    pub(crate) struct XvEnvGuard {
+        _lock: MutexGuard<'static, ()>,
+        previous: Option<String>,
+    }
+
+    impl XvEnvGuard {
+        pub(crate) fn acquire() -> Self {
+            // A poisoned lock only means some other test panicked while
+            // holding it; the data it guards is `()`, so recovering is safe
+            // and far more useful than cascading failures.
+            let lock = XV_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            Self {
+                _lock: lock,
+                previous: std::env::var("XV_ENV").ok(),
+            }
+        }
+    }
+
+    impl Drop for XvEnvGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var("XV_ENV", value),
+                None => std::env::remove_var("XV_ENV"),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::XvEnvGuard;
+    use super::*;
 
     #[test]
     fn project_config_default_is_empty() {
@@ -785,7 +822,7 @@ resource_group = "rg"
 
     #[test]
     fn resolve_env_uses_default_env_when_no_override() {
-        let _guard = XV_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = XvEnvGuard::acquire();
         let cfg = build_cfg(
             Some("dev"),
             &[
@@ -814,7 +851,7 @@ resource_group = "rg"
 
     #[test]
     fn resolve_env_cli_flag_overrides_default_env() {
-        let _guard = XV_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = XvEnvGuard::acquire();
         let cfg = build_cfg(
             Some("dev"),
             &[
@@ -838,7 +875,7 @@ resource_group = "rg"
 
     #[test]
     fn resolve_env_xv_env_overrides_cli_flag() {
-        let _guard = XV_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = XvEnvGuard::acquire();
         let cfg = build_cfg(
             Some("dev"),
             &[
@@ -864,7 +901,7 @@ resource_group = "rg"
 
     #[test]
     fn resolve_env_unknown_name_returns_env_not_defined() {
-        let _guard = XV_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = XvEnvGuard::acquire();
         let cfg = build_cfg(
             Some("dev"),
             &[
@@ -885,7 +922,7 @@ resource_group = "rg"
 
     #[test]
     fn resolve_env_no_default_no_override_errors_helpfully() {
-        let _guard = XV_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = XvEnvGuard::acquire();
         let cfg = build_cfg(None, &[("dev", EnvProfile::default())]);
         std::env::remove_var("XV_ENV");
         let err = resolve_env(&cfg, None).expect_err("must err");
@@ -904,7 +941,7 @@ resource_group = "rg"
         // Zero [env.*] blocks, no default_env, no --env, no XV_ENV: a
         // types-only project file contributes nothing env-related and
         // must not error.
-        let _guard = XV_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = XvEnvGuard::acquire();
         let cfg = build_cfg(None, &[]);
         std::env::remove_var("XV_ENV");
         let resolved = resolve_env(&cfg, None).expect("must not error");
@@ -916,7 +953,7 @@ resource_group = "rg"
         // Explicit --env against a file with zero [env.*] blocks must
         // still error (the user asked for a specific env by name), but
         // with a clearer message than an empty "available: " list.
-        let _guard = XV_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = XvEnvGuard::acquire();
         let cfg = build_cfg(None, &[]);
         std::env::remove_var("XV_ENV");
         let err = resolve_env(&cfg, Some("staging")).expect_err("must err");
@@ -946,7 +983,7 @@ resource_group = "rg"
         // default_env is explicitly configured but no [env.*] blocks
         // exist at all — this is a real misconfiguration (not the "no
         // envs at all" absent-defaults case), and must keep erroring.
-        let _guard = XV_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = XvEnvGuard::acquire();
         let cfg = build_cfg(Some("dev"), &[]);
         std::env::remove_var("XV_ENV");
         let err = resolve_env(&cfg, None).expect_err("must err");
@@ -1249,7 +1286,7 @@ vault = "staging-vault"
     async fn resolve_project_at_reports_path_digest_and_environment() {
         // `resolve_project_at` reaches `resolve_env`, which reads the
         // process-global `XV_ENV`; serialize against the tests that set it.
-        let _guard = XV_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = XvEnvGuard::acquire();
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         let nested = root.join("a").join("b");
@@ -1284,7 +1321,7 @@ vault = "staging-vault"
     async fn resolve_project_at_honors_the_cli_env_flag() {
         // `resolve_project_at` reaches `resolve_env`, which reads the
         // process-global `XV_ENV`; serialize against the tests that set it.
-        let _guard = XV_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = XvEnvGuard::acquire();
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join(".xv.toml"), PROJECT_FIXTURE).unwrap();
 
@@ -1310,7 +1347,7 @@ vault = "staging-vault"
     async fn resolve_project_at_stops_at_a_boundary_marker() {
         // `resolve_project_at` reaches `resolve_env`, which reads the
         // process-global `XV_ENV`; serialize against the tests that set it.
-        let _guard = XV_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = XvEnvGuard::acquire();
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         std::fs::write(root.join(".xv.toml"), PROJECT_FIXTURE).unwrap();

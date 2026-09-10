@@ -19,14 +19,11 @@
 //! client secrets, credential file contents, environment values, local age
 //! identities, secret names or secret values.
 //!
-//! This is P1 Task 1 of the scheduled-target-manifest work: paths and schema
-//! only. Nothing in `xv`'s CLI or the scheduled runner calls into this module
-//! yet — `schedule::target::resolve_install_target`, `xv schedule install`,
-//! `xv schedule run --manifest`, and `xv schedule status` are later tasks in
-//! the same delivery block that will consume these types and functions. Allow
-//! dead code here rather than making a schema module invent artificial
-//! callers.
-#![allow(dead_code)]
+//! PR 1 consumes the schema, the state paths and the preview serializer;
+//! the storage primitives and the run/recovery paths are consumed by the
+//! manifest runner in PR 2. Those still-unconsumed items carry a per-item
+//! `allow(dead_code)` rather than the module carrying a blanket one, so a
+//! genuinely unused item added later still shows up as a warning.
 
 use std::path::{Path, PathBuf};
 
@@ -92,21 +89,29 @@ impl ScheduleStatePaths {
     }
 
     /// `last-run.json` — owned by the scheduled runner.
+    // PR 2 (manifest runner) reads this; nothing in PR 1 does.
+    #[allow(dead_code)]
     pub fn last_run_path(&self) -> PathBuf {
         self.root.join("last-run.json")
     }
 
     /// `run.lock` — persistent lock inode owned by the scheduled runner.
+    // PR 2 (manifest runner) reads this; nothing in PR 1 does.
+    #[allow(dead_code)]
     pub fn run_lock_path(&self) -> PathBuf {
         self.root.join("run.lock")
     }
 
     /// `install.lock` — persistent lock inode owned by install/reinstall/uninstall.
+    // PR 2 (manifest runner) reads this; nothing in PR 1 does.
+    #[allow(dead_code)]
     pub fn install_lock_path(&self) -> PathBuf {
         self.root.join("install.lock")
     }
 
     /// `recovery/` — created only when an install rollback is incomplete.
+    // PR 2 (manifest runner) reads this; nothing in PR 1 does.
+    #[allow(dead_code)]
     pub fn recovery_dir(&self) -> PathBuf {
         self.root.join("recovery")
     }
@@ -131,6 +136,8 @@ pub fn resolve_from_process_env() -> Result<ScheduleStatePaths> {
 
 /// Resolve state paths for the current build's platform. Pure function of
 /// `env`; performs no environment or filesystem access itself.
+// PR 2 (manifest runner) reads this; nothing in PR 1 does.
+#[allow(dead_code)]
 pub fn resolve(env: &ScheduleEnv) -> Result<ScheduleStatePaths> {
     let platform = if cfg!(windows) {
         HostPlatform::Windows
@@ -244,7 +251,36 @@ struct SchemaVersionPeek {
 // Path/digest validation
 // ---------------------------------------------------------------------------
 
-fn validate_absolute_normalized_path(field: &str, value: &str) -> Result<()> {
+/// `installed_at` must be a non-empty RFC 3339 timestamp in UTC.
+///
+/// The stamp is what tells a person (and a later drift check) *when* this
+/// target was pinned, so an empty or unparseable value is a corrupt manifest,
+/// not a cosmetic defect. Only UTC is accepted: two manifests written in
+/// different local offsets must still compare and sort as written.
+///
+/// This runs on load and on write, never on the preview — the preview
+/// manifest's `installed_at` is deliberately empty and is rendered as
+/// `<set-at-install>` by [`serialize_manifest_preview`].
+fn validate_installed_at(value: &str) -> Result<()> {
+    if value.is_empty() {
+        return Err(CrosstacheError::config(
+            "schedule manifest field 'installed_at' must not be empty".to_string(),
+        ));
+    }
+    let parsed = chrono::DateTime::parse_from_rfc3339(value).map_err(|e| {
+        CrosstacheError::config(format!(
+            "schedule manifest field 'installed_at' must be an RFC 3339 timestamp: {value} ({e})"
+        ))
+    })?;
+    if parsed.offset().local_minus_utc() != 0 {
+        return Err(CrosstacheError::config(format!(
+            "schedule manifest field 'installed_at' must be in UTC: {value}"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_absolute_normalized_path(field: &str, value: &str) -> Result<()> {
     let path = Path::new(value);
     if !path.is_absolute() {
         return Err(CrosstacheError::config(format!(
@@ -313,6 +349,21 @@ fn validate_v1(manifest: &ScheduleManifestV1) -> Result<()> {
     }
     validate_digest("target.backend_identity", &manifest.target.backend_identity)?;
 
+    validate_installed_at(&manifest.installed_at)?;
+
+    if manifest.cadence.hour > 23 {
+        return Err(CrosstacheError::config(format!(
+            "schedule manifest field 'cadence.hour' must be 0-23: {}",
+            manifest.cadence.hour
+        )));
+    }
+    if manifest.cadence.minute > 59 {
+        return Err(CrosstacheError::config(format!(
+            "schedule manifest field 'cadence.minute' must be 0-59: {}",
+            manifest.cadence.minute
+        )));
+    }
+
     match manifest.target.workspace_source.as_str() {
         "project" | "context" | "degenerate" => {}
         other => {
@@ -342,6 +393,8 @@ pub fn serialize_manifest_preview(manifest: &ScheduleManifestV1) -> String {
 
 /// Deterministic pretty JSON bytes for the real on-disk manifest, terminated
 /// with a trailing newline.
+// PR 2 (manifest runner) reads this; nothing in PR 1 does.
+#[allow(dead_code)]
 pub fn serialize_manifest(manifest: &ScheduleManifestV1) -> Vec<u8> {
     let mut bytes =
         serde_json::to_vec_pretty(manifest).expect("schedule manifest is always valid JSON");
@@ -415,6 +468,8 @@ fn read_manifest_bytes(paths: &ScheduleStatePaths) -> Result<Vec<u8>> {
 ///
 /// An unknown `schema_version` produces a targeted error naming reinstall,
 /// rather than a generic deserialization failure.
+// PR 2 (manifest runner) reads this; nothing in PR 1 does.
+#[allow(dead_code)]
 pub fn load_manifest(paths: &ScheduleStatePaths) -> Result<ScheduleManifest> {
     let bytes = read_manifest_bytes(paths)?;
 
@@ -445,6 +500,8 @@ pub fn load_manifest(paths: &ScheduleStatePaths) -> Result<ScheduleManifest> {
 
 /// Atomically write `manifest.json`, creating the owning private directory
 /// (`0700` on Unix) if needed. The file is written private (`0600` on Unix).
+// PR 2 (manifest runner) reads this; nothing in PR 1 does.
+#[allow(dead_code)]
 pub fn write_manifest_atomic(paths: &ScheduleStatePaths, bytes: &[u8]) -> Result<()> {
     create_private_dir(paths.root()).map_err(|error| {
         CrosstacheError::config(format!(
@@ -457,6 +514,8 @@ pub fn write_manifest_atomic(paths: &ScheduleStatePaths, bytes: &[u8]) -> Result
 
 /// Remove only `manifest.json`. Refuses if it is a symlink; a missing file
 /// is not an error.
+// PR 2 (manifest runner) reads this; nothing in PR 1 does.
+#[allow(dead_code)]
 pub fn remove_owned_manifest(paths: &ScheduleStatePaths) -> Result<()> {
     let path = paths.manifest_path();
     match std::fs::symlink_metadata(&path) {
@@ -785,6 +844,64 @@ mod tests {
         manifest.target.workspace_source = "bogus".to_string();
         let error = validate_v1(&manifest).unwrap_err();
         assert!(error.to_string().contains("workspace_source"));
+    }
+
+    #[test]
+    fn validate_v1_rejects_an_empty_installed_at() {
+        let mut manifest = fixture_manifest();
+        manifest.installed_at = String::new();
+        let error = validate_v1(&manifest).unwrap_err();
+        assert!(error.to_string().contains("installed_at"), "{error}");
+    }
+
+    #[test]
+    fn validate_v1_rejects_a_non_rfc3339_installed_at() {
+        let mut manifest = fixture_manifest();
+        manifest.installed_at = "2026-09-09 15:04:05".to_string();
+        let error = validate_v1(&manifest).unwrap_err();
+        assert!(error.to_string().contains("RFC 3339"), "{error}");
+    }
+
+    #[test]
+    fn validate_v1_rejects_a_non_utc_installed_at() {
+        let mut manifest = fixture_manifest();
+        manifest.installed_at = "2026-09-09T15:04:05+02:00".to_string();
+        let error = validate_v1(&manifest).unwrap_err();
+        assert!(error.to_string().contains("UTC"), "{error}");
+    }
+
+    #[test]
+    fn validate_v1_accepts_an_offset_zero_installed_at() {
+        let mut manifest = fixture_manifest();
+        manifest.installed_at = "2026-09-09T15:04:05.123+00:00".to_string();
+        validate_v1(&manifest).unwrap();
+    }
+
+    #[test]
+    fn validate_v1_rejects_an_out_of_range_cadence() {
+        let mut manifest = fixture_manifest();
+        manifest.cadence.hour = 24;
+        let error = validate_v1(&manifest).unwrap_err();
+        assert!(error.to_string().contains("cadence.hour"), "{error}");
+
+        let mut manifest = fixture_manifest();
+        manifest.cadence.minute = 60;
+        let error = validate_v1(&manifest).unwrap_err();
+        assert!(error.to_string().contains("cadence.minute"), "{error}");
+    }
+
+    /// The preview manifest is built before the write stamps `installed_at`,
+    /// so validation must stay on the load/write path only — rendering a
+    /// preview of a manifest with an empty stamp has to keep working.
+    #[test]
+    fn serialize_manifest_preview_works_on_an_unstamped_manifest() {
+        let mut manifest = fixture_manifest();
+        manifest.installed_at = String::new();
+        let preview = serialize_manifest_preview(&manifest);
+        assert!(
+            preview.contains("\"installed_at\": \"<set-at-install>\""),
+            "{preview}"
+        );
     }
 
     #[test]
