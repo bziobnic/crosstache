@@ -165,10 +165,21 @@ configuration file and its digest, and an environment variable that redirects
 config resolution is a target-selection input a pinned unit may not add.
 
 It is a preview in the strict sense: it creates no directory, manifest, lock,
-result, unit or log, touches no existing file, and calls no scheduler. It is
-also the way to drive a scheduler `xv` does not manage — the `# command:` line
-is the exact command line to paste into cron, a Kubernetes CronJob, or a CI
-schedule.
+result, unit or log, touches no existing file, and calls no scheduler.
+
+The `# command:` line shows the pinned manifest runner, which **has not shipped
+yet** (see below) — do not paste it into cron, a Kubernetes CronJob, or a CI
+schedule in this release, because there is no manifest for it to read and
+`xv schedule run` does not exist. To drive a scheduler `xv` does not manage
+today, use the same legacy command an install writes:
+
+```
+xv rotate --due --force --vault <alias-or-vault>
+```
+
+with `HOME` and `XDG_CONFIG_HOME` set the way the preview's header shows. The
+`# command:` line becomes the exact command line to paste once the manifest
+runner ships and installs start writing a manifest.
 
 #### What the scheduled job runs
 
@@ -183,13 +194,20 @@ not target-pinned.** `xv schedule install` (without `--print`) still writes the
 legacy command:
 
 ```
-xv rotate --due --force --vault <resolved vault>
+xv rotate --due --force --vault <alias-or-vault>
 ```
 
-and writes no manifest. That command re-resolves nothing about the backend or
-account at run time beyond the config it is pointed at, so an installed
-schedule remains *legacy/unpinned* until the manifest runner lands. The
-`--vault` it carries is the real vault the alias resolved to at install time.
+and writes no manifest. That command re-resolves the vault, the backend and
+the account at run time from whatever config, `.xv.toml` and context the
+scheduled process finds, so an installed schedule remains *legacy/unpinned*
+until the manifest runner lands.
+
+The `--vault` it carries is the value that survives that re-resolution: with a
+workspace attached it is the **alias** you gave (or the default entry's alias),
+because run-time resolution looks an attached alias up on its own backend and
+would otherwise read the real vault name as a raw vault on the *active*
+backend. With no workspace attached there are no aliases, so it is the raw
+vault name.
 
 `--due` bounds the blast radius to secrets that already carry a policy and are
 already past it; `--force` is required because there is no terminal to confirm

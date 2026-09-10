@@ -288,18 +288,14 @@ pub fn selected_backend_identity(
 pub(crate) struct ResolvedScheduleTarget {
     /// The manifest's `target` block, ready to serialize.
     pub(crate) target: ManifestTarget,
-    // The three fields below are read by the manifest writer and the install
-    // preview, which land in the next task of this spec.
     /// The workspace entry that produced [`Self::target`] — its `vault` is
-    /// the real vault to sweep, on registry backend `backend`.
-    #[allow(dead_code)]
+    /// the real vault to sweep, on registry backend `backend`, and its
+    /// `alias` is the name the interim legacy install carries.
     pub(crate) entry: WorkspaceEntry,
     /// Which resolution layer produced the workspace.
-    #[allow(dead_code)]
     pub(crate) workspace_source: WorkspaceSource,
     /// The canonical working directory resolution ran in, recorded so the
     /// scheduled run replays the same `.xv.toml`/context discovery.
-    #[allow(dead_code)]
     pub(crate) working_directory: PathBuf,
 }
 
@@ -337,7 +333,7 @@ fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
 ///
 /// The path must exist — every path recorded by target resolution is a file
 /// or directory that was actually read.
-fn canonical_path_for_manifest(path: &Path) -> Result<PathBuf> {
+pub(crate) fn canonical_path_for_manifest(path: &Path) -> Result<PathBuf> {
     let canonical = std::fs::canonicalize(path).map_err(|e| {
         CrosstacheError::config(format!(
             "cannot resolve the schedule target path '{}': {e}",
@@ -1540,6 +1536,10 @@ mod resolve_tests {
 
     #[tokio::test]
     async fn project_environment_is_resolved_and_recorded() {
+        // `resolve_env` lets `XV_ENV` beat `--env`, so this test must not run
+        // beside one that sets it.
+        let _env = crate::config::project::test_support::XvEnvGuard::acquire();
+        std::env::remove_var("XV_ENV");
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let config = config_with_two_named_locals(root);

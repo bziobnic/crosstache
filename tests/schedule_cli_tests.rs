@@ -543,6 +543,109 @@ fn print_shows_the_real_vault_behind_an_attached_alias() {
     assert!(out.contains("\"vault\": \"payments-production\""), "{out}");
 }
 
+/// Point the isolated config at a *second* local store (`store-b`), open it
+/// so it exists, then rewrite the config so `local` is the original store and
+/// `local-b` is a named backend for `store-b`. Attaches a workspace whose
+/// default entry is on the active backend and whose `stage` alias is on
+/// `local-b`.
+///
+/// This is the shape the interim legacy install has to get right: `stage`
+/// resolves to `local-b/stage-vault`, but the *active* backend is `local`, so
+/// a unit that carried the real vault name would sweep `local/stage-vault`.
+fn attach_two_named_local_backends(root: &std::path::Path) {
+    let conf = root.join(".config").join("xv").join("xv.conf");
+    let original = std::fs::read_to_string(&conf).expect("read xv.conf");
+    let store_b = root.join("store-b");
+    let key_b = root.join("key-b.txt");
+    std::fs::create_dir_all(&store_b).expect("create store-b");
+    let path_b = store_b.to_string_lossy().replace('\\', "\\\\");
+    let key_b_str = key_b.to_string_lossy().replace('\\', "\\\\");
+
+    // Open store-b the only way a user can: by pointing the active local
+    // backend at it once.
+    let temporary = original.replace(
+        &format!(
+            "store_path = \"{}\"",
+            root.join("store").to_string_lossy().replace('\\', "\\\\")
+        ),
+        &format!("store_path = \"{path_b}\""),
+    );
+    let temporary = temporary.replace(
+        &format!(
+            "key_file = \"{}\"",
+            root.join("key.txt").to_string_lossy().replace('\\', "\\\\")
+        ),
+        &format!("key_file = \"{key_b_str}\""),
+    );
+    assert_ne!(temporary, original, "fixture config shape changed");
+    std::fs::write(&conf, &temporary).expect("write temp config");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_xv"))
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", root)
+        .env("XDG_CONFIG_HOME", root.join(".config"))
+        .env("XV_NO_PARENT_CONFIG", "1")
+        .env("XV_BACKEND", "local")
+        .env("NO_COLOR", "1")
+        .current_dir(root)
+        .args(["list"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "opening store-b failed: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Restore the original active backend and add the named one beside it.
+    let final_conf = format!(
+        "{original}\n[named_backends.local-b]\ntype = \"local\"\nstore_path = \"{path_b}\"\nkey_file = \"{key_b_str}\"\ndefault_vault = \"stage-vault\"\n"
+    );
+    std::fs::write(&conf, final_conf).expect("write final config");
+
+    let context_dir = root.join(".xv");
+    std::fs::create_dir_all(&context_dir).expect("create context dir");
+    let context = r#"{
+  "current": null,
+  "recent": [],
+  "workspace": {
+    "entries": [
+      { "vault": "payments-production", "backend": "local", "alias": "payments", "default": true },
+      { "vault": "stage-vault", "backend": "local-b", "alias": "stage" }
+    ]
+  }
+}
+"#;
+    std::fs::write(context_dir.join("context"), context).expect("write context");
+}
+
+/// An alias attached to a backend that is *not* the active one resolves to
+/// that backend, not to the active backend's same-named vault.
+///
+/// The other half of this — that the interim legacy unit carries the alias
+/// rather than the resolved real vault, so run-time re-resolution lands on the
+/// same place — is unit-tested at `cli::schedule_ops::tests`, because `--print`
+/// renders the manifest runner and there is no path that renders the legacy
+/// unit without registering it.
+#[test]
+fn print_resolves_an_alias_on_a_non_active_named_backend() {
+    let (_cmd, tmp, store) = xv_isolated_local_with_opts(false, false);
+    use_the_store_once(&store);
+    attach_two_named_local_backends(tmp.path());
+
+    let (ok, out) = print_schedule(&store, &["--vault", "stage"]);
+    assert!(ok, "{out}");
+    assert_eq!(
+        header_value(&out, "target"),
+        "stage -> local-b/stage-vault",
+        "{out}"
+    );
+    assert!(out.contains("\"backend_name\": \"local-b\""), "{out}");
+    assert!(out.contains("\"workspace_alias\": \"stage\""), "{out}");
+    assert!(out.contains("\"vault\": \"stage-vault\""), "{out}");
+}
+
 #[test]
 fn an_unattached_vault_name_is_rejected_with_the_attached_aliases() {
     let (_cmd, tmp, store) = xv_isolated_local_with_opts(false, false);
