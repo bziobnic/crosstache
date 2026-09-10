@@ -318,6 +318,16 @@ pub struct RotationSchedule {
     pub log_path: PathBuf,
     /// `HOME` for the scheduled process.
     pub home: PathBuf,
+    /// The `(variable, value)` pair that selected the schedule state root at
+    /// install time, when an environment variable did.
+    ///
+    /// `None` — the common case — means a native fallback chose it and the
+    /// scheduled process reaches the same root from `HOME` alone. When it is
+    /// `Some`, the unit must set it: install resolved the manifest path from
+    /// the *installing shell's* environment, and `xv schedule run` recomputes
+    /// that path from the *scheduled process's* environment. Without the pin
+    /// the two disagree and the job refuses its own manifest at 3am.
+    pub state_home: Option<(&'static str, PathBuf)>,
 }
 
 impl RotationSchedule {
@@ -338,7 +348,8 @@ impl RotationSchedule {
         parts.join(" ")
     }
 
-    /// Environment pairs the unit must set: `HOME`, and nothing else.
+    /// Environment pairs the unit must set: `HOME`, plus the state-root
+    /// variable when one selected the manifest's location.
     ///
     /// `XDG_CONFIG_HOME` used to be here, because the legacy sweep re-resolved
     /// its configuration at run time and would otherwise have read a different
@@ -346,8 +357,16 @@ impl RotationSchedule {
     /// configuration file in the manifest, so an env var that redirects config
     /// resolution stops being a safety net and becomes a second way to choose
     /// the target — which invariant 2 forbids the unit to carry.
+    ///
+    /// [`Self::state_home`] is a different thing and is allowed: it does not
+    /// select the target, it makes the runner agree with the installer about
+    /// where the already-absolute manifest path lives.
     fn env_pairs(&self) -> Vec<(String, String)> {
-        vec![("HOME".to_string(), self.home.to_string_lossy().to_string())]
+        let mut pairs = vec![("HOME".to_string(), self.home.to_string_lossy().to_string())];
+        if let Some((var, value)) = &self.state_home {
+            pairs.push(((*var).to_string(), value.to_string_lossy().to_string()));
+        }
+        pairs
     }
 
     /// Directory the scheduled process starts in, when the command pins one.
@@ -698,8 +717,17 @@ pub fn schtasks_create_args(schedule: &RotationSchedule) -> Vec<String> {
         .working_directory()
         .map(|dir| format!("cd /d \"{}\" && ", dir.display()))
         .unwrap_or_default();
+    // Task Scheduler has no environment field either, so the state-root pin
+    // becomes a `set` in the same shell. Quoting the whole `KEY=VALUE` is what
+    // keeps a value containing spaces intact — `set KEY="V A L"` would store
+    // the quotes as part of the value.
+    let set_env = schedule
+        .state_home
+        .as_ref()
+        .map(|(var, value)| format!("set \"{var}={}\" && ", value.display()))
+        .unwrap_or_default();
     let command = format!(
-        "cmd /c {cd}{} >> \"{}\" 2>&1",
+        "cmd /c {set_env}{cd}{} >> \"{}\" 2>&1",
         schedule.command_line(),
         schedule.log_path.display()
     );
@@ -759,7 +787,9 @@ pub fn install(
 ) -> Result<()> {
     if !matches!(schedule.command, ScheduleCommand::ManifestRun { .. }) {
         return Err(CrosstacheError::config(
-            "refusing to install an unpinned rotation schedule: a scheduled job must invoke              'xv schedule run --manifest <path>' so its target is the one recorded at install              time, not whatever the environment resolves to when it fires",
+            "refusing to install an unpinned rotation schedule: a scheduled job must invoke \
+             'xv schedule run --manifest <path>' so its target is the one recorded at install \
+             time, not whatever the environment resolves to when it fires",
         ));
     }
 
@@ -1022,6 +1052,7 @@ mod tests {
             binary: PathBuf::from("/usr/local/bin/xv"),
             log_path: PathBuf::from("/home/u/.local/state/xv/rotate.log"),
             home: PathBuf::from("/home/u"),
+            state_home: None,
         }
     }
 
@@ -1615,6 +1646,101 @@ mod tests {
         assert!(tr.contains("cd /d \"/home/my user/my work\" && "), "{tr}");
         assert!(tr.contains("\"/Applications/My Tools/xv\""), "{tr}");
         assert!(tr.contains("\"/home/my user/state/manifest.json\""), "{tr}");
+    }
+
+    /// The variable an installing shell used to pick the state root, pinned
+    /// into the unit.
+    fn state_home_schedule(var: &'static str, value: &str) -> RotationSchedule {
+        RotationSchedule {
+            state_home: Some((var, PathBuf::from(value))),
+            ..schedule()
+        }
+    }
+
+    #[test]
+    fn a_pinned_state_home_reaches_every_platforms_unit() {
+        // The bug this closes: a user whose profile sets XDG_STATE_HOME gets a
+        // manifest under it, a unit pointing at that manifest, and a scheduled
+        // process that inherits no XDG_STATE_HOME — so the runner recomputes
+        // $HOME/.local/state and refuses the manifest it was handed.
+        for (var, value) in [
+            ("XDG_STATE_HOME", "/home/u/state"),
+            ("XV_STATE_HOME", "/home/u/xv-state"),
+        ] {
+            let s = state_home_schedule(var, value);
+
+            let plist = render(Platform::Launchd, &s, &paths())[0].contents.clone();
+            assert!(
+                plist.contains(&format!(
+                    "<key>{var}</key>\n        <string>{value}</string>"
+                )),
+                "{plist}"
+            );
+            // HOME still comes first; the pin is additional, not a replacement.
+            assert!(
+                plist.find("<key>HOME</key>").unwrap()
+                    < plist.find(&format!("<key>{var}</key>")).unwrap(),
+                "{plist}"
+            );
+
+            let service = render(Platform::Systemd, &s, &paths())[0].contents.clone();
+            assert!(
+                service.contains(&format!("Environment=\"{var}={value}\"\n")),
+                "{service}"
+            );
+
+            let tr = schtasks_tr(&s);
+            assert!(
+                tr.starts_with(&format!("cmd /c set \"{var}={value}\" && cd /d ")),
+                "{tr}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pinned_state_home_survives_spaces() {
+        let s = state_home_schedule("XDG_STATE_HOME", "/home/my user/my state");
+        // launchd gives it its own element, so spaces need no quoting.
+        let plist = render(Platform::Launchd, &s, &paths())[0].contents.clone();
+        assert!(
+            plist.contains("<string>/home/my user/my state</string>"),
+            "{plist}"
+        );
+        // systemd quotes the whole KEY=VALUE.
+        let service = render(Platform::Systemd, &s, &paths())[0].contents.clone();
+        assert!(
+            service.contains("Environment=\"XDG_STATE_HOME=/home/my user/my state\"\n"),
+            "{service}"
+        );
+        // cmd.exe needs `set "KEY=VALUE"` for the value to keep its spaces.
+        let tr = schtasks_tr(&s);
+        assert!(
+            tr.contains("set \"XDG_STATE_HOME=/home/my user/my state\" && "),
+            "{tr}"
+        );
+    }
+
+    #[test]
+    fn units_are_unchanged_when_no_state_variable_selected_the_root() {
+        // The overwhelmingly common case: HOME picked the state root, so the
+        // unit needs no pin and must render exactly as it did before pinning
+        // existed.
+        let unpinned = schedule();
+        assert!(unpinned.state_home.is_none());
+        for platform in [Platform::Launchd, Platform::Systemd] {
+            for unit in render(platform, &unpinned, &paths()) {
+                assert!(!unit.contents.contains("STATE_HOME"), "{}", unit.contents);
+            }
+        }
+        assert!(
+            !schtasks_tr(&unpinned).contains("set "),
+            "{}",
+            schtasks_tr(&unpinned)
+        );
+        assert_eq!(
+            unpinned.env_pairs(),
+            vec![("HOME".to_string(), "/home/u".to_string())]
+        );
     }
 
     #[test]

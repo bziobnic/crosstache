@@ -987,3 +987,66 @@ fn schedule_run_is_hidden_from_help() {
     assert!(help.contains("install"), "{help}");
     assert!(!help.contains("\n  run"), "{help}");
 }
+
+#[test]
+fn an_installing_shells_state_home_is_pinned_into_the_unit() {
+    // The bug: a user whose profile sets XDG_STATE_HOME gets a manifest under
+    // it and a unit pointing there, but launchd and systemd user units export
+    // no XDG_STATE_HOME — so at fire time the runner recomputes
+    // $HOME/.local/state/... and refuses the manifest it was just handed.
+    let (_cmd, _tmp, store) = xv_isolated_local_with_opts(false, false);
+    use_the_store_once(&store);
+    let root = store.parent().unwrap();
+    let state = root.join("custom-state");
+    std::fs::create_dir_all(&state).unwrap();
+
+    let out = xv_cmd_for(&store)
+        .env("XDG_STATE_HOME", &state)
+        .args(["schedule", "install", "--print", "--vault", "prod-kv"])
+        .output()
+        .unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{combined}");
+
+    // The manifest the unit points at lives under the override...
+    let expected = state
+        .join("xv")
+        .join("schedules")
+        .join("rotation-default")
+        .join("manifest.json");
+    assert!(
+        combined.contains(&expected.display().to_string()),
+        "expected {} in:\n{combined}",
+        expected.display()
+    );
+    // ...so the unit must carry the variable that put it there.
+    assert!(
+        combined.contains(&format!("XDG_STATE_HOME={}", state.display()))
+            || combined.contains(&format!(
+                "<key>XDG_STATE_HOME</key>\n        <string>{}</string>",
+                state.display()
+            )),
+        "the unit does not pin XDG_STATE_HOME:\n{combined}"
+    );
+}
+
+#[test]
+fn no_state_variable_means_no_pin_in_the_unit() {
+    // The common case must stay exactly as it was: HOME picked the state root,
+    // and the unit says nothing about state directories.
+    let (_cmd, _tmp, store) = xv_isolated_local_with_opts(false, false);
+    use_the_store_once(&store);
+    let (ok, out) = print_schedule(&store, &["--vault", "prod-kv"]);
+    assert!(ok, "{out}");
+    // The preview's unit section carries no state-home variable at all.
+    let unit = out
+        .split_once("# --- ")
+        .map(|(_, rest)| rest.to_string())
+        .unwrap_or(out.clone());
+    assert!(!unit.contains("XDG_STATE_HOME"), "{out}");
+    assert!(!unit.contains("XV_STATE_HOME"), "{out}");
+}

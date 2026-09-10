@@ -233,10 +233,15 @@ fn resolve_log_path(log_file: &str) -> Result<PathBuf> {
 }
 
 /// Build the schedule from flags plus the current process's environment.
+///
+/// `state_home` is `ScheduleStatePaths::pinned_state_home` for the paths the
+/// manifest is being written to: the unit has to carry whichever variable
+/// picked that root, or the scheduled run will look somewhere else for it.
 fn build_schedule(
     interval: ScheduleInterval,
     command: ScheduleCommand,
     log_file: Option<String>,
+    state_home: Option<(&'static str, PathBuf)>,
 ) -> Result<RotationSchedule> {
     let home = home_dir()?;
     // One spelling of the executable everywhere: the manifest, the preview's
@@ -253,6 +258,7 @@ fn build_schedule(
         binary,
         log_path,
         home,
+        state_home,
     })
 }
 
@@ -289,10 +295,11 @@ async fn execute_install(
                 working_directory: resolved.working_directory.clone(),
             },
             log_file,
+            state_paths.pinned_state_home(),
         )?
     };
     let paths = UnitPaths::for_platform(platform, &schedule.home);
-    let mut manifest_v1 = build_manifest(&schedule, &resolved)?;
+    let manifest_v1 = build_manifest(&schedule, &resolved)?;
 
     if print {
         // Dry run: show exactly what installation would write — the pinned
@@ -345,10 +352,7 @@ async fn execute_install(
     // a manifest with no job, which `xv schedule status` reports and a reinstall
     // replaces. Task 4 of this series wraps the sequence in the spec's
     // six-stage install transaction with rollback.
-    manifest_v1.installed_at =
-        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    manifest::validate_v1(&manifest_v1)?;
-    manifest::write_manifest_atomic(&state_paths, &manifest::serialize_manifest(&manifest_v1))?;
+    let manifest_path = stamp_and_write_manifest(&state_paths, manifest_v1, chrono::Utc::now())?;
 
     schedule::install(platform, &schedule, &paths, &ProcessRunner)?;
 
@@ -358,10 +362,7 @@ async fn execute_install(
         schedule.interval.describe()
     ));
     output::info(&format!("  Command:  {}", schedule.command_line()));
-    output::info(&format!(
-        "  Manifest: {}",
-        state_paths.manifest_path().display()
-    ));
+    output::info(&format!("  Manifest: {}", manifest_path.display()));
     output::info(&format!("  Log:      {}", schedule.log_path.display()));
     for unit in schedule::unit_paths_for(platform, &paths) {
         output::info(&format!("  Unit:     {}", unit.display()));
@@ -373,6 +374,28 @@ async fn execute_install(
          whether the scheduler is happy.",
     );
     Ok(())
+}
+
+/// Stamp `installed_at`, validate, and atomically publish `manifest.json`.
+///
+/// `now` is a parameter so the whole sequence is testable end to end. What
+/// makes it worth extracting is the ordering: validation runs *before*
+/// serialization, so a manifest this build would refuse to load never reaches
+/// the disk — the alternative is an installed job that fails every night on a
+/// file only a reinstall can fix.
+///
+/// Returns the path written, which is also what the success output names.
+fn stamp_and_write_manifest(
+    paths: &manifest::ScheduleStatePaths,
+    mut manifest_v1: ScheduleManifestV1,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<PathBuf> {
+    // Seconds precision and a `Z` suffix: the schema requires UTC, and the
+    // stamp is read by people and compared for drift, not used as a clock.
+    manifest_v1.installed_at = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    manifest::validate_v1(&manifest_v1)?;
+    manifest::write_manifest_atomic(paths, &manifest::serialize_manifest(&manifest_v1))?;
+    Ok(paths.manifest_path())
 }
 
 /// Assemble the manifest installation would write for this schedule and
@@ -632,6 +655,112 @@ mod tests {
         let root = dir.join("xv").join("schedules").join("rotation-default");
         std::fs::create_dir_all(&root).unwrap();
         root.join("manifest.json")
+    }
+
+    /// A manifest whose every field passes `validate_v1`, rooted at `dir` so
+    /// the paths are absolute and normalized on the host running the test.
+    fn valid_manifest(dir: &Path) -> ScheduleManifestV1 {
+        let p = |name: &str| dir.join(name).to_string_lossy().to_string();
+        ScheduleManifestV1 {
+            schema_version: 1,
+            schedule_id: manifest::SCHEDULE_ID.to_string(),
+            installed_at: String::new(),
+            cadence: ManifestCadence {
+                kind: "daily".to_string(),
+                hour: 3,
+                minute: 0,
+            },
+            execution: ManifestExecution {
+                binary_path: p("xv"),
+                installed_version: "0.39.0".to_string(),
+                working_directory: p("work"),
+                log_path: p("rotate.log"),
+            },
+            target: crate::schedule::manifest::ManifestTarget {
+                config_path: p("xv.conf"),
+                config_digest: format!("sha256:{}", "0".repeat(64)),
+                project_path: None,
+                project_digest: None,
+                environment: None,
+                context_path: None,
+                context_digest: None,
+                workspace_source: "degenerate".to_string(),
+                workspace_alias: None,
+                backend_name: "local".to_string(),
+                backend_kind: "local".to_string(),
+                backend_identity: format!("sha256:{}", "1".repeat(64)),
+                vault: "default".to_string(),
+            },
+        }
+    }
+
+    /// State paths rooted in a tempdir, through the real resolver.
+    fn state_paths_in(dir: &Path) -> manifest::ScheduleStatePaths {
+        manifest::resolve(&manifest::ScheduleEnv {
+            xv_state_home: Some(dir.to_string_lossy().to_string()),
+            ..Default::default()
+        })
+        .expect("an explicit override always resolves")
+    }
+
+    #[test]
+    fn stamp_and_write_manifest_publishes_a_manifest_the_runner_can_load() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = state_paths_in(tmp.path());
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-10T15:04:05.987Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        let written =
+            stamp_and_write_manifest(&paths, valid_manifest(tmp.path()), now).expect("writes");
+        assert_eq!(written, paths.manifest_path());
+
+        // The whole point of the write is that the runner can read it back.
+        let crate::schedule::manifest::ScheduleManifest::V1(loaded) =
+            manifest::load_manifest(&paths).expect("loads back");
+        // Seconds precision, UTC, `Z` — sub-second noise would make two
+        // manifests written in the same second compare unequal for no reason.
+        assert_eq!(loaded.installed_at, "2026-09-10T15:04:05Z");
+        assert_eq!(loaded.target.vault, "default");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_written_manifest_is_owner_private_inside_an_owner_private_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = state_paths_in(tmp.path());
+        let written =
+            stamp_and_write_manifest(&paths, valid_manifest(tmp.path()), chrono::Utc::now())
+                .expect("writes");
+
+        let file = std::fs::metadata(&written).unwrap().permissions().mode() & 0o777;
+        assert_eq!(file, 0o600, "manifest mode {file:o}");
+        let dir = std::fs::metadata(paths.root())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(dir, 0o700, "state directory mode {dir:o}");
+    }
+
+    #[test]
+    fn an_invalid_manifest_is_refused_before_anything_is_written() {
+        // Writing first and validating later would leave an installed job
+        // pointing at a file this same build refuses to load — a failure only
+        // a reinstall can clear, discovered at 3am.
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = state_paths_in(tmp.path());
+        let mut invalid = valid_manifest(tmp.path());
+        invalid.execution.working_directory = "relative/work".to_string();
+
+        let err = stamp_and_write_manifest(&paths, invalid, chrono::Utc::now())
+            .expect_err("an invalid manifest is refused");
+        assert!(err.to_string().contains("absolute path"), "{err}");
+        assert!(
+            !paths.manifest_path().exists(),
+            "a refused write left a file"
+        );
     }
 
     #[test]

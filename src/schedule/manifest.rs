@@ -70,17 +70,64 @@ enum HostPlatform {
     Windows,
 }
 
+/// Which input selected the state root.
+///
+/// Install has to know this, not just the resulting path. A scheduled process
+/// inherits none of the installing shell's environment, so if an environment
+/// variable chose the root, the installed unit must carry that variable or the
+/// run will recompute a *different* root and refuse its own manifest. The
+/// native fallbacks need no pinning: they derive from `HOME`, which the unit
+/// already sets, or from the Windows local-data directory, which is a property
+/// of the account rather than the shell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StateRootSource {
+    /// `XV_STATE_HOME`, with the value that selected the root.
+    XvStateHome(String),
+    /// `XDG_STATE_HOME`, with the value that selected the root.
+    XdgStateHome(String),
+    /// The Unix `$HOME/.local/state` fallback.
+    Home,
+    /// The Windows local-data directory.
+    WindowsLocalData,
+}
+
 /// Resolved, owned paths for the `rotation-default` schedule's state
 /// directory and the fixed files inside it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScheduleStatePaths {
     root: PathBuf,
+    source: StateRootSource,
 }
 
 impl ScheduleStatePaths {
     /// `<state root>/xv/schedules/rotation-default/`.
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Which input selected [`Self::root`].
+    // Production reads the derived `pinned_state_home()`; the raw source is
+    // what the resolution tests assert on, and what a later status/diagnostic
+    // task needs to explain where the state directory came from.
+    #[allow(dead_code)]
+    pub fn source(&self) -> &StateRootSource {
+        &self.source
+    }
+
+    /// The `(variable, value)` pair an installed unit must set so the
+    /// scheduled process resolves this same state root, or `None` when the
+    /// root came from a native fallback the unit already reproduces.
+    ///
+    /// This is not target selection: the manifest path is written into the
+    /// unit as an absolute string either way, and `xv schedule run` compares
+    /// what it was handed against what it recomputes. Pinning the variable is
+    /// what makes those two agree for a user whose shell profile sets one.
+    pub fn pinned_state_home(&self) -> Option<(&'static str, PathBuf)> {
+        match &self.source {
+            StateRootSource::XvStateHome(value) => Some(("XV_STATE_HOME", PathBuf::from(value))),
+            StateRootSource::XdgStateHome(value) => Some(("XDG_STATE_HOME", PathBuf::from(value))),
+            StateRootSource::Home | StateRootSource::WindowsLocalData => None,
+        }
     }
 
     /// `manifest.json` — the pinned target, owned by install/reinstall.
@@ -150,15 +197,21 @@ pub fn resolve(env: &ScheduleEnv) -> Result<ScheduleStatePaths> {
 }
 
 fn resolve_for(env: &ScheduleEnv, platform: HostPlatform) -> Result<ScheduleStatePaths> {
-    let state_root = if let Some(overridden) = non_empty(env.xv_state_home.clone()) {
-        PathBuf::from(overridden)
+    let (state_root, source) = if let Some(overridden) = non_empty(env.xv_state_home.clone()) {
+        (
+            PathBuf::from(&overridden),
+            StateRootSource::XvStateHome(overridden),
+        )
     } else {
         match platform {
             HostPlatform::Unix => {
                 if let Some(xdg) = non_empty(env.xdg_state_home.clone()) {
-                    PathBuf::from(xdg)
+                    (PathBuf::from(&xdg), StateRootSource::XdgStateHome(xdg))
                 } else if let Some(home) = non_empty(env.home.clone()) {
-                    PathBuf::from(home).join(".local").join("state")
+                    (
+                        PathBuf::from(home).join(".local").join("state"),
+                        StateRootSource::Home,
+                    )
                 } else {
                     return Err(CrosstacheError::config(
                         "Cannot determine the schedule state directory: HOME is not set and no XDG_STATE_HOME or XV_STATE_HOME override was provided",
@@ -166,7 +219,7 @@ fn resolve_for(env: &ScheduleEnv, platform: HostPlatform) -> Result<ScheduleStat
                 }
             }
             HostPlatform::Windows => match env.windows_local_data_dir.clone() {
-                Some(local_data) => local_data,
+                Some(local_data) => (local_data, StateRootSource::WindowsLocalData),
                 None => {
                     return Err(CrosstacheError::config(
                         "Cannot determine the schedule state directory: the Windows local-data directory could not be resolved and no XV_STATE_HOME override was provided",
@@ -178,6 +231,7 @@ fn resolve_for(env: &ScheduleEnv, platform: HostPlatform) -> Result<ScheduleStat
 
     Ok(ScheduleStatePaths {
         root: state_root.join("xv").join("schedules").join(SCHEDULE_ID),
+        source,
     })
 }
 
@@ -642,6 +696,78 @@ mod tests {
         );
     }
 
+    /// The root alone is not enough: install has to tell the unit which
+    /// variable produced it, or a scheduled run that inherits none of them
+    /// recomputes a different root and refuses its own manifest.
+    #[test]
+    fn resolve_reports_which_input_selected_the_root() {
+        let overridden = ScheduleEnv {
+            xv_state_home: Some("/override/state".to_string()),
+            xdg_state_home: Some("/xdg/state".to_string()),
+            home: Some("/home/alice".to_string()),
+            windows_local_data_dir: None,
+        };
+        let paths = resolve_for(&overridden, HostPlatform::Unix).unwrap();
+        assert_eq!(
+            paths.source(),
+            &StateRootSource::XvStateHome("/override/state".to_string())
+        );
+        assert_eq!(
+            paths.pinned_state_home(),
+            Some(("XV_STATE_HOME", PathBuf::from("/override/state")))
+        );
+
+        let xdg = ScheduleEnv {
+            xv_state_home: None,
+            ..overridden.clone()
+        };
+        let paths = resolve_for(&xdg, HostPlatform::Unix).unwrap();
+        assert_eq!(
+            paths.source(),
+            &StateRootSource::XdgStateHome("/xdg/state".to_string())
+        );
+        assert_eq!(
+            paths.pinned_state_home(),
+            Some(("XDG_STATE_HOME", PathBuf::from("/xdg/state")))
+        );
+
+        // The native fallbacks need no pin: the unit already sets HOME, and
+        // the Windows local-data directory is a property of the account.
+        let home_only = ScheduleEnv {
+            xv_state_home: None,
+            xdg_state_home: None,
+            ..overridden.clone()
+        };
+        let paths = resolve_for(&home_only, HostPlatform::Unix).unwrap();
+        assert_eq!(paths.source(), &StateRootSource::Home);
+        assert_eq!(paths.pinned_state_home(), None);
+
+        let windows = ScheduleEnv {
+            xv_state_home: None,
+            xdg_state_home: None,
+            home: None,
+            windows_local_data_dir: Some(PathBuf::from(r"C:\Users\alice\AppData\Local")),
+        };
+        let paths = resolve_for(&windows, HostPlatform::Windows).unwrap();
+        assert_eq!(paths.source(), &StateRootSource::WindowsLocalData);
+        assert_eq!(paths.pinned_state_home(), None);
+    }
+
+    /// An empty override is ignored for the *source* too, not just the path —
+    /// otherwise the unit would pin an empty variable that resolves nowhere.
+    #[test]
+    fn an_empty_override_pins_nothing() {
+        let env = ScheduleEnv {
+            xv_state_home: Some(String::new()),
+            xdg_state_home: Some(String::new()),
+            home: Some("/home/alice".to_string()),
+            windows_local_data_dir: None,
+        };
+        let paths = resolve_for(&env, HostPlatform::Unix).unwrap();
+        assert_eq!(paths.source(), &StateRootSource::Home);
+        assert_eq!(paths.pinned_state_home(), None);
+    }
+
     #[test]
     fn resolve_unix_errors_without_any_input() {
         let env = ScheduleEnv::default();
@@ -796,6 +922,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = ScheduleStatePaths {
             root: dir.path().to_path_buf(),
+            source: StateRootSource::Home,
         };
         std::fs::create_dir_all(paths.root()).unwrap();
         std::fs::write(
@@ -919,6 +1046,7 @@ mod tests {
     fn temp_paths(dir: &tempfile::TempDir) -> ScheduleStatePaths {
         ScheduleStatePaths {
             root: dir.path().join("xv").join("schedules").join(SCHEDULE_ID),
+            source: StateRootSource::Home,
         }
     }
 
@@ -999,7 +1127,10 @@ mod tests {
 
         let linked_root = dir.path().join("linked-root");
         std::os::unix::fs::symlink(&real_dir, &linked_root).unwrap();
-        let paths = ScheduleStatePaths { root: linked_root };
+        let paths = ScheduleStatePaths {
+            root: linked_root,
+            source: StateRootSource::Home,
+        };
 
         let error = load_manifest(&paths).unwrap_err();
         assert!(error.to_string().contains("symlink"));
