@@ -17,7 +17,7 @@ use crate::schedule::manifest::{
     self as manifest, ManifestCadence, ManifestExecution, ManifestTarget, ScheduleManifestV1,
 };
 use crate::schedule::outcome::{self, RunDiagnostic, RunOutcomeV1, RunState, RunSummary};
-use crate::schedule::ownership::{self, Ownership, SchedulerProbe};
+use crate::schedule::ownership::{self, Ownership, SchedulerState};
 use crate::schedule::preview::render_install_preview;
 use crate::schedule::target::{
     canonical_path_for_manifest, manifest_path_string, resolve_install_target,
@@ -1102,7 +1102,7 @@ async fn execute_status() -> Result<()> {
         )),
         // A scheduler that would not answer is not evidence of absence.
         Ownership::Absent => match &report.scheduler {
-            SchedulerProbe::Error(_) => output::warn(&format!(
+            SchedulerState::Error(_) => output::warn(&format!(
                 "Could not determine whether a {} rotation schedule is installed.",
                 platform.name()
             )),
@@ -1117,7 +1117,7 @@ async fn execute_status() -> Result<()> {
         output::info(&format!("  Ownership: {label}"));
     }
     match &report.scheduler {
-        SchedulerProbe::Error(detail) => output::error(&format!("  Scheduler: error ({detail})")),
+        SchedulerState::Error(detail) => output::error(&format!("  Scheduler: error ({detail})")),
         probe => output::info(&format!("  Scheduler: {}", probe.describe())),
     }
 

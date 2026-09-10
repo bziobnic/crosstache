@@ -55,6 +55,7 @@ pub mod manifest;
 pub mod outcome;
 pub mod ownership;
 pub mod preview;
+pub mod status;
 pub mod target;
 /// Debug-only scheduler stand-in for tests that run the real binary.
 #[cfg(debug_assertions)]
@@ -538,15 +539,15 @@ impl UnitPaths {
         Self { dir }
     }
 
-    fn launchd_plist(&self) -> PathBuf {
+    pub(crate) fn launchd_plist(&self) -> PathBuf {
         self.dir.join(format!("{LAUNCHD_LABEL}.plist"))
     }
 
-    fn systemd_service(&self) -> PathBuf {
+    pub(crate) fn systemd_service(&self) -> PathBuf {
         self.dir.join(format!("{SYSTEMD_UNIT}.service"))
     }
 
-    fn systemd_timer(&self) -> PathBuf {
+    pub(crate) fn systemd_timer(&self) -> PathBuf {
         self.dir.join(format!("{SYSTEMD_UNIT}.timer"))
     }
 }
@@ -586,6 +587,25 @@ fn xml_escape(s: &str) -> String {
         .replace('\'', "&apos;")
 }
 
+/// The `StartCalendarInterval` keys a launchd plist carries for an interval,
+/// in the order the renderer emits them.
+///
+/// Shared with [`crate::schedule::status`], which reads the same keys back out
+/// of an installed plist to decide whether the unit still fires when the
+/// manifest says it should. One list, so the reader cannot drift from the
+/// writer.
+pub(crate) fn launchd_calendar_pairs(interval: ScheduleInterval) -> Vec<(&'static str, u32)> {
+    match interval {
+        ScheduleInterval::Hourly { minute } => vec![("Minute", minute)],
+        ScheduleInterval::Daily { hour, minute } => vec![("Hour", hour), ("Minute", minute)],
+        ScheduleInterval::Weekly {
+            weekday,
+            hour,
+            minute,
+        } => vec![("Weekday", weekday), ("Hour", hour), ("Minute", minute)],
+    }
+}
+
 fn render_launchd(schedule: &RotationSchedule) -> String {
     let mut args = String::new();
     args.push_str(&format!(
@@ -605,24 +625,12 @@ fn render_launchd(schedule: &RotationSchedule) -> String {
         ));
     }
 
-    let calendar = match schedule.interval {
-        ScheduleInterval::Hourly { minute } => {
-            format!("        <key>Minute</key>\n        <integer>{minute}</integer>\n")
-        }
-        ScheduleInterval::Daily { hour, minute } => format!(
-            "        <key>Hour</key>\n        <integer>{hour}</integer>\n        \
-             <key>Minute</key>\n        <integer>{minute}</integer>\n"
-        ),
-        ScheduleInterval::Weekly {
-            weekday,
-            hour,
-            minute,
-        } => format!(
-            "        <key>Weekday</key>\n        <integer>{weekday}</integer>\n        \
-             <key>Hour</key>\n        <integer>{hour}</integer>\n        \
-             <key>Minute</key>\n        <integer>{minute}</integer>\n"
-        ),
-    };
+    let calendar = launchd_calendar_pairs(schedule.interval)
+        .into_iter()
+        .map(|(key, value)| {
+            format!("        <key>{key}</key>\n        <integer>{value}</integer>\n")
+        })
+        .collect::<String>();
 
     // Same reason as systemd's WorkingDirectory: a pinned run starts where the
     // manifest says it did. Rendered as an empty string for the legacy
@@ -704,8 +712,13 @@ fn render_systemd_service(schedule: &RotationSchedule) -> String {
     )
 }
 
-fn render_systemd_timer(schedule: &RotationSchedule) -> String {
-    let on_calendar = match schedule.interval {
+/// The `OnCalendar=` expression for an interval.
+///
+/// Shared with [`crate::schedule::status`] for the same reason as
+/// [`launchd_calendar_pairs`]: the check that an installed timer still matches
+/// the manifest must compare against what the renderer would write today.
+pub(crate) fn systemd_on_calendar(interval: ScheduleInterval) -> String {
+    match interval {
         ScheduleInterval::Hourly { minute } => format!("*-*-* *:{minute:02}:00"),
         ScheduleInterval::Daily { hour, minute } => format!("*-*-* {hour:02}:{minute:02}:00"),
         ScheduleInterval::Weekly {
@@ -716,7 +729,11 @@ fn render_systemd_timer(schedule: &RotationSchedule) -> String {
             "{} *-*-* {hour:02}:{minute:02}:00",
             systemd_weekday(weekday)
         ),
-    };
+    }
+}
+
+fn render_systemd_timer(schedule: &RotationSchedule) -> String {
+    let on_calendar = systemd_on_calendar(schedule.interval);
     format!(
         "# Managed by crosstache (xv schedule). Edits are overwritten on reinstall.\n\
          [Unit]\n\

@@ -726,7 +726,7 @@ fn verify_registration(
 /// `schtasks /XML` emits UTF-16LE; [`crate::schedule::decode_console_output`]
 /// has already turned that into ordinary text by the time it reaches here, so
 /// this matches on the tags directly.
-fn verify_schtasks_cadence(xml: &str, interval: ScheduleInterval) -> Result<()> {
+pub(crate) fn verify_schtasks_cadence(xml: &str, interval: ScheduleInterval) -> Result<()> {
     let (expected_time, required): (String, Vec<&str>) = match interval {
         // `/SC HOURLY /ST 00:MM` registers a trigger that starts at :MM and
         // repeats every hour, so the repetition interval is what proves the

@@ -32,30 +32,7 @@ use crate::schedule::{
     ScheduleCommand, UnitPaths, SCHTASKS_NAME, SYSTEMD_UNIT,
 };
 
-/// What the platform scheduler answered when asked about our entry.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SchedulerProbe {
-    /// The scheduler reports our entry is registered.
-    Installed,
-    /// The scheduler ran and said it has no such entry.
-    Absent,
-    /// The scheduler could not be run, or failed for some reason other than
-    /// "no such entry". The string is sanitized: the command name and its exit
-    /// status, never the raw output, which on Windows is locale-dependent and
-    /// on Unix may quote paths from another user's job.
-    Error(String),
-}
-
-impl SchedulerProbe {
-    /// Display form for the `Scheduler:` status line.
-    pub fn describe(&self) -> String {
-        match self {
-            Self::Installed => "installed".to_string(),
-            Self::Absent => "not registered".to_string(),
-            Self::Error(detail) => format!("error ({detail})"),
-        }
-    }
-}
+pub use crate::schedule::status::SchedulerState;
 
 /// Who owns what is installed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,7 +74,7 @@ impl Ownership {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnershipReport {
     pub state: Ownership,
-    pub scheduler: SchedulerProbe,
+    pub scheduler: SchedulerState,
 }
 
 /// Inspect the owned paths and the scheduler, and decide what is installed.
@@ -146,7 +123,7 @@ pub fn inspect_ownership(
     // artifact. An errored probe there leaves presence unproven; the scheduler
     // dimension carries that, and ownership does not invent a claim from it.
     let native_present = match platform {
-        Platform::Schtasks => scheduler == SchedulerProbe::Installed,
+        Platform::Schtasks => scheduler == SchedulerState::Installed,
         _ => !units.is_empty(),
     };
 
@@ -203,13 +180,13 @@ pub fn inspect_ownership(
 
 /// Ask the platform scheduler whether our entry exists, distinguishing "it
 /// said no" from "it could not answer".
-pub fn probe_scheduler(platform: Platform, runner: &dyn CommandRunner) -> SchedulerProbe {
+pub fn probe_scheduler(platform: Platform, runner: &dyn CommandRunner) -> SchedulerState {
     match platform {
         Platform::Launchd => {
             let target = launchd_domain_target();
             match runner.run("launchctl", &["print", &target]) {
-                Err(_) => SchedulerProbe::Error("launchctl could not be run".to_string()),
-                Ok(out) if out.ok() => SchedulerProbe::Installed,
+                Err(_) => SchedulerState::Error("launchctl could not be run".to_string()),
+                Ok(out) if out.ok() => SchedulerState::Installed,
                 Ok(out) => classify_failure("launchctl print", &out),
             }
         }
@@ -229,22 +206,26 @@ pub fn probe_scheduler(platform: Platform, runner: &dyn CommandRunner) -> Schedu
                     "--property=UnitFileState",
                 ],
             ) {
-                Err(_) => SchedulerProbe::Error("systemctl could not be run".to_string()),
+                Err(_) => SchedulerState::Error("systemctl could not be run".to_string()),
                 Ok(out) if !out.ok() => classify_failure("systemctl --user show", &out),
                 Ok(out) => {
-                    if crate::schedule::install::systemd_is_registered(
-                        &crate::schedule::install::parse_systemd_properties(&out.stdout),
-                    ) {
-                        SchedulerProbe::Installed
+                    let properties =
+                        crate::schedule::install::parse_systemd_properties(&out.stdout);
+                    if crate::schedule::install::systemd_is_registered(&properties) {
+                        SchedulerState::Installed
+                    } else if properties.contains_key("LoadState") {
+                        SchedulerState::Absent
                     } else {
-                        SchedulerProbe::Absent
+                        // `show` succeeded but printed nothing we recognize —
+                        // not the same as it saying the timer does not exist.
+                        SchedulerState::Unknown
                     }
                 }
             }
         }
         Platform::Schtasks => match runner.run("schtasks", &["/Query", "/TN", SCHTASKS_NAME]) {
-            Err(_) => SchedulerProbe::Error("schtasks could not be run".to_string()),
-            Ok(out) if out.ok() => SchedulerProbe::Installed,
+            Err(_) => SchedulerState::Error("schtasks could not be run".to_string()),
+            Ok(out) if out.ok() => SchedulerState::Installed,
             Ok(out) => classify_failure("schtasks /Query", &out),
         },
     }
@@ -258,16 +239,16 @@ pub fn probe_scheduler(platform: Platform, runner: &dyn CommandRunner) -> Schedu
 /// deregistration converges on absent for it: a `systemctl` that could not talk
 /// to the user manager did not tell us whether a timer is enabled, and status
 /// exists to say what is true rather than what is convenient.
-fn classify_failure(what: &str, out: &CommandOutput) -> SchedulerProbe {
+fn classify_failure(what: &str, out: &CommandOutput) -> SchedulerState {
     if says_user_bus_unavailable(out) {
-        SchedulerProbe::Error(format!(
+        SchedulerState::Error(format!(
             "{what} failed (exit {}): user bus unavailable",
             out.status
         ))
     } else if says_absent(out) {
-        SchedulerProbe::Absent
+        SchedulerState::Absent
     } else {
-        SchedulerProbe::Error(format!("{what} failed (exit {})", out.status))
+        SchedulerState::Error(format!("{what} failed (exit {})", out.status))
     }
 }
 
@@ -331,7 +312,7 @@ enum CommandShape {
 fn read_installed_command(
     platform: Platform,
     units: &[(PathBuf, Vec<u8>)],
-    scheduler: &SchedulerProbe,
+    scheduler: &SchedulerState,
     runner: &dyn CommandRunner,
 ) -> CommandReading {
     match platform {
@@ -353,7 +334,7 @@ fn read_installed_command(
             }
         }
         Platform::Schtasks => {
-            if *scheduler != SchedulerProbe::Installed {
+            if *scheduler != SchedulerState::Installed {
                 return CommandReading::NotQueried;
             }
             match runner.run(
@@ -408,7 +389,7 @@ pub fn unverified_target_note(command_line: &str) -> String {
 }
 
 /// The value after `--manifest` in a command line, if there is one.
-fn manifest_argument(command_line: &str) -> Option<String> {
+pub(crate) fn manifest_argument(command_line: &str) -> Option<String> {
     let after = command_line.split_once("--manifest")?.1.trim_start();
     let value = if let Some(quoted) = after.strip_prefix('"') {
         quoted.split_once('"').map(|(value, _)| value)?
@@ -426,7 +407,7 @@ fn join_argv(argv: &[String]) -> String {
 }
 
 /// `ProgramArguments` from a launchd plist, in order.
-fn plist_program_arguments(text: &str) -> Option<Vec<String>> {
+pub(crate) fn plist_program_arguments(text: &str) -> Option<Vec<String>> {
     let after = text.split_once("<key>ProgramArguments</key>")?.1;
     let body = after.split_once("<array>")?.1.split_once("</array>")?.0;
     let mut argv = Vec::new();
@@ -453,7 +434,7 @@ fn xml_unescape(s: &str) -> String {
 }
 
 /// `ExecStart=` from a systemd service unit, tokenized.
-fn systemd_exec_start(text: &str) -> Option<Vec<String>> {
+pub(crate) fn systemd_exec_start(text: &str) -> Option<Vec<String>> {
     let line = text
         .lines()
         .map(str::trim)
@@ -505,7 +486,7 @@ fn split_exec_args(value: &str) -> Vec<String> {
 }
 
 /// The `Task To Run:` value from `schtasks /Query /V /FO LIST`.
-fn schtasks_task_to_run(stdout: &str) -> Option<String> {
+pub(crate) fn schtasks_task_to_run(stdout: &str) -> Option<String> {
     stdout
         .lines()
         .map(str::trim)
@@ -718,7 +699,7 @@ mod tests {
             let report =
                 inspect_ownership(platform, &f.units, &f.state, &not_registered()).unwrap();
             assert_eq!(report.state, Ownership::Absent, "{platform:?}");
-            assert_eq!(report.scheduler, SchedulerProbe::Absent, "{platform:?}");
+            assert_eq!(report.scheduler, SchedulerState::Absent, "{platform:?}");
             assert_eq!(report.state.label(), None);
         }
     }
@@ -736,7 +717,7 @@ mod tests {
             let report = inspect_ownership(platform, &f.units, &f.state, &registered()).unwrap();
             assert_eq!(report.state, Ownership::Managed, "{platform:?}");
             assert_eq!(report.state.label(), Some("managed"));
-            assert_eq!(report.scheduler, SchedulerProbe::Installed);
+            assert_eq!(report.scheduler, SchedulerState::Installed);
         }
     }
 
@@ -896,10 +877,10 @@ mod tests {
             let report = inspect_ownership(platform, &f.units, &f.state, &runner).unwrap();
             assert_eq!(
                 report.scheduler,
-                SchedulerProbe::Error(expected.to_string()),
+                SchedulerState::Error(expected.to_string()),
                 "{platform:?}"
             );
-            assert_ne!(report.scheduler, SchedulerProbe::Absent, "{platform:?}");
+            assert_ne!(report.scheduler, SchedulerState::Absent, "{platform:?}");
         }
     }
 
@@ -911,7 +892,7 @@ mod tests {
                 inspect_ownership(platform, &f.units, &f.state, &FakeRunner::spawn_failure())
                     .unwrap();
             assert!(
-                matches!(report.scheduler, SchedulerProbe::Error(ref d) if d.contains("could not be run")),
+                matches!(report.scheduler, SchedulerState::Error(ref d) if d.contains("could not be run")),
                 "{platform:?}: {:?}",
                 report.scheduler
             );
@@ -927,7 +908,7 @@ mod tests {
             "domain gui/501 is unavailable",
         );
         let report = inspect_ownership(Platform::Launchd, &f.units, &f.state, &runner).unwrap();
-        let SchedulerProbe::Error(detail) = report.scheduler else {
+        let SchedulerState::Error(detail) = report.scheduler else {
             panic!("expected an error");
         };
         assert_eq!(detail, "launchctl print failed (exit 74)");
@@ -943,7 +924,7 @@ mod tests {
         let report = inspect_ownership(Platform::Systemd, &f.units, &f.state, &runner).unwrap();
         assert_eq!(
             report.scheduler,
-            SchedulerProbe::Error(
+            SchedulerState::Error(
                 "systemctl --user show failed (exit 1): user bus unavailable".to_string()
             )
         );
