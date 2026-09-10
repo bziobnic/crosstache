@@ -1450,8 +1450,10 @@ nothing else. If any recorded input has changed, the run refuses before touching
 a backend and `xv schedule status` says so — reinstall is how you accept a new
 target. A schedule installed by an older `xv` is labelled `legacy-unpinned` and
 is replaced by an explicit `xv schedule install`, never automatically. The unit
-holds only a binary path, the manifest path, a log path and `HOME` — never
-credentials, and never a vault name.
+holds only a binary path, the manifest path, a log path, the working directory
+the target was resolved in, and `HOME` — plus `XV_STATE_HOME`/`XDG_STATE_HOME`
+when one of them selected the state root, so the job can find the manifest it
+owns. Never credentials, never a vault name, and never `XDG_CONFIG_HOME`.
 
 ```bash
 xv schedule install --vault v --print   # render the unit, write nothing

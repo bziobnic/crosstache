@@ -76,6 +76,10 @@
   scheduled run's outcome is not persisted and the scheduler's next-run time is
   not parsed; status reports ownership, the scheduler's answer, the recorded
   target and its drift verdict only.
+- **Concurrent firings are not serialized yet.** The scheduled run takes no
+  `run.lock`, so two overlapping runs (a manual `xv schedule run` while the
+  scheduler fires, or a firing that outlives its cadence) can rotate the same
+  vault at the same time. The run lock ships with last-run reporting.
 
 ## v0.39.0 — Attachment key lifecycle (2026-09-06)
 

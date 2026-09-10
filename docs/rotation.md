@@ -213,10 +213,15 @@ Under the per-user state directory, in `schedules/rotation-default/`:
 | File | Written by | Lifetime |
 |------|------------|----------|
 | `manifest.json` | install/reinstall | removed by `uninstall` |
-| `last-run.json` | the scheduled run | retained by reinstall and `uninstall` |
-| `run.lock` | the scheduled run | persistent lock inode; retained |
+| `last-run.json` | the scheduled run — **forthcoming (not written yet)** | retained by reinstall and `uninstall` |
+| `run.lock` | the scheduled run — **forthcoming (not written yet)** | persistent lock inode; retained |
 | `install.lock` | install/reinstall/uninstall | persistent lock inode; retained |
 | `recovery/` | an install rollback that could not finish | created only then; retained |
+
+`last-run.json` and `run.lock` are listed because `uninstall` already retains
+them if it finds them: this release's scheduled run writes neither, so nothing
+records the outcome of a firing and **concurrent firings are not serialized**.
+Both ship with last-run/next-run reporting.
 
 The rotation log lives outside that directory (`~/.local/state/xv/rotate.log` by
 default, or wherever `--log-file` pointed) and is likewise never removed.

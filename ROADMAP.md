@@ -53,8 +53,9 @@ scheduler runners where practical.
 purpose, but the rotation path it classifies (`execute_secret_rotate` in
 `src/cli/secret_ops.rs`) wraps most provider failures in `CrosstacheError::config`,
 so a denied write, an unreachable backend and a generator that failed all reach
-the scheduler as `rotate-failed`. The categories exist and are persisted; they
-are just not discriminating. Fix it in the rotation path — propagate the typed
+the scheduler as `rotate-failed`. The categories exist and are carried back in
+the run summary (nothing persists them yet — `last-run.json` is not written in
+this release); they are just not discriminating. Fix it in the rotation path — propagate the typed
 backend error instead of re-wrapping — rather than by matching on error text.
 
 ### P1 — Finish cache invalidation on vault removal

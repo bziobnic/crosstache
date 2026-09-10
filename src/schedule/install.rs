@@ -1043,7 +1043,11 @@ impl UninstallReport {
 ///
 /// A foreign or symlinked artifact at an owned path is reported and left
 /// exactly as it is: uninstall removes files `xv` wrote, and it decides that
-/// from the bytes, not from the path.
+/// from the bytes, not from the path. Classification happens *before* any
+/// scheduler command runs, and a single foreign artifact suppresses
+/// deregistration entirely — a registration is state too, and tearing it down
+/// while calling the file it points at "retained" would not be retaining
+/// anything.
 ///
 /// Absence is success — teardown scripts run this against hosts that never had
 /// a schedule — but a *scheduler failure* is not absence and is carried back in
@@ -1056,16 +1060,39 @@ pub(crate) fn uninstall_owned(
 ) -> Result<UninstallReport> {
     let mut report = UninstallReport::default();
 
-    // Deregister first: a unit file removed while the scheduler still holds
-    // the job leaves a registration pointing at nothing.
-    match unregister_native_reporting(platform, runner)? {
-        DeregisterOutcome::Removed => report.deregistered = true,
-        DeregisterOutcome::Absent => {}
-        DeregisterOutcome::Failed(detail) => report.scheduler_error = Some(detail),
+    // Classify BEFORE touching the scheduler. Deregistration is not reversible
+    // from here, so "reported and retained" has to mean the registration too:
+    // tearing down a job whose unit file somebody else wrote, and then
+    // reporting that file as retained, is the opposite of leaving foreign
+    // content alone. So every owned path is read first, and a single foreign
+    // artifact anywhere in the owned set means the scheduler is not touched at
+    // all. (Schtasks has no unit file to classify, so only its manifest can
+    // hold foreign content.)
+    let mut unit_states = Vec::new();
+    for path in unit_paths_for(platform, unit_paths) {
+        let state = store.read_unit(&path)?;
+        unit_states.push((path, state));
+    }
+    let manifest_state = store.read_manifest()?;
+
+    let any_foreign = unit_states
+        .iter()
+        .any(|(_, state)| matches!(state, ArtifactState::Foreign(_)))
+        || matches!(manifest_state, ArtifactState::Foreign(_));
+
+    if !any_foreign {
+        // Deregister before removing files: a unit file removed while the
+        // scheduler still holds the job leaves a registration pointing at
+        // nothing.
+        match unregister_native_reporting(platform, runner)? {
+            DeregisterOutcome::Removed => report.deregistered = true,
+            DeregisterOutcome::Absent => {}
+            DeregisterOutcome::Failed(detail) => report.scheduler_error = Some(detail),
+        }
     }
 
-    for path in unit_paths_for(platform, unit_paths) {
-        match store.read_unit(&path)? {
+    for (path, state) in unit_states {
+        match state {
             ArtifactState::Absent => {}
             ArtifactState::Owned(_) => {
                 store.remove_unit(&path)?;
@@ -1075,7 +1102,7 @@ pub(crate) fn uninstall_owned(
         }
     }
 
-    match store.read_manifest()? {
+    match manifest_state {
         ArtifactState::Absent => {}
         ArtifactState::Owned(_) => {
             store.remove_manifest()?;
@@ -1616,6 +1643,62 @@ mod tests {
         assert!(!report.removed_units.contains(&victim));
         // The other, genuinely owned unit is still removed.
         assert!(store.get(&plan.units[1].path).is_none());
+    }
+
+    /// Retention covers the registration, not just the bytes: classification
+    /// runs before any scheduler command, so a foreign unit at an owned path
+    /// means `launchctl bootout` / `systemctl --user disable --now` never runs.
+    /// Reporting "Retained" after tearing the job down retains nothing.
+    #[test]
+    fn uninstall_does_not_deregister_when_an_owned_path_is_foreign() {
+        for platform in [Platform::Launchd, Platform::Systemd] {
+            let plan = plan(platform);
+            let mut store = FakeStore::with_prior(platform);
+            let victim = plan.units[0].path.clone();
+            store
+                .files
+                .insert(victim.clone(), b"# my own job\n".to_vec());
+            store
+                .foreign
+                .insert(victim.clone(), "not written by xv".to_string());
+            let runner = FakeRunner::with_prior();
+
+            let report = uninstall_owned(platform, &unit_dir(), &mut store, &runner)
+                .unwrap_or_else(|e| panic!("{platform:?}: {e}"));
+
+            assert!(
+                !report.deregistered,
+                "{platform:?}: reported a deregistration it must not have performed"
+            );
+            let calls = runner.calls.lock().unwrap().clone();
+            let deregistration = match platform {
+                Platform::Launchd => "bootout",
+                Platform::Systemd => "disable",
+                Platform::Schtasks => "/Delete",
+            };
+            assert!(
+                !calls.iter().any(|call| call.contains(deregistration)),
+                "{platform:?}: tore down the registration of a foreign unit: {calls:?}"
+            );
+            assert_eq!(report.foreign, vec![victim], "{platform:?}");
+        }
+    }
+
+    /// The same run with nothing foreign still deregisters — the guard above
+    /// must be about foreign content, not about uninstall having stopped
+    /// calling the scheduler.
+    #[test]
+    fn uninstall_still_deregisters_when_every_owned_path_is_ours() {
+        for platform in [Platform::Launchd, Platform::Systemd] {
+            let mut store = FakeStore::with_prior(platform);
+            let runner = FakeRunner::with_prior();
+
+            let report = uninstall_owned(platform, &unit_dir(), &mut store, &runner)
+                .unwrap_or_else(|e| panic!("{platform:?}: {e}"));
+
+            assert!(report.deregistered, "{platform:?}");
+            assert!(report.foreign.is_empty(), "{platform:?}");
+        }
     }
 
     #[test]

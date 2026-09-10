@@ -1411,6 +1411,89 @@ fn a_changed_participating_context_refuses_the_run() {
     assert_eq!(fixture.value(), before);
 }
 
+/// A context-pinned schedule must survive its own success.
+///
+/// `execute_secret_rotate` used to bump the ambient context's usage counters
+/// on every rotation. When the context's `current` vault is the very vault the
+/// schedule targets, that rewrote the exact file `context_digest` pins, so the
+/// first successful firing made every later firing refuse with
+/// `context_digest changed`. Two firings, both green, and the file untouched.
+#[test]
+fn a_pinned_sweep_does_not_invalidate_its_own_context() {
+    // `current` names the target vault — the only shape in which
+    // `update_usage` rewrites the file — and the workspace block is what makes
+    // the context participate in resolution, so its digest is recorded.
+    let context = r#"{
+  "current": {
+    "vault_name": "default",
+    "resource_group": null,
+    "subscription_id": null,
+    "storage_container": null,
+    "last_used": "2026-01-01T00:00:00Z",
+    "usage_count": 1
+  },
+  "recent": [],
+  "workspace": {
+    "entries": [
+      { "vault": "default", "backend": "local", "alias": "pinned", "default": true }
+    ]
+  }
+}
+"#;
+    let fixture = pinned_run_fixture(&[], |root| {
+        std::fs::create_dir_all(root.join(".xv")).unwrap();
+        std::fs::write(root.join(".xv").join("context"), context).unwrap();
+    });
+    let context_file = fixture.root.join(".xv").join("context");
+    let recorded = std::fs::read(&context_file).unwrap();
+    assert_eq!(
+        recorded,
+        context.as_bytes(),
+        "the fixture's install must not have rewritten the context either"
+    );
+    // The manifest really did pin this file; otherwise the test would pass
+    // for the wrong reason.
+    let manifest_body = std::fs::read_to_string(&fixture.manifest).unwrap();
+    assert!(
+        manifest_body.contains("context_digest"),
+        "the context did not participate in the recorded target: {manifest_body}"
+    );
+
+    let mut values = Vec::new();
+    for firing in 1..=2 {
+        // Re-arm before each firing: a successful rotation refreshes
+        // `xv:rotated_at`, so without this the second run would find nothing
+        // due and prove nothing about a run that actually rotates.
+        make_due(&fixture.store, "STALE");
+        let out = fixture.run();
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "firing {firing} did not succeed: {combined}"
+        );
+        assert!(
+            !combined.contains("context_digest"),
+            "firing {firing} complained about the context: {combined}"
+        );
+        values.push(fixture.value());
+        assert_eq!(
+            std::fs::read(&context_file).unwrap(),
+            recorded,
+            "firing {firing} rewrote the pinned context file"
+        );
+    }
+
+    // Both firings really rotated, so the second one was not a no-op that
+    // happened to leave the context alone.
+    assert_ne!(values[0], "pinned-value");
+    assert_ne!(values[1], values[0]);
+}
+
 #[test]
 fn a_missing_working_directory_refuses_the_run() {
     let fixture = pinned_run_fixture(&[], |_| {});
@@ -1577,6 +1660,50 @@ fn seed_pinned_units(
             unit.path
         })
         .collect()
+}
+
+/// The reinstall hint has to be a command the user can paste, which means the
+/// name they installed with — the recorded workspace alias — not a placeholder
+/// and not the real vault behind it. `--vault default` here would send them at
+/// a different target than `--vault pinned`.
+#[test]
+fn a_reinstall_hint_names_the_alias_the_schedule_was_installed_with() {
+    let context = r#"{
+  "current": null,
+  "recent": [],
+  "workspace": {
+    "entries": [
+      { "vault": "default", "backend": "local", "alias": "pinned", "default": true }
+    ]
+  }
+}
+"#;
+    let fixture = pinned_run_fixture(&[], |root| {
+        std::fs::create_dir_all(root.join(".xv")).unwrap();
+        std::fs::write(root.join(".xv").join("context"), context).unwrap();
+    });
+    let manifest_body = std::fs::read_to_string(&fixture.manifest).unwrap();
+    assert!(
+        manifest_body.contains("\"workspace_alias\": \"pinned\""),
+        "the fixture did not record the alias: {manifest_body}"
+    );
+
+    // Drift the pinned config so status renders the "accept the new target"
+    // hint at all.
+    let conf = fixture.config_path();
+    let body = std::fs::read_to_string(&conf).unwrap();
+    std::fs::write(&conf, format!("{body}\n# a later edit\n")).unwrap();
+
+    let out = schedule_status(&fixture.root, &fixture.state);
+    assert!(out.contains("Drift:     refused"), "{out}");
+    assert!(
+        out.contains("xv schedule install --vault pinned"),
+        "the hint did not name the recorded alias: {out}"
+    );
+    assert!(
+        !out.contains("<alias-or-vault>"),
+        "the hint left the placeholder in although the alias is known: {out}"
+    );
 }
 
 fn schedule_status(root: &std::path::Path, state: &std::path::Path) -> String {
@@ -1750,15 +1877,23 @@ fn uninstall_removes_the_manifest_and_keeps_every_other_file() {
     );
     assert!(out.status.success(), "{combined}");
 
-    // The scheduler was still *asked* — the fake proves the command and its
-    // arguments without letting them reach the real one.
+    // A foreign file at an owned path retains the *registration* too:
+    // classification happens before any scheduler command, and a single
+    // foreign artifact suppresses deregistration entirely. Schtasks has no
+    // unit file to make foreign, so it still deregisters. The fake proves the
+    // command and its arguments without letting them reach the real one.
     let calls = scheduler_calls(&log);
-    assert!(
-        calls
-            .iter()
-            .any(|call| call.contains(expected_deregistration(platform))),
-        "uninstall did not deregister: {calls:?}"
-    );
+    let deregistered = calls
+        .iter()
+        .any(|call| call.contains(expected_deregistration(platform)));
+    if foreign.is_some() {
+        assert!(
+            !deregistered,
+            "uninstall tore down the registration of a unit xv did not write: {calls:?}"
+        );
+    } else {
+        assert!(deregistered, "uninstall did not deregister: {calls:?}");
+    }
 
     assert!(
         !fixture.manifest.exists(),

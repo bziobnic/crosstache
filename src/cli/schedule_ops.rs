@@ -541,6 +541,13 @@ fn check_owned_manifest_path(supplied: &Path, owned: &Path) -> Result<()> {
                 supplied.display()
             )));
         }
+        // Everything else — not a symlink, or the metadata call itself failed
+        // (NotFound, permission denied, an I/O error) — falls through on
+        // purpose. This check exists only to reject a symlink; it is not the
+        // existence or readability check. A path that cannot be stat'ed still
+        // has to pass the equality below, and `load_manifest` then opens the
+        // owned path no-follow and surfaces the real error there, where the
+        // message can name reinstall.
         _ => {}
     }
     if comparable_form(supplied) != comparable_form(owned) {
@@ -574,9 +581,25 @@ fn comparable_form(path: &Path) -> PathBuf {
 /// symlink-refusing manifest load, and the full drift validation all happen
 /// before anything that could construct a backend, so a malformed, oversized,
 /// symlinked, foreign or drifted manifest cannot reach a provider — let alone
-/// mutate a secret. Nothing on this path touches `XV_BACKEND`, `XV_ENV`, the
-/// ambient context file, or the directory the scheduler happened to start the
-/// process in: every selection input comes out of the manifest.
+/// mutate a secret.
+///
+/// **No target-selection input comes from the environment.** Nothing on this
+/// path reads `XV_BACKEND` or `XV_ENV`, nothing reads or writes the ambient
+/// context file — the sweep passes `track_context_usage: false`, precisely
+/// because a usage bump would change the very bytes `context_digest` pins —
+/// and the directory the scheduler happened to start the process in does not
+/// select anything: the run sets the process cwd to the recorded
+/// `working_directory` before the sweep, so ambient-cwd helpers see the
+/// directory the manifest names. Every selection input comes out of the
+/// manifest.
+///
+/// Two environment reads remain, and neither selects a target: the state root
+/// (`XV_STATE_HOME`/`XDG_STATE_HOME`), which locates the owned manifest and is
+/// pinned into the unit at install time, and `XV_NO_PARENT_CONFIG`, which
+/// `resolve_record_types` consults when loading custom `[types.*]` schemas
+/// from the recorded project file — record *shapes*, not which vault or
+/// backend is rotated. (Install refuses when that variable would change
+/// project discovery; see `drift`.)
 async fn execute_run(supplied_manifest: &Path) -> Result<()> {
     let state_paths = manifest::resolve_from_process_env()?;
     let owned = state_paths.manifest_path();
@@ -998,19 +1021,27 @@ async fn execute_status() -> Result<()> {
             );
         }
         Ownership::Managed | Ownership::OrphanedManifest => {
+            // Echo the name the schedule was installed with, so the hint is a
+            // command the user can paste. Only the placeholder is left when
+            // the manifest could not be read at all.
+            let vault_arg = recorded
+                .as_ref()
+                .and_then(RecordedTarget::install_argument)
+                .unwrap_or("<alias-or-vault>")
+                .to_string();
             if let Some(recorded) = recorded {
                 recorded.report();
             }
             if matches!(report.state, Ownership::OrphanedManifest) {
-                output::hint(
-                    "Run 'xv schedule install --vault <alias-or-vault>' to repair the schedule, \
+                output::hint(&format!(
+                    "Run 'xv schedule install --vault {vault_arg}' to repair the schedule, \
                      or 'xv schedule uninstall' to remove the manifest.",
-                );
+                ));
             } else if refuses {
-                output::hint(
-                    "Review the changes, then run 'xv schedule install --vault <alias-or-vault>' \
+                output::hint(&format!(
+                    "Review the changes, then run 'xv schedule install --vault {vault_arg}' \
                      to accept the new target.",
-                );
+                ));
             }
         }
         Ownership::Foreign { paths } => {
@@ -1036,12 +1067,26 @@ enum RecordedTarget {
     Unreadable(String),
     /// The recorded target and what recomputing it says today.
     Read {
+        /// The name the user installed with: the recorded workspace alias, or
+        /// the real vault in the degenerate (no workspace) case. This is what
+        /// a reinstall hint must echo — telling someone to rerun
+        /// `--vault <the real vault>` when they installed `--vault payments`
+        /// would send them at a different target.
+        alias: String,
         summary: String,
         drift: drift::DriftReport,
     },
 }
 
 impl RecordedTarget {
+    /// The `--vault` value a reinstall hint should name, when it is known.
+    fn install_argument(&self) -> Option<&str> {
+        match self {
+            Self::Unreadable(_) => None,
+            Self::Read { alias, .. } => Some(alias.as_str()),
+        }
+    }
+
     /// Print the `Target:` and `Drift:` lines.
     fn report(&self) {
         match self {
@@ -1049,7 +1094,7 @@ impl RecordedTarget {
                 output::error(&format!("  Target:    unreadable ({detail})"));
                 output::hint("Reinstall the schedule with 'xv schedule install' to regenerate it.");
             }
-            Self::Read { summary, drift } => {
+            Self::Read { summary, drift, .. } => {
                 output::info(&format!("  Target:    {summary}"));
                 output::info(&format!(
                     "  Drift:     {}",
@@ -1096,7 +1141,11 @@ async fn read_recorded_target(
         env!("CARGO_PKG_VERSION"),
     )
     .await;
-    Ok(RecordedTarget::Read { summary, drift })
+    Ok(RecordedTarget::Read {
+        alias,
+        summary,
+        drift,
+    })
 }
 
 /// Remove the schedule and the manifest, and nothing else.
