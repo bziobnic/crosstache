@@ -2478,3 +2478,35 @@ fn a_contending_runner_skips_without_touching_the_outcome() {
     fs2::FileExt::unlock(&held).unwrap();
     drop(fixture.tmp);
 }
+
+/// A refusal discovered **after** the `running` record is written still ends
+/// terminal.
+///
+/// Vault verification happens inside the sweep, well past the point where
+/// `last-run.json` already says `running`. If that path returned without
+/// replacing the record, status would report a phantom interrupted run
+/// forever — so this is the case that proves the no-early-return region does
+/// its job end to end, not just on the source text.
+#[test]
+fn a_refusal_found_during_the_sweep_still_ends_terminal() {
+    let fixture = pinned_run_fixture(&[], |_| {});
+    // The pinned store disappears after the manifest was written, so drift
+    // validation (which reads files, not vaults) still passes and the refusal
+    // comes from the sweep's own read-only probe.
+    std::fs::remove_dir_all(&fixture.store).unwrap();
+
+    let out = fixture.run();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
+
+    let outcome = read_outcome(&fixture.state);
+    assert_ne!(
+        outcome["state"], "running",
+        "the running record was never replaced: {outcome}"
+    );
+    assert_eq!(outcome["state"], "refused_drift");
+    assert_eq!(outcome["exit_code"], 3);
+    assert!(outcome["finished_at"].is_string(), "{outcome}");
+    assert_eq!(outcome["diagnostic"]["code"], "target_drift");
+    drop(fixture.tmp);
+}

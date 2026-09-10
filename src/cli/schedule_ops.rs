@@ -644,6 +644,13 @@ async fn execute_run(supplied_manifest: &Path) -> Result<()> {
             ))
         })?;
 
+    // Resolved *before* the `running` record, not at its use site below.
+    // `recorded_binary_path` reads `current_exe()`, which can fail (a deleted
+    // or unreadable executable). Every fallible step that cannot produce a
+    // terminal outcome has to happen while there is still no record to leave
+    // dangling — see the region marker below.
+    let binary_path = recorded_binary_path()?;
+
     // The digest of exactly the bytes just parsed — not a re-serialization,
     // and not a second read — so status can tell a record written by *this*
     // installation from one retained across a reinstall.
@@ -658,15 +665,27 @@ async fn execute_run(supplied_manifest: &Path) -> Result<()> {
         &outcome::RunOutcomeV1::running(&manifest_digest, &started_at),
     )?;
 
+    // -----------------------------------------------------------------
+    // [[run-outcome-region:begin]]
+    //
+    // NO EARLY RETURNS — from the `running` write above to the terminal
+    // write below.
+    //
+    // Nothing in here may use `?` or `return`. A `running` record that is
+    // never replaced is indistinguishable from a runner that was killed
+    // mid-sweep, so an ordinary error escaping this region would make
+    // `xv schedule status` report a phantom interrupted run forever.
+    // Every step here either yields a `RunOutcomeDraft` (which always has
+    // a terminal state) or, like the outcome write itself, degrades to a
+    // warning. `schedule_run_has_no_early_return_between_the_outcome_writes`
+    // enforces this on the source text.
+    // -----------------------------------------------------------------
+
     // Recompute the recorded target from the recorded inputs. This reads
     // files and nothing else — no backend is constructed until it returns a
     // non-refusing verdict (design invariant 4).
-    let report = drift::validate_recorded_target(
-        &manifest,
-        &recorded_binary_path()?,
-        env!("CARGO_PKG_VERSION"),
-    )
-    .await;
+    let report =
+        drift::validate_recorded_target(&manifest, &binary_path, env!("CARGO_PKG_VERSION")).await;
 
     for warning in &report.warnings {
         output::warn(&warning.detail);
@@ -689,6 +708,8 @@ async fn execute_run(supplied_manifest: &Path) -> Result<()> {
             state_paths.last_run_path().display()
         ));
     }
+    // [[run-outcome-region:end]]
+    // -----------------------------------------------------------------
     result
 }
 
@@ -1342,6 +1363,67 @@ fn remove_schedule_dir_if_empty(paths: &manifest::ScheduleStatePaths) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `running` record must always be replaceable.
+    ///
+    /// A `running` outcome that is never replaced is indistinguishable from a
+    /// runner that was killed mid-sweep, so `xv schedule status` would report
+    /// a phantom interrupted run forever. `execute_run` therefore marks the
+    /// span between the two outcome writes as a no-early-return region, and
+    /// this test enforces that on the source text: a `?` or a `return` added
+    /// there later fails here rather than in the field at 3am.
+    ///
+    /// A source-text assertion is blunt, but the alternative — injecting a
+    /// failure into `current_exe()` or `set_current_dir` — needs seams the
+    /// runner deliberately does not have.
+    #[test]
+    fn schedule_run_has_no_early_return_between_the_outcome_writes() {
+        const SOURCE: &str = include_str!("schedule_ops.rs");
+        // Assembled rather than written out, so this test's own source does
+        // not contain the markers it searches for.
+        let start_marker = format!("[[run-outcome-region:{}]]", "begin");
+        let end_marker = format!("[[run-outcome-region:{}]]", "end");
+
+        let start = SOURCE
+            .find(&start_marker)
+            .expect("the region start marker is present in execute_run");
+        let end = SOURCE
+            .find(&end_marker)
+            .expect("the region end marker is present in execute_run");
+        assert!(start < end, "the region markers are out of order");
+        assert_eq!(
+            SOURCE.matches(&start_marker).count(),
+            1,
+            "the region start marker must appear exactly once"
+        );
+        assert_eq!(
+            SOURCE.matches(&end_marker).count(),
+            1,
+            "the region end marker must appear exactly once"
+        );
+        let region = &SOURCE[start..end];
+        // Sanity: the region really is the body between the two writes, not
+        // an empty slice that would make the scan below vacuous.
+        assert!(
+            region.contains("drift::validate_recorded_target"),
+            "the region does not span the validation/sweep body"
+        );
+
+        for (offset, line) in region.lines().enumerate() {
+            let code = line.trim();
+            if code.starts_with("//") || code.starts_with("///") {
+                continue;
+            }
+            assert!(
+                !code.contains('?'),
+                "line {offset} of the no-early-return region uses `?`: {code}"
+            );
+            assert!(
+                !code.starts_with("return "),
+                "line {offset} of the no-early-return region returns early: {code}"
+            );
+        }
+    }
 
     /// A real owned path under a tempdir, so canonicalization has something to
     /// resolve on hosts where the temp root is itself a symlink (macOS).

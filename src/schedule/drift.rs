@@ -38,7 +38,7 @@ use crate::config::ContextManager;
 use crate::schedule::manifest::VAULT_SELECTION_IMPLICIT;
 use crate::schedule::manifest::{ManifestTarget, ScheduleManifestV1};
 use crate::schedule::target::{selected_backend_identity, workspace_source_label};
-use crate::workspace::WorkspaceEntry;
+use crate::workspace::{Workspace, WorkspaceEntry};
 
 /// The outcome of validating a recorded target against the world as it is now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -406,21 +406,8 @@ async fn recompute_target(target: &ManifestTarget, cwd: &Path, reasons: &mut Vec
             // vault the resolution chain no longer chooses — so re-derive it
             // and refuse on a difference. An explicit `--vault X` pinned the
             // name `X`, which a moving default does not affect.
-            if target.workspace_source == "degenerate"
-                && target.vault_selection == VAULT_SELECTION_IMPLICIT
-            {
-                if let Ok(default_entry) = workspace.default_entry() {
-                    if default_entry.vault != target.vault {
-                        // Names only in the wording: the recorded and current
-                        // vault names both already appear in ordinary CLI
-                        // output, but this reason is written to an unattended
-                        // log, so it points at the workspace instead.
-                        reasons.push(DriftReason::new(
-                            "vault",
-                            "vault changed; review the workspace default and reinstall",
-                        ));
-                    }
-                }
+            if let Some(reason) = implicit_default_vault_reason(&workspace, target) {
+                reasons.push(reason);
             }
             WorkspaceEntry {
                 alias: crate::workspace::degenerate_alias_for(&effective, &target.vault),
@@ -483,6 +470,45 @@ async fn recompute_target(target: &ManifestTarget, cwd: &Path, reasons: &mut Vec
                 target.vault, entry.vault
             ),
         ));
+    }
+}
+
+/// The `vault` reason an **implicit** degenerate target owes, if any.
+///
+/// An install with no `--vault` pinned *the degenerate workspace's default
+/// vault*, not a name. When that default moves, the recorded name would
+/// silently keep rotating a vault the resolution chain no longer chooses, so
+/// the run must refuse. An explicit `--vault X` pinned the name `X`, which a
+/// moving default does not affect — and a configured workspace records an
+/// alias, which the caller checks instead.
+///
+/// Split out of [`recompute_target`] so the failure branch is reachable from a
+/// test: a workspace whose `default_alias` names no entry cannot be produced
+/// by `build_workspace`, only handed in.
+fn implicit_default_vault_reason(
+    workspace: &Workspace,
+    target: &ManifestTarget,
+) -> Option<DriftReason> {
+    if target.workspace_source != "degenerate" || target.vault_selection != VAULT_SELECTION_IMPLICIT
+    {
+        return None;
+    }
+    match workspace.default_entry() {
+        Ok(entry) if entry.vault == target.vault => None,
+        // Names are deliberately absent from the wording: this reason is
+        // written to an unattended log.
+        Ok(_) => Some(DriftReason::new(
+            "vault",
+            "vault changed; review the workspace default and reinstall",
+        )),
+        // Fail closed. This branch exists precisely to catch a default that no
+        // longer resolves the way it did; a workspace that cannot name a
+        // default at all is a stronger version of that, not a reason to
+        // proceed.
+        Err(_) => Some(DriftReason::new(
+            "vault",
+            "the workspace default could not be resolved; review the workspace and reinstall",
+        )),
     }
 }
 

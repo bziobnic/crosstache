@@ -32,7 +32,7 @@
 //! inode and both "hold the lock". `install.lock` follows the same rule; this
 //! module reuses its opening helper verbatim.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -48,6 +48,7 @@ use crate::utils::helpers::{
 
 /// Outcome files are capped at this size before they are ever parsed, matching
 /// the manifest's cap.
+// Consumed by `xv schedule status` (PR 3, task 3), which reads `last-run.json`.
 #[allow(dead_code)]
 const MAX_OUTCOME_BYTES: usize = 64 * 1024;
 
@@ -79,6 +80,8 @@ pub enum RunState {
 
 impl RunState {
     /// The literal written to `last-run.json`.
+    // Consumed by `xv schedule status` (PR 3, task 3) when it renders the
+    // state token; serde owns the persisted spelling.
     #[allow(dead_code)]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -154,6 +157,7 @@ pub struct RunOutcomeV1 {
 
 /// A loaded, version-dispatched outcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
+// Consumed by `xv schedule status` (PR 3, task 3), which reads `last-run.json`.
 #[allow(dead_code)]
 pub enum RunOutcome {
     V1(RunOutcomeV1),
@@ -162,6 +166,7 @@ pub enum RunOutcome {
 /// Minimal shape used only to peek `schema_version` before committing to a
 /// concrete version's strict (`deny_unknown_fields`) deserialization.
 #[derive(Debug, Deserialize)]
+// Consumed by `xv schedule status` (PR 3, task 3), which reads `last-run.json`.
 #[allow(dead_code)]
 struct SchemaVersionPeek {
     schema_version: u32,
@@ -292,6 +297,7 @@ pub fn serialize_outcome(outcome: &RunOutcomeV1) -> Vec<u8> {
 // Storage
 // ---------------------------------------------------------------------------
 
+// Consumed by `xv schedule status` (PR 3, task 3), which reads `last-run.json`.
 #[allow(dead_code)]
 fn reject_symlink_components(paths: &ScheduleStatePaths) -> Result<()> {
     reject_if_symlink(paths.root())?;
@@ -299,6 +305,7 @@ fn reject_symlink_components(paths: &ScheduleStatePaths) -> Result<()> {
     Ok(())
 }
 
+// Consumed by `xv schedule status` (PR 3, task 3), which reads `last-run.json`.
 #[allow(dead_code)]
 fn read_outcome_bytes(path: &Path, paths: &ScheduleStatePaths) -> Result<Vec<u8>> {
     reject_symlink_components(paths)?;
@@ -333,6 +340,7 @@ fn read_outcome_bytes(path: &Path, paths: &ScheduleStatePaths) -> Result<Vec<u8>
 /// `Ok(None)` means no run has been recorded (or the record was removed);
 /// that is a normal state, not an error. An unknown `schema_version` produces
 /// a targeted error rather than a generic deserialization failure.
+// Consumed by `xv schedule status` (PR 3, task 3), which reads `last-run.json`.
 #[allow(dead_code)]
 pub fn load_outcome(paths: &ScheduleStatePaths) -> Result<Option<RunOutcome>> {
     let path = paths.last_run_path();
@@ -405,8 +413,6 @@ pub fn write_outcome_atomic(paths: &ScheduleStatePaths, outcome: &RunOutcomeV1) 
 #[derive(Debug)]
 pub struct RunGuard {
     _lock: std::fs::File,
-    #[allow(dead_code)]
-    path: PathBuf,
 }
 
 impl RunGuard {
@@ -426,19 +432,44 @@ impl RunGuard {
         })?;
         let lock = open_private_lock_file_no_follow(&path)?;
         match lock.try_lock_exclusive() {
-            Ok(()) => Ok(Some(Self { _lock: lock, path })),
+            Ok(()) => Ok(Some(Self { _lock: lock })),
             Err(_) => Ok(None),
         }
     }
 
-    /// Whether some process currently holds the run lock.
+    /// Whether some process currently holds the run lock, **without creating
+    /// anything**.
     ///
-    /// Acquire-and-release: nothing is written, and the lock is dropped
-    /// before returning, so a read-only caller (`xv schedule status`) can ask
-    /// "is a runner alive?" without becoming one.
+    /// `Ok(None)` means there is no `run.lock` yet, so no runner has ever
+    /// started here and there is nothing to hold. Otherwise the lock is taken
+    /// and immediately released, and the answer is whether that succeeded.
+    ///
+    /// This exists instead of a plain `probe` because `xv schedule status` is
+    /// read-only: a diagnosis that materialized the state directory and a lock
+    /// inode would change the very thing it was asked to describe — and would
+    /// leave `run.lock` behind on a machine that has no schedule installed.
+    // Consumed by `xv schedule status` (PR 3, task 3): the `running` vs
+    // `interrupted` distinction.
     #[allow(dead_code)]
-    pub fn probe(paths: &ScheduleStatePaths) -> Result<bool> {
-        Ok(Self::try_acquire(paths)?.is_none())
+    pub fn probe_existing(paths: &ScheduleStatePaths) -> Result<Option<bool>> {
+        let path = paths.run_lock_path();
+        match std::fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(CrosstacheError::config(format!(
+                    "Failed to inspect schedule run lock '{}': {error}",
+                    path.display()
+                )))
+            }
+            Ok(_) => {}
+        }
+        reject_if_symlink(&path)?;
+        let lock = open_private_lock_file_no_follow(&path)?;
+        match lock.try_lock_exclusive() {
+            // Taking it proves nobody else holds it; the handle drops here.
+            Ok(()) => Ok(Some(false)),
+            Err(_) => Ok(Some(true)),
+        }
     }
 }
 
@@ -760,27 +791,55 @@ mod tests {
             RunGuard::try_acquire(&paths).expect("contend").is_none(),
             "a second acquisition must fail while the first is held"
         );
-        assert!(RunGuard::probe(&paths).expect("probe"));
+        assert_eq!(RunGuard::probe_existing(&paths).expect("probe"), Some(true));
 
         drop(first);
         assert!(
             RunGuard::try_acquire(&paths).expect("reacquire").is_some(),
             "the lock must be free once the guard drops"
         );
-        assert!(!RunGuard::probe(&paths).expect("probe"));
+        assert_eq!(
+            RunGuard::probe_existing(&paths).expect("probe"),
+            Some(false)
+        );
+    }
+
+    /// Status is read-only. Probing a machine with no schedule installed must
+    /// not conjure the state directory or the lock inode into existence.
+    #[test]
+    fn probing_creates_nothing_when_no_run_has_ever_started() {
+        let dir = tempdir();
+        let paths = test_paths_in(dir.path());
+        assert!(!paths.root().exists(), "fixture starts with no state root");
+
+        assert_eq!(RunGuard::probe_existing(&paths).expect("probe"), None);
+
+        assert!(!paths.root().exists(), "probing created the state root");
+        assert!(!paths.run_lock_path().exists(), "probing created the lock");
+        assert!(!paths.last_run_path().exists());
     }
 
     #[test]
-    fn probing_the_lock_writes_nothing_but_the_lock_inode() {
+    fn probing_an_existing_free_lock_leaves_it_empty_and_unheld() {
         let dir = tempdir();
         let paths = test_paths_in(dir.path());
-        assert!(!RunGuard::probe(&paths).expect("probe"));
-        assert!(paths.run_lock_path().exists());
+        drop(
+            RunGuard::try_acquire(&paths)
+                .expect("acquire")
+                .expect("free"),
+        );
+
+        assert_eq!(
+            RunGuard::probe_existing(&paths).expect("probe"),
+            Some(false)
+        );
         assert!(!paths.last_run_path().exists());
         assert_eq!(
             std::fs::read(paths.run_lock_path()).expect("read"),
             Vec::<u8>::new()
         );
+        // The probe released what it took: a real runner can still start.
+        assert!(RunGuard::try_acquire(&paths).expect("acquire").is_some());
     }
 
     #[cfg(unix)]
