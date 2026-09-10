@@ -354,10 +354,14 @@ struct ProjectOverlay {
 /// Resolve the project layer to an overlay, or `None` when no project profile
 /// participates.
 ///
-/// `find_project_config`'s own error (a found `.xv.toml` that fails to parse)
-/// is swallowed, matching the existing precedent in
-/// `Config::resolve_vault_name` (src/config/settings.rs) — every other
-/// resolver in the codebase treats a parse failure the same way.
+/// `find_project_config`'s own error — a `.xv.toml` that governs this
+/// directory but does not parse — is **propagated**. A file the user wrote to
+/// scope this directory's vaults cannot be quietly ignored: skipping it falls
+/// through to the personal context workspace or the global `default_vault`,
+/// so a typo in a project file would silently retarget every read and write
+/// in that directory. (`Config::resolve_vault_name` swallows it; the
+/// workspace layer deliberately does not, and has not since the pass this
+/// function replaced.)
 ///
 /// `resolve_env`'s error is NOT swallowed (Bugbot round-4 fix): post-#334 it
 /// returns `Ok(None)` only when the project file genuinely defines no
@@ -378,13 +382,13 @@ async fn resolve_project_overlay(
         ProjectLayer::Replay(profile) => profile,
         ProjectLayer::Discover { cwd: None } => None,
         ProjectLayer::Discover { cwd: Some(cwd) } => {
-            match crate::config::project::find_project_config(cwd).await {
-                Ok(Some((_path, proj_cfg))) => {
+            match crate::config::project::find_project_config(cwd).await? {
+                Some((_path, proj_cfg)) => {
                     discovered = proj_cfg;
                     crate::config::project::resolve_env(&discovered, config.env_flag.as_deref())?
                         .map(|(_name, profile)| profile)
                 }
-                _ => None,
+                None => None,
             }
         }
     };
@@ -984,6 +988,54 @@ mod tests {
             "alias must not collide with a backend name"
         );
         assert_eq!(entry.alias, "default");
+    }
+
+    /// A `.xv.toml` that governs the directory but does not parse is a hard
+    /// error, not a reason to fall through to the personal workspace: the file
+    /// exists precisely to scope this directory's vaults, and silently
+    /// ignoring it would retarget every read and write under it.
+    #[tokio::test]
+    async fn a_malformed_project_file_is_an_error_not_a_fallthrough() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join(".xv.toml"), "this is not = = toml").unwrap();
+
+        let config = Config {
+            backend: Some("local".to_string()),
+            default_vault: "global-default".to_string(),
+            ..Default::default()
+        };
+        // A personal context workspace that must NOT be reached.
+        let context_manager = crate::config::ContextManager {
+            workspace: Some(WorkspaceState {
+                entries: vec![WorkspaceEntryConfig {
+                    vault: "context-vault".to_string(),
+                    backend: Some("local".to_string()),
+                    alias: Some("ctx".to_string()),
+                    default: true,
+                }],
+            }),
+            ..Default::default()
+        };
+
+        let err = resolve_workspace_from(&config, Some(temp.path()), &context_manager)
+            .await
+            .expect_err("a malformed project file must not resolve to a workspace");
+        assert!(
+            err.to_string().contains(".xv.toml"),
+            "the error must name the file: {err}"
+        );
+
+        let err = resolve_workspace_snapshot(&config, temp.path(), &context_manager)
+            .await
+            .expect_err("the snapshot form refuses the same way");
+        assert!(err.to_string().contains(".xv.toml"), "{err}");
+
+        // The replay form never discovers, so a malformed file in the same
+        // directory cannot reach it at all.
+        let snapshot = resolve_workspace_snapshot_replay(&config, &context_manager, None)
+            .await
+            .expect("the replay reads only what it is given");
+        assert_eq!(snapshot.workspace.source, WorkspaceSource::Context);
     }
 
     #[tokio::test]
