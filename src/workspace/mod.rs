@@ -399,6 +399,7 @@ pub(crate) async fn resolve_workspace_from(
 /// contributed — either as the configured workspace
 /// ([`WorkspaceSource::Context`]) or as the source of the degenerate
 /// workspace-of-one's vault.
+#[derive(Debug)]
 pub(crate) struct ResolvedWorkspaceSnapshot {
     pub(crate) workspace: Workspace,
     // Read by the scheduled-rotation target resolver (`schedule::target`),

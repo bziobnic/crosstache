@@ -211,6 +211,11 @@ pub fn parse_str(s: &str) -> Result<ProjectConfig> {
 /// The crate's own traversal goes through [`parse_file_with_bytes`], which
 /// additionally hands back the exact bytes parsed; this stays as the module's
 /// single-file parse API.
+///
+/// `allow(dead_code)` is load-bearing despite this being `pub`: `src/main.rs`
+/// re-declares these modules, so the `xv` binary is its own crate in which a
+/// `pub` item no caller reaches really is dead code, and
+/// `clippy --all-targets -D warnings` fails on it.
 #[allow(dead_code)]
 pub async fn parse_file(path: &Path) -> Result<ProjectConfig> {
     Ok(parse_file_with_bytes(path).await?.1)
@@ -1237,7 +1242,14 @@ vault = "staging-vault"
     /// `resolve_env` selection, and reports the canonical file it parsed
     /// together with the digest of those exact bytes.
     #[tokio::test]
+    // The `XV_ENV` guard is a std `Mutex` held across awaits here. These
+    // tests run on tokio's single-threaded test runtime and nothing else
+    // acquires that lock from an async context, so it cannot deadlock.
+    #[allow(clippy::await_holding_lock)]
     async fn resolve_project_at_reports_path_digest_and_environment() {
+        // `resolve_project_at` reaches `resolve_env`, which reads the
+        // process-global `XV_ENV`; serialize against the tests that set it.
+        let _guard = XV_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         let nested = root.join("a").join("b");
@@ -1265,7 +1277,14 @@ vault = "staging-vault"
     /// An explicit CLI `--env` flag selects the profile, exactly as
     /// `resolve_env` does for every other caller.
     #[tokio::test]
+    // The `XV_ENV` guard is a std `Mutex` held across awaits here. These
+    // tests run on tokio's single-threaded test runtime and nothing else
+    // acquires that lock from an async context, so it cannot deadlock.
+    #[allow(clippy::await_holding_lock)]
     async fn resolve_project_at_honors_the_cli_env_flag() {
+        // `resolve_project_at` reaches `resolve_env`, which reads the
+        // process-global `XV_ENV`; serialize against the tests that set it.
+        let _guard = XV_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join(".xv.toml"), PROJECT_FIXTURE).unwrap();
 
@@ -1284,7 +1303,14 @@ vault = "staging-vault"
     /// A `.xv.boundary` still stops the walk-up: the traversal rules are
     /// reused, not reimplemented.
     #[tokio::test]
+    // The `XV_ENV` guard is a std `Mutex` held across awaits here. These
+    // tests run on tokio's single-threaded test runtime and nothing else
+    // acquires that lock from an async context, so it cannot deadlock.
+    #[allow(clippy::await_holding_lock)]
     async fn resolve_project_at_stops_at_a_boundary_marker() {
+        // `resolve_project_at` reaches `resolve_env`, which reads the
+        // process-global `XV_ENV`; serialize against the tests that set it.
+        let _guard = XV_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         std::fs::write(root.join(".xv.toml"), PROJECT_FIXTURE).unwrap();
