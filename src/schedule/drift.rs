@@ -35,6 +35,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::project::{EnvProfile, ResolvedProject};
 use crate::config::ContextManager;
+use crate::schedule::manifest::VAULT_SELECTION_IMPLICIT;
 use crate::schedule::manifest::{ManifestTarget, ScheduleManifestV1};
 use crate::schedule::target::{selected_backend_identity, workspace_source_label};
 use crate::workspace::WorkspaceEntry;
@@ -398,12 +399,36 @@ async fn recompute_target(target: &ManifestTarget, cwd: &Path, reasons: &mut Vec
                 return;
             }
         },
-        None => WorkspaceEntry {
-            alias: crate::workspace::degenerate_alias_for(&effective, &target.vault),
-            backend: effective.effective_backend_name().to_string(),
-            vault: target.vault.clone(),
-            default: true,
-        },
+        None => {
+            // An implicit install (no `--vault`) pinned *the degenerate
+            // workspace's default vault*, not a name. If that default has
+            // since moved, the recorded name would silently keep rotating a
+            // vault the resolution chain no longer chooses — so re-derive it
+            // and refuse on a difference. An explicit `--vault X` pinned the
+            // name `X`, which a moving default does not affect.
+            if target.workspace_source == "degenerate"
+                && target.vault_selection == VAULT_SELECTION_IMPLICIT
+            {
+                if let Ok(default_entry) = workspace.default_entry() {
+                    if default_entry.vault != target.vault {
+                        // Names only in the wording: the recorded and current
+                        // vault names both already appear in ordinary CLI
+                        // output, but this reason is written to an unattended
+                        // log, so it points at the workspace instead.
+                        reasons.push(DriftReason::new(
+                            "vault",
+                            "vault changed; review the workspace default and reinstall",
+                        ));
+                    }
+                }
+            }
+            WorkspaceEntry {
+                alias: crate::workspace::degenerate_alias_for(&effective, &target.vault),
+                backend: effective.effective_backend_name().to_string(),
+                vault: target.vault.clone(),
+                default: true,
+            }
+        }
     };
 
     // 6. The backend the entry names, and the account it points at.

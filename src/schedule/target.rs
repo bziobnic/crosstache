@@ -501,6 +501,11 @@ async fn resolve_install_target_from(
         backend_kind: identity.kind,
         backend_identity: identity.digest,
         vault: entry.vault.clone(),
+        vault_selection: if vault.is_some() {
+            crate::schedule::manifest::VAULT_SELECTION_EXPLICIT.to_string()
+        } else {
+            crate::schedule::manifest::VAULT_SELECTION_IMPLICIT.to_string()
+        },
     };
 
     Ok(ResolvedScheduleTarget {
@@ -1387,6 +1392,9 @@ mod resolve_tests {
         .unwrap();
 
         assert_eq!(resolved.target.vault, "stage-vault");
+        // `--vault stage` was given: the name is pinned, so a moving default
+        // is not this target's business.
+        assert_eq!(resolved.target.vault_selection, "explicit");
         assert_eq!(resolved.target.workspace_alias.as_deref(), Some("stage"));
         assert_eq!(resolved.target.workspace_source, "context");
         assert_eq!(resolved.target.backend_name, "local-b");
@@ -1643,6 +1651,9 @@ vaults = [
         assert_eq!(resolved.target.workspace_source, "project");
         assert_eq!(resolved.target.environment.as_deref(), Some("prod"));
         assert_eq!(resolved.target.vault, "prod-vault");
+        // No `--vault`: the vault came out of the resolution chain, so drift
+        // validation has to re-derive it.
+        assert_eq!(resolved.target.vault_selection, "implicit");
         assert_eq!(resolved.target.workspace_alias.as_deref(), Some("prod"));
         assert_eq!(resolved.target.backend_name, "local-a");
         assert!(resolved

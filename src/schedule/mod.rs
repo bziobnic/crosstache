@@ -52,6 +52,7 @@ use crate::error::{CrosstacheError, Result};
 pub mod drift;
 pub mod install;
 pub mod manifest;
+pub mod outcome;
 pub mod ownership;
 pub mod preview;
 pub mod target;

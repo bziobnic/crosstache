@@ -142,6 +142,7 @@ mod tests {
                 backend_kind: "aws".to_string(),
                 backend_identity: BACKEND_IDENTITY.to_string(),
                 vault: "payments-production".to_string(),
+                vault_selection: "explicit".to_string(),
             },
         }
     }
@@ -223,7 +224,8 @@ mod tests {
     \"backend_name\": \"aws-prod\",
     \"backend_kind\": \"aws\",
     \"backend_identity\": \"{BACKEND_IDENTITY}\",
-    \"vault\": \"payments-production\"
+    \"vault\": \"payments-production\",
+    \"vault_selection\": \"explicit\"
   }}
 }}
 "

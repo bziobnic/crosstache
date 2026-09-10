@@ -35,6 +35,15 @@ use crate::utils::helpers::{atomic_write_file_no_follow, create_private_dir, rea
 /// Fixed identifier for the single schedule xv currently manages.
 pub const SCHEDULE_ID: &str = "rotation-default";
 
+/// `target.vault_selection` when the install did not pass `--vault`: the
+/// target is "whatever the degenerate workspace's default vault is", so the
+/// default moving is drift.
+pub const VAULT_SELECTION_IMPLICIT: &str = "implicit";
+
+/// `target.vault_selection` when the install named a vault explicitly. The
+/// name is pinned; a moving default does not affect it.
+pub const VAULT_SELECTION_EXPLICIT: &str = "explicit";
+
 /// Manifest files are capped at this size before they are ever parsed.
 const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 
@@ -299,6 +308,11 @@ pub struct ManifestTarget {
     pub backend_kind: String,
     pub backend_identity: String,
     pub vault: String,
+    /// Whether `vault` was chosen by the installer (`explicit`) or read out
+    /// of the resolution chain (`implicit`). Drift validation needs the
+    /// difference: only an implicit target has to be re-derived, because only
+    /// it can move without its recorded name changing.
+    pub vault_selection: String,
 }
 
 /// Version 1 of `manifest.json`.
@@ -381,7 +395,7 @@ pub(crate) fn validate_absolute_normalized_path(field: &str, value: &str) -> Res
     Ok(())
 }
 
-fn validate_digest(field: &str, value: &str) -> Result<()> {
+pub(crate) fn validate_digest(field: &str, value: &str) -> Result<()> {
     let invalid = || {
         CrosstacheError::config(format!(
             "schedule manifest field '{field}' must be a sha256 digest of the form 'sha256:<64 lowercase hex chars>': {value}"
@@ -450,6 +464,16 @@ pub(crate) fn validate_v1(manifest: &ScheduleManifestV1) -> Result<()> {
         )));
     }
 
+    match manifest.target.vault_selection.as_str() {
+        VAULT_SELECTION_IMPLICIT | VAULT_SELECTION_EXPLICIT => {}
+        other => {
+            return Err(CrosstacheError::config(format!(
+                "schedule manifest field 'target.vault_selection' must be one of \
+                 '{VAULT_SELECTION_IMPLICIT}', '{VAULT_SELECTION_EXPLICIT}': {other}"
+            )));
+        }
+    }
+
     match manifest.target.workspace_source.as_str() {
         "project" | "context" | "degenerate" => {}
         other => {
@@ -491,7 +515,7 @@ pub fn serialize_manifest(manifest: &ScheduleManifestV1) -> Vec<u8> {
 // ---------------------------------------------------------------------------
 
 /// Reject a path if it exists and is itself a symlink, without following it.
-fn reject_if_symlink(path: &Path) -> Result<()> {
+pub(crate) fn reject_if_symlink(path: &Path) -> Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => Err(CrosstacheError::config(format!(
             "Refusing symlinked schedule state path '{}'",
@@ -553,6 +577,16 @@ fn read_manifest_bytes(paths: &ScheduleStatePaths) -> Result<Vec<u8>> {
 /// An unknown `schema_version` produces a targeted error naming reinstall,
 /// rather than a generic deserialization failure.
 pub fn load_manifest(paths: &ScheduleStatePaths) -> Result<ScheduleManifest> {
+    load_manifest_with_bytes(paths).map(|(manifest, _)| manifest)
+}
+
+/// [`load_manifest`], also returning the exact bytes that were parsed.
+///
+/// The scheduled runner binds its outcome to `sha256(<these bytes>)`, so it
+/// must hash what it actually read — not a re-serialization of the parsed
+/// value (which would silently normalize whitespace and key order) and not a
+/// second read of the file (which could observe a different installation).
+pub fn load_manifest_with_bytes(paths: &ScheduleStatePaths) -> Result<(ScheduleManifest, Vec<u8>)> {
     let bytes = read_manifest_bytes(paths)?;
 
     let peek: SchemaVersionPeek = serde_json::from_slice(&bytes).map_err(|error| {
@@ -571,7 +605,7 @@ pub fn load_manifest(paths: &ScheduleStatePaths) -> Result<ScheduleManifest> {
                 ))
             })?;
             validate_v1(&manifest)?;
-            Ok(ScheduleManifest::V1(manifest))
+            Ok((ScheduleManifest::V1(manifest), bytes))
         }
         other => Err(CrosstacheError::config(format!(
             "schedule manifest '{}' has schema_version {other}, which this version of xv does not support; reinstall the schedule (xv schedule install) to regenerate it",
@@ -654,6 +688,7 @@ mod tests {
                 backend_kind: "aws".to_string(),
                 backend_identity: format!("sha256:{}", "55".repeat(32)),
                 vault: "payments-production".to_string(),
+                vault_selection: VAULT_SELECTION_EXPLICIT.to_string(),
             },
         }
     }
@@ -983,6 +1018,53 @@ mod tests {
         value.as_object_mut().unwrap().remove("schedule_id");
         let result: std::result::Result<ScheduleManifestV1, _> = serde_json::from_value(value);
         assert!(result.is_err());
+    }
+
+    /// A pre-`vault_selection` manifest (the PR 2 shape) fails to load.
+    ///
+    /// `deny_unknown_fields` cuts both ways: a *missing* required field is
+    /// just as fatal. Nothing has shipped with the older shape, and the
+    /// runner wraps this error with "reinstall the schedule", which is the
+    /// correct advice — a manifest that cannot say how its vault was chosen
+    /// cannot be drift-validated.
+    #[test]
+    fn a_manifest_without_vault_selection_is_refused() {
+        let mut value = serde_json::to_value(fixture_manifest()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .get_mut("target")
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove("vault_selection");
+        let result: std::result::Result<ScheduleManifestV1, _> = serde_json::from_value(value);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn an_unknown_vault_selection_is_refused() {
+        let mut manifest = fixture_manifest();
+        manifest.target.vault_selection = "whatever".to_string();
+        let error = validate_v1(&manifest)
+            .expect_err("bad selection")
+            .to_string();
+        assert!(error.contains("target.vault_selection"), "{error}");
+    }
+
+    #[test]
+    fn load_manifest_with_bytes_returns_what_it_parsed() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths_in(dir.path());
+        let mut manifest = fixture_manifest();
+        manifest.installed_at = "2026-09-09T15:04:05Z".to_string();
+        let bytes = serialize_manifest(&manifest);
+        write_manifest_atomic(&paths, &bytes).unwrap();
+
+        let (loaded, read_back) = load_manifest_with_bytes(&paths).unwrap();
+        assert_eq!(loaded, ScheduleManifest::V1(manifest));
+        assert_eq!(read_back, bytes);
+        assert_eq!(read_back, std::fs::read(paths.manifest_path()).unwrap());
     }
 
     #[test]

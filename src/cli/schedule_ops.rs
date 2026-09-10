@@ -16,6 +16,7 @@ use crate::schedule::install::{
 use crate::schedule::manifest::{
     self as manifest, ManifestCadence, ManifestExecution, ManifestTarget, ScheduleManifestV1,
 };
+use crate::schedule::outcome::{self, RunDiagnostic, RunOutcomeV1, RunState, RunSummary};
 use crate::schedule::ownership::{self, Ownership, SchedulerProbe};
 use crate::schedule::preview::render_install_preview;
 use crate::schedule::target::{
@@ -611,15 +612,51 @@ async fn execute_run(supplied_manifest: &Path) -> Result<()> {
         )));
     }
 
+    // The lock comes before validation, and after the two checks above.
+    //
+    // Before validation, because validation reads the user's config, project
+    // and context files and probes the vault: two runners doing that at once
+    // is the concurrency the lock exists to prevent, and the loser must leave
+    // before it touches anything. After the path checks, because those decide
+    // whether this process is a runner at all — a `--manifest` pointing
+    // somewhere else is a misconfigured unit, and it must fail loudly with
+    // its own error rather than be reported as a skipped run.
+    let Some(_run_guard) = outcome::RunGuard::try_acquire(&state_paths)? else {
+        // One line, exit zero, `last-run.json` untouched: the run that holds
+        // the lock owns the current outcome, and a scheduler that treated a
+        // benign overlap as a failure would alert every night a sweep ran
+        // long.
+        eprintln!("schedule rotation skipped: another run is already_running");
+        return Ok(());
+    };
+
     // Bounded, no-follow, schema-validated. Any failure names reinstall,
     // because a manifest this process cannot trust is not something a
     // scheduled run may work around.
-    let manifest::ScheduleManifest::V1(manifest) =
-        manifest::load_manifest(&state_paths).map_err(|e| {
+    //
+    // A manifest that does not load produces no outcome: there is no
+    // installation to bind a record to, and `manifest_digest` is what makes a
+    // record meaningful. The error is the report in that case.
+    let (manifest::ScheduleManifest::V1(manifest), manifest_bytes) =
+        manifest::load_manifest_with_bytes(&state_paths).map_err(|e| {
             CrosstacheError::config(format!(
                 "{e}. Reinstall the schedule with 'xv schedule install' to regenerate it."
             ))
         })?;
+
+    // The digest of exactly the bytes just parsed — not a re-serialization,
+    // and not a second read — so status can tell a record written by *this*
+    // installation from one retained across a reinstall.
+    let manifest_digest = crate::config::content_digest(&manifest_bytes);
+    let started_at = outcome::now_rfc3339_utc();
+
+    // Written before anything else can fail. A process killed after this
+    // point leaves `running`, which is precisely the claim that is true: a
+    // run started and did not report back.
+    outcome::write_outcome_atomic(
+        &state_paths,
+        &outcome::RunOutcomeV1::running(&manifest_digest, &started_at),
+    )?;
 
     // Recompute the recorded target from the recorded inputs. This reads
     // files and nothing else — no backend is constructed until it returns a
@@ -635,11 +672,24 @@ async fn execute_run(supplied_manifest: &Path) -> Result<()> {
         output::warn(&warning.detail);
     }
 
-    if report.is_refused() {
-        return refused_drift_outcome(&report).into_cli_result();
-    }
+    let draft = if report.is_refused() {
+        refused_drift_outcome(&report)
+    } else {
+        execute_pinned_run(&manifest).await
+    };
 
-    execute_pinned_run(&manifest).await.into_cli_result()
+    let (record, result) = draft.finish(&manifest_digest, &started_at);
+    if let Err(error) = outcome::write_outcome_atomic(&state_paths, &record) {
+        // The sweep already happened; failing to record it must not rewrite
+        // what the process reports about it. Say so loudly and keep the run's
+        // own verdict — status will show a stale (or absent) record, which is
+        // the honest reading of a state directory this process cannot write.
+        output::warn(&format!(
+            "could not record the run outcome in '{}': {error}",
+            state_paths.last_run_path().display()
+        ));
+    }
+    result
 }
 
 /// What the run did, in the shape `last-run.json` needs.
@@ -652,10 +702,7 @@ async fn execute_run(supplied_manifest: &Path) -> Result<()> {
 /// message come from closed sets (`DueRotationFailureCategory::code`,
 /// `DueRotationErrorKind::code`, or the drift fields) — never from a secret
 /// name, a vault value, or a provider error body.
-// The three persisted fields are read by PR 3's outcome writer; the runner
-// itself only needs `error` to decide the exit.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub(crate) struct RunOutcomeDraft {
     pub(crate) state: RunState,
     pub(crate) summary: Option<DueRotationSummary>,
@@ -667,42 +714,42 @@ pub(crate) struct RunOutcomeDraft {
     error: Option<CrosstacheError>,
 }
 
-/// The `state` field of a scheduled run's outcome.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RunState {
-    Success,
-    PartialFailure,
-    Failed,
-    RefusedDrift,
-}
-
-impl RunState {
-    /// The literal written to `last-run.json` (PR 3).
-    #[allow(dead_code)]
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            RunState::Success => "success",
-            RunState::PartialFailure => "partial_failure",
-            RunState::Failed => "failed",
-            RunState::RefusedDrift => "refused_drift",
-        }
-    }
-}
-
-/// A redacted diagnostic: a stable code plus a sanitized message.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RunDiagnostic {
-    pub(crate) code: String,
-    pub(crate) message: String,
-}
-
 impl RunOutcomeDraft {
-    /// Turn the draft into the process's exit behavior.
-    pub(crate) fn into_cli_result(self) -> Result<()> {
-        match self.error {
+    /// Split the draft into the record that goes on disk and the exit
+    /// behavior the process takes.
+    ///
+    /// `exit_code` is the code this very process will exit with, derived from
+    /// the very error the caller returns — so a reader of
+    /// `last-run.json` and a caller watching `$?` can never disagree. Only
+    /// aggregate counts cross into the record; `DueRotationSummary::failures`
+    /// (which names secrets) stays behind.
+    fn finish(self, manifest_digest: &str, started_at: &str) -> (RunOutcomeV1, Result<()>) {
+        let exit_code = self
+            .error
+            .as_ref()
+            .map(CrosstacheError::exit_code)
+            .unwrap_or(0);
+        let outcome = RunOutcomeV1 {
+            schema_version: 1,
+            schedule_id: manifest::SCHEDULE_ID.to_string(),
+            manifest_digest: manifest_digest.to_string(),
+            started_at: started_at.to_string(),
+            finished_at: Some(outcome::now_rfc3339_utc()),
+            state: self.state,
+            exit_code: Some(exit_code),
+            summary: self.summary.as_ref().map(|summary| RunSummary {
+                policy_managed: summary.policy_managed as u64,
+                due: summary.due as u64,
+                rotated: summary.rotated as u64,
+                failed: summary.failed as u64,
+            }),
+            diagnostic: self.diagnostic,
+        };
+        let result = match self.error {
             Some(error) => Err(error),
             None => Ok(()),
-        }
+        };
+        (outcome, result)
     }
 }
 
@@ -730,15 +777,15 @@ fn refused_drift_from_reasons(reasons: &[drift::DriftReason]) -> RunOutcomeDraft
     RunOutcomeDraft {
         state: RunState::RefusedDrift,
         summary: None,
-        diagnostic: Some(RunDiagnostic {
-            code: "target_drift".to_string(),
-            // Field names only — the same closed set the manifest schema
-            // defines, never a path or a file's contents.
-            message: format!(
+        // Field names only — the same closed set the manifest schema defines,
+        // never a path or a file's contents.
+        diagnostic: Some(RunDiagnostic::new(
+            "target_drift",
+            format!(
                 "{} changed; review the recorded target and reinstall",
                 fields.join(" and ")
             ),
-        }),
+        )),
         error: Some(CrosstacheError::config(format!(
             "the recorded rotation target has drifted ({} reason(s) reported above); reinstall \
              the schedule with 'xv schedule install' to accept the new target.",
@@ -900,10 +947,7 @@ async fn run_recorded_sweep(manifest: &ScheduleManifestV1) -> RunOutcomeDraft {
             return RunOutcomeDraft {
                 state: RunState::Failed,
                 summary: None,
-                diagnostic: Some(RunDiagnostic {
-                    code: "backend-unavailable".to_string(),
-                    message: message.to_string(),
-                }),
+                diagnostic: Some(RunDiagnostic::new("backend-unavailable", message)),
                 error: Some(CrosstacheError::config(format!(
                     "cannot construct the recorded backend '{backend_name}'"
                 ))),
@@ -957,10 +1001,10 @@ async fn run_recorded_sweep(manifest: &ScheduleManifestV1) -> RunOutcomeDraft {
             output::error(&error.to_string());
             RunOutcomeDraft {
                 state: RunState::PartialFailure,
-                diagnostic: summary.failures.first().map(|failure| RunDiagnostic {
-                    code: failure.code().to_string(),
-                    message: failure.message().to_string(),
-                }),
+                diagnostic: summary
+                    .failures
+                    .first()
+                    .map(|failure| RunDiagnostic::new(failure.code(), failure.message())),
                 summary: Some(summary),
                 error: Some(error),
             }
@@ -969,10 +1013,7 @@ async fn run_recorded_sweep(manifest: &ScheduleManifestV1) -> RunOutcomeDraft {
             // Whole-run failure: the vault was never read, so there is no
             // honest summary to record. The redacted code/message go to the
             // outcome; the source error is what the process exits with.
-            let diagnostic = RunDiagnostic {
-                code: failure.code().to_string(),
-                message: failure.message().to_string(),
-            };
+            let diagnostic = RunDiagnostic::new(failure.code(), failure.message());
             RunOutcomeDraft {
                 state: RunState::Failed,
                 summary: None,
@@ -1343,6 +1384,7 @@ mod tests {
                 backend_kind: "local".to_string(),
                 backend_identity: format!("sha256:{}", "1".repeat(64)),
                 vault: "default".to_string(),
+                vault_selection: "implicit".to_string(),
             },
         }
     }

@@ -2325,3 +2325,156 @@ fn status_names_the_missing_manifest_of_a_pinned_unit() {
         "this unit did record a target; status must not say otherwise: {out}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// `last-run.json`: what the runner records, and the lock that serializes runs
+// ---------------------------------------------------------------------------
+
+/// Every canary the goldens require to be absent from an outcome.
+const REDACTION_CANARIES: [&str; 5] = [
+    "AKIAIOSFODNN7EXAMPLE",
+    "aws-session-token-canary",
+    "azure-client-secret-canary",
+    "AGE-SECRET-KEY-1CANARY",
+    "super-secret-value-canary",
+];
+
+fn last_run_path(state: &std::path::Path) -> std::path::PathBuf {
+    state
+        .join("xv")
+        .join("schedules")
+        .join("rotation-default")
+        .join("last-run.json")
+}
+
+fn read_outcome(state: &std::path::Path) -> serde_json::Value {
+    let body = std::fs::read_to_string(last_run_path(state))
+        .unwrap_or_else(|e| panic!("last-run.json must exist: {e}"));
+    for canary in REDACTION_CANARIES {
+        assert!(!body.contains(canary), "canary '{canary}' leaked: {body}");
+    }
+    assert!(!body.contains("STALE"), "a secret name leaked: {body}");
+    serde_json::from_str(&body).expect("last-run.json is valid JSON")
+}
+
+fn manifest_digest_of(manifest: &std::path::Path) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(std::fs::read(manifest).unwrap());
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+#[test]
+fn a_successful_pinned_run_records_a_success_outcome() {
+    let fixture = pinned_run_fixture(&[], |_| {});
+    // Seed the canaries where a careless implementation would pick them up:
+    // as the rotated secret's own value, and as a nearby secret's name.
+    set_secret(&fixture.store, "STALE", "super-secret-value-canary");
+    make_due(&fixture.store, "STALE");
+    set_secret(
+        &fixture.store,
+        "AKIAIOSFODNN7EXAMPLE",
+        "azure-client-secret-canary",
+    );
+
+    let out = fixture.run();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+
+    let outcome = read_outcome(&fixture.state);
+    assert_eq!(outcome["schema_version"], 1);
+    assert_eq!(outcome["schedule_id"], "rotation-default");
+    assert_eq!(outcome["state"], "success");
+    assert_eq!(outcome["exit_code"], 0);
+    assert_eq!(
+        outcome["manifest_digest"].as_str().unwrap(),
+        manifest_digest_of(&fixture.manifest),
+        "the outcome must bind to the exact manifest bytes it parsed"
+    );
+    assert!(outcome["started_at"].as_str().unwrap().ends_with('Z'));
+    assert!(outcome["finished_at"].as_str().unwrap().ends_with('Z'));
+    assert_eq!(outcome["summary"]["due"], 1);
+    assert_eq!(outcome["summary"]["rotated"], 1);
+    assert_eq!(outcome["summary"]["failed"], 0);
+    assert!(outcome["summary"]["policy_managed"].as_u64().unwrap() >= 1);
+    assert!(outcome["diagnostic"].is_null(), "{outcome}");
+    drop(fixture.tmp);
+}
+
+#[test]
+fn a_drift_refusal_records_the_golden_refusal_outcome() {
+    let fixture = pinned_run_fixture(&[], |_| {});
+    let body = std::fs::read_to_string(fixture.config_path()).unwrap();
+    std::fs::write(fixture.config_path(), format!("{body}\n# edited\n")).unwrap();
+
+    let out = fixture.run();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
+
+    let outcome = read_outcome(&fixture.state);
+    assert_eq!(outcome["state"], "refused_drift");
+    assert_eq!(outcome["exit_code"], 3);
+    assert!(outcome["summary"].is_null(), "{outcome}");
+    assert_eq!(outcome["diagnostic"]["code"], "target_drift");
+    assert_eq!(
+        outcome["diagnostic"]["message"],
+        "config_digest changed; review the recorded target and reinstall"
+    );
+    drop(fixture.tmp);
+}
+
+/// A second runner that cannot take `run.lock` logs one line, exits zero, and
+/// leaves the active run's record — and the vault — untouched.
+///
+/// The lock is held by the *test process* rather than by a first `xv`: a real
+/// two-runner race would need the winner to stall inside its sweep, which has
+/// no deterministic hook. Holding the same inode from here exercises exactly
+/// the code path a losing runner takes.
+#[test]
+fn a_contending_runner_skips_without_touching_the_outcome() {
+    use fs2::FileExt;
+
+    let fixture = pinned_run_fixture(&[], |_| {});
+    let before = fixture.value();
+
+    let lock_path = fixture
+        .state
+        .join("xv")
+        .join("schedules")
+        .join("rotation-default")
+        .join("run.lock");
+    std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+    let held = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    held.try_lock_exclusive()
+        .expect("the test takes the lock first");
+
+    let out = fixture.run();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a skipped run exits zero: {stderr}"
+    );
+    assert!(
+        stderr.contains("schedule rotation skipped: another run is already_running"),
+        "{stderr}"
+    );
+    assert!(
+        !last_run_path(&fixture.state).exists(),
+        "a contender must not write an outcome"
+    );
+    assert_eq!(
+        fixture.value(),
+        before,
+        "a contender must not rotate anything"
+    );
+
+    fs2::FileExt::unlock(&held).unwrap();
+    drop(fixture.tmp);
+}

@@ -59,7 +59,8 @@ Normalized systemd output:
     "backend_name": "aws-prod",
     "backend_kind": "aws",
     "backend_identity": "sha256:55db8b6f5e64ef7c0af4c5b1f9b4d40d45994e8dcfb7d1f7b995f55f7cad2213",
-    "vault": "payments-production"
+    "vault": "payments-production",
+    "vault_selection": "explicit"
   }
 }
 
