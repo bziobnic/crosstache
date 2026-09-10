@@ -22,7 +22,7 @@
 //! returns the complete [`crate::schedule::manifest::ManifestTarget`] that
 //! both the install preview and the manifest describe.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -142,29 +142,17 @@ fn azure_identity(registry_name: &str, config: &Config) -> Result<SelectedBacken
 /// [`crate::schedule::manifest::validate_absolute_normalized_path`] requires
 /// (absolute, no `.`/`..` components).
 fn lexically_normalize(path: &Path) -> Result<PathBuf> {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
+    let base = if path.is_absolute() {
+        PathBuf::new()
     } else {
-        std::env::current_dir()
-            .map_err(|e| {
-                CrosstacheError::config(format!(
-                    "cannot resolve local store path '{}' from the current directory: {e}",
-                    path.display()
-                ))
-            })?
-            .join(path)
+        std::env::current_dir().map_err(|e| {
+            CrosstacheError::config(format!(
+                "cannot resolve local store path '{}' from the current directory: {e}",
+                path.display()
+            ))
+        })?
     };
-    let mut normalized = PathBuf::new();
-    for component in absolute.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            other => normalized.push(other.as_os_str()),
-        }
-    }
-    Ok(normalized)
+    Ok(crate::utils::helpers::lexically_normalize_from(&base, path))
 }
 
 /// Resolve the local store path exactly as the local backend does
@@ -299,48 +287,24 @@ pub(crate) struct ResolvedScheduleTarget {
     pub(crate) working_directory: PathBuf,
 }
 
-/// Strip Windows' `\\?\` verbatim prefixes from a canonical path.
-///
-/// `std::fs::canonicalize` returns verbatim paths on Windows (`\\?\C:\…`,
-/// `\\?\UNC\server\share\…`). Those are absolute and normalized, but they are
-/// not the form a user ever sees, and the manifest records paths a person is
-/// expected to read and compare. No-op on every other platform.
-#[cfg(windows)]
-fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
-    let text = path.to_string_lossy().into_owned();
-    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
-        return PathBuf::from(format!(r"\\{rest}"));
-    }
-    if let Some(rest) = text.strip_prefix(r"\\?\") {
-        // Only a plain drive path survives without the prefix; anything else
-        // (a device path, say) keeps it rather than becoming a different path.
-        let bytes = rest.as_bytes();
-        if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
-            return PathBuf::from(rest);
-        }
-    }
-    path
-}
-
-#[cfg(not(windows))]
-fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
-    path
-}
-
 /// Canonicalize a path for the manifest: resolve symlinks and `.`/`..`, then
 /// drop any Windows verbatim prefix so the result is a path
 /// `manifest::validate_absolute_normalized_path` accepts on every platform.
 ///
 /// The path must exist — every path recorded by target resolution is a file
 /// or directory that was actually read.
+///
+/// The prefix stripping is [`crate::utils::helpers::strip_verbatim_prefix`],
+/// the *same* helper `crate::config::project::canonicalize_project_path` uses,
+/// so the `.xv.toml` path recorded here and the one a later run resolves are
+/// the same string on Windows instead of `C:\…` versus `\\?\C:\…`.
 pub(crate) fn canonical_path_for_manifest(path: &Path) -> Result<PathBuf> {
-    let canonical = std::fs::canonicalize(path).map_err(|e| {
+    crate::utils::helpers::canonicalize_without_verbatim_prefix(path).map_err(|e| {
         CrosstacheError::config(format!(
             "cannot resolve the schedule target path '{}': {e}",
             path.display()
         ))
-    })?;
-    Ok(strip_verbatim_prefix(canonical))
+    })
 }
 
 /// Render a canonical path as the manifest's string form.
@@ -756,6 +720,12 @@ mod tests {
         assert_eq!(identity_a.kind, "local");
     }
 
+    /// Unix-only: the digest covers the *normalized* store path, and
+    /// `/tmp/...` is not absolute on Windows — it would be joined onto the
+    /// test process's working directory and hash differently on every
+    /// machine. The cross-platform guarantees (format, and that the digest
+    /// changes with the store path) are covered by the tests around this one.
+    #[cfg(unix)]
     #[test]
     fn local_builtin_digest_is_pinned_for_fixed_fixture() {
         let mut config = base_config();
@@ -1759,6 +1729,8 @@ vaults = [
     // Canonical path shaping
     // -----------------------------------------------------------------
 
+    use crate::utils::helpers::strip_verbatim_prefix;
+
     #[test]
     fn strip_verbatim_prefix_leaves_a_plain_path_unchanged() {
         let plain = if cfg!(windows) {
@@ -1780,5 +1752,26 @@ vaults = [
             strip_verbatim_prefix(PathBuf::from(r"\\?\UNC\server\share\xv.conf")),
             PathBuf::from(r"\\server\share\xv.conf")
         );
+    }
+
+    /// Whatever the platform, a path the manifest records must never carry a
+    /// verbatim prefix — that is the spelling drift comparison uses.
+    #[test]
+    fn canonical_path_for_manifest_never_returns_a_verbatim_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("xv.conf");
+        std::fs::write(&file, b"").unwrap();
+
+        let recorded = canonical_path_for_manifest(&file).unwrap();
+        assert!(
+            !recorded.to_string_lossy().starts_with(r"\\?\"),
+            "canonical_path_for_manifest leaked a verbatim prefix: {}",
+            recorded.display()
+        );
+        crate::schedule::manifest::validate_absolute_normalized_path(
+            "target.config_path",
+            recorded.to_str().unwrap(),
+        )
+        .unwrap();
     }
 }

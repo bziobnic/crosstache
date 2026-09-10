@@ -167,6 +167,35 @@ fn print_respects_interval_and_time() {
     assert!(out.contains("weekly on Sunday at 04:30"), "{out}");
 }
 
+/// A relative `--log-file` must reach both the `# log:` header and the
+/// manifest preview as an *absolute* path. Left raw, it produced a preview
+/// carrying a relative `execution.log_path` — a manifest the schema rejects
+/// at write time, after the user had already reviewed and approved it.
+#[test]
+fn a_relative_log_file_is_previewed_as_an_absolute_path() {
+    let (_cmd, _tmp, store) = xv_isolated_local_with_opts(false, false);
+    use_the_store_once(&store);
+
+    let (ok, out) = print_schedule(&store, &["--log-file", "logs/rotate.log"]);
+    assert!(ok, "{out}");
+
+    let logged = header_value(&out, "log");
+    assert!(
+        std::path::Path::new(logged).is_absolute(),
+        "the log header is still relative: {logged}\n{out}"
+    );
+    assert!(logged.ends_with("rotate.log"), "{logged}\n{out}");
+    assert!(!logged.contains(".."), "{logged}\n{out}");
+
+    // And the manifest preview carries the same absolute value, since that is
+    // the string `validate_v1` will see at install time.
+    let escaped = logged.replace('\\', "\\\\");
+    assert!(
+        out.contains(&format!("\"log_path\": \"{escaped}\"")),
+        "manifest preview does not carry {logged:?}\n{out}"
+    );
+}
+
 #[test]
 fn print_output_contains_a_loadable_unit_for_this_platform() {
     let (_cmd, _tmp, store) = xv_isolated_local_with_opts(false, false);

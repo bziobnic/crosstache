@@ -71,17 +71,91 @@ fn current_exe() -> Result<PathBuf> {
     })
 }
 
-/// The same path with symlinks and `.`/`..` resolved, and — on Windows — the
-/// `\\?\` verbatim prefix `std::fs::canonicalize` adds stripped back off.
+/// The canonical working directory installation resolves everything against.
+fn install_cwd() -> Result<PathBuf> {
+    let cwd = std::env::current_dir().map_err(|e| {
+        CrosstacheError::config(format!("could not determine the current directory: {e}"))
+    })?;
+    canonical_path_for_manifest(&cwd)
+}
+
+/// The path of the invoked binary, in the spelling the manifest records.
 ///
-/// The manifest records this form so a later run can compare it against its
-/// own executable without two spellings of the same file looking like drift,
-/// and the same string reaches the `# command:` line and the `schtasks /TR`
-/// value, which a person is expected to read and paste. Routed through
-/// [`canonical_path_for_manifest`] so every recorded path is normalized the
-/// one way.
-fn canonical_exe() -> Result<PathBuf> {
-    canonical_path_for_manifest(&current_exe()?)
+/// Deliberately **not** `std::fs::canonicalize`: that resolves symlinks, so a
+/// package-manager shim — `/opt/homebrew/bin/xv`, `~/.local/bin/xv`, a Nix or
+/// asdf shim — would be recorded as the versioned store path it happens to
+/// point at today. The design treats a binary at the *same* path reporting a
+/// new version as a warning that the run is still allowed to proceed
+/// (`docs/superpowers/specs/2026-09-09-scheduled-target-manifest-design.md`,
+/// the "in-place upgrade" row of the drift table); recording the versioned
+/// target instead would turn every ordinary `brew upgrade` into
+/// missing-binary drift and refuse the sweep.
+///
+/// So the recorded form is `std::env::current_exe()`, made absolute against
+/// the canonical install cwd only if it came back relative, lexically
+/// normalized, with Windows' `\\?\` verbatim prefix stripped. That is a path
+/// `manifest::validate_absolute_normalized_path` accepts, and it is the same
+/// string that reaches the `# command:` line, the unit `ExecStart`, and the
+/// `schtasks /TR` value a person is expected to read and paste.
+///
+/// Note for Linux: `current_exe()` there reads `/proc/self/exe`, which the
+/// kernel has *already* resolved through symlinks. Nothing here can un-resolve
+/// that — this function only guarantees xv adds no resolution of its own.
+fn recorded_binary_path() -> Result<PathBuf> {
+    let exe = current_exe()?;
+    let base = if exe.is_absolute() {
+        PathBuf::new()
+    } else {
+        install_cwd()?
+    };
+    Ok(crate::utils::helpers::lexically_normalize_from(&base, &exe))
+}
+
+/// Resolve a `--log-file` value into the absolute, normalized form the
+/// manifest schema requires.
+///
+/// `--log-file` is a raw user string and may be relative, in which case an
+/// unnormalized copy would land in `execution.log_path` and be rejected by
+/// `validate_v1` at write time — after the preview had already shown it. It is
+/// resolved against the canonical install cwd, lexically normalized, and the
+/// verbatim prefix stripped.
+///
+/// The file itself need not exist yet, but per the design its nearest existing
+/// ancestor must not be reached through a symlink: a log destination that is a
+/// symlinked directory lets whoever controls the link redirect an unattended
+/// root-less write somewhere the user never chose.
+fn resolve_log_path(log_file: &str) -> Result<PathBuf> {
+    let raw = PathBuf::from(log_file);
+    let base = if raw.is_absolute() {
+        PathBuf::new()
+    } else {
+        install_cwd()?
+    };
+    let resolved = crate::utils::helpers::lexically_normalize_from(&base, &raw);
+
+    let ancestor = resolved
+        .ancestors()
+        .skip(1)
+        .find(|candidate| candidate.exists())
+        .ok_or_else(|| {
+            CrosstacheError::config(format!(
+                "the log destination '{}' has no existing parent directory. Create it before \
+                 installing a schedule, so a failed unattended run has somewhere to report.",
+                resolved.display()
+            ))
+        })?;
+    if std::fs::symlink_metadata(ancestor)
+        .map(|meta| meta.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(CrosstacheError::config(format!(
+            "the log destination '{}' is reached through the symlink '{}'. A scheduled run \
+             writes there unattended, so pin a real directory instead.",
+            resolved.display(),
+            ancestor.display()
+        )));
+    }
+    Ok(resolved)
 }
 
 /// The `--vault` value the interim legacy install carries.
@@ -108,15 +182,19 @@ fn build_schedule(
     log_file: Option<String>,
 ) -> Result<RotationSchedule> {
     let home = home_dir()?;
-    let binary = current_exe()?;
+    // One spelling of the executable everywhere: the manifest, the preview's
+    // `# command:` line, and the installed unit must not disagree.
+    let binary = recorded_binary_path()?;
+    let log_path = match log_file {
+        Some(raw) => resolve_log_path(&raw)?,
+        None => default_log_path(&home),
+    };
 
     Ok(RotationSchedule {
         interval,
         command,
         binary,
-        log_path: log_file
-            .map(PathBuf::from)
-            .unwrap_or_else(|| default_log_path(&home)),
+        log_path,
         // Carry the *current* config location into the unit so the scheduled run
         // resolves the same configuration the user just tested against.
         config_home: std::env::var("XDG_CONFIG_HOME")
@@ -152,19 +230,17 @@ async fn execute_install(
         // `resolve_from_process_env` only computes paths; it creates nothing.
         let state_paths = manifest::resolve_from_process_env()?;
         let manifest_path = state_paths.manifest_path();
-        let schedule = RotationSchedule {
-            // The preview and the manifest must agree on one spelling of the
-            // executable, and the manifest's is the canonical one.
-            binary: canonical_exe()?,
-            ..build_schedule(
-                interval,
-                ScheduleCommand::ManifestRun {
-                    manifest: manifest_path.clone(),
-                    working_directory: resolved.working_directory.clone(),
-                },
-                log_file,
-            )?
-        };
+        // `build_schedule` already records the executable and the log path in
+        // the manifest's spelling, so the preview, the manifest and the unit
+        // all read the same strings.
+        let schedule = build_schedule(
+            interval,
+            ScheduleCommand::ManifestRun {
+                manifest: manifest_path.clone(),
+                working_directory: resolved.working_directory.clone(),
+            },
+            log_file,
+        )?;
         let paths = UnitPaths::for_platform(platform, &schedule.home);
         let manifest = build_manifest(&schedule, &resolved)?;
         print!(
@@ -457,32 +533,102 @@ mod tests {
         assert_eq!(legacy_vault_argument(&degenerate), "stage-vault");
     }
 
-    /// `canonical_exe` must go through the manifest's path normalizer, so the
-    /// manifest, the `# command:` line and the `schtasks /TR` value never
-    /// carry Windows' `\\?\` verbatim prefix.
+    /// The recorded executable must be a path the manifest schema accepts on
+    /// every platform.
     #[test]
-    fn canonical_exe_is_normalized_for_the_manifest() {
-        let exe = canonical_exe().expect("the running test binary canonicalizes");
-        let expected =
-            canonical_path_for_manifest(&current_exe().expect("current exe")).expect("normalizes");
-        assert_eq!(exe, expected);
-        // Whatever the platform, the recorded form must be a path the manifest
-        // schema accepts.
+    fn recorded_binary_path_is_absolute_and_normalized() {
+        let exe = recorded_binary_path().expect("the running test binary resolves");
         manifest::validate_absolute_normalized_path(
             "execution.binary_path",
             exe.to_str().expect("test binary path is UTF-8"),
         )
-        .expect("canonical_exe is absolute and normalized");
+        .expect("recorded_binary_path is absolute and normalized");
     }
 
     #[cfg(windows)]
     #[test]
-    fn canonical_exe_strips_the_windows_verbatim_prefix() {
-        let exe = canonical_exe().expect("the running test binary canonicalizes");
+    fn recorded_binary_path_strips_the_windows_verbatim_prefix() {
+        let exe = recorded_binary_path().expect("the running test binary resolves");
         assert!(
             !exe.to_string_lossy().starts_with(r"\\?\"),
-            "canonical_exe leaked a verbatim prefix: {}",
+            "recorded_binary_path leaked a verbatim prefix: {}",
             exe.display()
         );
+    }
+
+    /// The bug this guards: `std::fs::canonicalize` follows symlinks, so a
+    /// package-manager shim (`/opt/homebrew/bin/xv` → a versioned Cellar path)
+    /// would be recorded as the *versioned* path. The design allows a
+    /// same-path version bump with a warning; recording the version-bearing
+    /// target instead makes every upgrade read as missing-binary drift.
+    ///
+    /// Asserted against the shared normalizer rather than `recorded_binary_path`
+    /// itself, because a test cannot re-exec the suite through a symlink — and
+    /// on Linux `current_exe()` is `/proc/self/exe`, already OS-resolved.
+    #[cfg(unix)]
+    #[test]
+    fn the_recorded_path_shaping_does_not_resolve_a_symlinked_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("xv-0.39.0");
+        std::fs::write(&real, b"#!/bin/sh\n").unwrap();
+        let link = dir.path().join("xv");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let recorded = crate::utils::helpers::lexically_normalize_from(&PathBuf::new(), &link);
+        assert_eq!(recorded, link, "the link path must be recorded verbatim");
+        assert_ne!(recorded, real);
+        // And the contrast: canonicalization — what this deliberately does not
+        // do — would have swapped in the versioned name.
+        assert_eq!(
+            canonical_path_for_manifest(&link).unwrap(),
+            canonical_path_for_manifest(&real).unwrap()
+        );
+    }
+
+    /// A relative `--log-file` must land in the manifest as an absolute,
+    /// normalized path; leaving it raw made `validate_v1` reject the manifest
+    /// the preview had just shown.
+    #[test]
+    fn a_relative_log_file_is_resolved_against_the_install_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+        let cwd = canonical_path_for_manifest(dir.path()).unwrap();
+
+        let resolved = crate::utils::helpers::lexically_normalize_from(
+            &cwd,
+            Path::new("./logs/../logs/x.log"),
+        );
+        assert_eq!(resolved, cwd.join("logs").join("x.log"));
+        manifest::validate_absolute_normalized_path(
+            "execution.log_path",
+            resolved.to_str().unwrap(),
+        )
+        .expect("a resolved relative log path satisfies the schema");
+    }
+
+    /// An absolute `--log-file` is left where the user put it, and a missing
+    /// leaf file is fine — only the nearest existing ancestor is checked.
+    #[test]
+    fn an_absolute_log_file_survives_resolution_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = canonical_path_for_manifest(dir.path())
+            .unwrap()
+            .join("rotate.log");
+        assert_eq!(resolve_log_path(target.to_str().unwrap()).unwrap(), target);
+    }
+
+    /// A log destination reached through a symlinked directory is refused:
+    /// whoever controls the link would otherwise redirect an unattended write.
+    #[cfg(unix)]
+    #[test]
+    fn a_log_path_under_a_symlinked_directory_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = dir.path().join("linked");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let error = resolve_log_path(link.join("rotate.log").to_str().unwrap()).unwrap_err();
+        assert!(error.to_string().contains("symlink"), "{error}");
     }
 }

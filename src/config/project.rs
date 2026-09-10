@@ -532,8 +532,16 @@ pub(crate) async fn load_project_at(
     })
 }
 
+/// Canonicalize a discovered `.xv.toml` path.
+///
+/// Routed through [`crate::utils::helpers::canonicalize_without_verbatim_prefix`]
+/// rather than `std::fs::canonicalize` directly: on Windows the raw call keeps
+/// the `\\?\` verbatim prefix, and the schedule manifest records the *stripped*
+/// spelling at install time (`schedule::target::canonical_path_for_manifest`).
+/// Two spellings of one file would read as project-path drift and refuse an
+/// otherwise healthy scheduled run.
 fn canonicalize_project_path(path: &Path) -> Result<PathBuf> {
-    std::fs::canonicalize(path).map_err(|e| {
+    crate::utils::helpers::canonicalize_without_verbatim_prefix(path).map_err(|e| {
         CrosstacheError::config(format!("failed to canonicalize {}: {e}", path.display()))
     })
 }
@@ -621,6 +629,28 @@ pub(crate) mod test_support {
 mod tests {
     use super::test_support::XvEnvGuard;
     use super::*;
+
+    /// Install records the project path through
+    /// `schedule::target::canonical_path_for_manifest`; a later run
+    /// re-resolves it through `canonicalize_project_path`. If those two ever
+    /// spell the same file differently — the Windows `\\?\` verbatim prefix
+    /// was exactly that — drift refuses an otherwise healthy schedule. They
+    /// share one helper now, and this test pins that they agree.
+    #[test]
+    fn project_and_manifest_canonicalization_agree_on_the_same_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(".xv.toml");
+        std::fs::write(&file, b"").unwrap();
+
+        let via_project = canonicalize_project_path(&file).unwrap();
+        let via_manifest = crate::schedule::target::canonical_path_for_manifest(&file).unwrap();
+        assert_eq!(via_project, via_manifest);
+        assert!(
+            !via_project.to_string_lossy().starts_with(r"\\?\"),
+            "verbatim prefix leaked: {}",
+            via_project.display()
+        );
+    }
 
     #[test]
     fn project_config_default_is_empty() {
