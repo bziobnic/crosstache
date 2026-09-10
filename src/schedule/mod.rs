@@ -46,6 +46,8 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{CrosstacheError, Result};
 
+pub mod manifest;
+
 /// launchd job label and systemd/Task Scheduler unit name.
 const LAUNCHD_LABEL: &str = "com.crosstache.xv-rotate";
 const SYSTEMD_UNIT: &str = "xv-rotate";
