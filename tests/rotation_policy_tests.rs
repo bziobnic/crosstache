@@ -357,6 +357,42 @@ fn due_is_a_no_op_when_nothing_is_due() {
 }
 
 #[test]
+fn due_announces_the_batch_and_reports_the_rotated_count() {
+    // The public transcript of a successful `--due` run: the batch line before
+    // rotating, and the count afterwards. Both are rendered by the CLI adapter
+    // over the shared due-rotation service, so this pins them against a
+    // refactor of that seam.
+    let (mut cmd, _tmp, store) = xv_isolated_local_with_opts(false, false);
+    cmd.args(["set", "STALE", "--value", "old-value"])
+        .status()
+        .unwrap();
+    make_due(&store, "STALE");
+
+    let out = xv_cmd_for(&store)
+        .args(["rotate", "--due", "--force"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined.contains("1 secret(s) due for rotation in 'default': STALE"),
+        "{combined}"
+    );
+    assert!(
+        combined.contains("Rotated 1 secret(s) in 'default'."),
+        "{combined}"
+    );
+}
+
+#[test]
 fn an_unparseable_policy_fails_due_rather_than_being_skipped() {
     let (mut cmd, _tmp, store) = xv_isolated_local_with_opts(false, false);
     cmd.args(["set", "BROKEN", "--value", "v"])

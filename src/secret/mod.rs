@@ -25,6 +25,7 @@ pub mod manager;
 pub mod models;
 pub mod name_manager;
 pub mod rotation;
+pub mod scheduled_rotation;
 
 #[cfg(feature = "file-ops")]
 pub mod attachment_transfer;
