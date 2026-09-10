@@ -351,6 +351,11 @@ async fn execute_install(
     let now = chrono::Utc::now();
     let manifest_bytes = stamp_and_serialize_manifest(manifest_v1, now)?;
     let plan = InstallPlan::new(platform, schedule.clone(), paths.clone(), manifest_bytes)?;
+    // Stages 1 and 2 — resolving the target and rendering the manifest and
+    // units — mutate nothing, which is why they (and the confirmation prompt)
+    // deliberately run before the lock is taken: a person deciding at a prompt
+    // must not hold an exclusive lock while they think.
+    //
     // Opening the store takes the exclusive `install.lock` and holds it until
     // the transaction ends, so a second installer cannot interleave with this
     // one.

@@ -18,20 +18,15 @@ type FileMode = u32;
 enum FileOpenBehavior {
     Replace,
     Exclusive,
-    #[cfg(any(feature = "file-ops", feature = "ui", test))]
+    /// Open-or-create an empty file to hold an advisory lock on. Ungated: the
+    /// rotation schedule's `install.lock` needs it in every build, including
+    /// `--no-default-features`.
     Lock,
 }
 
 impl FileOpenBehavior {
     fn is_lock(self) -> bool {
-        #[cfg(any(feature = "file-ops", feature = "ui", test))]
-        {
-            matches!(self, Self::Lock)
-        }
-        #[cfg(not(any(feature = "file-ops", feature = "ui", test)))]
-        {
-            false
-        }
+        matches!(self, Self::Lock)
     }
 }
 
@@ -396,7 +391,6 @@ fn write_file_no_follow_with_mode(
         let (access_mode, create_mode) = match behavior {
             FileOpenBehavior::Replace => (libc::O_WRONLY, libc::O_TRUNC),
             FileOpenBehavior::Exclusive => (libc::O_WRONLY, libc::O_EXCL),
-            #[cfg(any(feature = "file-ops", feature = "ui", test))]
             FileOpenBehavior::Lock => (libc::O_RDWR, libc::O_EXCL),
         };
         let mut fd = unsafe {
@@ -496,7 +490,6 @@ fn write_file_no_follow_with_mode(
             FileOpenBehavior::Exclusive => {
                 options.create_new(true);
             }
-            #[cfg(any(feature = "file-ops", feature = "ui", test))]
             FileOpenBehavior::Lock => {
                 options.read(true);
             }

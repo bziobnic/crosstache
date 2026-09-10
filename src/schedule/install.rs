@@ -53,8 +53,8 @@ use crate::error::{CrosstacheError, Result};
 use crate::schedule::manifest::{self, ScheduleStatePaths, SCHEDULE_ID};
 use crate::schedule::{
     launchd_domain_target, register_native, render, unit_paths_for, unregister_native,
-    CommandRunner, Platform, RotationSchedule, ScheduleCommand, UnitFile, UnitPaths, LAUNCHD_LABEL,
-    SCHTASKS_NAME, SYSTEMD_UNIT,
+    CommandRunner, Platform, RotationSchedule, ScheduleCommand, ScheduleInterval, UnitFile,
+    UnitPaths, LAUNCHD_LABEL, SCHTASKS_NAME, SYSTEMD_UNIT,
 };
 use crate::utils::helpers::{
     atomic_write_file_no_follow, create_private_dir, open_private_lock_file_no_follow,
@@ -532,11 +532,8 @@ fn capture_registration(
             None,
         )),
         Platform::Systemd => {
-            let out = runner.run(
-                "systemctl",
-                &["--user", "is-active", &format!("{SYSTEMD_UNIT}.timer")],
-            )?;
-            Ok((out.stdout.trim() == "active", None))
+            let properties = systemd_timer_properties(runner)?;
+            Ok((systemd_is_registered(&properties), None))
         }
         Platform::Schtasks => {
             // The definition lives only inside Task Scheduler, so rollback has
@@ -617,17 +614,7 @@ fn verify_registration(
         }
         Platform::Systemd => {
             let timer = format!("{SYSTEMD_UNIT}.timer");
-            let shown = runner.run(
-                "systemctl",
-                &[
-                    "--user",
-                    "show",
-                    &timer,
-                    "--property=LoadState",
-                    "--property=ActiveState",
-                ],
-            )?;
-            let properties = parse_systemd_properties(&shown.stdout);
+            let properties = systemd_timer_properties(runner)?;
             let load_state = properties
                 .get("LoadState")
                 .map(String::as_str)
@@ -670,11 +657,19 @@ fn verify_registration(
         }
         Platform::Schtasks => {
             // Task Scheduler has no unit file to compare against, so the
-            // registered command line carries the whole check. Cadence is not
-            // re-read: `schtasks /Query` renders the schedule type and start
-            // time in the machine's display language, and refusing a correct
-            // install because the host is not English would be worse than the
-            // gap. `/TR` is verbatim what we sent.
+            // registered task itself has to answer for all four things. The
+            // XML carries the cadence in locale-independent tag names and an
+            // ISO-8601 `StartBoundary`, which the `/V /FO LIST` rendering does
+            // not — it prints the schedule type and start time in the machine's
+            // display language.
+            let xml = runner.run("schtasks", &["/Query", "/TN", SCHTASKS_NAME, "/XML"])?;
+            if !xml.ok() {
+                return Err(verification_error(&format!(
+                    "Task Scheduler does not report {SCHTASKS_NAME} after /Create"
+                )));
+            }
+            verify_schtasks_cadence(&xml.stdout, plan.schedule.interval)?;
+
             let out = runner.run(
                 "schtasks",
                 &["/Query", "/TN", SCHTASKS_NAME, "/V", "/FO", "LIST"],
@@ -699,6 +694,135 @@ fn verify_registration(
         }
     }
     Ok(())
+}
+
+/// Check the registered task's trigger against the cadence we asked for.
+///
+/// Reads the task XML rather than `/Query /V`: tag names and the ISO-8601
+/// `StartBoundary` are the same on every Windows display language, so this
+/// cannot refuse a correct install because the host is not English.
+///
+/// The NUL stripping is not cosmetic — `schtasks /XML` emits UTF-16, which
+/// reaches us as ASCII text interleaved with NUL bytes once the runner has
+/// lossily decoded it.
+fn verify_schtasks_cadence(raw_xml: &str, interval: ScheduleInterval) -> Result<()> {
+    let xml = raw_xml.replace('\0', "");
+
+    let (expected_time, required): (String, Vec<&str>) = match interval {
+        // `/SC HOURLY /ST 00:MM` registers a trigger that starts at :MM and
+        // repeats every hour, so the repetition interval is what proves the
+        // cadence, not the schedule kind.
+        ScheduleInterval::Hourly { minute } => (
+            format!("00:{minute:02}"),
+            vec!["<Repetition", "<Interval>PT1H</Interval>"],
+        ),
+        ScheduleInterval::Daily { hour, minute } => (
+            format!("{hour:02}:{minute:02}"),
+            vec!["<CalendarTrigger", "<ScheduleByDay"],
+        ),
+        ScheduleInterval::Weekly {
+            weekday,
+            hour,
+            minute,
+        } => (
+            format!("{hour:02}:{minute:02}"),
+            vec![
+                "<CalendarTrigger",
+                "<ScheduleByWeek",
+                "<DaysOfWeek",
+                schtasks_xml_weekday(weekday),
+            ],
+        ),
+    };
+
+    for tag in required {
+        if !xml.contains(tag) {
+            return Err(verification_error(&format!(
+                "the registered task's trigger is not the cadence this install asked for \
+                 (no '{tag}' element in schtasks /Query /XML output)"
+            )));
+        }
+    }
+
+    let Some(start) = start_boundary_time_of_day(&xml) else {
+        return Err(verification_error(
+            "the registered task has no readable <StartBoundary>, so its start time cannot be \
+             confirmed",
+        ));
+    };
+    if start != expected_time {
+        return Err(verification_error(&format!(
+            "the registered task starts at {start}, not the {expected_time} this install asked for"
+        )));
+    }
+    Ok(())
+}
+
+/// `HH:MM` from the first `<StartBoundary>YYYY-MM-DDTHH:MM:SS…</StartBoundary>`.
+fn start_boundary_time_of_day(xml: &str) -> Option<String> {
+    let after = xml.split_once("<StartBoundary>")?.1;
+    let value = after.split_once("</StartBoundary>")?.0.trim();
+    let time = value.split_once('T')?.1;
+    if time.len() < 5 {
+        return None;
+    }
+    let (hhmm, _) = time.split_at(5);
+    if hhmm.as_bytes()[2] == b':' {
+        Some(hhmm.to_string())
+    } else {
+        None
+    }
+}
+
+/// Task XML's empty day element, matched as an open prefix so both
+/// `<Sunday/>` and `<Sunday />` count.
+fn schtasks_xml_weekday(day: u32) -> &'static str {
+    match day {
+        0 => "<Sunday",
+        1 => "<Monday",
+        2 => "<Tuesday",
+        3 => "<Wednesday",
+        4 => "<Thursday",
+        5 => "<Friday",
+        _ => "<Saturday",
+    }
+}
+
+/// The one systemd query both the prior-state probe and verification use.
+///
+/// They must not ask different questions. `is-active` alone reports an
+/// enabled-but-inactive timer — a perfectly real schedule between firings, or
+/// one the user stopped — as absent, and a rollback that believed that would
+/// `disable --now` a schedule the user still had.
+fn systemd_timer_properties(runner: &dyn CommandRunner) -> Result<HashMap<String, String>> {
+    let out = runner.run(
+        "systemctl",
+        &[
+            "--user",
+            "show",
+            &format!("{SYSTEMD_UNIT}.timer"),
+            "--property=LoadState",
+            "--property=ActiveState",
+            "--property=UnitFileState",
+        ],
+    )?;
+    Ok(parse_systemd_properties(&out.stdout))
+}
+
+/// Whether systemd currently has our timer at all. `show` exits 0 even for a
+/// unit that does not exist, so the properties are the only real answer.
+fn systemd_is_registered(properties: &HashMap<String, String>) -> bool {
+    if properties.get("LoadState").map(String::as_str) != Some("loaded") {
+        return false;
+    }
+    let enabled = properties
+        .get("UnitFileState")
+        .is_some_and(|state| state.starts_with("enabled"));
+    let running = matches!(
+        properties.get("ActiveState").map(String::as_str),
+        Some("active") | Some("activating")
+    );
+    enabled || running
 }
 
 fn parse_systemd_properties(stdout: &str) -> HashMap<String, String> {
@@ -898,7 +1022,7 @@ pub(crate) enum StoreOp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schedule::{fixture_abs, CommandOutput, ScheduleInterval};
+    use crate::schedule::{fixture_abs, CommandOutput};
     use std::cell::RefCell;
     use std::collections::BTreeMap;
     use std::sync::Mutex;
@@ -1115,6 +1239,15 @@ mod tests {
         reports_active: String,
         /// systemd `LoadState` after enabling.
         reports_load: String,
+        /// systemd `ActiveState` of the *prior* timer, before this install
+        /// registers anything. An enabled timer between firings is `inactive`.
+        prior_active: String,
+        /// systemd `UnitFileState` of the prior timer.
+        prior_unit_file_state: String,
+        /// The trigger element Task Scheduler reports for the installed task.
+        reports_trigger: String,
+        /// The `<StartBoundary>` Task Scheduler reports for it.
+        reports_start_boundary: String,
     }
 
     impl Default for FakeRunner {
@@ -1129,6 +1262,12 @@ mod tests {
                 reports_log: s.log_path.to_string_lossy().to_string(),
                 reports_active: "active".to_string(),
                 reports_load: "loaded".to_string(),
+                prior_active: "active".to_string(),
+                prior_unit_file_state: "enabled".to_string(),
+                reports_trigger: "<CalendarTrigger>…<ScheduleByDay><DaysInterval>1</DaysInterval>\
+                                  </ScheduleByDay></CalendarTrigger>"
+                    .to_string(),
+                reports_start_boundary: "2026-09-10T03:30:00".to_string(),
             }
         }
     }
@@ -1146,6 +1285,15 @@ mod tests {
         /// The `/TR` line `schtasks /Query /V` prints, built from what this
         /// fake claims is registered rather than from the plan — so a test can
         /// make the scheduler report a job pointing somewhere else.
+        /// The task XML `schtasks /Query /XML` prints for the installed task.
+        fn task_xml(&self) -> String {
+            format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n<Task><Triggers>{}\
+                 <StartBoundary>{}</StartBoundary></Triggers><Actions><Exec><Command>{}\
+                 </Command></Exec></Actions></Task>\n",
+                self.reports_trigger, self.reports_start_boundary, self.reports_binary
+            )
+        }
         fn task_command(&self) -> String {
             format!(
                 "Task To Run:  cmd /c {} schedule run --manifest {} >> \"{}\" 2>&1",
@@ -1175,10 +1323,10 @@ mod tests {
 
             // How many calls of this shape have already happened decides
             // whether we are answering "before" or "after" registration.
-            let already_registered = self.prior_registered
-                || self.calls.lock().unwrap().iter().any(|c| {
-                    c.contains("bootstrap") || c.contains("enable") || c.contains("/Create")
-                });
+            let registration_happened = self.calls.lock().unwrap().iter().any(|c| {
+                c.contains("bootstrap") || c.contains("enable --now") || c.contains("/Create")
+            });
+            let already_registered = self.prior_registered || registration_happened;
 
             let (status, stdout) = match (program, joined.as_str()) {
                 ("launchctl", j) if j.starts_with("print") => {
@@ -1196,23 +1344,20 @@ mod tests {
                         (1, String::new())
                     }
                 }
-                ("systemctl", j) if j.contains("is-active") => (
-                    0,
-                    if already_registered {
-                        "active\n".to_string()
-                    } else {
-                        "inactive\n".to_string()
-                    },
-                ),
                 ("systemctl", j) if j.contains("show") && j.contains("timer") => (
                     0,
-                    if already_registered {
+                    if registration_happened {
                         format!(
-                            "LoadState={}\nActiveState={}\n",
+                            "LoadState={}\nActiveState={}\nUnitFileState=enabled\n",
                             self.reports_load, self.reports_active
                         )
+                    } else if self.prior_registered {
+                        format!(
+                            "LoadState=loaded\nActiveState={}\nUnitFileState={}\n",
+                            self.prior_active, self.prior_unit_file_state
+                        )
                     } else {
-                        "LoadState=not-found\nActiveState=inactive\n".to_string()
+                        "LoadState=not-found\nActiveState=inactive\nUnitFileState=\n".to_string()
                     },
                 ),
                 ("systemctl", j) if j.contains("show") && j.contains("service") => (
@@ -1223,7 +1368,9 @@ mod tests {
                     ),
                 ),
                 ("schtasks", j) if j.contains("/XML") && j.contains("/Query") => {
-                    if self.prior_registered {
+                    if registration_happened {
+                        (0, self.task_xml())
+                    } else if self.prior_registered {
                         (0, "<Task><Exec>previous</Exec></Task>\n".to_string())
                     } else {
                         (1, String::new())
@@ -1735,6 +1882,150 @@ mod tests {
             install_transactional(&plan, &mut store, &runner, now()).expect_err("must refuse");
         assert!(err.to_string().contains("LoadState=not-found"), "{err}");
         assert!(store.files.is_empty(), "{:?}", store.files);
+    }
+
+    #[test]
+    fn schtasks_verification_accepts_the_cadence_it_registered() {
+        // Daily is the fixture; the trigger and start time the fake reports
+        // are the ones `/SC DAILY /ST 03:30` produces.
+        let plan = plan(Platform::Schtasks);
+        let mut store = FakeStore::new();
+        install_transactional(&plan, &mut store, &FakeRunner::default(), now()).unwrap();
+        assert_eq!(store.get(&manifest_path()), Some(&MANIFEST_BYTES.to_vec()));
+    }
+
+    #[test]
+    fn schtasks_verification_rejects_a_task_that_starts_at_another_time() {
+        let plan = plan(Platform::Schtasks);
+        let mut store = FakeStore::new();
+        let runner = FakeRunner {
+            reports_start_boundary: "2026-09-10T23:30:00".to_string(),
+            ..FakeRunner::default()
+        };
+        let err =
+            install_transactional(&plan, &mut store, &runner, now()).expect_err("must refuse");
+        assert!(err.to_string().contains("starts at 23:30"), "{err}");
+        assert!(store.files.is_empty(), "{:?}", store.files);
+    }
+
+    #[test]
+    fn schtasks_verification_rejects_a_task_with_another_kind_of_trigger() {
+        let plan = plan(Platform::Schtasks);
+        let mut store = FakeStore::new();
+        // A weekly trigger where a daily one was asked for: the job would fire
+        // once a week and nobody would notice until a rotation was six days
+        // late.
+        let runner = FakeRunner {
+            reports_trigger: "<CalendarTrigger><ScheduleByWeek><DaysOfWeek><Sunday/></DaysOfWeek>\
+                              </ScheduleByWeek></CalendarTrigger>"
+                .to_string(),
+            ..FakeRunner::default()
+        };
+        let err =
+            install_transactional(&plan, &mut store, &runner, now()).expect_err("must refuse");
+        assert!(err.to_string().contains("ScheduleByDay"), "{err}");
+        assert!(store.files.is_empty(), "{:?}", store.files);
+    }
+
+    #[test]
+    fn schtasks_cadence_is_read_from_utf16_xml_and_matched_per_interval() {
+        // schtasks emits UTF-16; lossily decoded it arrives with NULs between
+        // the ASCII characters, and the check has to see through that.
+        let utf16ish = |xml: &str| -> String { xml.chars().flat_map(|c| [c, '\0']).collect() };
+
+        let hourly = "<Task><Triggers><CalendarTrigger><Repetition><Interval>PT1H</Interval>\
+                      </Repetition><StartBoundary>2026-09-10T00:15:00</StartBoundary>\
+                      </CalendarTrigger></Triggers></Task>";
+        verify_schtasks_cadence(&utf16ish(hourly), ScheduleInterval::Hourly { minute: 15 })
+            .expect("an hourly repetition starting at :15 is what /SC HOURLY /ST 00:15 makes");
+        assert!(
+            verify_schtasks_cadence(hourly, ScheduleInterval::Hourly { minute: 45 }).is_err(),
+            "a different minute must not pass"
+        );
+
+        let weekly = "<Task><Triggers><CalendarTrigger><ScheduleByWeek><DaysOfWeek><Sunday/>\
+                      </DaysOfWeek></ScheduleByWeek><StartBoundary>2026-09-13T04:00:00\
+                      </StartBoundary></CalendarTrigger></Triggers></Task>";
+        verify_schtasks_cadence(
+            weekly,
+            ScheduleInterval::Weekly {
+                weekday: 0,
+                hour: 4,
+                minute: 0,
+            },
+        )
+        .expect("Sunday at 04:00");
+        assert!(
+            verify_schtasks_cadence(
+                weekly,
+                ScheduleInterval::Weekly {
+                    weekday: 3,
+                    hour: 4,
+                    minute: 0
+                }
+            )
+            .is_err(),
+            "a different day must not pass"
+        );
+
+        // No trigger at all, and an unreadable boundary.
+        assert!(verify_schtasks_cadence(
+            "<Task><Triggers><LogonTrigger/></Triggers></Task>",
+            ScheduleInterval::Daily {
+                hour: 3,
+                minute: 30
+            }
+        )
+        .is_err());
+        let err = verify_schtasks_cadence(
+            "<Task><CalendarTrigger><ScheduleByDay/></CalendarTrigger></Task>",
+            ScheduleInterval::Daily {
+                hour: 3,
+                minute: 30,
+            },
+        )
+        .expect_err("no StartBoundary");
+        assert!(err.to_string().contains("StartBoundary"), "{err}");
+    }
+
+    #[test]
+    fn an_enabled_but_inactive_prior_timer_still_counts_as_a_schedule() {
+        // A systemd timer between firings is `inactive`; `is-active` alone
+        // would call that "no schedule" and the rollback would disable a
+        // schedule the user still had.
+        let plan = plan(Platform::Systemd);
+        let mut store = FakeStore::with_prior(Platform::Systemd);
+        let runner = FakeRunner {
+            prior_active: "inactive".to_string(),
+            prior_unit_file_state: "enabled".to_string(),
+            ..FakeRunner::with_prior()
+        };
+        // Fail a unit write so the transaction rolls back with the scheduler
+        // itself healthy.
+        let mut failing = FakeStore::with_prior(Platform::Systemd).failing(StoreOp::WriteUnit, 1);
+
+        let err =
+            install_transactional(&plan, &mut failing, &runner, now()).expect_err("must fail");
+        assert!(!err.to_string().contains("also failed"), "{err}");
+        let flat = runner.flat();
+        assert!(
+            !flat.iter().any(|c| c.contains("disable --now")),
+            "the previous schedule was disabled instead of restored: {flat:?}"
+        );
+        assert!(
+            flat.iter().filter(|c| c.contains("enable --now")).count() >= 1,
+            "the previous timer was not re-enabled: {flat:?}"
+        );
+        // And the untouched control: an absent prior timer is still absent.
+        let absent = FakeRunner::default();
+        let mut store2 = FakeStore::new().failing(StoreOp::WriteUnit, 1);
+        let _ = install_transactional(&plan, &mut store2, &absent, now());
+        assert!(
+            absent.flat().iter().any(|c| c.contains("disable --now")),
+            "{:?}",
+            absent.flat()
+        );
+        let _ = &mut store;
     }
 
     // -- Task Scheduler rollback -------------------------------------------
