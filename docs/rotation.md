@@ -158,6 +158,12 @@ exactly what an install would produce:
   write itself;
 - the native unit file(s), and on Windows the exact `schtasks` invocation.
 
+The pinned unit carries the manifest path, `HOME`, the working directory the
+target was resolved in, and the log path — nothing else. In particular it does
+**not** set `XDG_CONFIG_HOME`: the manifest already names the exact
+configuration file and its digest, and an environment variable that redirects
+config resolution is a target-selection input a pinned unit may not add.
+
 It is a preview in the strict sense: it creates no directory, manifest, lock,
 result, unit or log, touches no existing file, and calls no scheduler. It is
 also the way to drive a scheduler `xv` does not manage — the `# command:` line

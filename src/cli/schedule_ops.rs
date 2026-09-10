@@ -13,7 +13,9 @@ use crate::schedule::manifest::{
     self as manifest, ManifestCadence, ManifestExecution, ScheduleManifestV1,
 };
 use crate::schedule::preview::render_install_preview;
-use crate::schedule::target::{resolve_install_target, ResolvedScheduleTarget};
+use crate::schedule::target::{
+    manifest_path_string, resolve_install_target, ResolvedScheduleTarget,
+};
 use crate::schedule::{
     self, Platform, ProcessRunner, RotationSchedule, ScheduleCommand, ScheduleInterval, UnitPaths,
 };
@@ -139,6 +141,7 @@ async fn execute_install(
                 interval,
                 ScheduleCommand::ManifestRun {
                     manifest: manifest_path.clone(),
+                    working_directory: resolved.working_directory.clone(),
                 },
                 log_file,
             )?
@@ -228,15 +231,6 @@ fn build_manifest(
         ScheduleInterval::Weekly { hour, minute, .. } => ("weekly", hour, minute),
     };
 
-    let path_string = |field: &str, path: &Path| -> Result<String> {
-        path.to_str().map(str::to_string).ok_or_else(|| {
-            CrosstacheError::config(format!(
-                "schedule manifest field '{field}' cannot be recorded: '{}' is not valid UTF-8",
-                path.display()
-            ))
-        })
-    };
-
     Ok(ScheduleManifestV1 {
         schema_version: 1,
         schedule_id: manifest::SCHEDULE_ID.to_string(),
@@ -247,13 +241,13 @@ fn build_manifest(
             minute: minute as u8,
         },
         execution: ManifestExecution {
-            binary_path: path_string("execution.binary_path", &schedule.binary)?,
+            binary_path: manifest_path_string("execution.binary_path", &schedule.binary)?,
             installed_version: env!("CARGO_PKG_VERSION").to_string(),
-            working_directory: path_string(
+            working_directory: manifest_path_string(
                 "execution.working_directory",
                 &resolved.working_directory,
             )?,
-            log_path: path_string("execution.log_path", &schedule.log_path)?,
+            log_path: manifest_path_string("execution.log_path", &schedule.log_path)?,
         },
         target: resolved.target.clone(),
     })

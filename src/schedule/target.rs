@@ -348,7 +348,7 @@ fn canonical_path_for_manifest(path: &Path) -> Result<PathBuf> {
 }
 
 /// Render a canonical path as the manifest's string form.
-fn manifest_path_string(field: &str, path: &Path) -> Result<String> {
+pub(crate) fn manifest_path_string(field: &str, path: &Path) -> Result<String> {
     path.to_str().map(str::to_string).ok_or_else(|| {
         CrosstacheError::config(format!(
             "schedule manifest field '{field}' cannot be recorded: '{}' is not valid UTF-8",

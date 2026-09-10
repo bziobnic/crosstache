@@ -373,22 +373,37 @@ fn print_writes_nothing_and_creates_no_state_root() {
 }
 
 #[test]
-fn print_carries_the_config_environment_into_the_unit() {
-    // The classic failure: the job runs but resolves a different config than the
-    // user tested with, so it sweeps the wrong vault or none at all.
+fn print_pins_the_config_file_rather_than_a_config_environment() {
+    // The classic failure: the job runs but resolves a different config than
+    // the user tested with, so it sweeps the wrong vault or none at all. The
+    // manifest closes that by naming the exact file and its digest — which is
+    // also why the unit may no longer carry XDG_CONFIG_HOME, an environment
+    // variable that would redirect config resolution out from under it.
     let (_cmd, tmp, store) = xv_isolated_local_with_opts(false, false);
     use_the_store_once(&store);
     let (ok, out) = print_schedule(&store, &["--vault", "v"]);
     assert!(ok, "{out}");
 
-    if cfg!(target_os = "macos") || cfg!(target_os = "linux") {
-        let config_home = tmp.path().join(".config");
-        assert!(
-            out.contains(&config_home.to_string_lossy().to_string()),
-            "the unit must pin XDG_CONFIG_HOME ({}): {out}",
-            config_home.display()
-        );
-    }
+    let config = tmp.path().join(".config").join("xv").join("xv.conf");
+    let config = std::fs::canonicalize(&config).unwrap();
+    assert!(
+        out.contains(&format!("\"config_path\": \"{}\"", config.display())),
+        "the manifest must pin the config file ({}): {out}",
+        config.display()
+    );
+    assert!(out.contains("\"config_digest\": \"sha256:"), "{out}");
+    assert!(
+        !out.contains("XDG_CONFIG_HOME"),
+        "a pinned unit may not add target-selection environment variables: {out}"
+    );
+
+    // And it starts where the manifest says resolution happened.
+    let cwd = std::fs::canonicalize(tmp.path()).unwrap();
+    assert!(
+        out.contains(&format!("\"working_directory\": \"{}\"", cwd.display())),
+        "{out}"
+    );
+    assert_eq!(header_value(&out, "cwd"), cwd.to_string_lossy(), "{out}");
 }
 
 #[test]

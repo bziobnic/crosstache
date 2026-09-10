@@ -105,6 +105,8 @@ mod tests {
     const MANIFEST_PATH: &str =
         "/home/alice/.local/state/xv/schedules/rotation-default/manifest.json";
     const LOG_PATH: &str = "/home/alice/.local/state/xv/rotate.log";
+    const WORKING_DIRECTORY: &str = "/home/alice/work/service";
+    const UNIT_DIR: &str = "/home/alice/.config/systemd/user";
 
     /// The golden's fixture target: an aliased AWS vault selected by a project
     /// environment.
@@ -149,6 +151,7 @@ mod tests {
             interval: ScheduleInterval::Daily { hour: 3, minute: 0 },
             command: ScheduleCommand::ManifestRun {
                 manifest: PathBuf::from(MANIFEST_PATH),
+                working_directory: PathBuf::from(WORKING_DIRECTORY),
             },
             binary: PathBuf::from("/home/alice/bin/xv"),
             log_path: PathBuf::from(LOG_PATH),
@@ -159,7 +162,7 @@ mod tests {
 
     fn unit_paths() -> UnitPaths {
         UnitPaths {
-            dir: PathBuf::from("/home/alice/.config/systemd/user"),
+            dir: PathBuf::from(UNIT_DIR),
         }
     }
 
@@ -219,29 +222,94 @@ mod tests {
 "
         );
 
-        // The unit bodies themselves come from the renderers; the preview only
-        // frames them, and that framing is what is asserted here.
-        let units = schedule::render(Platform::Systemd, &schedule, &paths);
-        let mut expected = expected_prefix;
-        for unit in &units {
-            expected.push_str(&format!("\n# --- {} ---\n", unit.path.display()));
-            expected.push_str(&unit.contents);
-        }
+        // The unit bodies are written out literally, NOT re-derived from
+        // `schedule::render` — a test that renders its own expectation cannot
+        // catch the unit drifting away from the golden.
+        //
+        // Deviations from goldens 67-88 below, all of them the "required
+        // metadata" the golden's preamble allows unit bodies to gain:
+        //   - the managed-by comment and `Documentation=`, so a reader who
+        //     finds the file knows what owns it;
+        //   - crosstache's own `Description=` wording;
+        //   - per-argument quoting on `ExecStart=` and `Environment=`, without
+        //     which a manifest path or HOME containing a space silently
+        //     becomes two arguments (asserted separately below);
+        //   - `RandomizedDelaySec=` on the timer.
+        // Everything the golden makes a contract — the ExecStart command, the
+        // WorkingDirectory, the single HOME environment pair, the append
+        // redirections, the calendar and the install target — is literal here.
+        let expected_service = format!(
+            "\
+# Managed by crosstache (xv schedule). Edits are overwritten on reinstall.
+[Unit]
+Description=crosstache due-secret rotation sweep
+Documentation=https://github.com/bziobnic/crosstache/blob/main/docs/rotation.md
+
+[Service]
+Type=oneshot
+ExecStart=\"/home/alice/bin/xv\" \"schedule\" \"run\" \"--manifest\" \"{MANIFEST_PATH}\"
+WorkingDirectory={WORKING_DIRECTORY}
+Environment=\"HOME=/home/alice\"
+StandardOutput=append:{LOG_PATH}
+StandardError=append:{LOG_PATH}
+"
+        );
+        let expected_timer = "\
+# Managed by crosstache (xv schedule). Edits are overwritten on reinstall.
+[Unit]
+Description=crosstache due-secret rotation schedule
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+# Run a missed sweep once the machine is back, rather than skipping a day.
+Persistent=true
+# Spread load and avoid every host rotating at the same instant.
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
+";
+
+        let expected = format!(
+            "{expected_prefix}\n# --- {UNIT_DIR}/xv-rotate.service ---\n{expected_service}\
+             \n# --- {UNIT_DIR}/xv-rotate.timer ---\n{expected_timer}"
+        );
 
         assert_eq!(rendered, expected);
 
+        // The golden's contract lines, asserted as text so a renderer change
+        // that quietly drops one is a failure with a name.
+        for required in [
+            format!("ExecStart=\"/home/alice/bin/xv\" \"schedule\" \"run\" \"--manifest\" \"{MANIFEST_PATH}\"\n"),
+            format!("WorkingDirectory={WORKING_DIRECTORY}\n"),
+            "Environment=\"HOME=/home/alice\"\n".to_string(),
+            format!("StandardOutput=append:{LOG_PATH}\n"),
+            format!("StandardError=append:{LOG_PATH}\n"),
+            "OnCalendar=*-*-* 03:00:00\n".to_string(),
+            "Persistent=true\n".to_string(),
+            "WantedBy=timers.target\n".to_string(),
+        ] {
+            assert!(rendered.contains(&required), "missing {required:?}\n{rendered}");
+        }
+
+        // goldens:73 — WorkingDirectory sits after ExecStart and before the
+        // environment, exactly as the golden orders them.
+        let exec = rendered.find("ExecStart=").unwrap();
+        let workdir = rendered.find("WorkingDirectory=").unwrap();
+        let env = rendered.find("Environment=").unwrap();
+        assert!(exec < workdir && workdir < env, "{rendered}");
+
+        // goldens:91-92 — no target-selection environment variables, and no
+        // ambient sweep in place of the manifest runner.
+        assert!(!rendered.contains("XDG_CONFIG_HOME"), "{rendered}");
+        assert!(!rendered.contains("--vault"), "{rendered}");
+        assert!(!rendered.contains("rotate --due"), "{rendered}");
+
         // Order is service, then timer — a reader enables the timer last.
-        assert!(rendered.contains("# --- /home/alice/.config/systemd/user/xv-rotate.service ---"));
         assert!(
             rendered.find("xv-rotate.service ---") < rendered.find("xv-rotate.timer ---"),
             "{rendered}"
         );
-        // The unit runs the pinned manifest, never an ambient sweep.
-        assert!(
-            rendered.contains(&format!("--manifest\" \"{MANIFEST_PATH}")),
-            "{rendered}"
-        );
-        assert!(!rendered.contains("rotate --due"), "{rendered}");
     }
 
     #[test]
@@ -291,6 +359,7 @@ mod tests {
         let mut s = schedule();
         s.command = ScheduleCommand::ManifestRun {
             manifest: PathBuf::from("/home/a & b/manifest.json"),
+            working_directory: PathBuf::from(WORKING_DIRECTORY),
         };
         let out = render_install_preview(Platform::Launchd, &s, &unit_paths(), &manifest());
         assert!(
@@ -304,13 +373,16 @@ mod tests {
         let mut s = schedule();
         s.command = ScheduleCommand::ManifestRun {
             manifest: PathBuf::from("/home/a b/manifest.json"),
+            working_directory: PathBuf::from("/home/a b/work"),
         };
         let out = render_install_preview(Platform::Schtasks, &s, &unit_paths(), &manifest());
         assert!(
             out.contains("\n# --- schtasks invocation ---\nschtasks /Create"),
             "{out}"
         );
-        // A manifest path with a space must stay one argument.
+        // A manifest path with a space must stay one argument, and so must the
+        // working directory the task starts in.
         assert!(out.contains("\"/home/a b/manifest.json\""), "{out}");
+        assert!(out.contains("cd /d \"/home/a b/work\" && "), "{out}");
     }
 }
