@@ -274,6 +274,19 @@ actually runs:
 Run that install (add `--force` where there is no terminal) and the legacy unit
 is replaced in the same transaction as any other reinstall.
 
+A pinned unit whose `manifest.json` has gone — deleted by hand, or a state
+directory that moved — is reported under the same `legacy-unpinned` label,
+because its target can no longer be proven either. Status names the manifest it
+was pinned to instead of claiming the unit recorded nothing:
+
+```text
+  Ownership: legacy-unpinned
+  Command:   /home/alice/bin/xv schedule run --manifest /home/alice/.local/state/xv/schedules/rotation-default/manifest.json
+  Target:    unverified (the recorded manifest /home/alice/.local/state/xv/schedules/rotation-default/manifest.json is missing)
+```
+
+That job would refuse itself at its next firing; reinstalling repairs it.
+
 #### Install is transactional
 
 Install and reinstall hold an exclusive `install.lock`, render everything in
