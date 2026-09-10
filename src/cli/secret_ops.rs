@@ -3140,6 +3140,7 @@ pub(crate) async fn execute_secret_rotate_direct(
         force,
         interval,
         &config,
+        true, // interactive single-secret rotate: bump context usage
     )
     .await?;
 
@@ -3495,6 +3496,9 @@ async fn execute_rotate_due(
             length,
             charset,
             generator,
+            // Terminal path: keep the pre-extraction behavior of bumping the
+            // context's usage counters for the rotated vault.
+            track_context_usage: true,
         },
         &mut observer,
     )
@@ -5835,6 +5839,10 @@ pub(crate) async fn execute_secret_rotate(
     // When `Some`, also set/refresh the secret's rotation policy.
     rotation_interval: Option<chrono::Duration>,
     config: &Config,
+    // Whether to bump the ambient context's `last_used`/`usage_count` for the
+    // rotated vault. Interactive callers pass `true`; batch/scheduled callers
+    // pass `false` — see the comment at the tracking block below.
+    track_context_usage: bool,
 ) -> Result<()> {
     use crate::config::ContextManager;
     use crate::secret::manager::SecretRequest;
@@ -5849,9 +5857,20 @@ pub(crate) async fn execute_secret_rotate(
     let vault_name =
         vault.expect("execute_secret_rotate is only called with an already-resolved vault");
 
-    // Update context usage tracking
-    let mut context_manager = ContextManager::load().await?;
-    let _ = context_manager.update_usage(&vault_name).await;
+    // Update context usage tracking — INTERACTIVE ONLY.
+    //
+    // `update_usage` rewrites the ambient context file whenever `current`
+    // names the rotated vault. A context-pinned scheduled install records a
+    // digest of exactly those bytes (`ManifestTarget::context_digest`), and
+    // `drift::recompute_context` refuses on any byte change — so a scheduled
+    // sweep that bumped the counter would invalidate its own schedule after
+    // the first successful rotation. A scheduled run must therefore neither
+    // load nor save the ambient context; it passes `false` and this whole
+    // block is skipped.
+    if track_context_usage {
+        let mut context_manager = ContextManager::load().await?;
+        let _ = context_manager.update_usage(&vault_name).await;
+    }
 
     // Check if the secret exists first
     let existing_secret = reg

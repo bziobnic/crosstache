@@ -3,7 +3,10 @@
 //! These run against a **real** local age-encrypted store in a temp directory —
 //! no backend mock — so a passing test means secrets really were re-encrypted
 //! and re-stamped. Nothing here mutates process-global state (no `set_var`, no
-//! `set_current_dir`), because the whole suite runs in parallel.
+//! `set_current_dir`), because the whole suite runs in parallel — with one
+//! deliberate exception, `a_scheduled_sweep_never_writes_the_ambient_context_file`,
+//! which sets `XV_CONTEXT_DIR` under the shared context env lock so it can
+//! prove the service path leaves the ambient context file untouched.
 
 use super::*;
 
@@ -476,4 +479,104 @@ async fn silent_observer_proceeds_by_default() {
 
     assert_eq!(summary.rotated, 1);
     assert_eq!(summary.failed, 0);
+}
+
+/// The default (scheduled/batch) options must leave the ambient context file
+/// completely alone — not merely "not change the digest", but not write it at
+/// all. A scheduled install pins `ManifestTarget::context_digest` to the exact
+/// bytes of this file, and `drift::recompute_context` refuses on any change,
+/// so a sweep that bumped the usage counter would invalidate its own schedule
+/// after the first successful rotation.
+///
+/// This is also the isolation guard for the rest of this module: it proves the
+/// service path no longer reads or writes the developer's real context file.
+///
+/// Sets `XV_CONTEXT_DIR` (process-global), so it takes the shared context env
+/// lock — the only test in this module that touches process state.
+#[tokio::test]
+async fn a_scheduled_sweep_never_writes_the_ambient_context_file() {
+    let _env_lock = crate::config::context::test_support::context_dir_env_lock()
+        .lock()
+        .await;
+
+    let context_home = tempfile::tempdir().unwrap();
+    let context_path = context_home.path().join("context");
+    // `current` names the very vault being rotated, which is the only case in
+    // which `update_usage` rewrites the file.
+    let seeded = serde_json::json!({
+        "current": {
+            "vault_name": VAULT,
+            "resource_group": null,
+            "subscription_id": null,
+            "storage_container": null,
+            "last_used": "2026-01-01T00:00:00Z",
+            "usage_count": 1
+        },
+        "recent": []
+    });
+    let seeded_bytes = serde_json::to_vec_pretty(&seeded).unwrap();
+    std::fs::write(&context_path, &seeded_bytes).unwrap();
+    let seeded_mtime = std::fs::metadata(&context_path)
+        .unwrap()
+        .modified()
+        .unwrap();
+
+    let _context_dir = EnvVarGuard::set("XV_CONTEXT_DIR", context_home.path());
+
+    let (_dir, _store, backend) = fixture();
+    seed(&backend, "due-a", due_policy()).await;
+
+    // Two firings, exactly as a pinned schedule would do: the first rotation
+    // is what used to rewrite the context and break the second.
+    for firing in 1..=2 {
+        let summary = run_due_rotation_with_backend(
+            &test_config(),
+            backend.clone(),
+            "local",
+            VAULT,
+            &DueRotationOptions::default(),
+            &mut SilentObserver,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("firing {firing} failed: {e}"));
+        assert_eq!(summary.failed, 0, "firing {firing} reported a failure");
+    }
+
+    assert_eq!(
+        std::fs::read(&context_path).unwrap(),
+        seeded_bytes,
+        "the scheduled sweep rewrote the ambient context file"
+    );
+    assert_eq!(
+        std::fs::metadata(&context_path)
+            .unwrap()
+            .modified()
+            .unwrap(),
+        seeded_mtime,
+        "the scheduled sweep touched the ambient context file"
+    );
+}
+
+/// RAII guard that sets an env var for its lifetime and restores the previous
+/// value (or removes it, if previously unset) on drop.
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(v) => std::env::set_var(self.key, v),
+            None => std::env::remove_var(self.key),
+        }
+    }
 }

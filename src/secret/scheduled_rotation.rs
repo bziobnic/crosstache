@@ -60,6 +60,16 @@ pub struct DueRotationOptions {
     pub charset: CharsetType,
     /// Optional custom generator script, overriding `length`/`charset`.
     pub generator: Option<String>,
+    /// Whether each rotation may bump the ambient context's usage counters.
+    ///
+    /// Context usage tracking is **interactive only**. The scheduled runner
+    /// pins a digest of the context file it recorded at install time, and any
+    /// byte change makes the next firing refuse with `context_digest changed`
+    /// — so a scheduled sweep must neither read nor write that file. The
+    /// default is therefore `false`, which is what `DueRotationOptions::
+    /// default()` (the scheduled runner's constructor) gets; the terminal
+    /// adapter for `xv rotate --due` opts in explicitly.
+    pub track_context_usage: bool,
 }
 
 impl Default for DueRotationOptions {
@@ -69,6 +79,9 @@ impl Default for DueRotationOptions {
             length: 32,
             charset: CharsetType::default(),
             generator: None,
+            // Fail-safe for the scheduled runner: never touch the pinned
+            // ambient context.
+            track_context_usage: false,
         }
     }
 }
@@ -548,6 +561,7 @@ pub(crate) async fn run_due_rotation_with_backend(
             true,  // force: the batch was confirmed (or needs no confirmation)
             None,  // rotation_interval
             config,
+            options.track_context_usage,
         )
         .await
         {
