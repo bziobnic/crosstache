@@ -243,7 +243,6 @@ pub fn read_file_no_follow(path: &Path) -> Result<Vec<u8>> {
 }
 
 /// Create a new private file without following symlinks.
-#[cfg(test)]
 pub fn write_private_file_no_follow_create_new(
     path: &Path,
     content: &[u8],
@@ -255,7 +254,6 @@ pub fn write_private_file_no_follow_create_new(
 ///
 /// Missing parent directories are created owner-only (0700 on Unix), and the
 /// lock file itself is created owner-only (0600 on Unix).
-#[cfg(any(feature = "file-ops", feature = "ui", test))]
 pub fn open_private_lock_file_no_follow(path: &Path) -> Result<std::fs::File> {
     write_file_no_follow_with_mode(path, &[], FileOpenBehavior::Lock, 0o600, 0o700)
 }

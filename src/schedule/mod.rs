@@ -50,6 +50,7 @@ use std::path::{Path, PathBuf};
 use crate::error::{CrosstacheError, Result};
 
 pub mod drift;
+pub mod install;
 pub mod manifest;
 pub mod preview;
 pub mod target;
@@ -774,48 +775,18 @@ pub struct ScheduleStatus {
     pub detail: String,
 }
 
-/// Install (or reinstall) the schedule. Idempotent.
+/// Register the rendered units with the platform scheduler.
 ///
-/// Only [`ScheduleCommand::ManifestRun`] may be registered. The legacy shape
-/// is refused here rather than at the call site so there is exactly one place
-/// that decides what a scheduler is allowed to be told to run, and no future
-/// caller can reintroduce an unpinned job by constructing the other variant.
-pub fn install(
+/// Assumes the unit files are already on disk: the file write and the
+/// registration are separate steps because the install transaction has to be
+/// able to undo them independently. Lives here, next to the renderers, so the
+/// argument order for each scheduler is written once.
+pub(crate) fn register_native(
     platform: Platform,
     schedule: &RotationSchedule,
     paths: &UnitPaths,
     runner: &dyn CommandRunner,
 ) -> Result<()> {
-    if !matches!(schedule.command, ScheduleCommand::ManifestRun { .. }) {
-        return Err(CrosstacheError::config(
-            "refusing to install an unpinned rotation schedule: a scheduled job must invoke \
-             'xv schedule run --manifest <path>' so its target is the one recorded at install \
-             time, not whatever the environment resolves to when it fires",
-        ));
-    }
-
-    // Ensure the log directory exists before the scheduler tries to append; a
-    // missing directory makes launchd fail the job with no visible reason.
-    if let Some(parent) = schedule.log_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            CrosstacheError::config(format!(
-                "failed to create the log directory {}: {e}",
-                parent.display()
-            ))
-        })?;
-    }
-
-    for unit in render(platform, schedule, paths) {
-        if let Some(parent) = unit.path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                CrosstacheError::config(format!("failed to create {}: {e}", parent.display()))
-            })?;
-        }
-        std::fs::write(&unit.path, &unit.contents).map_err(|e| {
-            CrosstacheError::config(format!("failed to write {}: {e}", unit.path.display()))
-        })?;
-    }
-
     match platform {
         Platform::Launchd => {
             let plist = paths.launchd_plist();
@@ -856,6 +827,35 @@ pub fn install(
             expect_ok(runner.run("schtasks", &refs)?, "schtasks /Create")
         }
     }
+}
+
+/// Deregister the schedule from the platform scheduler, converging on absent.
+///
+/// A scheduler that reports "no such job" is the outcome this wants, not a
+/// failure — both uninstall and an install rollback have to reach "absent"
+/// from any starting state. Only a runner that cannot run at all is an error.
+/// Returns whether something was actually removed.
+pub(crate) fn unregister_native(platform: Platform, runner: &dyn CommandRunner) -> Result<bool> {
+    let removed = match platform {
+        Platform::Launchd => runner
+            .run("launchctl", &["bootout", &launchd_domain_target()])?
+            .ok(),
+        Platform::Systemd => runner
+            .run(
+                "systemctl",
+                &[
+                    "--user",
+                    "disable",
+                    "--now",
+                    &format!("{SYSTEMD_UNIT}.timer"),
+                ],
+            )?
+            .ok(),
+        Platform::Schtasks => runner
+            .run("schtasks", &["/Delete", "/TN", SCHTASKS_NAME, "/F"])?
+            .ok(),
+    };
+    Ok(removed)
 }
 
 /// Report whether the schedule is registered.
@@ -917,37 +917,7 @@ pub fn uninstall(
     paths: &UnitPaths,
     runner: &dyn CommandRunner,
 ) -> Result<bool> {
-    let mut removed = false;
-
-    match platform {
-        Platform::Launchd => {
-            // A missing job is not an error here: uninstall must converge on
-            // "absent" whatever the starting state.
-            if runner
-                .run("launchctl", &["bootout", &launchd_domain_target()])?
-                .ok()
-            {
-                removed = true;
-            }
-        }
-        Platform::Systemd => {
-            let timer = format!("{SYSTEMD_UNIT}.timer");
-            if runner
-                .run("systemctl", &["--user", "disable", "--now", &timer])?
-                .ok()
-            {
-                removed = true;
-            }
-        }
-        Platform::Schtasks => {
-            if runner
-                .run("schtasks", &["/Delete", "/TN", SCHTASKS_NAME, "/F"])?
-                .ok()
-            {
-                removed = true;
-            }
-        }
-    }
+    let mut removed = unregister_native(platform, runner)?;
 
     for unit in unit_paths_for(platform, paths) {
         if unit.exists() {
@@ -1744,46 +1714,19 @@ mod tests {
         );
     }
 
-    #[test]
-    fn install_refuses_an_unpinned_legacy_command() {
-        // The legacy shape survives only so `status` can recognize a job an
-        // older xv installed. Nothing may register one.
-        let tmp = tempfile::tempdir().unwrap();
-        let s = RotationSchedule {
-            command: ScheduleCommand::LegacyRotateDue {
-                vault: Some("prod-kv".into()),
-            },
-            log_path: tmp.path().join("state/rotate.log"),
-            ..schedule()
-        };
-        let p = UnitPaths {
-            dir: tmp.path().join("units"),
-        };
-        let runner = FakeRunner::default();
-        let err = install(Platform::Systemd, &s, &p, &runner).expect_err("must refuse");
-        assert!(err.to_string().contains("unpinned"), "{err}");
-        // Nothing was written and no scheduler was touched.
-        assert!(!p.dir.exists(), "a refused install wrote unit files");
-        assert!(runner.calls().is_empty(), "{:?}", runner.calls());
-    }
-
     // -- lifecycle ----------------------------------------------------------
+    //
+    // The install *transaction* — ordering, verification and rollback — is
+    // tested in `install.rs` against injected failures. What belongs here is
+    // the native registration seam it calls: the argument order each scheduler
+    // needs, and that deregistration converges on absent.
 
     #[test]
-    fn install_writes_units_then_registers_with_launchd() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut s = schedule();
-        s.log_path = tmp.path().join("state/rotate.log");
-        let p = UnitPaths {
-            dir: tmp.path().join("LaunchAgents"),
-        };
+    fn register_boots_out_before_bootstrapping_with_launchd() {
+        let p = paths();
         let runner = FakeRunner::default();
 
-        install(Platform::Launchd, &s, &p, &runner).unwrap();
-
-        assert!(p.dir.join("com.crosstache.xv-rotate.plist").exists());
-        // Log directory pre-created; launchd fails silently without it.
-        assert!(tmp.path().join("state").is_dir());
+        register_native(Platform::Launchd, &schedule(), &p, &runner).unwrap();
 
         let flat = runner.flat();
         // bootout before bootstrap makes reinstall idempotent.
@@ -1796,52 +1739,22 @@ mod tests {
     }
 
     #[test]
-    fn install_is_idempotent() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut s = schedule();
-        s.log_path = tmp.path().join("state/rotate.log");
-        let p = UnitPaths {
-            dir: tmp.path().join("units"),
-        };
-        let runner = FakeRunner::default();
-        install(Platform::Systemd, &s, &p, &runner).unwrap();
-        install(Platform::Systemd, &s, &p, &runner).unwrap();
-        assert!(p.dir.join("xv-rotate.timer").exists());
-        assert_eq!(
-            std::fs::read_dir(&p.dir).unwrap().count(),
-            2,
-            "reinstall must not accumulate unit files"
-        );
-    }
-
-    #[test]
-    fn install_reports_scheduler_failure() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut s = schedule();
-        s.log_path = tmp.path().join("rotate.log");
-        let p = UnitPaths {
-            dir: tmp.path().join("units"),
-        };
+    fn register_reports_scheduler_failure() {
         let runner = FakeRunner {
             fail_containing: Some("enable".to_string()),
             ..Default::default()
         };
-        let err = install(Platform::Systemd, &s, &p, &runner).expect_err("must surface failure");
+        let err = register_native(Platform::Systemd, &schedule(), &paths(), &runner)
+            .expect_err("must surface failure");
         let msg = err.to_string();
         assert!(msg.contains("systemctl --user enable --now"), "{msg}");
         assert!(msg.contains("boom"), "{msg}");
     }
 
     #[test]
-    fn systemd_install_reloads_before_enabling() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut s = schedule();
-        s.log_path = tmp.path().join("rotate.log");
-        let p = UnitPaths {
-            dir: tmp.path().join("units"),
-        };
+    fn systemd_registration_reloads_before_enabling() {
         let runner = FakeRunner::default();
-        install(Platform::Systemd, &s, &p, &runner).unwrap();
+        register_native(Platform::Systemd, &schedule(), &paths(), &runner).unwrap();
         let flat = runner.flat();
         // Enabling before a reload would act on a stale unit view.
         assert!(flat[0].contains("daemon-reload"), "{flat:?}");
@@ -1849,15 +1762,31 @@ mod tests {
     }
 
     #[test]
+    fn deregistration_converges_when_the_scheduler_says_no_such_job() {
+        // Every scheduler call fails, as it would with no job registered.
+        let runner = FakeRunner {
+            fail_containing: Some(String::new()),
+            ..Default::default()
+        };
+        for platform in [Platform::Launchd, Platform::Systemd, Platform::Schtasks] {
+            assert!(
+                !unregister_native(platform, &runner).unwrap(),
+                "{platform:?} claimed to remove a job that was not there"
+            );
+        }
+    }
+
+    #[test]
     fn uninstall_removes_units_and_deregisters() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut s = schedule();
-        s.log_path = tmp.path().join("rotate.log");
         let p = UnitPaths {
             dir: tmp.path().join("units"),
         };
+        std::fs::create_dir_all(&p.dir).unwrap();
+        for unit in render(Platform::Systemd, &schedule(), &p) {
+            std::fs::write(&unit.path, &unit.contents).unwrap();
+        }
         let runner = FakeRunner::default();
-        install(Platform::Systemd, &s, &p, &runner).unwrap();
 
         let removed = uninstall(Platform::Systemd, &p, &runner).unwrap();
         assert!(removed);

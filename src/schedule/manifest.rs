@@ -152,20 +152,24 @@ impl ScheduleStatePaths {
     }
 
     /// `install.lock` — persistent lock inode owned by install/reinstall/uninstall.
-    // The scheduled runner and the install transaction consume these; the
-    // renderer/runner scaffolding does not.
-    #[allow(dead_code)]
     pub fn install_lock_path(&self) -> PathBuf {
         self.root.join("install.lock")
     }
 
     /// `recovery/` — created only when an install rollback is incomplete.
-    // The scheduled runner and the install transaction consume these; the
-    // renderer/runner scaffolding does not.
-    #[allow(dead_code)]
     pub fn recovery_dir(&self) -> PathBuf {
         self.root.join("recovery")
     }
+}
+
+/// Test-only: state paths rooted in `dir`, through the real resolver.
+#[cfg(test)]
+pub(crate) fn test_paths_in(dir: &Path) -> ScheduleStatePaths {
+    resolve(&ScheduleEnv {
+        xv_state_home: Some(dir.to_string_lossy().to_string()),
+        ..Default::default()
+    })
+    .expect("an explicit override always resolves")
 }
 
 fn non_empty(value: Option<String>) -> Option<String> {
@@ -571,8 +575,6 @@ pub fn write_manifest_atomic(paths: &ScheduleStatePaths, bytes: &[u8]) -> Result
 
 /// Remove only `manifest.json`. Refuses if it is a symlink; a missing file
 /// is not an error.
-// Consumed by uninstall and the install transaction, still to come.
-#[allow(dead_code)]
 pub fn remove_owned_manifest(paths: &ScheduleStatePaths) -> Result<()> {
     let path = paths.manifest_path();
     match std::fs::symlink_metadata(&path) {

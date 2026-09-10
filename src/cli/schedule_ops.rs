@@ -10,6 +10,7 @@ use crate::cli::commands::ScheduleCommands;
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
 use crate::schedule::drift;
+use crate::schedule::install::{install_transactional, InstallPlan, RealOwnedScheduleStore};
 use crate::schedule::manifest::{
     self as manifest, ManifestCadence, ManifestExecution, ScheduleManifestV1,
 };
@@ -340,23 +341,30 @@ async fn execute_install(
         }
     }
 
-    // The manifest is the target; the unit is only a pointer to it. Publish it
-    // before the scheduler can ever fire, so a job that exists always has a
-    // manifest to read. `installed_at` is stamped here rather than in
-    // `build_manifest` because the preview must stay deterministic — it renders
-    // the placeholder — and because the recorded time should be the moment the
+    // The manifest is the target; the unit is only a pointer to it. Both are
+    // published by one transaction so a failure cannot leave a job without a
+    // manifest to read, or — on reinstall — destroy the schedule the user
+    // already had. `installed_at` is stamped here rather than in
+    // `build_manifest` because the preview must stay deterministic (it renders
+    // the placeholder) and because the recorded time should be the moment the
     // target was actually pinned.
-    //
-    // This is deliberately non-transactional: a failure after the write leaves
-    // a manifest with no job, which `xv schedule status` reports and a reinstall
-    // replaces. Task 4 of this series wraps the sequence in the spec's
-    // six-stage install transaction with rollback.
-    let manifest_path = stamp_and_write_manifest(&state_paths, manifest_v1, chrono::Utc::now())?;
-
-    schedule::install(platform, &schedule, &paths, &ProcessRunner)?;
+    let now = chrono::Utc::now();
+    let manifest_bytes = stamp_and_serialize_manifest(manifest_v1, now)?;
+    let plan = InstallPlan::new(platform, schedule.clone(), paths.clone(), manifest_bytes)?;
+    // Opening the store takes the exclusive `install.lock` and holds it until
+    // the transaction ends, so a second installer cannot interleave with this
+    // one.
+    let mut store = RealOwnedScheduleStore::open(&state_paths)?;
+    let report = install_transactional(&plan, &mut store, &ProcessRunner, now)?;
+    let manifest_path = report.manifest_path.clone();
 
     output::success(&format!(
-        "Installed a {} rotation schedule: {}.",
+        "{} a {} rotation schedule: {}.",
+        if report.replaced_prior_schedule {
+            "Reinstalled"
+        } else {
+            "Installed"
+        },
         platform.name(),
         schedule.interval.describe()
     ));
@@ -375,26 +383,22 @@ async fn execute_install(
     Ok(())
 }
 
-/// Stamp `installed_at`, validate, and atomically publish `manifest.json`.
+/// Stamp `installed_at`, validate, and serialize the manifest's exact bytes.
 ///
 /// `now` is a parameter so the whole sequence is testable end to end. What
 /// makes it worth extracting is the ordering: validation runs *before*
 /// serialization, so a manifest this build would refuse to load never reaches
-/// the disk — the alternative is an installed job that fails every night on a
-/// file only a reinstall can fix.
-///
-/// Returns the path written, which is also what the success output names.
-fn stamp_and_write_manifest(
-    paths: &manifest::ScheduleStatePaths,
+/// the install transaction — the alternative is an installed job that fails
+/// every night on a file only a reinstall can fix.
+fn stamp_and_serialize_manifest(
     mut manifest_v1: ScheduleManifestV1,
     now: chrono::DateTime<chrono::Utc>,
-) -> Result<PathBuf> {
+) -> Result<Vec<u8>> {
     // Seconds precision and a `Z` suffix: the schema requires UTC, and the
     // stamp is read by people and compared for drift, not used as a clock.
     manifest_v1.installed_at = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     manifest::validate_v1(&manifest_v1)?;
-    manifest::write_manifest_atomic(paths, &manifest::serialize_manifest(&manifest_v1))?;
-    Ok(paths.manifest_path())
+    Ok(manifest::serialize_manifest(&manifest_v1))
 }
 
 /// Assemble the manifest installation would write for this schedule and
@@ -1070,11 +1074,20 @@ mod tests {
 
     /// State paths rooted in a tempdir, through the real resolver.
     fn state_paths_in(dir: &Path) -> manifest::ScheduleStatePaths {
-        manifest::resolve(&manifest::ScheduleEnv {
-            xv_state_home: Some(dir.to_string_lossy().to_string()),
-            ..Default::default()
-        })
-        .expect("an explicit override always resolves")
+        manifest::test_paths_in(dir)
+    }
+
+    /// Stamp, validate and publish in one step — the two halves production
+    /// runs through the install transaction, so the ordering assertions below
+    /// still test the real sequence.
+    fn stamp_and_write_manifest(
+        paths: &manifest::ScheduleStatePaths,
+        manifest_v1: ScheduleManifestV1,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<PathBuf> {
+        let bytes = stamp_and_serialize_manifest(manifest_v1, now)?;
+        manifest::write_manifest_atomic(paths, &bytes)?;
+        Ok(paths.manifest_path())
     }
 
     #[test]
