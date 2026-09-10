@@ -322,7 +322,7 @@ pub(crate) fn manifest_path_string(field: &str, path: &Path) -> Result<String> {
     })
 }
 
-fn workspace_source_label(source: WorkspaceSource) -> &'static str {
+pub(crate) fn workspace_source_label(source: WorkspaceSource) -> &'static str {
     match source {
         WorkspaceSource::ProjectToml => "project",
         WorkspaceSource::Context => "context",
@@ -540,7 +540,7 @@ fn select_entry(
 /// verifies here is a target the scheduled run can actually read. Listed
 /// secret names are discarded; only the vault and backend names, which
 /// already appear in ordinary CLI output, reach an error message.
-async fn verify_selected_target(config: &Config, entry: &WorkspaceEntry) -> Result<()> {
+pub(crate) async fn verify_selected_target(config: &Config, entry: &WorkspaceEntry) -> Result<()> {
     let mut probe = config.clone();
     probe.runtime_open_existing_local = true;
 

@@ -550,19 +550,7 @@ async fn degenerate_default_vault_with_source(
             }
         }
 
-        // 2. Context current vault.
-        if let Some(v) = context_manager.current_vault() {
-            return Ok((v.to_string(), true));
-        }
-
-        // 3. Config default vault.
-        if !config.default_vault.is_empty() {
-            return Ok((config.default_vault.clone(), false));
-        }
-
-        Err(CrosstacheError::config(
-            "No vault specified. Use --vault, set context with 'xv context use', or configure default_vault",
-        ))
+        degenerate_default_vault_after_project(config, context_manager)
     }
     .await;
 
@@ -581,6 +569,120 @@ async fn degenerate_default_vault_with_source(
             Ok(("default".to_string(), false))
         }
     }
+}
+
+/// Steps 2-4 of the degenerate vault chain: context current vault, then the
+/// global `default_vault`. Shared by the discovering resolver above and the
+/// replay resolver below so the two can never drift apart; only step 1 (the
+/// `.xv.toml` env-profile vault) differs between them, because discovery
+/// walks up from a cwd while replay is handed the recorded profile.
+fn degenerate_default_vault_after_project(
+    config: &Config,
+    context_manager: &crate::config::ContextManager,
+) -> Result<(String, bool)> {
+    // 2. Context current vault.
+    if let Some(v) = context_manager.current_vault() {
+        return Ok((v.to_string(), true));
+    }
+
+    // 3. Config default vault.
+    if !config.default_vault.is_empty() {
+        return Ok((config.default_vault.clone(), false));
+    }
+
+    Err(CrosstacheError::config(
+        "No vault specified. Use --vault, set context with 'xv context use', or configure default_vault",
+    ))
+}
+
+/// Workspace resolution for a **replay**: the scheduled-rotation runner
+/// recomputing the target a manifest recorded.
+///
+/// Identical layering to [`resolve_workspace_snapshot`] — project `[env.*]`
+/// overlay, then the context workspace, then the degenerate workspace-of-one
+/// — with one difference that is the whole point of the function: the project
+/// layer is *supplied* rather than discovered. Discovery would walk up from a
+/// working directory and re-run [`crate::config::project::resolve_env`],
+/// which consults `XV_ENV` **before** anything the caller passes; a scheduled
+/// run must not let an ambient variable pick the profile that selects its
+/// vaults (design invariant 3). The caller loads the recorded `.xv.toml` at
+/// the recorded path with the recorded environment name
+/// ([`crate::config::project::load_project_at`]) and hands the selected
+/// profile in here.
+///
+/// `profile` is `None` when the manifest recorded no project file, or when
+/// the recorded file selected no environment.
+pub(crate) async fn resolve_workspace_snapshot_replay(
+    config: &Config,
+    context_manager: &crate::config::ContextManager,
+    profile: Option<&crate::config::project::EnvProfile>,
+) -> Result<ResolvedWorkspaceSnapshot> {
+    let active_backend = config.effective_backend_name().to_string();
+    let backend_names = known_backend_names(config);
+    let backend_name_refs: Vec<&str> = backend_names.iter().map(|s| s.as_str()).collect();
+
+    // 1. `.xv.toml` project overlay — replaces context entirely.
+    if let Some(profile) = profile {
+        if !profile.vaults.is_empty() {
+            let ws = build_workspace(
+                &profile.vaults,
+                &active_backend,
+                WorkspaceSource::ProjectToml,
+                &backend_name_refs,
+            )?;
+            return Ok(ResolvedWorkspaceSnapshot {
+                workspace: ws,
+                context_contributed: false,
+            });
+        }
+    }
+
+    // 2. Context workspace.
+    if let Some(ws_state) = &context_manager.workspace {
+        if !ws_state.entries.is_empty() {
+            let ws = build_workspace(
+                &ws_state.entries,
+                &active_backend,
+                WorkspaceSource::Context,
+                &backend_name_refs,
+            )?;
+            return Ok(ResolvedWorkspaceSnapshot {
+                workspace: ws,
+                context_contributed: true,
+            });
+        }
+    }
+
+    // 3. Degenerate workspace-of-one.
+    let resolved = match profile.and_then(|p| p.vault.as_deref()) {
+        Some(vault) => Ok((vault.to_string(), false)),
+        None => degenerate_default_vault_after_project(config, context_manager),
+    };
+    let (vault, from_context) = match resolved {
+        Ok(resolved) => resolved,
+        Err(e) if active_kind_is_azure(config) => return Err(e),
+        Err(_) => match config.local.as_ref().and_then(|l| l.default_vault.clone()) {
+            Some(v) => (v, false),
+            None => ("default".to_string(), false),
+        },
+    };
+    let alias = degenerate_alias(&vault, &backend_name_refs);
+    let degenerate_entry = WorkspaceEntryConfig {
+        vault,
+        backend: Some(active_backend.clone()),
+        alias: Some(alias),
+        default: true,
+    };
+    let ws = build_workspace(
+        std::slice::from_ref(&degenerate_entry),
+        &active_backend,
+        WorkspaceSource::Degenerate,
+        &backend_name_refs,
+    )?;
+    Ok(ResolvedWorkspaceSnapshot {
+        workspace: ws,
+        context_contributed: from_context,
+    })
 }
 
 #[cfg(test)]

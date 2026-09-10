@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::cli::commands::ScheduleCommands;
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
+use crate::schedule::drift;
 use crate::schedule::manifest::{
     self as manifest, ManifestCadence, ManifestExecution, ScheduleManifestV1,
 };
@@ -19,6 +20,9 @@ use crate::schedule::target::{
 };
 use crate::schedule::{
     self, Platform, ProcessRunner, RotationSchedule, ScheduleCommand, ScheduleInterval, UnitPaths,
+};
+use crate::secret::scheduled_rotation::{
+    run_due_rotation, DueRotationOptions, DueRotationSummary, SilentObserver,
 };
 use crate::utils::output;
 
@@ -37,7 +41,7 @@ pub(crate) async fn execute_schedule_command(
         } => execute_install(&interval, &at, vault, log_file, print, force, &config).await,
         ScheduleCommands::Status => execute_status(&config).await,
         ScheduleCommands::Uninstall => execute_uninstall().await,
-        ScheduleCommands::Run { manifest } => execute_run(&manifest),
+        ScheduleCommands::Run { manifest } => execute_run(&manifest).await,
     }
 }
 
@@ -528,16 +532,14 @@ fn comparable_form(path: &Path) -> PathBuf {
 
 /// `xv schedule run --manifest <path>` — the pinned scheduled sweep.
 ///
-/// Ordering is the security property: the path check and the bounded,
-/// symlink-refusing manifest load both happen before anything that could
-/// construct a backend, so a malformed, oversized, symlinked or foreign
-/// manifest cannot reach a provider — let alone mutate a secret. Nothing here
-/// touches `XV_BACKEND`, `XV_ENV` or the context file.
-///
-/// The rotation itself is not implemented yet. Returning an error rather than
-/// `Ok(())` is deliberate: a scheduler wired to this build must record a
-/// failure, not a silent no-op that looks like a clean nightly sweep.
-fn execute_run(supplied_manifest: &Path) -> Result<()> {
+/// Ordering is the security property: the path check, the bounded,
+/// symlink-refusing manifest load, and the full drift validation all happen
+/// before anything that could construct a backend, so a malformed, oversized,
+/// symlinked, foreign or drifted manifest cannot reach a provider — let alone
+/// mutate a secret. Nothing on this path touches `XV_BACKEND`, `XV_ENV`, the
+/// ambient context file, or the directory the scheduler happened to start the
+/// process in: every selection input comes out of the manifest.
+async fn execute_run(supplied_manifest: &Path) -> Result<()> {
     let state_paths = manifest::resolve_from_process_env()?;
     let owned = state_paths.manifest_path();
     check_owned_manifest_path(supplied_manifest, &owned)?;
@@ -553,16 +555,260 @@ fn execute_run(supplied_manifest: &Path) -> Result<()> {
     // Bounded, no-follow, schema-validated. Any failure names reinstall,
     // because a manifest this process cannot trust is not something a
     // scheduled run may work around.
-    manifest::load_manifest(&state_paths).map_err(|e| {
+    let manifest::ScheduleManifest::V1(manifest) =
+        manifest::load_manifest(&state_paths).map_err(|e| {
+            CrosstacheError::config(format!(
+                "{e}. Reinstall the schedule with 'xv schedule install' to regenerate it."
+            ))
+        })?;
+
+    // Recompute the recorded target from the recorded inputs. This reads
+    // files and nothing else — no backend is constructed until it returns a
+    // non-refusing verdict (design invariant 4).
+    let report = drift::validate_recorded_target(
+        &manifest,
+        &recorded_binary_path()?,
+        env!("CARGO_PKG_VERSION"),
+    )
+    .await;
+
+    for warning in &report.warnings {
+        output::warn(&warning.detail);
+    }
+
+    if report.is_refused() {
+        return refused_drift_outcome(&report).into_cli_result();
+    }
+
+    execute_pinned_run(&manifest).await?.into_cli_result()
+}
+
+/// What the run did, in the shape `last-run.json` needs.
+///
+/// **Seam for PR 3 (outcome persistence).** Nothing here is written to disk
+/// yet; the runner returns this draft instead of persisting it so the file
+/// format, its locking and its retention can land as one change. Everything a
+/// result file needs is already in it, and everything in it is safe to
+/// serialize: counts, a fixed state token, and a diagnostic whose code and
+/// message come from closed sets (`DueRotationFailureCategory::code`,
+/// `DueRotationErrorKind::code`, or the drift fields) — never from a secret
+/// name, a vault value, or a provider error body.
+// The three persisted fields are read by PR 3's outcome writer; the runner
+// itself only needs `error` to decide the exit.
+#[derive(Debug)]
+#[allow(dead_code)]
+pub(crate) struct RunOutcomeDraft {
+    pub(crate) state: RunState,
+    pub(crate) summary: Option<DueRotationSummary>,
+    pub(crate) diagnostic: Option<RunDiagnostic>,
+    /// The error this outcome exits with. Deliberately not part of the
+    /// persisted shape: it is the human-facing CLI error, which may name the
+    /// vault and quote a provider message, while `diagnostic` is the redacted
+    /// form a result file may keep.
+    error: Option<CrosstacheError>,
+}
+
+/// The `state` field of a scheduled run's outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunState {
+    Success,
+    PartialFailure,
+    Failed,
+    RefusedDrift,
+}
+
+impl RunState {
+    /// The literal written to `last-run.json` (PR 3).
+    #[allow(dead_code)]
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            RunState::Success => "success",
+            RunState::PartialFailure => "partial_failure",
+            RunState::Failed => "failed",
+            RunState::RefusedDrift => "refused_drift",
+        }
+    }
+}
+
+/// A redacted diagnostic: a stable code plus a sanitized message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RunDiagnostic {
+    pub(crate) code: String,
+    pub(crate) message: String,
+}
+
+impl RunOutcomeDraft {
+    /// Turn the draft into the process's exit behavior.
+    pub(crate) fn into_cli_result(self) -> Result<()> {
+        match self.error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Print every drift reason and build the refusal outcome.
+///
+/// One stderr line per reason, in manifest-field order, plus a hint naming the
+/// only operation that accepts a changed target. The exit is the ordinary
+/// configuration-error code (3) via [`CrosstacheError::config`].
+fn refused_drift_outcome(report: &drift::DriftReport) -> RunOutcomeDraft {
+    output::error("The recorded rotation target has changed; refusing to rotate.");
+    for reason in &report.reasons {
+        output::error(&format!("  - {}", reason.detail));
+    }
+    output::hint("Review the changes, then run 'xv schedule install' to accept the new target.");
+
+    let fields: Vec<&str> = report.reasons.iter().map(|reason| reason.field).collect();
+    RunOutcomeDraft {
+        state: RunState::RefusedDrift,
+        summary: None,
+        diagnostic: Some(RunDiagnostic {
+            code: "target_drift".to_string(),
+            // Field names only — the same closed set the manifest schema
+            // defines, never a path or a file's contents.
+            message: format!(
+                "{} changed; review the recorded target and reinstall",
+                fields.join(" and ")
+            ),
+        }),
+        error: Some(CrosstacheError::config(format!(
+            "the recorded rotation target has drifted ({} reason(s) reported above); reinstall \
+             the schedule with 'xv schedule install' to accept the new target.",
+            report.reasons.len()
+        ))),
+    }
+}
+
+/// Run the sweep the manifest pinned, after drift validation has passed.
+///
+/// Every input is the recorded one: the process moves to the recorded working
+/// directory (helpers reached from rotation — record-type resolution, for one
+/// — still read the ambient directory, and the recorded one is the directory
+/// the target was resolved in), the configuration is re-read from the recorded
+/// path rather than taken from the process config, and only the recorded
+/// registry backend is constructed. `runtime_open_existing_local` is set so a
+/// local store that has gone missing is an error instead of being invented.
+async fn execute_pinned_run(manifest: &ScheduleManifestV1) -> Result<RunOutcomeDraft> {
+    let working_directory = Path::new(&manifest.execution.working_directory);
+    std::env::set_current_dir(working_directory).map_err(|e| {
         CrosstacheError::config(format!(
-            "{e}. Reinstall the schedule with 'xv schedule install' to regenerate it."
+            "cannot enter the recorded working directory '{}': {e}. Reinstall the schedule from \
+             a stable directory with 'xv schedule install'.",
+            working_directory.display()
         ))
     })?;
 
-    Err(CrosstacheError::config(
-        "the scheduled rotation runner is not implemented in this build; reinstall the schedule \
-         after upgrading xv ('xv schedule install').",
-    ))
+    let config_path = Path::new(&manifest.target.config_path);
+    let (mut file_config, _bytes) =
+        crate::config::settings::load_config_file_at_with_bytes(config_path)
+            .await
+            .map_err(|e| {
+                CrosstacheError::config(format!(
+                    "cannot read the recorded configuration file '{}': {e}. Reinstall the \
+                     schedule with 'xv schedule install'.",
+                    config_path.display()
+                ))
+            })?;
+    file_config.runtime_open_existing_local = true;
+
+    let backend_name = manifest.target.backend_name.as_str();
+    let vault = manifest.target.vault.as_str();
+    let entry = crate::workspace::WorkspaceEntry {
+        alias: manifest
+            .target
+            .workspace_alias
+            .clone()
+            .unwrap_or_else(|| vault.to_string()),
+        backend: backend_name.to_string(),
+        vault: vault.to_string(),
+        default: true,
+    };
+
+    // The same read-only verification installation performed, against the same
+    // target: a vault this process cannot list is not one it may rotate.
+    crate::schedule::target::verify_selected_target(&file_config, &entry).await?;
+
+    let registry = crate::backend::BackendRegistry::with_lazy(
+        &file_config,
+        std::slice::from_ref(&entry.backend),
+    )
+    .map_err(|e| {
+        CrosstacheError::config(format!(
+            "cannot construct the recorded backend '{backend_name}': {e}"
+        ))
+    })?;
+
+    output::step(&format!(
+        "Scheduled rotation sweep of '{vault}' on backend '{backend_name}'."
+    ));
+
+    match run_due_rotation(
+        &file_config,
+        &registry,
+        backend_name,
+        vault,
+        &DueRotationOptions::default(),
+        &mut SilentObserver,
+    )
+    .await
+    {
+        Ok(summary) if summary.failed == 0 => {
+            output::success(&format!(
+                "Rotated {} of {} due secret(s) in '{vault}'.",
+                summary.rotated, summary.due
+            ));
+            Ok(RunOutcomeDraft {
+                state: RunState::Success,
+                summary: Some(summary),
+                diagnostic: None,
+                error: None,
+            })
+        }
+        Ok(summary) => {
+            // A partial batch must not look like a success — the same rule
+            // (and the same configuration-error exit) `xv rotate --due` uses.
+            let mut codes: Vec<&'static str> = summary
+                .failures
+                .iter()
+                .map(|failure| failure.code())
+                .collect();
+            codes.sort_unstable();
+            codes.dedup();
+            let error = CrosstacheError::config(format!(
+                "rotated {} of {} due secret(s) in '{vault}'; {} failed ({})",
+                summary.rotated,
+                summary.due,
+                summary.failed,
+                codes.join(", ")
+            ));
+            output::error(&error.to_string());
+            Ok(RunOutcomeDraft {
+                state: RunState::PartialFailure,
+                diagnostic: summary.failures.first().map(|failure| RunDiagnostic {
+                    code: failure.code().to_string(),
+                    message: failure.message().to_string(),
+                }),
+                summary: Some(summary),
+                error: Some(error),
+            })
+        }
+        Err(failure) => {
+            // Whole-run failure: the vault was never read, so there is no
+            // honest summary to record. The redacted code/message go to the
+            // outcome; the source error is what the process exits with.
+            let diagnostic = RunDiagnostic {
+                code: failure.code().to_string(),
+                message: failure.message().to_string(),
+            };
+            Ok(RunOutcomeDraft {
+                state: RunState::Failed,
+                summary: None,
+                diagnostic: Some(diagnostic),
+                error: Some(failure.into()),
+            })
+        }
+    }
 }
 
 async fn execute_status(config: &Config) -> Result<()> {

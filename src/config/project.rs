@@ -460,7 +460,6 @@ pub(crate) struct ResolvedProject {
 
 impl ResolvedProject {
     /// The selected `[env.*]` profile, if an environment was selected.
-    #[allow(dead_code)]
     pub(crate) fn profile(&self) -> Option<&EnvProfile> {
         self.environment
             .as_deref()
@@ -501,7 +500,6 @@ pub(crate) async fn resolve_project_at(
 /// caller replays the environment recorded at install time, so `None` means
 /// "no environment was recorded" and yields no profile. A missing file, or a
 /// recorded environment that the file no longer defines, is an error.
-#[allow(dead_code)]
 pub(crate) async fn load_project_at(
     path: &Path,
     environment: Option<&str>,

@@ -151,7 +151,6 @@ pub struct DueRotationFailure {
 }
 
 // The scheduled runner writes both into `last-run.json`'s diagnostics.
-#[allow(dead_code)]
 impl DueRotationFailure {
     /// Stable code for this failure's category.
     pub fn code(&self) -> &'static str {
@@ -334,8 +333,8 @@ pub struct DueRotationSummary {
 #[derive(Debug, Clone)]
 pub struct DueRotationPlan {
     /// The vault the run targets.
-    // Read by the scheduled runner's observer, which lands with the runner
-    // itself; the CLI adapter already knows its own vault name.
+    // Read by an observer that renders for a person; the CLI adapter already
+    // knows its own vault name and the scheduled runner uses `SilentObserver`.
     #[allow(dead_code)]
     pub vault: String,
     /// Every policy-managed secret, valid or not.
@@ -391,7 +390,6 @@ pub trait DueRotationObserver {
 #[derive(Debug, Default, Clone, Copy)]
 // Constructed by the scheduled runner (and by this module's tests); the CLI
 // adapter has its own observer.
-#[allow(dead_code)]
 pub struct SilentObserver;
 
 impl DueRotationObserver for SilentObserver {}
@@ -439,7 +437,6 @@ pub(crate) async fn evaluate_vault_policies(
 /// discovery failure and returns `Err`.
 // The scheduled runner's entry point; the CLI adapter calls
 // `run_due_rotation_with_backend` with its already-resolved backend.
-#[allow(dead_code)]
 pub async fn run_due_rotation(
     config: &Config,
     registry: &BackendRegistry,

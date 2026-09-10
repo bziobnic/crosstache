@@ -1050,3 +1050,407 @@ fn no_state_variable_means_no_pin_in_the_unit() {
     assert!(!unit.contains("XDG_STATE_HOME"), "{out}");
     assert!(!unit.contains("XV_STATE_HOME"), "{out}");
 }
+
+// ---------------------------------------------------------------------------
+// `xv schedule run`: the pinned sweep and the drift refusals
+//
+// These do register a manifest, but never a native job: the manifest is the
+// exact JSON `--print` renders (the crate's own serializer), stamped and
+// written into an `XV_STATE_HOME` sandbox. Nothing touches launchd, systemd or
+// schtasks.
+// ---------------------------------------------------------------------------
+
+/// The manifest JSON block out of an `xv schedule install --print` rendering.
+fn manifest_json_from_preview(preview: &str) -> String {
+    let mut lines = preview
+        .lines()
+        .skip_while(|l| !l.starts_with("# --- manifest.json"));
+    lines.next().expect("preview contains a manifest block");
+    let body: Vec<&str> = lines.take_while(|l| !l.starts_with("# --- ")).collect();
+    body.join("\n").trim().to_string()
+}
+
+/// Render the manifest installation would write and publish it under
+/// `state_home` the way installation does, without registering a native job.
+fn install_manifest(
+    root: &std::path::Path,
+    state: &std::path::Path,
+    extra: &[&str],
+) -> std::path::PathBuf {
+    let mut args = vec!["schedule", "install", "--print"];
+    args.extend_from_slice(extra);
+    let out = xv_cmd_in(root)
+        .env("XV_BACKEND", "local")
+        .env("XV_STATE_HOME", state)
+        .args(&args)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        out.status.success(),
+        "install --print failed: {stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json =
+        manifest_json_from_preview(&stdout).replace("<set-at-install>", "2026-09-09T15:04:05Z");
+    assert!(json.contains("\"schema_version\""), "{json}");
+
+    let path = seed_state_manifest(state, &format!("{json}\n"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    path
+}
+
+/// Run the pinned sweep from a directory that is *not* the recorded one, with
+/// selection variables that contradict the manifest. Neither may matter.
+fn run_pinned(
+    elsewhere: &std::path::Path,
+    root: &std::path::Path,
+    state: &std::path::Path,
+    manifest: &std::path::Path,
+) -> std::process::Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_xv"))
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", root)
+        .env("XDG_CONFIG_HOME", root.join(".config"))
+        .env("XV_NO_PARENT_CONFIG", "1")
+        .env("NO_COLOR", "1")
+        // Deliberately wrong: the runner replays recorded inputs.
+        .env("XV_BACKEND", "azure")
+        .env("XV_ENV", "no-such-environment")
+        .env("XV_STATE_HOME", state)
+        .current_dir(elsewhere)
+        .args(["schedule", "run", "--manifest", manifest.to_str().unwrap()])
+        .output()
+        .unwrap()
+}
+
+fn set_secret(store: &std::path::Path, name: &str, value: &str) {
+    let out = xv_cmd_for(store)
+        .args(["set", name, "--value", value])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Back-date a secret's rotation stamp so `--due` picks it up.
+fn make_due(store: &std::path::Path, name: &str) {
+    let out = xv_cmd_for(store)
+        .args([
+            "update",
+            name,
+            "--tag",
+            "xv:rotate_every=30d",
+            "--tag",
+            "xv:rotated_at=2020-01-01T00:00:00Z",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn secret_value(store: &std::path::Path, name: &str) -> String {
+    let out = xv_cmd_for(store)
+        .args(["get", name, "--raw"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// A fixture with one due secret in the pinned store, a same-named due secret
+/// in a *second* local store attached as the named backend `local-b`, and a
+/// published manifest pinning the first.
+struct PinnedRun {
+    tmp: tempfile::TempDir,
+    root: std::path::PathBuf,
+    store: std::path::PathBuf,
+    decoy_store: std::path::PathBuf,
+    state: std::path::PathBuf,
+    elsewhere: std::path::PathBuf,
+    manifest: std::path::PathBuf,
+}
+
+impl PinnedRun {
+    fn config_path(&self) -> std::path::PathBuf {
+        self.root.join(".config").join("xv").join("xv.conf")
+    }
+
+    fn value(&self) -> String {
+        secret_value(&self.store, "STALE")
+    }
+
+    fn decoy_snapshot(&self) -> Vec<(String, u64, std::time::SystemTime, u64)> {
+        snapshot_tree(&self.decoy_store)
+    }
+
+    fn run(&self) -> std::process::Output {
+        run_pinned(&self.elsewhere, &self.root, &self.state, &self.manifest)
+    }
+}
+
+/// Build the fixture. `extra` are additional `schedule install` flags, and
+/// `before_install` runs with the fixture assembled but the manifest not yet
+/// rendered — the place to add a `.xv.toml` or a context file that must be
+/// part of the recorded target.
+fn pinned_run_fixture(extra: &[&str], before_install: impl FnOnce(&std::path::Path)) -> PinnedRun {
+    let (_cmd, tmp, store) = xv_isolated_local_with_opts(false, false);
+    // Canonical, because that is the spelling the manifest records (macOS
+    // hands out `/var/...` tempdirs that canonicalize to `/private/var/...`).
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    use_the_store_once(&store);
+
+    // The decoy: a second local store holding the same due secret name in the
+    // same vault. A run that resolved its target from the ambient environment
+    // instead of the manifest could land here.
+    let conf = root.join(".config").join("xv").join("xv.conf");
+    let original = std::fs::read_to_string(&conf).unwrap();
+    let decoy_store = root.join("store-b");
+    // The decoy's age identity gets its own directory: the recipients file is
+    // derived as `<key file dir>/recipients.txt`, so two keys side by side in
+    // one directory would share (and clobber) one recipients file.
+    let decoy_key = root.join("key-b").join("key-b.txt");
+    std::fs::create_dir_all(&decoy_store).unwrap();
+    std::fs::create_dir_all(decoy_key.parent().unwrap()).unwrap();
+    let swapped = original
+        .replace(
+            &store.to_string_lossy().replace('\\', "\\\\"),
+            &decoy_store.to_string_lossy().replace('\\', "\\\\"),
+        )
+        .replace(
+            &root.join("key.txt").to_string_lossy().replace('\\', "\\\\"),
+            &decoy_key.to_string_lossy().replace('\\', "\\\\"),
+        );
+    assert_ne!(swapped, original, "fixture config shape changed");
+    std::fs::write(&conf, &swapped).unwrap();
+    set_secret(&store, "STALE", "decoy-value");
+    make_due(&store, "STALE");
+
+    // Restore the pinned store and attach the decoy as a named backend.
+    let path_b = decoy_store.to_string_lossy().replace('\\', "\\\\");
+    let key_b = decoy_key.to_string_lossy().replace('\\', "\\\\");
+    std::fs::write(
+        &conf,
+        format!(
+            "{original}\n[named_backends.local-b]\ntype = \"local\"\nstore_path = \"{path_b}\"\nkey_file = \"{key_b}\"\ndefault_vault = \"default\"\n"
+        ),
+    )
+    .unwrap();
+
+    set_secret(&store, "STALE", "pinned-value");
+    make_due(&store, "STALE");
+
+    before_install(&root);
+
+    let state = root.join("state");
+    let elsewhere = root.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let manifest = install_manifest(&root, &state, extra);
+
+    PinnedRun {
+        tmp,
+        root,
+        store,
+        decoy_store,
+        state,
+        elsewhere,
+        manifest,
+    }
+}
+
+#[test]
+fn a_pinned_run_rotates_the_recorded_target_and_nothing_else() {
+    let fixture = pinned_run_fixture(&[], |_| {});
+    let before = fixture.value();
+    let decoy_before = fixture.decoy_snapshot();
+    assert_eq!(before, "pinned-value");
+
+    let out = fixture.run();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+
+    assert_ne!(
+        fixture.value(),
+        before,
+        "the pinned secret must rotate: {stderr}"
+    );
+    assert_eq!(
+        fixture.decoy_snapshot(),
+        decoy_before,
+        "the run touched the decoy store"
+    );
+    // No secret value may appear in the run's chatter.
+    assert!(!stderr.contains("pinned-value"), "{stderr}");
+    drop(fixture.tmp);
+}
+
+#[test]
+fn changed_config_bytes_refuse_the_run() {
+    let fixture = pinned_run_fixture(&[], |_| {});
+    let before = fixture.value();
+    let body = std::fs::read_to_string(fixture.config_path()).unwrap();
+    std::fs::write(fixture.config_path(), format!("{body}\n# edited\n")).unwrap();
+
+    let out = fixture.run();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
+    assert!(
+        stderr.contains(&format!(
+            "config_digest changed; review {} and reinstall",
+            fixture.config_path().display()
+        )),
+        "{stderr}"
+    );
+    assert!(stderr.to_lowercase().contains("reinstall"), "{stderr}");
+    assert_eq!(fixture.value(), before, "a refused run must not rotate");
+}
+
+#[test]
+fn a_changed_project_file_refuses_the_run() {
+    let project = "default_env = \"production\"\n\n[env.production]\nvault = \"default\"\n";
+    let fixture = pinned_run_fixture(&[], |root| {
+        std::fs::write(root.join(".xv.toml"), project).unwrap();
+    });
+    let before = fixture.value();
+    std::fs::write(
+        fixture.root.join(".xv.toml"),
+        format!("{project}\n# edited\n"),
+    )
+    .unwrap();
+
+    let out = fixture.run();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
+    assert!(stderr.contains("project_digest changed"), "{stderr}");
+    assert_eq!(fixture.value(), before);
+}
+
+#[test]
+fn a_changed_participating_context_refuses_the_run() {
+    let context = r#"{
+  "current": null,
+  "recent": [],
+  "workspace": {
+    "entries": [
+      { "vault": "default", "backend": "local", "alias": "pinned", "default": true }
+    ]
+  }
+}
+"#;
+    let fixture = pinned_run_fixture(&[], |root| {
+        std::fs::create_dir_all(root.join(".xv")).unwrap();
+        std::fs::write(root.join(".xv").join("context"), context).unwrap();
+    });
+    let before = fixture.value();
+    std::fs::write(
+        fixture.root.join(".xv").join("context"),
+        format!("{context}\n"),
+    )
+    .unwrap();
+
+    let out = fixture.run();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
+    assert!(stderr.contains("context_digest changed"), "{stderr}");
+    assert_eq!(fixture.value(), before);
+}
+
+#[test]
+fn a_missing_working_directory_refuses_the_run() {
+    let fixture = pinned_run_fixture(&[], |_| {});
+    let before = fixture.value();
+    let body = std::fs::read_to_string(&fixture.manifest).unwrap();
+    let gone = fixture.root.join("gone");
+    let edited = body.replace(
+        &format!("\"working_directory\": \"{}\"", json_path(&fixture.root)),
+        &format!("\"working_directory\": \"{}\"", json_path(&gone)),
+    );
+    assert_ne!(edited, body, "manifest shape changed: {body}");
+    std::fs::write(&fixture.manifest, edited).unwrap();
+
+    let out = fixture.run();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
+    assert!(stderr.contains("working_directory"), "{stderr}");
+    assert_eq!(fixture.value(), before);
+}
+
+#[test]
+fn a_binary_path_the_running_process_does_not_match_refuses_the_run() {
+    let fixture = pinned_run_fixture(&[], |_| {});
+    let before = fixture.value();
+    let body = std::fs::read_to_string(&fixture.manifest).unwrap();
+    let replacement = json_path(&fixture.root.join("xv-gone"));
+    let edited = body
+        .lines()
+        .map(|line| {
+            if line.trim_start().starts_with("\"binary_path\"") {
+                format!("    \"binary_path\": \"{replacement}\",")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_ne!(edited, body, "manifest shape changed: {body}");
+    std::fs::write(&fixture.manifest, edited).unwrap();
+
+    let out = fixture.run();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
+    assert!(stderr.contains("binary_path"), "{stderr}");
+    assert_eq!(fixture.value(), before);
+}
+
+#[test]
+fn a_changed_backend_identity_refuses_the_run() {
+    let fixture = pinned_run_fixture(&[], |_| {});
+    let before = fixture.value();
+    // Repoint the pinned local backend at the decoy's store: the account the
+    // manifest pinned is no longer what the config selects.
+    let body = std::fs::read_to_string(fixture.config_path()).unwrap();
+    let moved = body.replacen(
+        &format!("store_path = \"{}\"", json_path(&fixture.store)),
+        &format!("store_path = \"{}\"", json_path(&fixture.decoy_store)),
+        1,
+    );
+    assert_ne!(moved, body, "fixture config shape changed: {body}");
+    std::fs::write(fixture.config_path(), moved).unwrap();
+
+    let out = fixture.run();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
+
+    // Put the config back so the pinned store is readable again.
+    std::fs::write(fixture.config_path(), &body).unwrap();
+
+    // Both reasons, in manifest-field order.
+    let config_at = stderr.find("config_digest changed").expect(&stderr);
+    let identity_at = stderr
+        .find("backend_identity changed for local; review the account/provider and reinstall")
+        .expect(&stderr);
+    assert!(config_at < identity_at, "{stderr}");
+    assert_eq!(fixture.value(), before);
+}
+
+/// A path as it appears inside the JSON/TOML fixtures (Windows separators are
+/// escaped in both).
+fn json_path(path: &std::path::Path) -> String {
+    path.to_string_lossy().replace('\\', "\\\\")
+}

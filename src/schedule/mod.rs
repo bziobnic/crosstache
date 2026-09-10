@@ -49,6 +49,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{CrosstacheError, Result};
 
+pub mod drift;
 pub mod manifest;
 pub mod preview;
 pub mod target;
