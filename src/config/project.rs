@@ -1329,7 +1329,10 @@ vault = "staging-vault"
             .unwrap()
             .expect("walk-up must find the ancestor .xv.toml");
 
-        assert_eq!(resolved.path, std::fs::canonicalize(&project_path).unwrap());
+        assert_eq!(
+            resolved.path,
+            crate::utils::helpers::canonicalize_without_verbatim_prefix(&project_path).unwrap()
+        );
         assert_eq!(
             resolved.bytes_digest,
             crate::config::content_digest(PROJECT_FIXTURE.as_bytes())
@@ -1403,7 +1406,10 @@ vault = "staging-vault"
         let replayed = load_project_at(&project_path, Some("staging"))
             .await
             .unwrap();
-        assert_eq!(replayed.path, std::fs::canonicalize(&project_path).unwrap());
+        assert_eq!(
+            replayed.path,
+            crate::utils::helpers::canonicalize_without_verbatim_prefix(&project_path).unwrap()
+        );
         assert_eq!(
             replayed.bytes_digest,
             crate::config::content_digest(PROJECT_FIXTURE.as_bytes())
