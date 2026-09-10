@@ -284,20 +284,15 @@ async fn execute_install(
     // `resolve_from_process_env` only computes paths; it creates nothing, so
     // this is safe on the `--print` path too.
     let state_paths = manifest::resolve_from_process_env()?;
-    let schedule = RotationSchedule {
-        // The unit, the preview and the manifest must agree on one spelling of
-        // the executable, and the manifest's is the canonical one.
-        binary: canonical_exe()?,
-        ..build_schedule(
-            interval,
-            ScheduleCommand::ManifestRun {
-                manifest: state_paths.manifest_path(),
-                working_directory: resolved.working_directory.clone(),
-            },
-            log_file,
-            state_paths.pinned_state_home(),
-        )?
-    };
+    let schedule = build_schedule(
+        interval,
+        ScheduleCommand::ManifestRun {
+            manifest: state_paths.manifest_path(),
+            working_directory: resolved.working_directory.clone(),
+        },
+        log_file,
+        state_paths.pinned_state_home(),
+    )?;
     let paths = UnitPaths::for_platform(platform, &schedule.home);
     let manifest_v1 = build_manifest(&schedule, &resolved)?;
 
