@@ -278,9 +278,14 @@ pub(crate) struct ResolvedScheduleTarget {
     pub(crate) target: ManifestTarget,
     /// The workspace entry that produced [`Self::target`] — its `vault` is
     /// the real vault to sweep, on registry backend `backend`, and its
-    /// `alias` is the name the interim legacy install carries.
+    /// `alias` is the name a person recognizes it by.
+    // Everything the *manifest* records already lives in `target`; these two
+    // survive for the status/drift reporting that reads the resolved entry
+    // back, which lands in a later task of this series.
+    #[allow(dead_code)]
     pub(crate) entry: WorkspaceEntry,
     /// Which resolution layer produced the workspace.
+    #[allow(dead_code)]
     pub(crate) workspace_source: WorkspaceSource,
     /// The canonical working directory resolution ran in, recorded so the
     /// scheduled run replays the same `.xv.toml`/context discovery.

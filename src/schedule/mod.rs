@@ -24,14 +24,17 @@
 //!
 //! ## What ends up in the unit
 //!
-//! Only an absolute binary path, the `rotate --due --force` arguments, a log
-//! path, and the `HOME`/`XDG_CONFIG_HOME` pair. **No credentials and no secret
-//! values** — the scheduled run authenticates exactly as an interactive one does.
+//! Only an absolute binary path, `schedule run --manifest <absolute path>`, the
+//! working directory the manifest pinned, a log path, and `HOME`. **No
+//! credentials and no secret values** — the scheduled run authenticates exactly
+//! as an interactive one does.
 //!
-//! The env pair matters more than it looks: a scheduled process does not inherit
-//! the interactive shell's environment, and a schedule that resolves a different
-//! config than the user tested against is the classic way this feature silently
-//! rotates the wrong vault, or nothing at all.
+//! Nothing else may appear, and that is the point. A scheduled process does not
+//! inherit the interactive shell's environment, so anything in the unit that can
+//! *select* a target — a vault name, `XDG_CONFIG_HOME`, `XV_BACKEND` — is a
+//! second, unversioned answer to "what does this job rotate?" that can disagree
+//! with the manifest. `HOME` stays because credential and platform libraries
+//! need it; target selection never reads it.
 //!
 //! ## The honest limitation
 //!
@@ -236,8 +239,14 @@ fn parse_hhmm(at: &str) -> Result<(u32, u32)> {
 pub enum ScheduleCommand {
     /// The historical unattended sweep: `rotate --due --force [--vault V]`.
     ///
-    /// It re-resolves its target at run time from whatever the environment
-    /// then says, which is exactly what the pinned manifest replaces.
+    /// **Recognition only.** It re-resolves its target at run time from
+    /// whatever the environment then says, which is exactly what the pinned
+    /// manifest replaces, so [`install`] refuses it. It survives as a shape
+    /// because `xv schedule status` must still recognize — and label
+    /// `legacy-unpinned` — a job an older `xv` registered.
+    // Constructed only by tests today; `xv schedule status` constructs it to
+    // compare against an installed job's command line in a later task.
+    #[allow(dead_code)]
     LegacyRotateDue {
         /// Vault to sweep. `None` leaves the scheduled run to resolve the
         /// config default, which is a common source of surprise.
@@ -309,8 +318,6 @@ pub struct RotationSchedule {
     pub log_path: PathBuf,
     /// `HOME` for the scheduled process.
     pub home: PathBuf,
-    /// `XDG_CONFIG_HOME`, when the current process has one.
-    pub config_home: Option<PathBuf>,
 }
 
 impl RotationSchedule {
@@ -331,25 +338,16 @@ impl RotationSchedule {
         parts.join(" ")
     }
 
-    /// Environment pairs the unit must set.
+    /// Environment pairs the unit must set: `HOME`, and nothing else.
     ///
-    /// A legacy unit carries `XDG_CONFIG_HOME` because it re-resolves its
-    /// target at run time and would otherwise read a different configuration
-    /// than the user tested against. A manifest-run unit must **not**: the
-    /// manifest already names the exact configuration file, and an env var
-    /// that redirects config resolution is a target-selection input the pinned
-    /// unit is forbidden to add.
+    /// `XDG_CONFIG_HOME` used to be here, because the legacy sweep re-resolved
+    /// its configuration at run time and would otherwise have read a different
+    /// one than the user tested against. The pinned runner names its exact
+    /// configuration file in the manifest, so an env var that redirects config
+    /// resolution stops being a safety net and becomes a second way to choose
+    /// the target — which invariant 2 forbids the unit to carry.
     fn env_pairs(&self) -> Vec<(String, String)> {
-        let mut pairs = vec![("HOME".to_string(), self.home.to_string_lossy().to_string())];
-        if matches!(self.command, ScheduleCommand::LegacyRotateDue { .. }) {
-            if let Some(config_home) = &self.config_home {
-                pairs.push((
-                    "XDG_CONFIG_HOME".to_string(),
-                    config_home.to_string_lossy().to_string(),
-                ));
-            }
-        }
-        pairs
+        vec![("HOME".to_string(), self.home.to_string_lossy().to_string())]
     }
 
     /// Directory the scheduled process starts in, when the command pins one.
@@ -748,12 +746,23 @@ pub struct ScheduleStatus {
 }
 
 /// Install (or reinstall) the schedule. Idempotent.
+///
+/// Only [`ScheduleCommand::ManifestRun`] may be registered. The legacy shape
+/// is refused here rather than at the call site so there is exactly one place
+/// that decides what a scheduler is allowed to be told to run, and no future
+/// caller can reintroduce an unpinned job by constructing the other variant.
 pub fn install(
     platform: Platform,
     schedule: &RotationSchedule,
     paths: &UnitPaths,
     runner: &dyn CommandRunner,
 ) -> Result<()> {
+    if !matches!(schedule.command, ScheduleCommand::ManifestRun { .. }) {
+        return Err(CrosstacheError::config(
+            "refusing to install an unpinned rotation schedule: a scheduled job must invoke              'xv schedule run --manifest <path>' so its target is the one recorded at install              time, not whatever the environment resolves to when it fires",
+        ));
+    }
+
     // Ensure the log directory exists before the scheduler tries to append; a
     // missing directory makes launchd fail the job with no visible reason.
     if let Some(parent) = schedule.log_path.parent() {
@@ -996,19 +1005,34 @@ fn summarize_launchd(stdout: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Absolute manifest path used by the pinned-runner fixtures.
+    const MANIFEST: &str = "/home/u/.local/state/xv/schedules/rotation-default/manifest.json";
+
+    /// The only shape production installs: the pinned manifest runner.
     fn schedule() -> RotationSchedule {
         RotationSchedule {
             interval: ScheduleInterval::Daily {
                 hour: 3,
                 minute: 30,
             },
-            command: ScheduleCommand::LegacyRotateDue {
-                vault: Some("prod-kv".into()),
+            command: ScheduleCommand::ManifestRun {
+                manifest: PathBuf::from(MANIFEST),
+                working_directory: PathBuf::from("/home/u/work/service"),
             },
             binary: PathBuf::from("/usr/local/bin/xv"),
             log_path: PathBuf::from("/home/u/.local/state/xv/rotate.log"),
             home: PathBuf::from("/home/u"),
-            config_home: Some(PathBuf::from("/home/u/.config")),
+        }
+    }
+
+    /// The shape `status` must still recognize on a job an older `xv` left
+    /// behind. Never installed — [`install`] refuses it.
+    fn legacy_schedule() -> RotationSchedule {
+        RotationSchedule {
+            command: ScheduleCommand::LegacyRotateDue {
+                vault: Some("prod-kv".into()),
+            },
+            ..schedule()
         }
     }
 
@@ -1129,54 +1153,45 @@ mod tests {
 
     // -- command construction ----------------------------------------------
 
+    /// The shape `status` compares an already-installed job against. It is
+    /// never rendered into a unit this version installs — see
+    /// `install_refuses_an_unpinned_legacy_command` — but recognizing it is
+    /// how a `legacy-unpinned` job gets labelled instead of silently trusted.
     #[test]
-    fn scheduled_command_is_an_unattended_due_sweep() {
-        let s = schedule();
+    fn the_legacy_sweep_shape_is_still_recognizable() {
         assert_eq!(
-            s.command_args(),
+            legacy_schedule().command_args(),
             vec!["rotate", "--due", "--force", "--vault", "prod-kv"]
         );
-        // --due bounds the blast radius to policy-bearing, already-due secrets;
-        // --force is required because there is no terminal to confirm at.
-        assert!(s.command_args().contains(&"--due".to_string()));
-        assert!(!s.command_args().contains(&"--every".to_string()));
-    }
-
-    #[test]
-    fn command_omits_vault_when_unset() {
-        let mut s = schedule();
-        s.command = ScheduleCommand::LegacyRotateDue { vault: None };
-        assert_eq!(s.command_args(), vec!["rotate", "--due", "--force"]);
+        let unset = RotationSchedule {
+            command: ScheduleCommand::LegacyRotateDue { vault: None },
+            ..schedule()
+        };
+        assert_eq!(unset.command_args(), vec!["rotate", "--due", "--force"]);
+        // A legacy job pins no directory: it re-resolves from wherever it runs.
+        assert!(legacy_schedule().working_directory().is_none());
     }
 
     #[test]
     fn manifest_run_command_carries_only_the_manifest_path() {
-        let mut s = schedule();
-        s.command = ScheduleCommand::ManifestRun {
-            manifest: PathBuf::from(
-                "/home/u/.local/state/xv/schedules/rotation-default/manifest.json",
-            ),
-            working_directory: PathBuf::from("/home/u/work/service"),
-        };
+        let s = schedule();
         assert_eq!(
             s.command_args(),
-            vec![
-                "schedule",
-                "run",
-                "--manifest",
-                "/home/u/.local/state/xv/schedules/rotation-default/manifest.json"
-            ]
+            vec!["schedule", "run", "--manifest", MANIFEST]
         );
         // No target selection of its own: everything comes from the manifest.
         assert!(!s.command_args().contains(&"--vault".to_string()));
+        assert!(!s.command_args().contains(&"--due".to_string()));
     }
 
     #[test]
     fn systemd_quotes_a_manifest_path_with_spaces() {
-        let mut s = schedule();
-        s.command = ScheduleCommand::ManifestRun {
-            manifest: PathBuf::from("/home/my user/manifest.json"),
-            working_directory: PathBuf::from("/home/my user/work"),
+        let s = RotationSchedule {
+            command: ScheduleCommand::ManifestRun {
+                manifest: PathBuf::from("/home/my user/manifest.json"),
+                working_directory: PathBuf::from("/home/my user/work"),
+            },
+            ..schedule()
         };
         let service = render(Platform::Systemd, &s, &paths())[0].contents.clone();
         assert!(
@@ -1194,10 +1209,12 @@ mod tests {
         // goldens: "The unit may not add target-selection environment
         // variables". XDG_CONFIG_HOME redirects config resolution, so a pinned
         // unit must not set it — the manifest already names the config file.
-        let mut s = schedule();
-        s.command = ScheduleCommand::ManifestRun {
-            manifest: PathBuf::from("/home/u/manifest.json"),
-            working_directory: PathBuf::from("/home/u/work"),
+        let s = RotationSchedule {
+            command: ScheduleCommand::ManifestRun {
+                manifest: PathBuf::from("/home/u/manifest.json"),
+                working_directory: PathBuf::from("/home/u/work"),
+            },
+            ..schedule()
         };
         let service = render(Platform::Systemd, &s, &paths())[0].contents.clone();
         assert!(
@@ -1220,30 +1237,13 @@ mod tests {
     }
 
     #[test]
-    fn a_legacy_unit_pins_no_directory_and_keeps_its_config_root() {
-        // The other half of the contract: nothing above may leak into the
-        // legacy command, whose units must stay byte-identical.
-        let s = schedule();
-        let service = render(Platform::Systemd, &s, &paths())[0].contents.clone();
-        assert!(!service.contains("WorkingDirectory="), "{service}");
-        assert!(
-            service.contains("Environment=\"XDG_CONFIG_HOME=/home/u/.config\""),
-            "{service}"
-        );
-
-        let plist = render(Platform::Launchd, &s, &paths())[0].contents.clone();
-        assert!(!plist.contains("WorkingDirectory"), "{plist}");
-        assert!(plist.contains("<key>XDG_CONFIG_HOME</key>"), "{plist}");
-
-        assert!(!schtasks_tr(&s).contains("cd /d"), "{}", schtasks_tr(&s));
-    }
-
-    #[test]
     fn launchd_escapes_a_manifest_path() {
-        let mut s = schedule();
-        s.command = ScheduleCommand::ManifestRun {
-            manifest: PathBuf::from("/home/a & b/manifest.json"),
-            working_directory: PathBuf::from("/home/a & b/work"),
+        let s = RotationSchedule {
+            command: ScheduleCommand::ManifestRun {
+                manifest: PathBuf::from("/home/a & b/manifest.json"),
+                working_directory: PathBuf::from("/home/a & b/work"),
+            },
+            ..schedule()
         };
         let body = render(Platform::Launchd, &s, &paths())[0].contents.clone();
         assert!(
@@ -1258,10 +1258,12 @@ mod tests {
     /// refuses to load.
     #[test]
     fn launchd_escapes_the_working_directory() {
-        let mut s = schedule();
-        s.command = ScheduleCommand::ManifestRun {
-            manifest: PathBuf::from("/home/u/manifest.json"),
-            working_directory: PathBuf::from("/home/a & b/<work>/\"q\"/'p'"),
+        let s = RotationSchedule {
+            command: ScheduleCommand::ManifestRun {
+                manifest: PathBuf::from("/home/u/manifest.json"),
+                working_directory: PathBuf::from("/home/a & b/<work>/\"q\"/'p'"),
+            },
+            ..schedule()
         };
         let body = render(Platform::Launchd, &s, &paths())[0].contents.clone();
         assert!(
@@ -1275,10 +1277,12 @@ mod tests {
 
     #[test]
     fn schtasks_keeps_a_spaced_manifest_path_as_one_argument() {
-        let mut s = schedule();
-        s.command = ScheduleCommand::ManifestRun {
-            manifest: PathBuf::from("/home/my user/manifest.json"),
-            working_directory: PathBuf::from("/home/my user/work"),
+        let s = RotationSchedule {
+            command: ScheduleCommand::ManifestRun {
+                manifest: PathBuf::from("/home/my user/manifest.json"),
+                working_directory: PathBuf::from("/home/my user/work"),
+            },
+            ..schedule()
         };
         let tr = schtasks_tr(&s);
         assert!(tr.contains("\"/home/my user/manifest.json\""), "{tr}");
@@ -1297,8 +1301,10 @@ mod tests {
 
     #[test]
     fn command_line_quotes_paths_with_spaces() {
-        let mut s = schedule();
-        s.binary = PathBuf::from("/Applications/My Tools/xv");
+        let s = RotationSchedule {
+            binary: PathBuf::from("/Applications/My Tools/xv"),
+            ..schedule()
+        };
         assert!(
             s.command_line()
                 .starts_with("\"/Applications/My Tools/xv\""),
@@ -1322,15 +1328,16 @@ mod tests {
         assert!(body.starts_with("<?xml version=\"1.0\""), "{body}");
         assert!(body.contains("<string>com.crosstache.xv-rotate</string>"));
         assert!(body.contains("<string>/usr/local/bin/xv</string>"));
-        assert!(body.contains("<string>--due</string>"));
-        assert!(body.contains("<string>prod-kv</string>"));
+        assert!(body.contains("<string>--manifest</string>"));
+        assert!(body.contains(&format!("<string>{MANIFEST}</string>")));
         // Calendar interval, not a naive StartInterval.
         assert!(body.contains("StartCalendarInterval"));
         assert!(body.contains("<key>Hour</key>\n        <integer>3</integer>"));
         assert!(body.contains("<key>Minute</key>\n        <integer>30</integer>"));
-        // Environment so the scheduled run resolves the same config.
+        // `HOME` for credential and platform libraries — and nothing that
+        // could redirect target resolution.
         assert!(body.contains("<key>HOME</key>"));
-        assert!(body.contains("<key>XDG_CONFIG_HOME</key>"));
+        assert!(!body.contains("XDG_CONFIG_HOME"), "{body}");
         // Output must be capturable or a 3am failure is invisible.
         assert!(body.contains("StandardOutPath"));
         assert!(body.contains("/home/u/.local/state/xv/rotate.log"));
@@ -1349,18 +1356,21 @@ mod tests {
 
     #[test]
     fn launchd_plist_escapes_xml_metacharacters() {
-        // A vault name with an ampersand would otherwise produce invalid XML and
-        // a job launchd silently refuses to load.
-        let mut s = schedule();
-        s.command = ScheduleCommand::LegacyRotateDue {
-            vault: Some("prod&stage<\"'>".into()),
+        // A state directory with an ampersand in it would otherwise produce
+        // invalid XML and a job launchd silently refuses to load.
+        let s = RotationSchedule {
+            command: ScheduleCommand::ManifestRun {
+                manifest: PathBuf::from("/home/a&b<\"'>/manifest.json"),
+                working_directory: PathBuf::from("/home/u/work"),
+            },
+            ..schedule()
         };
         let body = render(Platform::Launchd, &s, &paths())[0].contents.clone();
         assert!(
-            body.contains("prod&amp;stage&lt;&quot;&apos;&gt;"),
+            body.contains("/home/a&amp;b&lt;&quot;&apos;&gt;/manifest.json"),
             "{body}"
         );
-        assert!(!body.contains("prod&stage"), "{body}");
+        assert!(!body.contains("/home/a&b"), "{body}");
     }
 
     #[test]
@@ -1391,9 +1401,12 @@ mod tests {
 
         let service = &units[0].contents;
         assert!(service.contains("Type=oneshot"));
-        assert!(service.contains("\"/usr/local/bin/xv\" \"rotate\" \"--due\" \"--force\""));
+        assert!(service.contains(&format!(
+            "\"/usr/local/bin/xv\" \"schedule\" \"run\" \"--manifest\" \"{MANIFEST}\""
+        )));
+        assert!(service.contains("WorkingDirectory=/home/u/work/service\n"));
         assert!(service.contains("Environment=\"HOME=/home/u\""));
-        assert!(service.contains("Environment=\"XDG_CONFIG_HOME=/home/u/.config\""));
+        assert!(!service.contains("XDG_CONFIG_HOME"), "{service}");
         assert!(service.contains("StandardOutput=append:/home/u/.local/state/xv/rotate.log"));
 
         let timer = &units[1].contents;
@@ -1401,16 +1414,6 @@ mod tests {
         // A missed sweep should run once the machine is back, not be skipped.
         assert!(timer.contains("Persistent=true"));
         assert!(timer.contains("WantedBy=timers.target"));
-    }
-
-    #[test]
-    fn systemd_quotes_arguments_so_a_spaced_vault_stays_one_argument() {
-        let mut s = schedule();
-        s.command = ScheduleCommand::LegacyRotateDue {
-            vault: Some("my vault".into()),
-        };
-        let service = render(Platform::Systemd, &s, &paths())[0].contents.clone();
-        assert!(service.contains("\"my vault\""), "{service}");
     }
 
     #[test]
@@ -1461,6 +1464,180 @@ mod tests {
         let joined = schtasks_create_args(&s).join(" ");
         assert!(joined.contains("/SC WEEKLY"), "{joined}");
         assert!(joined.contains("/D FRI"), "{joined}");
+    }
+
+    // -- the renderer contract ---------------------------------------------
+
+    /// Every executable invocation a platform's rendered artifacts contain.
+    ///
+    /// launchd's `ProgramArguments` array, systemd's `ExecStart` line and the
+    /// `schtasks /TR` command line are the three places a scheduler is told
+    /// what to run; the contract is that all three say the same one thing.
+    fn invocations(platform: Platform, s: &RotationSchedule) -> Vec<String> {
+        match platform {
+            Platform::Launchd => {
+                let body = render(platform, s, &paths())[0].contents.clone();
+                let array = body
+                    .split_once("<key>ProgramArguments</key>")
+                    .expect("plist has ProgramArguments")
+                    .1;
+                let array = array
+                    .split_once("</array>")
+                    .expect("ProgramArguments closes")
+                    .0;
+                vec![array
+                    .lines()
+                    .filter_map(|l| {
+                        let t = l.trim();
+                        t.strip_prefix("<string>")
+                            .and_then(|t| t.strip_suffix("</string>"))
+                            .map(str::to_string)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ")]
+            }
+            Platform::Systemd => render(platform, s, &paths())
+                .into_iter()
+                .flat_map(|u| {
+                    u.contents
+                        .lines()
+                        .filter(|l| l.starts_with("ExecStart="))
+                        .map(|l| l.trim_start_matches("ExecStart=").to_string())
+                        .collect::<Vec<_>>()
+                })
+                .collect(),
+            Platform::Schtasks => vec![schtasks_tr(s)],
+        }
+    }
+
+    #[test]
+    fn every_platform_invokes_only_the_pinned_manifest_runner() {
+        let s = schedule();
+        for platform in [Platform::Launchd, Platform::Systemd, Platform::Schtasks] {
+            let calls = invocations(platform, &s);
+            assert_eq!(
+                calls.len(),
+                1,
+                "{platform:?} invokes more than once: {calls:?}"
+            );
+            let call = &calls[0];
+            // The one invocation, whatever the platform's quoting.
+            let unquoted = call.replace(['"', '\''], "");
+            assert!(
+                unquoted.contains(&format!(
+                    "/usr/local/bin/xv schedule run --manifest {MANIFEST}"
+                )),
+                "{platform:?}: {call}"
+            );
+            // `rotate.log` legitimately contains the word, so the assertion
+            // is on the argument shape, not the substring.
+            assert!(!unquoted.contains("rotate --due"), "{platform:?}: {call}");
+            assert!(!unquoted.contains("--vault"), "{platform:?}: {call}");
+            assert!(
+                unquoted.contains("/usr/local/bin/xv schedule run"),
+                "{platform:?}: {call}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_rendered_artifact_carries_a_target_selecting_input() {
+        // Invariant 2: the unit names an absolute executable and an absolute
+        // manifest, and nothing else that could choose a different target.
+        let s = schedule();
+        for platform in [Platform::Launchd, Platform::Systemd, Platform::Schtasks] {
+            let mut bodies: Vec<String> = render(platform, &s, &paths())
+                .into_iter()
+                .map(|u| u.contents)
+                .collect();
+            if platform == Platform::Schtasks {
+                bodies.push(schtasks_create_args(&s).join(" "));
+            }
+            for body in bodies {
+                for forbidden in [
+                    "rotate --due",
+                    "--vault",
+                    "XDG_CONFIG_HOME",
+                    "XV_BACKEND",
+                    "XV_ENV",
+                ] {
+                    assert!(
+                        !body.contains(forbidden),
+                        "{platform:?} carries {forbidden:?}:\n{body}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_platform_escapes_a_spaced_manifest_path_and_working_directory() {
+        let s = RotationSchedule {
+            command: ScheduleCommand::ManifestRun {
+                manifest: PathBuf::from("/home/my user/state/manifest.json"),
+                working_directory: PathBuf::from("/home/my user/my work"),
+            },
+            binary: PathBuf::from("/Applications/My Tools/xv"),
+            ..schedule()
+        };
+
+        // launchd: one <string> per argument, so spaces need no quoting at all.
+        let plist = render(Platform::Launchd, &s, &paths())[0].contents.clone();
+        assert!(
+            plist.contains("<string>/Applications/My Tools/xv</string>"),
+            "{plist}"
+        );
+        assert!(
+            plist.contains("<string>/home/my user/state/manifest.json</string>"),
+            "{plist}"
+        );
+        assert!(
+            plist.contains(
+                "<key>WorkingDirectory</key>\n    <string>/home/my user/my work</string>"
+            ),
+            "{plist}"
+        );
+
+        // systemd: ExecStart is whitespace-split, so each argument is quoted;
+        // WorkingDirectory= is a whole-line value and must not be.
+        let service = render(Platform::Systemd, &s, &paths())[0].contents.clone();
+        assert!(
+            service.contains("\"/Applications/My Tools/xv\" \"schedule\" \"run\" \"--manifest\" \"/home/my user/state/manifest.json\""),
+            "{service}"
+        );
+        assert!(
+            service.contains("WorkingDirectory=/home/my user/my work\n"),
+            "{service}"
+        );
+
+        // schtasks: one cmd.exe command line, so every path is double-quoted.
+        let tr = schtasks_tr(&s);
+        assert!(tr.contains("cd /d \"/home/my user/my work\" && "), "{tr}");
+        assert!(tr.contains("\"/Applications/My Tools/xv\""), "{tr}");
+        assert!(tr.contains("\"/home/my user/state/manifest.json\""), "{tr}");
+    }
+
+    #[test]
+    fn install_refuses_an_unpinned_legacy_command() {
+        // The legacy shape survives only so `status` can recognize a job an
+        // older xv installed. Nothing may register one.
+        let tmp = tempfile::tempdir().unwrap();
+        let s = RotationSchedule {
+            command: ScheduleCommand::LegacyRotateDue {
+                vault: Some("prod-kv".into()),
+            },
+            log_path: tmp.path().join("state/rotate.log"),
+            ..schedule()
+        };
+        let p = UnitPaths {
+            dir: tmp.path().join("units"),
+        };
+        let runner = FakeRunner::default();
+        let err = install(Platform::Systemd, &s, &p, &runner).expect_err("must refuse");
+        assert!(err.to_string().contains("unpinned"), "{err}");
+        // Nothing was written and no scheduler was touched.
+        assert!(!p.dir.exists(), "a refused install wrote unit files");
+        assert!(runner.calls().is_empty(), "{:?}", runner.calls());
     }
 
     // -- lifecycle ----------------------------------------------------------

@@ -866,3 +866,124 @@ fn an_unsaved_ambient_backend_is_refused() {
     assert!(combined.contains("XV_BACKEND"), "{combined}");
     assert!(!combined.contains("# --- manifest.json"), "{combined}");
 }
+
+// ---------------------------------------------------------------------------
+// The hidden manifest runner (`xv schedule run --manifest ...`)
+// ---------------------------------------------------------------------------
+
+/// The owned manifest path under an `XV_STATE_HOME` override, with `contents`
+/// already written there.
+fn seed_state_manifest(state_home: &std::path::Path, contents: &str) -> std::path::PathBuf {
+    let dir = state_home
+        .join("xv")
+        .join("schedules")
+        .join("rotation-default");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("manifest.json");
+    std::fs::write(&path, contents).unwrap();
+    path
+}
+
+#[test]
+fn a_malformed_manifest_refuses_before_any_backend_is_constructed() {
+    // Invariant 4: the sweep is refused before backend construction. The
+    // local store here has never been opened, so a backend constructor would
+    // leave a store and an age identity behind — visible, unfakeable evidence
+    // that the runner reached one.
+    let tmp = tempfile::tempdir().unwrap();
+    let (store, key) = fresh_unopened_store(tmp.path());
+    let state = tmp.path().join("state");
+    let manifest = seed_state_manifest(&state, "{ this is not json");
+
+    let out = xv_cmd_in(tmp.path())
+        .env("XV_STATE_HOME", &state)
+        .args(["schedule", "run", "--manifest", manifest.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+
+    assert_eq!(out.status.code(), Some(3), "stdout={stdout}stderr={stderr}");
+    // stdout is data; a refused run produces none.
+    assert!(stdout.is_empty(), "{stdout}");
+    assert!(
+        stderr.to_lowercase().contains("reinstall"),
+        "the refusal must say how to recover: {stderr}"
+    );
+    assert!(
+        !store.exists() && !key.exists(),
+        "the runner constructed a backend: store={} key={}\n{stderr}",
+        store.exists(),
+        key.exists()
+    );
+}
+
+#[test]
+fn a_missing_manifest_is_reported_as_missing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (store, key) = fresh_unopened_store(tmp.path());
+    let state = tmp.path().join("state");
+    let manifest = state
+        .join("xv")
+        .join("schedules")
+        .join("rotation-default")
+        .join("manifest.json");
+
+    let out = xv_cmd_in(tmp.path())
+        .env("XV_STATE_HOME", &state)
+        .args(["schedule", "run", "--manifest", manifest.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
+    assert!(stderr.contains("missing"), "{stderr}");
+    assert!(stderr.to_lowercase().contains("reinstall"), "{stderr}");
+    assert!(!store.exists() && !key.exists(), "{stderr}");
+}
+
+#[test]
+fn the_runner_refuses_a_manifest_outside_the_owned_location() {
+    // Anyone who can hand the scheduler a different `--manifest` chooses the
+    // rotation target. Only the current user's own manifest path is accepted.
+    let tmp = tempfile::tempdir().unwrap();
+    let (store, key) = fresh_unopened_store(tmp.path());
+    let state = tmp.path().join("state");
+    seed_state_manifest(&state, "{}");
+    let foreign = tmp.path().join("elsewhere.json");
+    std::fs::write(&foreign, "{}").unwrap();
+
+    for arg in [
+        foreign.to_str().unwrap().to_string(),
+        "manifest.json".to_string(),
+    ] {
+        let out = xv_cmd_in(tmp.path())
+            .env("XV_STATE_HOME", &state)
+            .args(["schedule", "run", "--manifest", &arg])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        assert_eq!(out.status.code(), Some(3), "{arg}: {stderr}");
+        assert!(
+            String::from_utf8_lossy(&out.stdout).is_empty(),
+            "{arg}: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        assert!(!store.exists() && !key.exists(), "{arg}: {stderr}");
+    }
+}
+
+#[test]
+fn schedule_run_is_hidden_from_help() {
+    // It is scheduler plumbing, not a user-facing verb: the units invoke it,
+    // people never should.
+    let tmp = tempfile::tempdir().unwrap();
+    fresh_unopened_store(tmp.path());
+    let out = xv_cmd_in(tmp.path())
+        .args(["schedule", "--help"])
+        .output()
+        .unwrap();
+    let help = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(help.contains("install"), "{help}");
+    assert!(!help.contains("\n  run"), "{help}");
+}

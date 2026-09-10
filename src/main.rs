@@ -376,11 +376,13 @@ Rebuild with `cargo build --features aws` or install an AWS-enabled binary.",
                 command: Some(crate::cli::commands::ScanCommands::Uninstall),
                 ..
             }
-            // `schedule status`/`uninstall` only talk to the OS scheduler, and
+            // `schedule status`/`uninstall` only talk to the OS scheduler,
             // `schedule install` resolves and verifies its own target through a
-            // lazy one-backend registry. Building the eager registry here would
-            // construct (and, for the local backend, create) a store before the
-            // handler has decided which backend the schedule even targets.
+            // lazy one-backend registry, and `schedule run` must validate its
+            // pinned manifest *before* any backend exists (invariant 4).
+            // Building the eager registry here would construct (and, for the
+            // local backend, create) a store before the handler has decided
+            // which backend the schedule even targets.
             | crate::cli::Commands::Schedule { .. }
     );
 

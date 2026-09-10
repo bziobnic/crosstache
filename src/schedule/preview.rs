@@ -156,7 +156,6 @@ mod tests {
             binary: PathBuf::from("/home/alice/bin/xv"),
             log_path: PathBuf::from(LOG_PATH),
             home: PathBuf::from("/home/alice"),
-            config_home: Some(PathBuf::from("/home/alice/.config")),
         }
     }
 

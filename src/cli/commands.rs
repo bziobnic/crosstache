@@ -1644,6 +1644,20 @@ pub enum ScheduleCommands {
 
     /// Remove the rotation schedule. Succeeds when none is installed.
     Uninstall,
+
+    /// Private scheduler plumbing: replay the pinned rotation manifest.
+    ///
+    /// Hidden because it is not a verb a person invokes — the launchd,
+    /// systemd and Task Scheduler entries `xv schedule install` writes are
+    /// its only callers, and it accepts nothing but the manifest path this
+    /// user's own installation owns.
+    #[command(hide = true)]
+    Run {
+        /// Absolute path to the owned `manifest.json`. Any other path is
+        /// refused: whoever picks the manifest picks what gets rotated.
+        #[arg(long)]
+        manifest: std::path::PathBuf,
+    },
 }
 
 /// Git-native versioning subcommands for the local store.

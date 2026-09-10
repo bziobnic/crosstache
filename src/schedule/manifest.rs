@@ -19,9 +19,9 @@
 //! client secrets, credential file contents, environment values, local age
 //! identities, secret names or secret values.
 //!
-//! PR 1 consumes the schema, the state paths and the preview serializer;
-//! the storage primitives and the run/recovery paths are consumed by the
-//! manifest runner in PR 2. Those still-unconsumed items carry a per-item
+//! Install writes and validates the manifest and the runner loads it back;
+//! the last-run, lock and recovery paths belong to the runner and install
+//! transaction still to come. Those still-unconsumed items carry a per-item
 //! `allow(dead_code)` rather than the module carrying a blanket one, so a
 //! genuinely unused item added later still shows up as a warning.
 
@@ -89,28 +89,32 @@ impl ScheduleStatePaths {
     }
 
     /// `last-run.json` — owned by the scheduled runner.
-    // PR 2 (manifest runner) reads this; nothing in PR 1 does.
+    // The scheduled runner and the install transaction consume these; the
+    // renderer/runner scaffolding does not.
     #[allow(dead_code)]
     pub fn last_run_path(&self) -> PathBuf {
         self.root.join("last-run.json")
     }
 
     /// `run.lock` — persistent lock inode owned by the scheduled runner.
-    // PR 2 (manifest runner) reads this; nothing in PR 1 does.
+    // The scheduled runner and the install transaction consume these; the
+    // renderer/runner scaffolding does not.
     #[allow(dead_code)]
     pub fn run_lock_path(&self) -> PathBuf {
         self.root.join("run.lock")
     }
 
     /// `install.lock` — persistent lock inode owned by install/reinstall/uninstall.
-    // PR 2 (manifest runner) reads this; nothing in PR 1 does.
+    // The scheduled runner and the install transaction consume these; the
+    // renderer/runner scaffolding does not.
     #[allow(dead_code)]
     pub fn install_lock_path(&self) -> PathBuf {
         self.root.join("install.lock")
     }
 
     /// `recovery/` — created only when an install rollback is incomplete.
-    // PR 2 (manifest runner) reads this; nothing in PR 1 does.
+    // The scheduled runner and the install transaction consume these; the
+    // renderer/runner scaffolding does not.
     #[allow(dead_code)]
     pub fn recovery_dir(&self) -> PathBuf {
         self.root.join("recovery")
@@ -136,8 +140,6 @@ pub fn resolve_from_process_env() -> Result<ScheduleStatePaths> {
 
 /// Resolve state paths for the current build's platform. Pure function of
 /// `env`; performs no environment or filesystem access itself.
-// PR 2 (manifest runner) reads this; nothing in PR 1 does.
-#[allow(dead_code)]
 pub fn resolve(env: &ScheduleEnv) -> Result<ScheduleStatePaths> {
     let platform = if cfg!(windows) {
         HostPlatform::Windows
@@ -258,9 +260,11 @@ struct SchemaVersionPeek {
 /// not a cosmetic defect. Only UTC is accepted: two manifests written in
 /// different local offsets must still compare and sort as written.
 ///
-/// This runs on load and on write, never on the preview — the preview
+/// [`validate_v1`] runs on load and — since install validates before
+/// serializing — on write too, but never on the preview: the preview
 /// manifest's `installed_at` is deliberately empty and is rendered as
-/// `<set-at-install>` by [`serialize_manifest_preview`].
+/// `<set-at-install>` by [`serialize_manifest_preview`], which does not
+/// validate.
 fn validate_installed_at(value: &str) -> Result<()> {
     if value.is_empty() {
         return Err(CrosstacheError::config(
@@ -317,7 +321,12 @@ fn validate_digest(field: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_v1(manifest: &ScheduleManifestV1) -> Result<()> {
+/// Validate a v1 manifest.
+///
+/// Called on every load *and* by install before serializing, so a manifest
+/// this build would refuse to read is never written in the first place — the
+/// alternative is discovering the defect at 3am, from a job that cannot run.
+pub(crate) fn validate_v1(manifest: &ScheduleManifestV1) -> Result<()> {
     if manifest.schedule_id != SCHEDULE_ID {
         return Err(CrosstacheError::config(format!(
             "schedule manifest field 'schedule_id' must be '{SCHEDULE_ID}': {}",
@@ -393,8 +402,6 @@ pub fn serialize_manifest_preview(manifest: &ScheduleManifestV1) -> String {
 
 /// Deterministic pretty JSON bytes for the real on-disk manifest, terminated
 /// with a trailing newline.
-// PR 2 (manifest runner) reads this; nothing in PR 1 does.
-#[allow(dead_code)]
 pub fn serialize_manifest(manifest: &ScheduleManifestV1) -> Vec<u8> {
     let mut bytes =
         serde_json::to_vec_pretty(manifest).expect("schedule manifest is always valid JSON");
@@ -468,8 +475,6 @@ fn read_manifest_bytes(paths: &ScheduleStatePaths) -> Result<Vec<u8>> {
 ///
 /// An unknown `schema_version` produces a targeted error naming reinstall,
 /// rather than a generic deserialization failure.
-// PR 2 (manifest runner) reads this; nothing in PR 1 does.
-#[allow(dead_code)]
 pub fn load_manifest(paths: &ScheduleStatePaths) -> Result<ScheduleManifest> {
     let bytes = read_manifest_bytes(paths)?;
 
@@ -500,8 +505,6 @@ pub fn load_manifest(paths: &ScheduleStatePaths) -> Result<ScheduleManifest> {
 
 /// Atomically write `manifest.json`, creating the owning private directory
 /// (`0700` on Unix) if needed. The file is written private (`0600` on Unix).
-// PR 2 (manifest runner) reads this; nothing in PR 1 does.
-#[allow(dead_code)]
 pub fn write_manifest_atomic(paths: &ScheduleStatePaths, bytes: &[u8]) -> Result<()> {
     create_private_dir(paths.root()).map_err(|error| {
         CrosstacheError::config(format!(
@@ -514,7 +517,7 @@ pub fn write_manifest_atomic(paths: &ScheduleStatePaths, bytes: &[u8]) -> Result
 
 /// Remove only `manifest.json`. Refuses if it is a symlink; a missing file
 /// is not an error.
-// PR 2 (manifest runner) reads this; nothing in PR 1 does.
+// Consumed by uninstall and the install transaction, still to come.
 #[allow(dead_code)]
 pub fn remove_owned_manifest(paths: &ScheduleStatePaths) -> Result<()> {
     let path = paths.manifest_path();

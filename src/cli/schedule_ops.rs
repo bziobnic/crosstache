@@ -21,7 +21,6 @@ use crate::schedule::{
     self, Platform, ProcessRunner, RotationSchedule, ScheduleCommand, ScheduleInterval, UnitPaths,
 };
 use crate::utils::output;
-use crate::workspace::WorkspaceSource;
 
 pub(crate) async fn execute_schedule_command(
     command: ScheduleCommands,
@@ -38,6 +37,7 @@ pub(crate) async fn execute_schedule_command(
         } => execute_install(&interval, &at, vault, log_file, print, force, &config).await,
         ScheduleCommands::Status => execute_status(&config).await,
         ScheduleCommands::Uninstall => execute_uninstall().await,
+        ScheduleCommands::Run { manifest } => execute_run(&manifest),
     }
 }
 
@@ -232,23 +232,6 @@ fn resolve_log_path(log_file: &str) -> Result<PathBuf> {
     Ok(resolved)
 }
 
-/// The `--vault` value the interim legacy install carries.
-///
-/// The installed legacy command re-resolves this string at run time through
-/// [`crate::cli::helpers::resolve_vault_ref_with_workspace`], which looks it up
-/// as an attached workspace alias first and only falls back to a raw vault name
-/// on the *active* backend. So in a configured workspace the alias is the value
-/// that survives the round trip: handing it the real vault instead would be
-/// read as a raw name on the active backend, sweeping the wrong backend for any
-/// alias attached to another one. In the degenerate workspace-of-one there is
-/// no alias to look up, and the raw vault is exactly what resolution expects.
-fn legacy_vault_argument(resolved: &ResolvedScheduleTarget) -> String {
-    match resolved.workspace_source {
-        WorkspaceSource::Context | WorkspaceSource::ProjectToml => resolved.entry.alias.clone(),
-        WorkspaceSource::Degenerate => resolved.target.vault.clone(),
-    }
-}
-
 /// Build the schedule from flags plus the current process's environment.
 fn build_schedule(
     interval: ScheduleInterval,
@@ -269,12 +252,6 @@ fn build_schedule(
         command,
         binary,
         log_path,
-        // Carry the *current* config location into the unit so the scheduled run
-        // resolves the same configuration the user just tested against.
-        config_home: std::env::var("XDG_CONFIG_HOME")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .map(PathBuf::from),
         home,
     })
 }
@@ -298,43 +275,34 @@ async fn execute_install(
     // context that may since have changed.
     let resolved = resolve_target(vault.as_deref(), config).await?;
 
-    if print {
-        // Dry run: show exactly what installation would write — the pinned
-        // manifest and the units that read it — and write nothing at all.
-        // `resolve_from_process_env` only computes paths; it creates nothing.
-        let state_paths = manifest::resolve_from_process_env()?;
-        let manifest_path = state_paths.manifest_path();
-        // `build_schedule` already records the executable and the log path in
-        // the manifest's spelling, so the preview, the manifest and the unit
-        // all read the same strings.
-        let schedule = build_schedule(
+    // `resolve_from_process_env` only computes paths; it creates nothing, so
+    // this is safe on the `--print` path too.
+    let state_paths = manifest::resolve_from_process_env()?;
+    let schedule = RotationSchedule {
+        // The unit, the preview and the manifest must agree on one spelling of
+        // the executable, and the manifest's is the canonical one.
+        binary: canonical_exe()?,
+        ..build_schedule(
             interval,
             ScheduleCommand::ManifestRun {
-                manifest: manifest_path.clone(),
+                manifest: state_paths.manifest_path(),
                 working_directory: resolved.working_directory.clone(),
             },
             log_file,
-        )?;
-        let paths = UnitPaths::for_platform(platform, &schedule.home);
-        let manifest = build_manifest(&schedule, &resolved)?;
+        )?
+    };
+    let paths = UnitPaths::for_platform(platform, &schedule.home);
+    let mut manifest_v1 = build_manifest(&schedule, &resolved)?;
+
+    if print {
+        // Dry run: show exactly what installation would write — the pinned
+        // manifest and the units that read it — and write nothing at all.
         print!(
             "{}",
-            render_install_preview(platform, &schedule, &paths, &manifest)
+            render_install_preview(platform, &schedule, &paths, &manifest_v1)
         );
         return Ok(());
     }
-
-    // Until the pinned runner ships, the *installed* command is still the
-    // legacy sweep against the resolved real vault. Nothing is written to the
-    // schedule state directory, so there is no manifest for a runner to read.
-    let schedule = build_schedule(
-        interval,
-        ScheduleCommand::LegacyRotateDue {
-            vault: Some(legacy_vault_argument(&resolved)),
-        },
-        log_file,
-    )?;
-    let paths = UnitPaths::for_platform(platform, &schedule.home);
 
     if !force {
         output::warn(&format!(
@@ -366,6 +334,22 @@ async fn execute_install(
         }
     }
 
+    // The manifest is the target; the unit is only a pointer to it. Publish it
+    // before the scheduler can ever fire, so a job that exists always has a
+    // manifest to read. `installed_at` is stamped here rather than in
+    // `build_manifest` because the preview must stay deterministic — it renders
+    // the placeholder — and because the recorded time should be the moment the
+    // target was actually pinned.
+    //
+    // This is deliberately non-transactional: a failure after the write leaves
+    // a manifest with no job, which `xv schedule status` reports and a reinstall
+    // replaces. Task 4 of this series wraps the sequence in the spec's
+    // six-stage install transaction with rollback.
+    manifest_v1.installed_at =
+        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    manifest::validate_v1(&manifest_v1)?;
+    manifest::write_manifest_atomic(&state_paths, &manifest::serialize_manifest(&manifest_v1))?;
+
     schedule::install(platform, &schedule, &paths, &ProcessRunner)?;
 
     output::success(&format!(
@@ -373,10 +357,14 @@ async fn execute_install(
         platform.name(),
         schedule.interval.describe()
     ));
-    output::info(&format!("  Command: {}", schedule.command_line()));
-    output::info(&format!("  Log:     {}", schedule.log_path.display()));
+    output::info(&format!("  Command:  {}", schedule.command_line()));
+    output::info(&format!(
+        "  Manifest: {}",
+        state_paths.manifest_path().display()
+    ));
+    output::info(&format!("  Log:      {}", schedule.log_path.display()));
     for unit in schedule::unit_paths_for(platform, &paths) {
-        output::info(&format!("  Unit:    {}", unit.display()));
+        output::info(&format!("  Unit:     {}", unit.display()));
     }
     output::hint(
         "A scheduled run has no terminal, so any credential that needs interaction will fail \
@@ -388,8 +376,10 @@ async fn execute_install(
 }
 
 /// Assemble the manifest installation would write for this schedule and
-/// target. `installed_at` is a placeholder: the real value is stamped by the
-/// write itself, and the preview renders it as `<set-at-install>`.
+/// target. `installed_at` is left empty: [`execute_install`] stamps it just
+/// before writing, and the preview renders the empty value as
+/// `<set-at-install>`. Keeping it out of here is what lets the preview be
+/// deterministic and byte-comparable across runs.
 fn build_manifest(
     schedule: &RotationSchedule,
     resolved: &ResolvedScheduleTarget,
@@ -458,6 +448,103 @@ async fn resolve_target(vault: Option<&str>, config: &Config) -> Result<Resolved
         Some(config.effective_backend_name()),
     )
     .await
+}
+
+/// Accept only the manifest path this user's own installation owns.
+///
+/// The scheduler passes `--manifest` verbatim, so whoever can influence that
+/// argument — a hand-edited unit, a foreign job reusing our subcommand — picks
+/// what gets rotated. Comparing against the owned location makes the flag a
+/// consistency check rather than a target-selection input, which is what
+/// invariant 2 requires of everything outside the manifest.
+///
+/// Both sides are compared in the same canonical form so `/tmp/...` and
+/// `/private/tmp/...` on macOS are not mistaken for different files. The path
+/// need not exist yet: a missing manifest is a separate, more useful error than
+/// "wrong path", and it is reported as one.
+fn check_owned_manifest_path(supplied: &Path, owned: &Path) -> Result<()> {
+    if !supplied.is_absolute() {
+        return Err(CrosstacheError::config(format!(
+            "'xv schedule run --manifest' requires an absolute path: '{}'. This command is \
+             scheduler plumbing; the installed job passes the right path itself.",
+            supplied.display()
+        )));
+    }
+    // A symlink here would let the checked path and the read path be two
+    // different files. `load_manifest` refuses one too; refusing it before the
+    // comparison keeps the equality below honest.
+    match std::fs::symlink_metadata(supplied) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(CrosstacheError::config(format!(
+                "Refusing symlinked schedule manifest '{}'; reinstall the schedule with \
+                 'xv schedule install' to regenerate it.",
+                supplied.display()
+            )));
+        }
+        _ => {}
+    }
+    if comparable_form(supplied) != comparable_form(owned) {
+        return Err(CrosstacheError::config(format!(
+            "'xv schedule run --manifest {}' does not name this user's schedule manifest \
+             ('{}'). Reinstall the schedule with 'xv schedule install' so its job points at the \
+             owned manifest.",
+            supplied.display(),
+            owned.display()
+        )));
+    }
+    Ok(())
+}
+
+/// The path with its *directory* canonicalized, leaving the file name alone so
+/// a not-yet-existing manifest still compares correctly.
+fn comparable_form(path: &Path) -> PathBuf {
+    let Some(parent) = path.parent() else {
+        return path.to_path_buf();
+    };
+    let base = canonical_path_for_manifest(parent).unwrap_or_else(|_| parent.to_path_buf());
+    match path.file_name() {
+        Some(name) => base.join(name),
+        None => base,
+    }
+}
+
+/// `xv schedule run --manifest <path>` — the pinned scheduled sweep.
+///
+/// Ordering is the security property: the path check and the bounded,
+/// symlink-refusing manifest load both happen before anything that could
+/// construct a backend, so a malformed, oversized, symlinked or foreign
+/// manifest cannot reach a provider — let alone mutate a secret. Nothing here
+/// touches `XV_BACKEND`, `XV_ENV` or the context file.
+///
+/// The rotation itself is not implemented yet. Returning an error rather than
+/// `Ok(())` is deliberate: a scheduler wired to this build must record a
+/// failure, not a silent no-op that looks like a clean nightly sweep.
+fn execute_run(supplied_manifest: &Path) -> Result<()> {
+    let state_paths = manifest::resolve_from_process_env()?;
+    let owned = state_paths.manifest_path();
+    check_owned_manifest_path(supplied_manifest, &owned)?;
+
+    if !owned.exists() {
+        return Err(CrosstacheError::config(format!(
+            "the pinned schedule manifest '{}' is missing; reinstall the schedule with \
+             'xv schedule install'.",
+            owned.display()
+        )));
+    }
+
+    // Bounded, no-follow, schema-validated. Any failure names reinstall,
+    // because a manifest this process cannot trust is not something a
+    // scheduled run may work around.
+    manifest::load_manifest(&state_paths).map_err(|e| {
+        CrosstacheError::config(format!(
+            "{e}. Reinstall the schedule with 'xv schedule install' to regenerate it."
+        ))
+    })?;
+
+    Err(CrosstacheError::config(
+        "the scheduled rotation runner is not implemented in this build; reinstall the schedule \
+         after upgrading xv ('xv schedule install').",
+    ))
 }
 
 async fn execute_status(config: &Config) -> Result<()> {
@@ -538,73 +625,61 @@ async fn execute_uninstall() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schedule::manifest::ManifestTarget;
-    use crate::workspace::WorkspaceEntry;
 
-    fn resolved(
-        source: WorkspaceSource,
-        alias: &str,
-        backend: &str,
-        vault: &str,
-    ) -> ResolvedScheduleTarget {
-        ResolvedScheduleTarget {
-            target: ManifestTarget {
-                config_path: "/home/u/.config/xv/xv.conf".to_string(),
-                config_digest: format!("sha256:{}", "0".repeat(64)),
-                project_path: None,
-                project_digest: None,
-                environment: None,
-                context_path: None,
-                context_digest: None,
-                workspace_source: "context".to_string(),
-                workspace_alias: Some(alias.to_string()),
-                backend_name: backend.to_string(),
-                backend_kind: "local".to_string(),
-                backend_identity: format!("sha256:{}", "1".repeat(64)),
-                vault: vault.to_string(),
-            },
-            entry: WorkspaceEntry {
-                alias: alias.to_string(),
-                backend: backend.to_string(),
-                vault: vault.to_string(),
-                default: true,
-            },
-            workspace_source: source,
-            working_directory: PathBuf::from("/home/u/work"),
-        }
+    /// A real owned path under a tempdir, so canonicalization has something to
+    /// resolve on hosts where the temp root is itself a symlink (macOS).
+    fn owned_in(dir: &Path) -> PathBuf {
+        let root = dir.join("xv").join("schedules").join("rotation-default");
+        std::fs::create_dir_all(&root).unwrap();
+        root.join("manifest.json")
     }
 
-    /// The bug this guards: run-time re-resolution looks `--vault` up as an
-    /// attached alias first and otherwise treats it as a raw vault on the
-    /// *active* backend. Carrying the resolved real vault for an alias
-    /// attached to a non-active backend would sweep the active backend's
-    /// same-named vault instead.
     #[test]
-    fn legacy_vault_argument_carries_the_alias_in_a_configured_workspace() {
-        let context = resolved(WorkspaceSource::Context, "stage", "local-b", "stage-vault");
-        assert_eq!(legacy_vault_argument(&context), "stage");
-
-        let project = resolved(
-            WorkspaceSource::ProjectToml,
-            "stage",
-            "local-b",
-            "stage-vault",
-        );
-        assert_eq!(legacy_vault_argument(&project), "stage");
+    fn the_owned_manifest_path_is_accepted_even_before_it_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let owned = owned_in(tmp.path());
+        // Nothing written yet: "missing" is a separate, more useful error than
+        // "wrong path", so the check itself must not depend on existence.
+        check_owned_manifest_path(&owned, &owned).expect("the owned path is accepted");
+        std::fs::write(&owned, b"{}").unwrap();
+        check_owned_manifest_path(&owned, &owned).expect("still accepted once written");
     }
 
-    /// In the degenerate workspace-of-one there is no alias to look up — the
-    /// synthesized alias is a label, not a name resolution accepts — so the
-    /// raw vault is the only value that round-trips.
     #[test]
-    fn legacy_vault_argument_carries_the_raw_vault_in_the_degenerate_workspace() {
-        let degenerate = resolved(
-            WorkspaceSource::Degenerate,
-            "local:stage-vault",
-            "local",
-            "stage-vault",
-        );
-        assert_eq!(legacy_vault_argument(&degenerate), "stage-vault");
+    fn a_relative_manifest_path_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let owned = owned_in(tmp.path());
+        let err = check_owned_manifest_path(Path::new("manifest.json"), &owned)
+            .expect_err("relative paths are refused");
+        assert!(err.to_string().contains("absolute"), "{err}");
+    }
+
+    #[test]
+    fn a_foreign_absolute_manifest_path_is_refused() {
+        // Whoever picks the manifest picks what gets rotated, so a path
+        // outside the owned location is refused even when it parses fine.
+        let tmp = tempfile::tempdir().unwrap();
+        let owned = owned_in(tmp.path());
+        let foreign = tmp.path().join("elsewhere.json");
+        std::fs::write(&foreign, b"{}").unwrap();
+        let err =
+            check_owned_manifest_path(&foreign, &owned).expect_err("a foreign path is refused");
+        assert!(err.to_string().contains("does not name"), "{err}");
+        assert!(err.to_string().contains("Reinstall"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_at_the_manifest_path_is_refused() {
+        // Otherwise the path this check compares and the file the loader reads
+        // could be two different things.
+        let tmp = tempfile::tempdir().unwrap();
+        let owned = owned_in(tmp.path());
+        let real = tmp.path().join("real.json");
+        std::fs::write(&real, b"{}").unwrap();
+        std::os::unix::fs::symlink(&real, &owned).unwrap();
+        let err = check_owned_manifest_path(&owned, &owned).expect_err("a symlink is refused");
+        assert!(err.to_string().contains("symlink"), "{err}");
     }
 
     /// The recorded executable must be a path the manifest schema accepts on
