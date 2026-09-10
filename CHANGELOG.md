@@ -28,16 +28,54 @@
 - **`xv schedule` commands no longer create a local store or age key.** Target
   resolution and the preview are provisioning-free; a store that has never been
   opened is reported rather than silently created.
+- **Installed rotation schedules are target-pinned and refuse drift.**
+  `xv schedule install` now writes a `manifest.json` recording the resolved
+  target — config file and digest, `.xv.toml` path/environment, context file,
+  workspace alias, backend registry entry and identity digest, real vault,
+  working directory, binary path and version, cadence and log path — and the
+  installed unit runs `xv schedule run --manifest <path>` instead of
+  `rotate --due --force`. Before constructing any backend the scheduled run
+  recomputes that target from the recorded inputs; any difference refuses the
+  sweep with the ordinary configuration-error exit code. An in-place upgrade of
+  the same binary path is a warning, not a refusal. The unit no longer carries
+  a vault name or `XDG_CONFIG_HOME`; it pins `XV_STATE_HOME`/`XDG_STATE_HOME`
+  only when one of them selected the state root.
+- **Existing schedules are reported as `legacy-unpinned` and are replaced only
+  by an explicit reinstall.** A schedule an older `xv` installed keeps working,
+  but `xv schedule status` labels it, shows the command it actually runs, and
+  states that its target cannot be verified. There is no automatic migration and
+  no code path that writes a manifest without `xv schedule install`.
+- **`xv schedule install` is transactional.** Install and reinstall run under an
+  exclusive `install.lock`, verify that the scheduler really registered an entry
+  pointing at this executable, manifest, cadence and log path, and roll back to
+  the previous manifest, unit bytes and registration if anything fails. A
+  rollback that cannot complete saves the prior bytes as owner-private snapshots
+  under `recovery/` and reports both failures. A file at an owned path that `xv`
+  did not write is refused rather than adopted or overwritten.
+- **`xv schedule status` reports ownership, and `uninstall` removes only what
+  `xv` owns.** Status distinguishes `managed`, `legacy-unpinned`,
+  `orphaned-manifest` and `foreign`, keeps "the scheduler failed" distinct from
+  "nothing is installed", and reports the recorded target and drift verdict
+  without contacting the provider (it no longer prints the config's default
+  vault, which had nothing to do with what a schedule acts on). Uninstall
+  removes the native unit(s)/task and `manifest.json` and retains
+  `last-run.json`, both lock files, `recovery/`, the rotation log, unrelated
+  files and any foreign artifact.
+
+### Fixed
+
+- **Task Scheduler's saved task definition is decoded correctly.**
+  `schtasks /Query /XML` emits UTF-16LE; its output was being read as UTF-8, so
+  the definition an install rollback saves — and hands back to
+  `schtasks /Create /XML` — was NUL-interleaved and would have failed to
+  restore. Scheduler output is now decoded as UTF-16LE when it is UTF-16LE.
 
 ### Known limitations
 
-- **Installed schedules are not target-pinned yet.** Until the manifest runner
-  ships, `xv schedule install` (without `--print`) still registers the legacy
-  `xv rotate --due --force --vault <alias-or-vault>` command and writes no
-  manifest, so the scheduled run still re-resolves its target at run time. The
-  `--vault` value it carries is the workspace alias when a workspace is
-  attached, and the raw vault otherwise — the form that survives run-time
-  re-resolution.
+- **`xv schedule status` does not yet report the last or next run.** The
+  scheduled run's outcome is not persisted and the scheduler's next-run time is
+  not parsed; status reports ownership, the scheduler's answer, the recorded
+  target and its drift verdict only.
 
 ## v0.39.0 — Attachment key lifecycle (2026-09-06)
 

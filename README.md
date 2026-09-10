@@ -1442,17 +1442,24 @@ xv schedule uninstall
 ```
 
 `xv schedule` installs a **per-user** job in the platform's own scheduler —
-launchd on macOS, a systemd user timer on Linux, Task Scheduler on Windows — that
-runs `xv rotate --due --force`. No daemon, nothing system-wide, no root. The unit
-holds only a binary path, those arguments, a log path, and `HOME`/`XDG_CONFIG_HOME`
-— never credentials.
+launchd on macOS, a systemd user timer on Linux, Task Scheduler on Windows. No
+daemon, nothing system-wide, no root. The job is **target-pinned**: install
+records the config, project, workspace, backend identity and vault it resolved
+in a `manifest.json`, and the unit runs `xv schedule run --manifest <path>` and
+nothing else. If any recorded input has changed, the run refuses before touching
+a backend and `xv schedule status` says so — reinstall is how you accept a new
+target. A schedule installed by an older `xv` is labelled `legacy-unpinned` and
+is replaced by an explicit `xv schedule install`, never automatically. The unit
+holds only a binary path, the manifest path, a log path and `HOME` — never
+credentials, and never a vault name.
 
 ```bash
 xv schedule install --vault v --print   # render the unit, write nothing
 ```
 
 `--print` also gives you the exact command line for a scheduler `xv` does not
-manage (cron, a Kubernetes CronJob, a CI schedule).
+manage (cron, a Kubernetes CronJob, a CI schedule) — usable only with the same
+pinned environment it prints.
 
 One thing to plan around: a scheduled run has no terminal, so a credential that
 needs interaction fails there even though it works for you now. Verify with

@@ -167,67 +167,156 @@ config resolution is a target-selection input a pinned unit may not add.
 It is a preview in the strict sense: it creates no directory, manifest, lock,
 result, unit or log, touches no existing file, and calls no scheduler.
 
-The `# command:` line shows the pinned manifest runner, which **has not shipped
-yet** (see below) — do not paste it into cron, a Kubernetes CronJob, or a CI
-schedule in this release, because there is no manifest for it to read and
-`xv schedule run` does not exist. To drive a scheduler `xv` does not manage
-today, use the same legacy command an install writes:
-
-```
-xv rotate --due --force --vault <alias-or-vault>
-```
-
-with `HOME` and `XDG_CONFIG_HOME` set the way the preview's header shows. The
-`# command:` line becomes the exact command line to paste once the manifest
-runner ships and installs start writing a manifest.
+The `# command:` line is exactly what the installed unit runs. To drive a
+scheduler `xv` does not manage — cron, a Kubernetes CronJob, a CI schedule —
+paste that line, but only with the same pinned environment the preview's header
+shows: `HOME`, and `XV_STATE_HOME`/`XDG_STATE_HOME` when one of them selected
+the state root. The runner resolves the manifest path from its *own*
+environment, so a job started with a different one refuses its own manifest
+rather than guessing. Install first: the command has nothing to read until a
+manifest exists.
 
 #### What the scheduled job runs
 
-The preview shows the pinned runner:
+Installed schedules are **target-pinned**. `xv schedule install` writes a
+`manifest.json` and the unit runs only this:
 
 ```
 xv schedule run --manifest <state dir>/schedules/rotation-default/manifest.json
 ```
 
-**In this release that runner has not shipped yet, and installed schedules are
-not target-pinned.** `xv schedule install` (without `--print`) still writes the
-legacy command:
+Everything the sweep may act on comes from that file: the config file and its
+digest, the `.xv.toml` path and environment that participated, the context
+file, the workspace alias, the backend registry entry and its identity digest,
+the real vault, the working directory the target was resolved in, the binary
+path and version, the cadence, and the log path.
 
+Before any backend is constructed the runner recomputes that target from the
+recorded inputs and compares it with what the manifest says. A difference
+refuses the sweep (see [Drift](#when-a-run-refuses-drift)). The sweep itself is
+still `--due`-bounded — only secrets that already carry a policy and are already
+past it — and the schedule never sets or changes a policy: `--every` is
+deliberately not part of it, so a schedule cannot redefine what it is sweeping.
+
+The unit contains an absolute binary path, the manifest path, `HOME`, the
+recorded working directory, the log path, and — only when a variable selected
+the state root — `XV_STATE_HOME` or `XDG_STATE_HOME`. **No credentials, no
+secret values, no vault name, and no `XDG_CONFIG_HOME`.** The manifest already
+names the exact configuration file and its digest, so a variable that redirects
+config resolution would be a second, unversioned answer to "what does this job
+rotate?" that can disagree with the manifest.
+
+#### Where the schedule's files live
+
+Under the per-user state directory, in `schedules/rotation-default/`:
+
+| File | Written by | Lifetime |
+|------|------------|----------|
+| `manifest.json` | install/reinstall | removed by `uninstall` |
+| `last-run.json` | the scheduled run | retained by reinstall and `uninstall` |
+| `run.lock` | the scheduled run | persistent lock inode; retained |
+| `install.lock` | install/reinstall/uninstall | persistent lock inode; retained |
+| `recovery/` | an install rollback that could not finish | created only then; retained |
+
+The rotation log lives outside that directory (`~/.local/state/xv/rotate.log` by
+default, or wherever `--log-file` pointed) and is likewise never removed.
+Everything is owner-private: `0700` directories and `0600` files on Unix, an
+owner-and-SYSTEM DACL on Windows.
+
+#### When a run refuses (drift)
+
+The recorded target is the acknowledgement you gave at install time. If any
+recorded input changed, the scheduled run refuses **before** constructing a
+backend and exits with the ordinary configuration-error code, and
+`xv schedule status` says the same thing without contacting the provider:
+
+```text
+[error] The installed systemd user timer rotation schedule is unsafe to run.
+  Ownership: managed
+  Target:    payments -> aws-prod/payments-production
+  Drift:     refused
+  - project_digest changed; review /home/alice/work/service/.xv.toml and reinstall
+  - backend_identity changed for aws-prod; review the account/provider and reinstall
+[hint] Review the changes, then run 'xv schedule install --vault payments' to accept the new target.
 ```
-xv rotate --due --force --vault <alias-or-vault>
+
+Reinstall — `xv schedule install --vault <alias-or-vault>` — is the only
+operation that accepts a changed target, which is the point: an unattended job
+that mutates secrets should need a fresh acknowledgement after the ground moves
+under it. So **reinstall after** editing `xv.conf` or `.xv.toml`, changing the
+active environment, switching account/subscription or backend identity,
+re-pointing a workspace alias, or moving the directory you installed from.
+
+Ambient variables are deliberately *ignored*: `XV_BACKEND`, `XV_ENV`, the
+current directory and the ambient context file do not change what a scheduled
+run does, because the run replays the recorded inputs instead.
+
+**Upgrading `xv` in place** is the one allowed difference: the same executable
+path reporting a new version is a warning, not a refusal, and the run proceeds.
+Reinstalling afterwards is still worth doing — it refreshes the rendered units
+and the recorded version. A binary that **moved or disappeared** is a refusal.
+
+#### Replacing a legacy schedule
+
+A schedule installed by an older `xv` runs `rotate --due --force` directly and
+has no manifest. It is not migrated automatically, and nothing but an explicit
+install ever writes a manifest. `xv schedule status` labels it and shows what it
+actually runs:
+
+```text
+[warn] A legacy systemd user timer rotation schedule is installed.
+  Ownership: legacy-unpinned
+  Command:   /home/alice/bin/xv rotate --due --force --vault payments-production
+  Target:    unverified (the legacy unit does not record backend or account identity)
+[hint] Replace it explicitly with 'xv schedule install --vault <alias-or-vault>'.
 ```
 
-and writes no manifest. That command re-resolves the vault, the backend and
-the account at run time from whatever config, `.xv.toml` and context the
-scheduled process finds, so an installed schedule remains *legacy/unpinned*
-until the manifest runner lands.
+Run that install (add `--force` where there is no terminal) and the legacy unit
+is replaced in the same transaction as any other reinstall.
 
-The `--vault` it carries is the value that survives that re-resolution: with a
-workspace attached it is the **alias** you gave (or the default entry's alias),
-because run-time resolution looks an attached alias up on its own backend and
-would otherwise read the real vault name as a raw vault on the *active*
-backend. With no workspace attached there are no aliases, so it is the raw
-vault name.
+#### Install is transactional
 
-`--due` bounds the blast radius to secrets that already carry a policy and are
-already past it; `--force` is required because there is no terminal to confirm
-at. The schedule never sets or changes a policy — `--every` is deliberately not
-passed, so a schedule can never redefine what it is sweeping.
+Install and reinstall hold an exclusive `install.lock`, render everything in
+memory, publish `manifest.json`, then write and register the native unit(s) and
+**verify** that the scheduler really has an entry pointing at this executable,
+this manifest, this cadence and this log path. If any of that fails, the prior
+manifest and unit bytes are put back and the previous registration restored — a
+failed reinstall leaves the schedule you had, and a failed first install leaves
+nothing.
 
-The unit contains only an absolute binary path, those arguments, a log path, and
-`HOME`/`XDG_CONFIG_HOME`. **No credentials and no secret values.** The env pair
-matters: a scheduled process does not inherit your shell's environment, and a job
-that resolves a different config than you tested against is the classic way this
-silently sweeps the wrong vault.
+If the rollback *itself* fails, the prior bytes are written to owner-private
+snapshots under `recovery/<UTC>-<artifact>` and the error reports both failures
+and points at `xv schedule status`. Those snapshots are yours to inspect; `xv`
+never reads them back on its own.
+
+A file at an owned path that `xv` did not write — anything without its
+`Managed by crosstache (xv schedule)` marker, or a symlink — is refused rather
+than adopted or overwritten. `status` reports it as `foreign` and leaves it
+alone.
+
+#### What `uninstall` removes, and what it keeps
+
+`xv schedule uninstall` deregisters the job and removes exactly two things: the
+native unit file(s) or task entry, and `manifest.json`. It **keeps**
+`last-run.json`, both lock files, `recovery/`, the rotation log, anything else
+in the state directory, and any file at an owned path that `xv` did not write
+(reported, not removed). Removing nothing is success — it is safe in teardown
+scripts — but a scheduler that fails for a reason other than "no such job" is
+reported as an error rather than as absence.
 
 #### `XV_STATE_HOME`
 
-The previewed manifest lives under the per-user state directory
+The manifest lives under the per-user state directory
 (`$XDG_STATE_HOME/xv/schedules/rotation-default/`, else
 `~/.local/state/xv/...`; `%LOCALAPPDATA%\xv\...` on Windows).
 `XV_STATE_HOME` overrides that root on every platform. It exists for tests and
 embedding only — it is **not** a target-selection input, it changes nothing
 about which vault or backend a schedule acts on, and an empty value is ignored.
+
+Whichever variable selected the root at install time is pinned into the unit, so
+the scheduled process computes the same manifest path the installing shell did.
+Without that pin the two would disagree and the job would refuse its own
+manifest at 3 a.m.
 
 #### The limitation to plan around
 
@@ -238,7 +327,7 @@ and the local backend work unconditionally. Verify before trusting it:
 
 ```bash
 xv rotate --due --force --vault v        # in a clean shell
-xv schedule status                       # what the scheduler thinks
+xv schedule status                       # ownership, target and drift
 cat ~/.local/state/xv/rotate.log         # what actually happened
 ```
 

@@ -47,6 +47,16 @@ and validate an explicit resolved target manifest. Define upgrade, missing-targe
 drift-reporting, and uninstall behavior and exercise the manifest on real
 scheduler runners where practical.
 
+### P2 — Distinguish scheduled-rotation failure categories
+
+`DueRotationFailureCategory::classify` keys off the `CrosstacheError` variant on
+purpose, but the rotation path it classifies (`execute_secret_rotate` in
+`src/cli/secret_ops.rs`) wraps most provider failures in `CrosstacheError::config`,
+so a denied write, an unreachable backend and a generator that failed all reach
+the scheduler as `rotate-failed`. The categories exist and are persisted; they
+are just not discriminating. Fix it in the rotation path — propagate the typed
+backend error instead of re-wrapping — rather than by matching on error text.
+
 ### P1 — Finish cache invalidation on vault removal
 
 Vault deletion and purge currently invalidate the vault list but leave that
