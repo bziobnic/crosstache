@@ -285,3 +285,98 @@ fn schedule_help_explains_it_is_not_a_daemon() {
         "help should say what it does not do: {stdout}"
     );
 }
+
+/// Attach a two-vault workspace to the context store the isolated command
+/// reads (`<cwd>/.xv/context`), so `--vault` means "attached alias" rather
+/// than "raw vault name".
+fn attach_workspace(root: &std::path::Path) {
+    let context_dir = root.join(".xv");
+    std::fs::create_dir_all(&context_dir).expect("create context dir");
+    let context = r#"{
+  "current": null,
+  "recent": [],
+  "workspace": {
+    "entries": [
+      { "vault": "payments-production", "backend": "local", "alias": "payments", "default": true },
+      { "vault": "billing-production", "backend": "local", "alias": "billing" }
+    ]
+  }
+}
+"#;
+    std::fs::write(context_dir.join("context"), context).expect("write context");
+}
+
+#[test]
+fn print_shows_the_real_vault_behind_an_attached_alias() {
+    let (_cmd, tmp, store) = xv_isolated_local_with_opts(false, false);
+    attach_workspace(tmp.path());
+
+    let (ok, out) = print_schedule(&store, &["--vault", "payments"]);
+    assert!(ok, "{out}");
+    // The scheduled command must carry the vault the alias resolves to, not
+    // the alias — the scheduled run does not re-resolve a workspace.
+    assert!(
+        out.contains("rotate --due --force --vault payments-production"),
+        "{out}"
+    );
+}
+
+#[test]
+fn an_unattached_vault_name_is_rejected_with_the_attached_aliases() {
+    let (_cmd, tmp, store) = xv_isolated_local_with_opts(false, false);
+    attach_workspace(tmp.path());
+
+    // The raw vault name behind an alias is still not an alias: a scheduled
+    // target must resolve exactly.
+    let out = xv_cmd_for(&store)
+        .args([
+            "schedule",
+            "install",
+            "--print",
+            "--vault",
+            "payments-production",
+        ])
+        .output()
+        .unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!out.status.success(), "{combined}");
+    assert!(combined.contains("payments"), "{combined}");
+    assert!(combined.contains("billing"), "{combined}");
+    // Nothing may have been rendered, let alone installed.
+    assert!(!combined.contains("rotate --due --force"), "{combined}");
+}
+
+#[test]
+fn a_missing_global_config_file_fails_before_the_scheduler_is_touched() {
+    let (_cmd, tmp, _store) = xv_isolated_local_with_opts(false, false);
+    // Same isolated home, but pointed at a config directory with no xv.conf:
+    // an unattended run replays a saved file, so there is nothing to pin.
+    let empty_config = tmp.path().join("empty-config");
+    std::fs::create_dir_all(empty_config.join("xv")).unwrap();
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_xv"))
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", &empty_config)
+        .env("XV_NO_PARENT_CONFIG", "1")
+        .env("XV_BACKEND", "local")
+        .env("NO_COLOR", "1")
+        .current_dir(tmp.path())
+        .args(["schedule", "install", "--print", "--vault", "prod-kv"])
+        .output()
+        .unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(!out.status.success(), "{combined}");
+    assert!(combined.contains("xv.conf"), "{combined}");
+    assert!(!combined.contains("rotate --due --force"), "{combined}");
+}

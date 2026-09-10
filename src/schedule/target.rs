@@ -17,11 +17,10 @@
 //! and does not distinguish a specific *named* backend entry, which is
 //! exactly the case this digest must separate.
 //!
-//! This is P1 Task 2 of the scheduled-target-manifest work: the identity
-//! digest only. `resolve_install_target`, the rest of canonical target
-//! resolution, is a later task in the same module — kept separate so this
-//! file stays focused.
-#![allow(dead_code)]
+//! [`resolve_install_target`] is the other half: it resolves the config,
+//! project, environment, context and workspace layers exactly once and
+//! returns the complete [`crate::schedule::manifest::ManifestTarget`] that
+//! both the install preview and the manifest describe.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -32,6 +31,8 @@ use crate::backend::local::config::ResolvedLocalConfig;
 use crate::backend::BackendKind;
 use crate::config::settings::{AwsConfig, Config, NamedBackendEntry};
 use crate::error::{CrosstacheError, Result};
+use crate::schedule::manifest::ManifestTarget;
+use crate::workspace::{Workspace, WorkspaceEntry, WorkspaceSource};
 
 /// Domain separator prepended to the canonical JSON before hashing, so this
 /// digest can never collide with a digest computed by an unrelated feature
@@ -65,6 +66,9 @@ struct AzureIdentityFields<'a> {
     credential_priority: &'a str,
 }
 
+/// Only reachable in an AWS-enabled build; without the feature every AWS
+/// selection is refused before an identity is computed.
+#[cfg_attr(not(feature = "aws"), allow(dead_code))]
 #[derive(Serialize)]
 struct AwsIdentityFields<'a> {
     registry_name: &'a str,
@@ -91,12 +95,16 @@ fn digest_payload<T: Serialize>(payload: &T) -> Result<String> {
     Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 
+/// Only reachable in a build without the `aws` feature, where every AWS
+/// selection is refused instead of resolving an identity.
+#[cfg_attr(feature = "aws", allow(dead_code))]
 fn aws_not_compiled_error(registry_name: &str) -> CrosstacheError {
     CrosstacheError::config(format!(
         "schedule backend '{registry_name}' is aws, but this binary lacks AWS support (rebuild with --features aws)"
     ))
 }
 
+#[cfg_attr(not(feature = "aws"), allow(dead_code))]
 fn aws_identity(registry_name: &str, aws_cfg: &AwsConfig) -> Result<SelectedBackendIdentity> {
     let fields = AwsIdentityFields {
         registry_name,
@@ -264,6 +272,303 @@ pub fn selected_backend_identity(
     })?;
 
     identity_from_builtin_kind(registry_name, kind, config)
+}
+
+// ---------------------------------------------------------------------------
+// Canonical target resolution
+// ---------------------------------------------------------------------------
+
+/// A resolved schedule target: the complete manifest target plus the workspace
+/// entry it came from, resolved exactly once at install time.
+///
+/// Everything a scheduled run is allowed to touch is decided here, so the
+/// install preview, the unit that gets written, and (in a later task) the
+/// manifest all describe the same target. Nothing downstream re-resolves.
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedScheduleTarget {
+    /// The manifest's `target` block, ready to serialize.
+    pub(crate) target: ManifestTarget,
+    // The three fields below are read by the manifest writer and the install
+    // preview, which land in the next task of this spec.
+    /// The workspace entry that produced [`Self::target`] — its `vault` is
+    /// the real vault to sweep, on registry backend `backend`.
+    #[allow(dead_code)]
+    pub(crate) entry: WorkspaceEntry,
+    /// Which resolution layer produced the workspace.
+    #[allow(dead_code)]
+    pub(crate) workspace_source: WorkspaceSource,
+    /// The canonical working directory resolution ran in, recorded so the
+    /// scheduled run replays the same `.xv.toml`/context discovery.
+    #[allow(dead_code)]
+    pub(crate) working_directory: PathBuf,
+}
+
+/// Strip Windows' `\\?\` verbatim prefixes from a canonical path.
+///
+/// `std::fs::canonicalize` returns verbatim paths on Windows (`\\?\C:\…`,
+/// `\\?\UNC\server\share\…`). Those are absolute and normalized, but they are
+/// not the form a user ever sees, and the manifest records paths a person is
+/// expected to read and compare. No-op on every other platform.
+#[cfg(windows)]
+fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy().into_owned();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = text.strip_prefix(r"\\?\") {
+        // Only a plain drive path survives without the prefix; anything else
+        // (a device path, say) keeps it rather than becoming a different path.
+        let bytes = rest.as_bytes();
+        if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+            return PathBuf::from(rest);
+        }
+    }
+    path
+}
+
+#[cfg(not(windows))]
+fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    path
+}
+
+/// Canonicalize a path for the manifest: resolve symlinks and `.`/`..`, then
+/// drop any Windows verbatim prefix so the result is a path
+/// `manifest::validate_absolute_normalized_path` accepts on every platform.
+///
+/// The path must exist — every path recorded by target resolution is a file
+/// or directory that was actually read.
+fn canonical_path_for_manifest(path: &Path) -> Result<PathBuf> {
+    let canonical = std::fs::canonicalize(path).map_err(|e| {
+        CrosstacheError::config(format!(
+            "cannot resolve the schedule target path '{}': {e}",
+            path.display()
+        ))
+    })?;
+    Ok(strip_verbatim_prefix(canonical))
+}
+
+/// Render a canonical path as the manifest's string form.
+fn manifest_path_string(field: &str, path: &Path) -> Result<String> {
+    path.to_str().map(str::to_string).ok_or_else(|| {
+        CrosstacheError::config(format!(
+            "schedule manifest field '{field}' cannot be recorded: '{}' is not valid UTF-8",
+            path.display()
+        ))
+    })
+}
+
+fn workspace_source_label(source: WorkspaceSource) -> &'static str {
+    match source {
+        WorkspaceSource::ProjectToml => "project",
+        WorkspaceSource::Context => "context",
+        WorkspaceSource::Degenerate => "degenerate",
+    }
+}
+
+/// Resolve the complete schedule target from the install-time inputs.
+///
+/// `config` must be the configuration parsed from `config_path`'s exact
+/// `config_bytes` — not the process configuration with environment overrides
+/// folded in. An unattended run replays a *saved* configuration, so the
+/// recorded digest and the recorded target have to describe the same file.
+///
+/// Reads the context file for `cwd` through the same loader normal commands
+/// use, then defers to [`resolve_install_target_from`].
+pub(crate) async fn resolve_install_target(
+    config: &Config,
+    config_path: &Path,
+    config_bytes: &[u8],
+    cwd: &Path,
+    vault: Option<&str>,
+    cli_env: Option<&str>,
+) -> Result<ResolvedScheduleTarget> {
+    let context = crate::config::ContextManager::load_for_cwd(cwd).await?;
+    resolve_install_target_from(
+        config,
+        config_path,
+        config_bytes,
+        cwd,
+        &context,
+        vault,
+        cli_env,
+    )
+    .await
+}
+
+/// Core of [`resolve_install_target`], parameterized over the loaded context
+/// so it is testable without the ambient context lookup (which reads
+/// `XV_CONTEXT_DIR` and the user's global context file). Production code goes
+/// through [`resolve_install_target`].
+#[allow(clippy::too_many_arguments)]
+async fn resolve_install_target_from(
+    config: &Config,
+    config_path: &Path,
+    config_bytes: &[u8],
+    cwd: &Path,
+    context: &crate::config::ContextManager,
+    vault: Option<&str>,
+    cli_env: Option<&str>,
+) -> Result<ResolvedScheduleTarget> {
+    // 1. The exact global config file.
+    let config_path = canonical_path_for_manifest(config_path)?;
+    let config_digest = crate::config::content_digest(config_bytes);
+
+    // 2. The exact working directory. A cwd that cannot be resolved is an
+    //    error: every later layer (`.xv.toml` discovery, local context
+    //    discovery) is defined relative to it.
+    let cwd = canonical_path_for_manifest(cwd)?;
+
+    // 3. The `.xv.toml` governing that directory, and the environment it
+    //    selects right now — installation resolves `XV_ENV`/`--env` once and
+    //    records the result; the runner replays it.
+    let project = crate::config::project::resolve_project_at(&cwd, cli_env).await?;
+
+    // The effective configuration for resolution: the saved file, plus the
+    // active env profile's backend folded in the same way `src/main.rs` folds
+    // it for an interactive command.
+    let mut effective = config.clone();
+    effective.env_flag = cli_env.map(str::to_string);
+    if let Some(backend) = project
+        .as_ref()
+        .and_then(|p| p.profile())
+        .and_then(|profile| profile.backend.clone())
+    {
+        crate::config::project::validate_env_profile_backend(&backend)?;
+        effective.backend = Some(backend);
+    }
+
+    // 4. The active workspace, resolved once from those exact inputs.
+    let snapshot = crate::workspace::resolve_workspace_snapshot(&effective, &cwd, context).await?;
+    let workspace = snapshot.workspace;
+    let (entry, workspace_alias) = select_entry(&workspace, &effective, vault)?;
+
+    // 5. The selected registry entry's kind and identity.
+    let identity = selected_backend_identity(&effective, &entry.backend)?;
+
+    // 6. Materialize only that backend and verify it read-only.
+    verify_selected_target(&effective, &entry).await?;
+
+    let (context_path, context_digest) = if snapshot.context_contributed {
+        let path = context
+            .source_path()
+            .map(canonical_path_for_manifest)
+            .transpose()?;
+        let path = path
+            .as_deref()
+            .map(|p| manifest_path_string("target.context_path", p))
+            .transpose()?;
+        (path, context.source_digest().map(str::to_string))
+    } else {
+        (None, None)
+    };
+
+    let project_path = project
+        .as_ref()
+        .map(|p| canonical_path_for_manifest(&p.path))
+        .transpose()?;
+    let project_path = project_path
+        .as_deref()
+        .map(|p| manifest_path_string("target.project_path", p))
+        .transpose()?;
+
+    let target = ManifestTarget {
+        config_path: manifest_path_string("target.config_path", &config_path)?,
+        config_digest,
+        project_path,
+        project_digest: project.as_ref().map(|p| p.bytes_digest.clone()),
+        environment: project.as_ref().and_then(|p| p.environment.clone()),
+        context_path,
+        context_digest,
+        workspace_source: workspace_source_label(workspace.source).to_string(),
+        workspace_alias,
+        backend_name: identity.name,
+        backend_kind: identity.kind,
+        backend_identity: identity.digest,
+        vault: entry.vault.clone(),
+    };
+
+    Ok(ResolvedScheduleTarget {
+        target,
+        entry,
+        workspace_source: workspace.source,
+        working_directory: cwd,
+    })
+}
+
+/// Apply `--vault` to the resolved workspace.
+///
+/// In a configured workspace `--vault` names an attached alias and nothing
+/// else: the same text can mean an alias in one directory and a raw vault in
+/// another, and an unattended job must not depend on which. In the degenerate
+/// workspace-of-one there are no aliases, so `--vault` is a raw vault on the
+/// effective backend and the manifest records a null alias.
+fn select_entry(
+    workspace: &Workspace,
+    config: &Config,
+    vault: Option<&str>,
+) -> Result<(WorkspaceEntry, Option<String>)> {
+    let configured = workspace.is_configured();
+    let entry = match vault {
+        Some(requested) if configured => workspace.entry(requested).cloned().ok_or_else(|| {
+            let attached: Vec<&str> = workspace.entries.iter().map(|e| e.alias.as_str()).collect();
+            CrosstacheError::invalid_argument(format!(
+                "--vault '{requested}' is not attached to the active workspace; attached aliases: {}. \
+                 A scheduled run must resolve its target exactly, so an unattached name is refused \
+                 rather than retried as a raw vault name.",
+                attached.join(", ")
+            ))
+        })?,
+        Some(requested) => WorkspaceEntry {
+            alias: requested.to_string(),
+            backend: config.effective_backend_name().to_string(),
+            vault: requested.to_string(),
+            default: true,
+        },
+        None => workspace.default_entry()?.clone(),
+    };
+    let alias = configured.then(|| entry.alias.clone());
+    Ok((entry, alias))
+}
+
+/// Construct only the selected backend and check it read-only.
+///
+/// Nothing here provisions: the probe registry opens an existing local store
+/// rather than bootstrapping one, and the check itself is the same
+/// `list_secrets` sweep `xv rotate --due` performs — so a target that
+/// verifies here is a target the scheduled run can actually read. Listed
+/// secret names are discarded; only the vault and backend names, which
+/// already appear in ordinary CLI output, reach an error message.
+async fn verify_selected_target(config: &Config, entry: &WorkspaceEntry) -> Result<()> {
+    let mut probe = config.clone();
+    probe.runtime_open_existing_local = true;
+
+    let registry =
+        crate::backend::BackendRegistry::with_lazy(&probe, std::slice::from_ref(&entry.backend))
+            .map_err(|e| target_unavailable(entry, e))?;
+    let backend = registry
+        .materialize(&entry.backend)
+        .map_err(|e| target_unavailable(entry, e))?;
+    backend
+        .health_check()
+        .await
+        .map_err(|e| target_unavailable(entry, e))?;
+    backend
+        .secrets()
+        .list_secrets(&entry.vault, None)
+        .await
+        .map_err(|e| target_unavailable(entry, e))?;
+    Ok(())
+}
+
+fn target_unavailable(
+    entry: &WorkspaceEntry,
+    error: crate::backend::error::BackendError,
+) -> CrosstacheError {
+    CrosstacheError::config(format!(
+        "cannot verify the schedule target vault '{}' on backend '{}': {error}. \
+         A schedule is only installed against a target this machine can already read.",
+        entry.vault, entry.backend
+    ))
 }
 
 #[cfg(test)]
@@ -837,5 +1142,457 @@ mod tests {
                 "canary '{canary}' leaked into manifest snippet: {manifest_snippet}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::*;
+    use crate::config::context::ContextManager;
+    use crate::config::settings::{Config, LocalConfig, NamedBackendEntry};
+    use crate::workspace::{WorkspaceEntryConfig, WorkspaceState};
+    use std::collections::HashMap;
+
+    /// A hermetic local backend config rooted under `root`, already
+    /// initialized on disk: resolution verifies an existing store and must
+    /// never create one.
+    fn local_backend(root: &Path, name: &str) -> LocalConfig {
+        let cfg = LocalConfig {
+            store_path: Some(root.join(format!("{name}-store")).to_string_lossy().into()),
+            key_file: Some(
+                root.join(format!("{name}-key.txt"))
+                    .to_string_lossy()
+                    .into(),
+            ),
+            default_vault: Some("default".into()),
+            encrypt_metadata: None,
+            opaque_filenames: None,
+            audit: None,
+            git: None,
+        };
+        crate::backend::local::LocalBackend::new(Some(&cfg)).expect("initialize fixture store");
+        cfg
+    }
+
+    /// Config with one built-in `local` backend plus two named local
+    /// backends (`local-a`, `local-b`) over separate stores.
+    fn config_with_two_named_locals(root: &Path) -> Config {
+        let mut named_backends = HashMap::new();
+        named_backends.insert(
+            "local-a".to_string(),
+            NamedBackendEntry::Local(local_backend(root, "a")),
+        );
+        named_backends.insert(
+            "local-b".to_string(),
+            NamedBackendEntry::Local(local_backend(root, "b")),
+        );
+        Config {
+            backend: Some("local".to_string()),
+            default_vault: "default".to_string(),
+            local: Some(local_backend(root, "builtin")),
+            named_backends,
+            ..Default::default()
+        }
+    }
+
+    fn entry_config(
+        alias: &str,
+        backend: &str,
+        vault: &str,
+        default: bool,
+    ) -> WorkspaceEntryConfig {
+        WorkspaceEntryConfig {
+            vault: vault.to_string(),
+            backend: Some(backend.to_string()),
+            alias: Some(alias.to_string()),
+            default,
+        }
+    }
+
+    /// Write a real context file under `dir/.xv/context` and load it back
+    /// through the same reader production uses, so `source_path`/
+    /// `source_digest` describe a file that actually exists.
+    async fn context_with_workspace(
+        dir: &Path,
+        entries: Vec<WorkspaceEntryConfig>,
+    ) -> ContextManager {
+        let context_dir = dir.join(".xv");
+        std::fs::create_dir_all(&context_dir).unwrap();
+        let manager = ContextManager {
+            workspace: Some(WorkspaceState { entries }),
+            ..Default::default()
+        };
+        let path = context_dir.join("context");
+        std::fs::write(&path, serde_json::to_vec(&manager).unwrap()).unwrap();
+        ContextManager::load_at(&path).await.unwrap()
+    }
+
+    fn config_bytes() -> &'static [u8] {
+        b"backend = \"local\"\n"
+    }
+
+    fn write_config(root: &Path) -> PathBuf {
+        let path = root.join("xv.conf");
+        std::fs::write(&path, config_bytes()).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn explicit_alias_selects_that_attached_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let config = config_with_two_named_locals(root);
+        let config_path = write_config(root);
+        let context = context_with_workspace(
+            root,
+            vec![
+                entry_config("work", "local-a", "work-vault", true),
+                entry_config("stage", "local-b", "stage-vault", false),
+            ],
+        )
+        .await;
+
+        let resolved = resolve_install_target_from(
+            &config,
+            &config_path,
+            config_bytes(),
+            root,
+            &context,
+            Some("stage"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resolved.target.vault, "stage-vault");
+        assert_eq!(resolved.target.workspace_alias.as_deref(), Some("stage"));
+        assert_eq!(resolved.target.workspace_source, "context");
+        assert_eq!(resolved.target.backend_name, "local-b");
+        assert_eq!(resolved.target.backend_kind, "local");
+        assert_eq!(resolved.entry.backend, "local-b");
+        // Context participated, so its exact file is pinned.
+        assert!(resolved.target.context_path.is_some());
+        assert!(resolved
+            .target
+            .context_digest
+            .as_deref()
+            .unwrap()
+            .starts_with("sha256:"));
+        // No `.xv.toml` governs a bare temp dir.
+        assert_eq!(resolved.target.project_path, None);
+        assert_eq!(resolved.target.project_digest, None);
+        assert_eq!(resolved.target.environment, None);
+        assert!(resolved.target.config_digest.starts_with("sha256:"));
+    }
+
+    #[tokio::test]
+    async fn no_vault_selects_the_workspace_default_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let config = config_with_two_named_locals(root);
+        let config_path = write_config(root);
+        let context = context_with_workspace(
+            root,
+            vec![
+                entry_config("work", "local-a", "work-vault", true),
+                entry_config("stage", "local-b", "stage-vault", false),
+            ],
+        )
+        .await;
+
+        let resolved = resolve_install_target_from(
+            &config,
+            &config_path,
+            config_bytes(),
+            root,
+            &context,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resolved.target.vault, "work-vault");
+        assert_eq!(resolved.target.workspace_alias.as_deref(), Some("work"));
+        assert_eq!(resolved.target.backend_name, "local-a");
+    }
+
+    #[tokio::test]
+    async fn same_vault_name_on_two_named_backends_resolves_to_distinct_identities() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let config = config_with_two_named_locals(root);
+        let config_path = write_config(root);
+        let context = context_with_workspace(
+            root,
+            vec![
+                entry_config("work", "local-a", "shared", true),
+                entry_config("stage", "local-b", "shared", false),
+            ],
+        )
+        .await;
+
+        let a = resolve_install_target_from(
+            &config,
+            &config_path,
+            config_bytes(),
+            root,
+            &context,
+            Some("work"),
+            None,
+        )
+        .await
+        .unwrap();
+        let b = resolve_install_target_from(
+            &config,
+            &config_path,
+            config_bytes(),
+            root,
+            &context,
+            Some("stage"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(a.target.vault, b.target.vault);
+        assert_ne!(a.target.backend_name, b.target.backend_name);
+        assert_ne!(
+            a.target.backend_identity, b.target.backend_identity,
+            "same vault name on two stores must not share an identity"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_alias_is_rejected_with_the_attached_aliases() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let config = config_with_two_named_locals(root);
+        let config_path = write_config(root);
+        let context = context_with_workspace(
+            root,
+            vec![
+                entry_config("work", "local-a", "work-vault", true),
+                entry_config("stage", "local-b", "stage-vault", false),
+            ],
+        )
+        .await;
+
+        let error = resolve_install_target_from(
+            &config,
+            &config_path,
+            config_bytes(),
+            root,
+            &context,
+            Some("work-vault"),
+            None,
+        )
+        .await
+        .expect_err("a raw vault name must not resolve inside a configured workspace");
+
+        let rendered = error.to_string();
+        assert!(rendered.contains("work-vault"), "{rendered}");
+        assert!(rendered.contains("work"), "{rendered}");
+        assert!(rendered.contains("stage"), "{rendered}");
+    }
+
+    #[tokio::test]
+    async fn degenerate_workspace_takes_an_explicit_vault_as_a_raw_vault() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let config = config_with_two_named_locals(root);
+        let config_path = write_config(root);
+        let context = ContextManager::default();
+
+        let resolved = resolve_install_target_from(
+            &config,
+            &config_path,
+            config_bytes(),
+            root,
+            &context,
+            Some("raw-vault"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resolved.target.vault, "raw-vault");
+        assert_eq!(resolved.target.workspace_alias, None);
+        assert_eq!(resolved.target.workspace_source, "degenerate");
+        assert_eq!(resolved.target.backend_name, "local");
+        // Nothing was read from a context file, so nothing is pinned to one.
+        assert_eq!(resolved.target.context_path, None);
+        assert_eq!(resolved.target.context_digest, None);
+    }
+
+    #[tokio::test]
+    async fn degenerate_workspace_without_a_vault_uses_the_configured_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let config = config_with_two_named_locals(root);
+        let config_path = write_config(root);
+        let context = ContextManager::default();
+
+        let resolved = resolve_install_target_from(
+            &config,
+            &config_path,
+            config_bytes(),
+            root,
+            &context,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resolved.target.vault, "default");
+        assert_eq!(resolved.target.workspace_source, "degenerate");
+        assert_eq!(resolved.target.workspace_alias, None);
+    }
+
+    #[tokio::test]
+    async fn missing_working_directory_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let config = config_with_two_named_locals(root);
+        let config_path = write_config(root);
+        let context = ContextManager::default();
+        let missing = root.join("no-such-directory");
+
+        let error = resolve_install_target_from(
+            &config,
+            &config_path,
+            config_bytes(),
+            &missing,
+            &context,
+            None,
+            None,
+        )
+        .await
+        .expect_err("a working directory that does not exist cannot be pinned");
+
+        assert!(error.to_string().contains("no-such-directory"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn project_environment_is_resolved_and_recorded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let config = config_with_two_named_locals(root);
+        let config_path = write_config(root);
+        let context = ContextManager::default();
+
+        std::fs::write(
+            root.join(".xv.toml"),
+            r#"default_env = "prod"
+
+[env.prod]
+vaults = [
+  { vault = "prod-vault", backend = "local-a", alias = "prod", default = true },
+]
+"#,
+        )
+        .unwrap();
+
+        let resolved = resolve_install_target_from(
+            &config,
+            &config_path,
+            config_bytes(),
+            root,
+            &context,
+            None,
+            Some("prod"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resolved.target.workspace_source, "project");
+        assert_eq!(resolved.target.environment.as_deref(), Some("prod"));
+        assert_eq!(resolved.target.vault, "prod-vault");
+        assert_eq!(resolved.target.workspace_alias.as_deref(), Some("prod"));
+        assert_eq!(resolved.target.backend_name, "local-a");
+        assert!(resolved
+            .target
+            .project_path
+            .as_deref()
+            .unwrap()
+            .ends_with(".xv.toml"));
+        assert!(resolved
+            .target
+            .project_digest
+            .as_deref()
+            .unwrap()
+            .starts_with("sha256:"));
+        // The project overlay replaced context, so no context file is pinned.
+        assert_eq!(resolved.target.context_path, None);
+    }
+
+    #[tokio::test]
+    async fn paths_containing_spaces_are_recorded_verbatim() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("work dir with spaces");
+        std::fs::create_dir_all(&root).unwrap();
+        let config = config_with_two_named_locals(&root);
+        let config_path = write_config(&root);
+        let context = context_with_workspace(
+            &root,
+            vec![entry_config("work", "local-a", "work-vault", true)],
+        )
+        .await;
+
+        let resolved = resolve_install_target_from(
+            &config,
+            &config_path,
+            config_bytes(),
+            &root,
+            &context,
+            Some("work"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            resolved.target.config_path.contains("work dir with spaces"),
+            "{}",
+            resolved.target.config_path
+        );
+        assert!(resolved
+            .target
+            .context_path
+            .as_deref()
+            .unwrap()
+            .contains("work dir with spaces"));
+        assert!(resolved
+            .working_directory
+            .to_string_lossy()
+            .contains("work dir with spaces"));
+    }
+
+    // -----------------------------------------------------------------
+    // Canonical path shaping
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn strip_verbatim_prefix_leaves_a_plain_path_unchanged() {
+        let plain = if cfg!(windows) {
+            PathBuf::from(r"C:\Users\alice\xv.conf")
+        } else {
+            PathBuf::from("/home/alice/.config/xv/xv.conf")
+        };
+        assert_eq!(strip_verbatim_prefix(plain.clone()), plain);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn strip_verbatim_prefix_removes_windows_verbatim_prefixes() {
+        assert_eq!(
+            strip_verbatim_prefix(PathBuf::from(r"\\?\C:\Users\alice\xv.conf")),
+            PathBuf::from(r"C:\Users\alice\xv.conf")
+        );
+        assert_eq!(
+            strip_verbatim_prefix(PathBuf::from(r"\\?\UNC\server\share\xv.conf")),
+            PathBuf::from(r"\\server\share\xv.conf")
+        );
     }
 }

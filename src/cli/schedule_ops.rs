@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::cli::commands::ScheduleCommands;
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
+use crate::schedule::target::{resolve_install_target, ResolvedScheduleTarget};
 use crate::schedule::{
     self, Platform, ProcessRunner, RotationSchedule, ScheduleInterval, UnitPaths,
 };
@@ -98,12 +99,12 @@ async fn execute_install(
     let interval = ScheduleInterval::from_parts(interval, at)?;
     let platform = Platform::detect()?;
 
-    // Default to the vault the user is actually working in, rather than leaving
-    // the scheduled run to re-resolve a context that may since have changed.
-    let vault = match vault {
-        Some(v) => Some(v),
-        None => Some(config.default_vault.clone()).filter(|v| !v.is_empty()),
-    };
+    // Resolve the target ONCE, before anything is rendered or installed: the
+    // preview, the unit, and the manifest must all describe the same vault on
+    // the same backend, rather than leaving the scheduled run to re-resolve a
+    // context that may since have changed.
+    let resolved = resolve_target(vault.as_deref(), config).await?;
+    let vault = Some(resolved.target.vault.clone());
 
     let schedule = build_schedule(interval, vault.clone(), log_file)?;
     let paths = UnitPaths::for_platform(platform, &schedule.home);
@@ -139,13 +140,6 @@ async fn execute_install(
             schedule.interval.describe(),
             schedule.command_line(),
         ));
-        if vault.is_none() {
-            output::warn(
-                "No --vault was given and no default_vault is configured, so the scheduled run \
-                 will resolve whatever vault its context points at when it fires. Pass --vault to \
-                 pin it.",
-            );
-        }
         // Without a terminal there is nobody to confirm to. Say so directly
         // rather than surfacing a generic "not a terminal" I/O failure, which
         // reads like a bug in a provisioning script.
@@ -183,6 +177,41 @@ async fn execute_install(
          whether the scheduler is happy.",
     );
     Ok(())
+}
+
+/// Resolve the schedule target from the *saved* configuration.
+///
+/// The `Config` a command handler receives has environment overrides folded
+/// in; an unattended run has none of that environment, so the manifest pins
+/// the configuration file itself. The file must therefore exist and be
+/// readable — an environment-only configuration cannot be replayed at 3am.
+async fn resolve_target(vault: Option<&str>, config: &Config) -> Result<ResolvedScheduleTarget> {
+    let config_path = Config::get_config_path()?;
+    let (file_config, config_bytes) =
+        crate::config::settings::load_config_file_at_with_bytes(&config_path)
+            .await
+            .map_err(|e| {
+                CrosstacheError::config(format!(
+                    "cannot read the configuration file '{}': {e}. A scheduled run replays a \
+                     saved configuration rather than the environment you are typing in, so save \
+                     your configuration (for example with 'xv init') before installing a schedule.",
+                    config_path.display()
+                ))
+            })?;
+
+    let cwd = std::env::current_dir().map_err(|e| {
+        CrosstacheError::config(format!("could not determine the current directory: {e}"))
+    })?;
+
+    resolve_install_target(
+        &file_config,
+        &config_path,
+        &config_bytes,
+        &cwd,
+        vault,
+        config.env_flag.as_deref(),
+    )
+    .await
 }
 
 async fn execute_status(config: &Config) -> Result<()> {

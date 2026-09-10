@@ -145,8 +145,9 @@ impl ContextManager {
     ///
     /// Display and server startup paths use this seam so project discovery
     /// and local-context discovery describe the same directory without
-    /// changing the process-wide current directory.
-    #[cfg(any(feature = "ui", test))]
+    /// changing the process-wide current directory. Schedule-target
+    /// resolution uses it for the same reason: the directory it records and
+    /// the directory it resolves against must be the same one.
     pub(crate) async fn load_for_cwd(cwd: &std::path::Path) -> Result<Self> {
         Self::load_from(Some(cwd)).await
     }
