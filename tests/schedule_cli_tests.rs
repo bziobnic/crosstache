@@ -1117,8 +1117,11 @@ fn run_pinned(
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .env("HOME", root)
         .env("XDG_CONFIG_HOME", root.join(".config"))
-        .env("XV_NO_PARENT_CONFIG", "1")
         .env("NO_COLOR", "1")
+        // Deliberately *not* set: `XV_NO_PARENT_CONFIG` is an ambient
+        // discovery switch the scheduler's environment never carries, so a
+        // runner that depended on it would refuse every night in the field
+        // while passing here.
         // Deliberately wrong: the runner replays recorded inputs.
         .env("XV_BACKEND", "azure")
         .env("XV_ENV", "no-such-environment")

@@ -252,21 +252,56 @@ use std::path::PathBuf;
 /// root (or a boundary). Returns `Err` only if a found `.xv.toml`
 /// fails to parse.
 pub async fn find_project_config(start: &Path) -> Result<Option<(PathBuf, ProjectConfig)>> {
-    Ok(find_project_config_with_bytes(start)
+    find_project_config_walking(start, !parent_config_suppressed()).await
+}
+
+/// `true` when `XV_NO_PARENT_CONFIG` suppresses the walk-up for interactive
+/// commands.
+///
+/// Exposed so callers that must *replay* a discovery — the scheduled-rotation
+/// runner — can ask whether the ambient environment would have changed it,
+/// instead of silently inheriting the answer. The runner itself always walks
+/// up; installation refuses to pin a target the variable is currently hiding
+/// (`schedule::target::suppressed_parent_project`).
+pub(crate) fn parent_config_suppressed() -> bool {
+    std::env::var("XV_NO_PARENT_CONFIG")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// [`find_project_config`] with the walk-up decided by the caller rather than
+/// by the environment.
+///
+/// `walk_up == false` inspects only `start` itself, which is what
+/// `XV_NO_PARENT_CONFIG=1` asks for. An unattended run inherits none of the
+/// invoking shell's environment, so it must state the traversal it wants
+/// instead of reading a variable that will not be there.
+pub(crate) async fn find_project_config_walking(
+    start: &Path,
+    walk_up: bool,
+) -> Result<Option<(PathBuf, ProjectConfig)>> {
+    Ok(find_project_config_with_bytes_walking(start, walk_up)
         .await?
         .map(|(path, _bytes, cfg)| (path, cfg)))
 }
 
 /// [`find_project_config`], additionally returning the exact bytes of the
-/// `.xv.toml` that was parsed. Same traversal, boundary and
-/// `XV_NO_PARENT_CONFIG` rules — this is the single implementation both
-/// forms use.
+/// `.xv.toml` that was parsed. Same traversal and boundary rules, with
+/// `XV_NO_PARENT_CONFIG` applied — this is the single implementation every
+/// environment-honoring form uses.
 async fn find_project_config_with_bytes(
     start: &Path,
 ) -> Result<Option<(PathBuf, Vec<u8>, ProjectConfig)>> {
-    let no_walk = std::env::var("XV_NO_PARENT_CONFIG")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+    find_project_config_with_bytes_walking(start, !parent_config_suppressed()).await
+}
+
+/// The one traversal. Every other discovery function decides `walk_up` and
+/// calls this.
+async fn find_project_config_with_bytes_walking(
+    start: &Path,
+    walk_up: bool,
+) -> Result<Option<(PathBuf, Vec<u8>, ProjectConfig)>> {
+    let no_walk = !walk_up;
 
     let mut current: Option<&Path> = Some(start);
     while let Some(dir) = current {

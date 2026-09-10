@@ -11,8 +11,11 @@
 //! 1. **Only recorded inputs participate.** The recorded config path, the
 //!    recorded `.xv.toml` path and environment name, the recorded context file,
 //!    and the recorded working directory. Nothing here reads `XV_BACKEND`,
-//!    `XV_ENV`, `XV_CONTEXT_DIR`, the ambient context file, or the process's
-//!    current directory — the "Ignore" row of the design's drift table. The
+//!    `XV_ENV`, `XV_CONTEXT_DIR`, `XV_NO_PARENT_CONFIG`, the ambient context
+//!    file, or the process's current directory — the "Ignore" row of the
+//!    design's drift table. Project discovery states its traversal explicitly
+//!    (always walking up); installation refuses to pin a target
+//!    `XV_NO_PARENT_CONFIG` is hiding, so the two always agree. The
 //!    workspace layer is reached through
 //!    [`crate::workspace::resolve_workspace_snapshot_replay`] rather than the
 //!    interactive resolver for exactly this reason: the interactive one
@@ -66,7 +69,7 @@ pub(crate) struct DriftReason {
 }
 
 impl DriftReason {
-    fn new(field: &'static str, detail: impl Into<String>) -> Self {
+    pub(crate) fn new(field: &'static str, detail: impl Into<String>) -> Self {
         Self {
             field,
             detail: detail.into(),
@@ -81,7 +84,7 @@ impl DriftReason {
         )
     }
 
-    fn missing_at(field: &'static str, path: &str) -> Self {
+    pub(crate) fn missing_at(field: &'static str, path: &str) -> Self {
         Self::new(
             field,
             format!("{field} is missing or unreadable; review {path} and reinstall"),
@@ -113,10 +116,20 @@ impl DriftReport {
     }
 }
 
-/// Manifest-field order for reason output. Also the authoritative list of
-/// fields drift validation can report on: a field added to the manifest that
-/// belongs in a refusal must be added here, or its reason would sort first by
-/// accident.
+/// The order reasons are reported in: every `target` field in the order the
+/// manifest declares them, then the `execution` fields that can drift
+/// (`working_directory`, `binary_path`, `installed_version`).
+///
+/// Target fields come first because they are what a person acts on, and
+/// because the goldens
+/// (`docs/superpowers/specs/2026-09-09-scheduled-target-manifest-goldens.md`,
+/// "Drift refusal") show target-field refusals in exactly this order. It is
+/// therefore *not* the manifest's own top-level order, which puts `execution`
+/// before `target`; the execution fields are appended rather than interleaved.
+///
+/// This is also the authoritative list of fields drift validation may report
+/// on: a new manifest field that belongs in a refusal must be added here, or
+/// its reason would sort first by accident.
 const FIELD_ORDER: [&str; 16] = [
     "config_path",
     "config_digest",
@@ -459,7 +472,12 @@ async fn recompute_project(
     cwd: &Path,
     reasons: &mut Vec<DriftReason>,
 ) -> Option<ResolvedProject> {
-    let discovered = crate::config::project::find_project_config(cwd)
+    // Explicit walk-up: `find_project_config` would consult
+    // `XV_NO_PARENT_CONFIG`, and a scheduled run inherits none of the
+    // invoking shell's environment. Installation refuses to pin a target that
+    // variable is currently hiding (`target::suppressed_parent_project`), so
+    // the two discoveries agree.
+    let discovered = crate::config::project::find_project_config_walking(cwd, true)
         .await
         .ok()
         .flatten()

@@ -580,7 +580,7 @@ async fn execute_run(supplied_manifest: &Path) -> Result<()> {
         return refused_drift_outcome(&report).into_cli_result();
     }
 
-    execute_pinned_run(&manifest).await?.into_cli_result()
+    execute_pinned_run(&manifest).await.into_cli_result()
 }
 
 /// What the run did, in the shape `last-run.json` needs.
@@ -647,19 +647,27 @@ impl RunOutcomeDraft {
     }
 }
 
-/// Print every drift reason and build the refusal outcome.
+/// The refusal outcome for a full validation report.
+fn refused_drift_outcome(report: &drift::DriftReport) -> RunOutcomeDraft {
+    refused_drift_from_reasons(&report.reasons)
+}
+
+/// Print drift reasons and build the refusal outcome.
 ///
 /// One stderr line per reason, in manifest-field order, plus a hint naming the
 /// only operation that accepts a changed target. The exit is the ordinary
-/// configuration-error code (3) via [`CrosstacheError::config`].
-fn refused_drift_outcome(report: &drift::DriftReport) -> RunOutcomeDraft {
+/// configuration-error code (3) via [`CrosstacheError::config`]. Used both for
+/// a full [`drift::DriftReport`] and for the single-reason refusals the run
+/// itself discovers (a working directory that has since gone, a config file
+/// that has since become unreadable, a vault that no longer verifies).
+fn refused_drift_from_reasons(reasons: &[drift::DriftReason]) -> RunOutcomeDraft {
     output::error("The recorded rotation target has changed; refusing to rotate.");
-    for reason in &report.reasons {
+    for reason in reasons {
         output::error(&format!("  - {}", reason.detail));
     }
     output::hint("Review the changes, then run 'xv schedule install' to accept the new target.");
 
-    let fields: Vec<&str> = report.reasons.iter().map(|reason| reason.field).collect();
+    let fields: Vec<&str> = reasons.iter().map(|reason| reason.field).collect();
     RunOutcomeDraft {
         state: RunState::RefusedDrift,
         summary: None,
@@ -675,7 +683,7 @@ fn refused_drift_outcome(report: &drift::DriftReport) -> RunOutcomeDraft {
         error: Some(CrosstacheError::config(format!(
             "the recorded rotation target has drifted ({} reason(s) reported above); reinstall \
              the schedule with 'xv schedule install' to accept the new target.",
-            report.reasons.len()
+            reasons.len()
         ))),
     }
 }
@@ -689,55 +697,101 @@ fn refused_drift_outcome(report: &drift::DriftReport) -> RunOutcomeDraft {
 /// path rather than taken from the process config, and only the recorded
 /// registry backend is constructed. `runtime_open_existing_local` is set so a
 /// local store that has gone missing is an error instead of being invented.
-async fn execute_pinned_run(manifest: &ScheduleManifestV1) -> Result<RunOutcomeDraft> {
+///
+/// Returns a [`RunOutcomeDraft`] on **every** path, including the failures
+/// before rotation starts: an unattended run has to be able to record what it
+/// did (or refused to do), and a bare `Err` here would be the one outcome
+/// PR 3's result file could not describe.
+async fn execute_pinned_run(manifest: &ScheduleManifestV1) -> RunOutcomeDraft {
     let working_directory = Path::new(&manifest.execution.working_directory);
-    std::env::set_current_dir(working_directory).map_err(|e| {
-        CrosstacheError::config(format!(
-            "cannot enter the recorded working directory '{}': {e}. Reinstall the schedule from \
-             a stable directory with 'xv schedule install'.",
-            working_directory.display()
-        ))
-    })?;
+    if std::env::set_current_dir(working_directory).is_err() {
+        // Validation checked this directory moments ago, so this is a race (or
+        // a permission change) rather than ordinary drift — but it is the same
+        // condition and the same advice, so it is reported the same way.
+        return refused_drift_from_reasons(&[drift::DriftReason::missing_at(
+            "working_directory",
+            &manifest.execution.working_directory,
+        )]);
+    }
 
+    run_recorded_sweep(manifest).await
+}
+
+/// The pinned sweep, from the recorded working directory.
+///
+/// Split from [`execute_pinned_run`] so every step after the process-global
+/// `set_current_dir` is unit-testable: a test can exercise the config re-read
+/// and the vault verification without moving the test runner's own working
+/// directory.
+async fn run_recorded_sweep(manifest: &ScheduleManifestV1) -> RunOutcomeDraft {
     let config_path = Path::new(&manifest.target.config_path);
-    let (mut file_config, _bytes) =
-        crate::config::settings::load_config_file_at_with_bytes(config_path)
-            .await
-            .map_err(|e| {
-                CrosstacheError::config(format!(
-                    "cannot read the recorded configuration file '{}': {e}. Reinstall the \
-                     schedule with 'xv schedule install'.",
-                    config_path.display()
-                ))
-            })?;
+    let Ok((mut file_config, _bytes)) =
+        crate::config::settings::load_config_file_at_with_bytes(config_path).await
+    else {
+        return refused_drift_from_reasons(&[drift::DriftReason::missing_at(
+            "config_path",
+            &manifest.target.config_path,
+        )]);
+    };
     file_config.runtime_open_existing_local = true;
 
     let backend_name = manifest.target.backend_name.as_str();
     let vault = manifest.target.vault.as_str();
     let entry = crate::workspace::WorkspaceEntry {
-        alias: manifest
-            .target
-            .workspace_alias
-            .clone()
-            .unwrap_or_else(|| vault.to_string()),
+        alias: manifest.target.workspace_alias.clone().unwrap_or_else(|| {
+            // The degenerate workspace's own labelling rule — the same one
+            // `select_entry` and drift validation use, so one vault never has
+            // two alias spellings.
+            crate::workspace::degenerate_alias_for(&file_config, vault)
+        }),
         backend: backend_name.to_string(),
         vault: vault.to_string(),
         default: true,
     };
 
     // The same read-only verification installation performed, against the same
-    // target: a vault this process cannot list is not one it may rotate.
-    crate::schedule::target::verify_selected_target(&file_config, &entry).await?;
+    // target: a vault this process cannot list is not one it may rotate. The
+    // provider's error body is deliberately dropped — this reason is written
+    // to an unattended log.
+    if crate::schedule::target::probe_selected_target(&file_config, &entry)
+        .await
+        .is_err()
+    {
+        return refused_drift_from_reasons(&[drift::DriftReason::new(
+            "vault",
+            format!(
+                "vault '{vault}' on '{backend_name}' no longer verifies; review the vault and \
+                 reinstall"
+            ),
+        )]);
+    }
 
-    let registry = crate::backend::BackendRegistry::with_lazy(
+    let registry = match crate::backend::BackendRegistry::with_lazy(
         &file_config,
         std::slice::from_ref(&entry.backend),
-    )
-    .map_err(|e| {
-        CrosstacheError::config(format!(
-            "cannot construct the recorded backend '{backend_name}': {e}"
-        ))
-    })?;
+    ) {
+        Ok(registry) => registry,
+        Err(error) => {
+            // Not drift — the target still resolves, this process just could
+            // not build it. Recorded with the same closed-set code the
+            // due-rotation service uses for an unusable backend.
+            let message = "the recorded backend could not be constructed";
+            output::error(&format!(
+                "cannot construct the recorded backend '{backend_name}': {error}"
+            ));
+            return RunOutcomeDraft {
+                state: RunState::Failed,
+                summary: None,
+                diagnostic: Some(RunDiagnostic {
+                    code: "backend-unavailable".to_string(),
+                    message: message.to_string(),
+                }),
+                error: Some(CrosstacheError::config(format!(
+                    "cannot construct the recorded backend '{backend_name}'"
+                ))),
+            };
+        }
+    };
 
     output::step(&format!(
         "Scheduled rotation sweep of '{vault}' on backend '{backend_name}'."
@@ -758,12 +812,12 @@ async fn execute_pinned_run(manifest: &ScheduleManifestV1) -> Result<RunOutcomeD
                 "Rotated {} of {} due secret(s) in '{vault}'.",
                 summary.rotated, summary.due
             ));
-            Ok(RunOutcomeDraft {
+            RunOutcomeDraft {
                 state: RunState::Success,
                 summary: Some(summary),
                 diagnostic: None,
                 error: None,
-            })
+            }
         }
         Ok(summary) => {
             // A partial batch must not look like a success — the same rule
@@ -783,7 +837,7 @@ async fn execute_pinned_run(manifest: &ScheduleManifestV1) -> Result<RunOutcomeD
                 codes.join(", ")
             ));
             output::error(&error.to_string());
-            Ok(RunOutcomeDraft {
+            RunOutcomeDraft {
                 state: RunState::PartialFailure,
                 diagnostic: summary.failures.first().map(|failure| RunDiagnostic {
                     code: failure.code().to_string(),
@@ -791,7 +845,7 @@ async fn execute_pinned_run(manifest: &ScheduleManifestV1) -> Result<RunOutcomeD
                 }),
                 summary: Some(summary),
                 error: Some(error),
-            })
+            }
         }
         Err(failure) => {
             // Whole-run failure: the vault was never read, so there is no
@@ -801,12 +855,12 @@ async fn execute_pinned_run(manifest: &ScheduleManifestV1) -> Result<RunOutcomeD
                 code: failure.code().to_string(),
                 message: failure.message().to_string(),
             };
-            Ok(RunOutcomeDraft {
+            RunOutcomeDraft {
                 state: RunState::Failed,
                 summary: None,
                 diagnostic: Some(diagnostic),
                 error: Some(failure.into()),
-            })
+            }
         }
     }
 }
@@ -933,6 +987,85 @@ mod tests {
                 vault: "default".to_string(),
             },
         }
+    }
+
+    /// A config file selecting a local store that was never created, so the
+    /// read-only probe fails the way a vanished store does.
+    fn unopened_local_config(dir: &Path) -> PathBuf {
+        let path = dir.join("xv.conf");
+        let store = dir.join("never-opened-store");
+        let key = dir.join("never-opened-key.txt");
+        std::fs::write(
+            &path,
+            format!(
+                "backend = \"local\"\ndebug = false\nsubscription_id = \"\"\ndefault_vault = \"default\"\n\
+                 default_resource_group = \"\"\ndefault_location = \"\"\ntenant_id = \"\"\n\
+                 output_json = false\nno_color = true\ncache_enabled = false\ncache_ttl_secs = 0\n\
+                 clipboard_timeout = 0\n\n[local]\nstore_path = \"{}\"\nkey_file = \"{}\"\n\
+                 default_vault = \"default\"\n",
+                store.display(),
+                key.display()
+            ),
+        )
+        .unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn a_vault_that_no_longer_verifies_produces_a_refused_drift_draft() {
+        // The "selected vault no longer verifies" row of the drift table: the
+        // run must produce an outcome, not a bare error, and the reason must
+        // not carry the provider's error body into an unattended log.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest = valid_manifest(tmp.path());
+        manifest.target.config_path = unopened_local_config(tmp.path())
+            .to_string_lossy()
+            .to_string();
+
+        let draft = run_recorded_sweep(&manifest).await;
+
+        assert_eq!(draft.state, RunState::RefusedDrift);
+        let diagnostic = draft.diagnostic.expect("a refusal carries a diagnostic");
+        assert_eq!(diagnostic.code, "target_drift");
+        assert_eq!(
+            diagnostic.message,
+            "vault changed; review the recorded target and reinstall"
+        );
+        let rendered = draft.error.expect("a refusal exits non-zero").to_string();
+        for leak in ["never-opened-store", "never-opened-key", "age", "decrypt"] {
+            assert!(!rendered.contains(leak), "leaked '{leak}': {rendered}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_recorded_config_produces_a_draft() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = valid_manifest(tmp.path());
+
+        let draft = run_recorded_sweep(&manifest).await;
+
+        assert_eq!(draft.state, RunState::RefusedDrift);
+        assert_eq!(
+            draft.diagnostic.expect("diagnostic").message,
+            "config_path changed; review the recorded target and reinstall"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_working_directory_that_cannot_be_entered_produces_a_draft() {
+        // `valid_manifest`'s working directory does not exist, so the chdir
+        // fails and the process's own directory is never changed.
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = valid_manifest(tmp.path());
+
+        let draft = execute_pinned_run(&manifest).await;
+
+        assert_eq!(draft.state, RunState::RefusedDrift);
+        assert_eq!(
+            draft.diagnostic.expect("diagnostic").message,
+            "working_directory changed; review the recorded target and reinstall"
+        );
+        assert!(draft.error.is_some());
     }
 
     /// State paths rooted in a tempdir, through the real resolver.

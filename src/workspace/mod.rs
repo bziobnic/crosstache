@@ -321,42 +321,101 @@ async fn resolve_configured_workspace_from(
     cwd: Option<&std::path::Path>,
     context_manager: &crate::config::ContextManager,
 ) -> Result<Option<Workspace>> {
+    let overlay = resolve_project_overlay(ProjectLayer::Discover { cwd }, config).await?;
+    configured_workspace_from_overlay(config, overlay.as_ref(), context_manager)
+}
+
+/// Which project `[env.*]` profile participates in resolution, and how it is
+/// obtained.
+///
+/// [`ProjectLayer::Discover`] is what an interactive command does: walk up
+/// from `cwd`, then let [`crate::config::project::resolve_env`] pick the
+/// environment (which consults `XV_ENV` first).
+/// [`ProjectLayer::Replay`] is what the scheduled-rotation runner does: the
+/// profile was already selected from a *recorded* file and a *recorded*
+/// environment name, and no ambient variable may re-select it. Everything
+/// after this one step is identical, which is why it is a parameter rather
+/// than a second resolver.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ProjectLayer<'a> {
+    Discover { cwd: Option<&'a std::path::Path> },
+    Replay(Option<&'a crate::config::project::EnvProfile>),
+}
+
+/// The two things workspace resolution takes from a project profile: the
+/// workspace overlay entries and the single degenerate vault. Owned, so the
+/// discovering and replaying layers share one code path without borrowing
+/// from a temporary `ProjectConfig`.
+struct ProjectOverlay {
+    vaults: Vec<WorkspaceEntryConfig>,
+    vault: Option<String>,
+}
+
+/// Resolve the project layer to an overlay, or `None` when no project profile
+/// participates.
+///
+/// `find_project_config`'s own error (a found `.xv.toml` that fails to parse)
+/// is swallowed, matching the existing precedent in
+/// `Config::resolve_vault_name` (src/config/settings.rs) — every other
+/// resolver in the codebase treats a parse failure the same way.
+///
+/// `resolve_env`'s error is NOT swallowed (Bugbot round-4 fix): post-#334 it
+/// returns `Ok(None)` only when the project file genuinely defines no
+/// `[env.*]` blocks at all (a types-only file, #331) — that case falls through
+/// to the context workspace, correctly. A real `Err` means the file DOES
+/// define environments but none was selected, or an explicit `--env`/`XV_ENV`
+/// names one that doesn't exist — the same "fail closed" case
+/// `resolve_vault_name` and every other resolver already propagates. Silently
+/// falling through to the personal context workspace here would let a secret
+/// command target personal vaults inside a project directory that clearly
+/// intends project-scoped ones.
+async fn resolve_project_overlay(
+    layer: ProjectLayer<'_>,
+    config: &Config,
+) -> Result<Option<ProjectOverlay>> {
+    let discovered;
+    let profile = match layer {
+        ProjectLayer::Replay(profile) => profile,
+        ProjectLayer::Discover { cwd: None } => None,
+        ProjectLayer::Discover { cwd: Some(cwd) } => {
+            match crate::config::project::find_project_config(cwd).await {
+                Ok(Some((_path, proj_cfg))) => {
+                    discovered = proj_cfg;
+                    crate::config::project::resolve_env(&discovered, config.env_flag.as_deref())?
+                        .map(|(_name, profile)| profile)
+                }
+                _ => None,
+            }
+        }
+    };
+
+    Ok(profile.map(|profile| ProjectOverlay {
+        vaults: profile.vaults.clone(),
+        vault: profile.vault.clone(),
+    }))
+}
+
+/// The configured workspace: the project overlay when it attaches vaults,
+/// otherwise the personal context workspace, otherwise `None`.
+fn configured_workspace_from_overlay(
+    config: &Config,
+    overlay: Option<&ProjectOverlay>,
+    context_manager: &crate::config::ContextManager,
+) -> Result<Option<Workspace>> {
     let active_backend = config.effective_backend_name().to_string();
     let backend_names = known_backend_names(config);
     let backend_name_refs: Vec<&str> = backend_names.iter().map(|s| s.as_str()).collect();
 
     // 1. `.xv.toml` project overlay — replaces context entirely.
-    //
-    // `find_project_config`'s own error (a found `.xv.toml` that fails to
-    // parse) is swallowed here, matching the existing precedent in
-    // `Config::resolve_vault_name` (src/config/settings.rs) — every other
-    // resolver in the codebase treats a parse failure the same way.
-    //
-    // `resolve_env`'s error is NOT swallowed (Bugbot round-4 fix): post-#334
-    // it returns `Ok(None)` only when the project file genuinely defines no
-    // `[env.*]` blocks at all (a types-only file, #331) — that case falls
-    // through to the context workspace below, correctly. A real `Err` means
-    // the file DOES define environments but none was selected, or an
-    // explicit `--env`/`XV_ENV` names one that doesn't exist — the same
-    // "fail closed" case `resolve_vault_name` and every other resolver
-    // already propagates. Silently falling through to the personal context
-    // workspace here would let a secret command target personal vaults
-    // inside a project directory that clearly intends project-scoped ones.
-    if let Some(cwd) = cwd {
-        if let Some((_path, proj_cfg)) = crate::config::project::find_project_config(cwd).await? {
-            if let Some((_name, profile)) =
-                crate::config::project::resolve_env(&proj_cfg, config.env_flag.as_deref())?
-            {
-                if !profile.vaults.is_empty() {
-                    let ws = build_workspace(
-                        &profile.vaults,
-                        &active_backend,
-                        WorkspaceSource::ProjectToml,
-                        &backend_name_refs,
-                    )?;
-                    return Ok(Some(ws));
-                }
-            }
+    if let Some(overlay) = overlay {
+        if !overlay.vaults.is_empty() {
+            let ws = build_workspace(
+                &overlay.vaults,
+                &active_backend,
+                WorkspaceSource::ProjectToml,
+                &backend_name_refs,
+            )?;
+            return Ok(Some(ws));
         }
     }
 
@@ -385,7 +444,7 @@ pub(crate) async fn resolve_workspace_from(
     context_manager: &crate::config::ContextManager,
 ) -> Result<Option<Workspace>> {
     Ok(Some(
-        resolve_workspace_snapshot_from(config, cwd, context_manager)
+        resolve_workspace_snapshot_from(config, ProjectLayer::Discover { cwd }, context_manager)
             .await?
             .workspace,
     ))
@@ -418,15 +477,47 @@ pub(crate) async fn resolve_workspace_snapshot(
     cwd: &std::path::Path,
     context_manager: &crate::config::ContextManager,
 ) -> Result<ResolvedWorkspaceSnapshot> {
-    resolve_workspace_snapshot_from(config, Some(cwd), context_manager).await
+    resolve_workspace_snapshot_from(
+        config,
+        ProjectLayer::Discover { cwd: Some(cwd) },
+        context_manager,
+    )
+    .await
+}
+
+/// [`resolve_workspace_snapshot`] for a **replay**: the scheduled-rotation
+/// runner recomputing the target a manifest recorded.
+///
+/// Same resolution, with the project layer supplied instead of discovered.
+/// Discovery would walk up from a working directory and re-run
+/// [`crate::config::project::resolve_env`], which consults `XV_ENV` **before**
+/// anything the caller passes; a scheduled run must not let an ambient
+/// variable pick the profile that selects its vaults (design invariant 3). The
+/// caller loads the recorded `.xv.toml` at the recorded path with the recorded
+/// environment name ([`crate::config::project::load_project_at`]) and hands
+/// the selected profile in here.
+///
+/// `profile` is `None` when the manifest recorded no project file, or when the
+/// recorded file selected no environment.
+pub(crate) async fn resolve_workspace_snapshot_replay(
+    config: &Config,
+    context_manager: &crate::config::ContextManager,
+    profile: Option<&crate::config::project::EnvProfile>,
+) -> Result<ResolvedWorkspaceSnapshot> {
+    resolve_workspace_snapshot_from(config, ProjectLayer::Replay(profile), context_manager).await
 }
 
 async fn resolve_workspace_snapshot_from(
     config: &Config,
-    cwd: Option<&std::path::Path>,
+    layer: ProjectLayer<'_>,
     context_manager: &crate::config::ContextManager,
 ) -> Result<ResolvedWorkspaceSnapshot> {
-    if let Some(ws) = resolve_configured_workspace_from(config, cwd, context_manager).await? {
+    // Resolved once and shared by the configured workspace and the degenerate
+    // vault chain, so the two passes cannot see different project files.
+    let overlay = resolve_project_overlay(layer, config).await?;
+
+    if let Some(ws) = configured_workspace_from_overlay(config, overlay.as_ref(), context_manager)?
+    {
         let context_contributed = ws.source == WorkspaceSource::Context;
         return Ok(ResolvedWorkspaceSnapshot {
             workspace: ws,
@@ -445,7 +536,7 @@ async fn resolve_workspace_snapshot_from(
     let backend_name_refs: Vec<&str> = backend_names.iter().map(|s| s.as_str()).collect();
 
     let (vault, from_context) =
-        degenerate_default_vault_with_source(config, cwd, context_manager).await?;
+        degenerate_default_vault_with_source(config, overlay.as_ref(), context_manager)?;
     let alias = degenerate_alias(&vault, &backend_name_refs);
     let degenerate_entry = WorkspaceEntryConfig {
         vault,
@@ -520,39 +611,42 @@ fn active_kind_is_azure(config: &Config) -> bool {
 /// (src/cli/helpers.rs).
 ///
 /// The resolution chain is replicated here (rather than calling
-/// `Config::resolve_vault_name`) so it uses the injected `cwd` and
+/// `Config::resolve_vault_name`) so it uses the injected project overlay and
 /// `context_manager` — the same parameterization that keeps
-/// [`resolve_workspace_from`] hermetic under `cargo test`. The one behavioral
-/// difference from `resolve_vault_name` is that the cross-boundary `.xv.toml`
-/// notice (a stderr line) is not re-emitted here, since the workspace-overlay
-/// pass above already inspected the same project config.
+/// [`resolve_workspace_from`] hermetic under `cargo test` and lets the
+/// scheduled runner replay a recorded profile. The one behavioral difference
+/// from `resolve_vault_name` is that the cross-boundary `.xv.toml` notice (a
+/// stderr line) is not re-emitted here, since the workspace-overlay pass above
+/// already inspected the same project config.
+///
 /// Returns the resolved vault together with `true` when it came from the
-/// context file's current vault (step 2 of the chain below) — the schedule
-/// target manifest records the context path/digest only in that case.
-async fn degenerate_default_vault_with_source(
+/// context file's current vault (step 2 below) — the schedule target manifest
+/// records the context path/digest only in that case.
+fn degenerate_default_vault_with_source(
     config: &Config,
-    cwd: Option<&std::path::Path>,
+    overlay: Option<&ProjectOverlay>,
     context_manager: &crate::config::ContextManager,
 ) -> Result<(String, bool)> {
-    let resolved: Result<(String, bool)> = async {
-        // 1. Project `.xv.toml` env-profile vault (walk up from cwd).
-        if let Some(cwd) = cwd {
-            if let Ok(Some((_path, proj_cfg))) =
-                crate::config::project::find_project_config(cwd).await
-            {
-                if let Some((_name, profile)) =
-                    crate::config::project::resolve_env(&proj_cfg, config.env_flag.as_deref())?
-                {
-                    if let Some(v) = profile.vault.as_deref() {
-                        return Ok((v.to_string(), false));
-                    }
-                }
-            }
+    let resolved: Result<(String, bool)> = (|| {
+        // 1. Project `.xv.toml` env-profile vault.
+        if let Some(vault) = overlay.and_then(|overlay| overlay.vault.as_deref()) {
+            return Ok((vault.to_string(), false));
         }
 
-        degenerate_default_vault_after_project(config, context_manager)
-    }
-    .await;
+        // 2. Context current vault.
+        if let Some(v) = context_manager.current_vault() {
+            return Ok((v.to_string(), true));
+        }
+
+        // 3. Config default vault.
+        if !config.default_vault.is_empty() {
+            return Ok((config.default_vault.clone(), false));
+        }
+
+        Err(CrosstacheError::config(
+            "No vault specified. Use --vault, set context with 'xv context use', or configure default_vault",
+        ))
+    })();
 
     match resolved {
         Ok(resolved) => Ok(resolved),
@@ -569,120 +663,6 @@ async fn degenerate_default_vault_with_source(
             Ok(("default".to_string(), false))
         }
     }
-}
-
-/// Steps 2-4 of the degenerate vault chain: context current vault, then the
-/// global `default_vault`. Shared by the discovering resolver above and the
-/// replay resolver below so the two can never drift apart; only step 1 (the
-/// `.xv.toml` env-profile vault) differs between them, because discovery
-/// walks up from a cwd while replay is handed the recorded profile.
-fn degenerate_default_vault_after_project(
-    config: &Config,
-    context_manager: &crate::config::ContextManager,
-) -> Result<(String, bool)> {
-    // 2. Context current vault.
-    if let Some(v) = context_manager.current_vault() {
-        return Ok((v.to_string(), true));
-    }
-
-    // 3. Config default vault.
-    if !config.default_vault.is_empty() {
-        return Ok((config.default_vault.clone(), false));
-    }
-
-    Err(CrosstacheError::config(
-        "No vault specified. Use --vault, set context with 'xv context use', or configure default_vault",
-    ))
-}
-
-/// Workspace resolution for a **replay**: the scheduled-rotation runner
-/// recomputing the target a manifest recorded.
-///
-/// Identical layering to [`resolve_workspace_snapshot`] — project `[env.*]`
-/// overlay, then the context workspace, then the degenerate workspace-of-one
-/// — with one difference that is the whole point of the function: the project
-/// layer is *supplied* rather than discovered. Discovery would walk up from a
-/// working directory and re-run [`crate::config::project::resolve_env`],
-/// which consults `XV_ENV` **before** anything the caller passes; a scheduled
-/// run must not let an ambient variable pick the profile that selects its
-/// vaults (design invariant 3). The caller loads the recorded `.xv.toml` at
-/// the recorded path with the recorded environment name
-/// ([`crate::config::project::load_project_at`]) and hands the selected
-/// profile in here.
-///
-/// `profile` is `None` when the manifest recorded no project file, or when
-/// the recorded file selected no environment.
-pub(crate) async fn resolve_workspace_snapshot_replay(
-    config: &Config,
-    context_manager: &crate::config::ContextManager,
-    profile: Option<&crate::config::project::EnvProfile>,
-) -> Result<ResolvedWorkspaceSnapshot> {
-    let active_backend = config.effective_backend_name().to_string();
-    let backend_names = known_backend_names(config);
-    let backend_name_refs: Vec<&str> = backend_names.iter().map(|s| s.as_str()).collect();
-
-    // 1. `.xv.toml` project overlay — replaces context entirely.
-    if let Some(profile) = profile {
-        if !profile.vaults.is_empty() {
-            let ws = build_workspace(
-                &profile.vaults,
-                &active_backend,
-                WorkspaceSource::ProjectToml,
-                &backend_name_refs,
-            )?;
-            return Ok(ResolvedWorkspaceSnapshot {
-                workspace: ws,
-                context_contributed: false,
-            });
-        }
-    }
-
-    // 2. Context workspace.
-    if let Some(ws_state) = &context_manager.workspace {
-        if !ws_state.entries.is_empty() {
-            let ws = build_workspace(
-                &ws_state.entries,
-                &active_backend,
-                WorkspaceSource::Context,
-                &backend_name_refs,
-            )?;
-            return Ok(ResolvedWorkspaceSnapshot {
-                workspace: ws,
-                context_contributed: true,
-            });
-        }
-    }
-
-    // 3. Degenerate workspace-of-one.
-    let resolved = match profile.and_then(|p| p.vault.as_deref()) {
-        Some(vault) => Ok((vault.to_string(), false)),
-        None => degenerate_default_vault_after_project(config, context_manager),
-    };
-    let (vault, from_context) = match resolved {
-        Ok(resolved) => resolved,
-        Err(e) if active_kind_is_azure(config) => return Err(e),
-        Err(_) => match config.local.as_ref().and_then(|l| l.default_vault.clone()) {
-            Some(v) => (v, false),
-            None => ("default".to_string(), false),
-        },
-    };
-    let alias = degenerate_alias(&vault, &backend_name_refs);
-    let degenerate_entry = WorkspaceEntryConfig {
-        vault,
-        backend: Some(active_backend.clone()),
-        alias: Some(alias),
-        default: true,
-    };
-    let ws = build_workspace(
-        std::slice::from_ref(&degenerate_entry),
-        &active_backend,
-        WorkspaceSource::Degenerate,
-        &backend_name_refs,
-    )?;
-    Ok(ResolvedWorkspaceSnapshot {
-        workspace: ws,
-        context_contributed: from_context,
-    })
 }
 
 #[cfg(test)]

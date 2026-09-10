@@ -155,6 +155,15 @@ impl Fixture {
         self
     }
 
+    /// Move the recorded working directory into a fresh subdirectory, leaving
+    /// the recorded project file where it is — the ancestor-project shape.
+    fn in_subdirectory(mut self, name: &str) -> Self {
+        let child = self.root.join(name);
+        std::fs::create_dir_all(&child).unwrap();
+        self.manifest.execution.working_directory = child.to_string_lossy().into_owned();
+        self
+    }
+
     async fn validate(&self) -> DriftReport {
         validate_recorded_target(&self.manifest, &Self::binary(), env!("CARGO_PKG_VERSION")).await
     }
@@ -324,6 +333,26 @@ async fn a_project_file_appearing_after_an_absent_install_refuses() {
 
     let report = fixture.validate().await;
     assert_eq!(report.fields(), vec!["project_path"]);
+}
+
+/// Project discovery always walks up, whatever `XV_NO_PARENT_CONFIG` says.
+///
+/// The variable is an ambient discovery switch the scheduler's environment
+/// never carries. If the replay honored it, a schedule installed under it
+/// would refuse every night; if the replay refused to walk up, an ancestor
+/// project file recorded at install time would read as `project_path` drift.
+/// Installation refuses the one case where the two can disagree
+/// (`target::suppressed_parent_project`), so here the recorded ancestor file
+/// simply has to still resolve.
+#[tokio::test]
+async fn an_ancestor_project_file_is_still_discovered_from_a_subdirectory() {
+    let fixture = Fixture::new()
+        .await
+        .with_project(PROJECT_WITH_ENV, Some("production"))
+        .in_subdirectory("service");
+
+    let report = fixture.validate().await;
+    assert_eq!(report.verdict, DriftVerdict::Valid, "{:?}", report.reasons);
 }
 
 // ---------------------------------------------------------------------------
