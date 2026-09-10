@@ -207,11 +207,29 @@ pub fn parse_str(s: &str) -> Result<ProjectConfig> {
 }
 
 /// Parse a `.xv.toml` file from disk asynchronously.
+///
+/// The crate's own traversal goes through [`parse_file_with_bytes`], which
+/// additionally hands back the exact bytes parsed; this stays as the module's
+/// single-file parse API.
+#[allow(dead_code)]
 pub async fn parse_file(path: &Path) -> Result<ProjectConfig> {
-    let content = tokio::fs::read_to_string(path)
+    Ok(parse_file_with_bytes(path).await?.1)
+}
+
+/// [`parse_file`], additionally returning the exact bytes that were parsed.
+///
+/// Callers that must digest the file (the schedule target manifest) hash
+/// *these* bytes rather than re-reading it, so a concurrent edit cannot make
+/// the recorded digest describe a different file than the one that produced
+/// the recorded target.
+async fn parse_file_with_bytes(path: &Path) -> Result<(Vec<u8>, ProjectConfig)> {
+    let bytes = tokio::fs::read(path)
         .await
         .map_err(|e| CrosstacheError::config(format!("failed to read {}: {e}", path.display())))?;
-    parse_str(&content)
+    let content = std::str::from_utf8(&bytes)
+        .map_err(|e| CrosstacheError::config(format!("failed to read {}: {e}", path.display())))?;
+    let cfg = parse_str(content)?;
+    Ok((bytes, cfg))
 }
 
 use std::path::PathBuf;
@@ -229,6 +247,18 @@ use std::path::PathBuf;
 /// root (or a boundary). Returns `Err` only if a found `.xv.toml`
 /// fails to parse.
 pub async fn find_project_config(start: &Path) -> Result<Option<(PathBuf, ProjectConfig)>> {
+    Ok(find_project_config_with_bytes(start)
+        .await?
+        .map(|(path, _bytes, cfg)| (path, cfg)))
+}
+
+/// [`find_project_config`], additionally returning the exact bytes of the
+/// `.xv.toml` that was parsed. Same traversal, boundary and
+/// `XV_NO_PARENT_CONFIG` rules — this is the single implementation both
+/// forms use.
+async fn find_project_config_with_bytes(
+    start: &Path,
+) -> Result<Option<(PathBuf, Vec<u8>, ProjectConfig)>> {
     let no_walk = std::env::var("XV_NO_PARENT_CONFIG")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
@@ -240,8 +270,8 @@ pub async fn find_project_config(start: &Path) -> Result<Option<(PathBuf, Projec
         // block *ancestor* discovery).
         let candidate = dir.join(".xv.toml");
         if tokio::fs::metadata(&candidate).await.is_ok() {
-            let cfg = parse_file(&candidate).await?;
-            return Ok(Some((candidate, cfg)));
+            let (bytes, cfg) = parse_file_with_bytes(&candidate).await?;
+            return Ok(Some((candidate, bytes, cfg)));
         }
 
         if no_walk {
@@ -403,6 +433,109 @@ pub(crate) fn resolve_env_with_source<'a>(
             cfg.envs.keys().cloned().collect(),
         ))
     }
+}
+
+/// A `.xv.toml` resolution recorded exactly enough to be replayed later.
+///
+/// Produced by [`resolve_project_at`] at schedule-install time and by
+/// [`load_project_at`] at run time; the run-time form must reproduce the
+/// install-time one for a target to be considered undrifted.
+// Used by the scheduled-rotation target resolver (`schedule::target`),
+// which lands in the next task of this spec.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedProject {
+    /// Canonical path of the `.xv.toml` that was parsed.
+    pub(crate) path: PathBuf,
+    /// `sha256:<hex>` over the exact bytes that were parsed.
+    pub(crate) bytes_digest: String,
+    /// The selected environment name, or `None` when the file contributes no
+    /// active environment.
+    pub(crate) environment: Option<String>,
+    /// The parsed file.
+    pub(crate) config: ProjectConfig,
+}
+
+impl ResolvedProject {
+    /// The selected `[env.*]` profile, if an environment was selected.
+    #[allow(dead_code)]
+    pub(crate) fn profile(&self) -> Option<&EnvProfile> {
+        self.environment
+            .as_deref()
+            .and_then(|name| self.config.envs.get(name))
+    }
+}
+
+/// Install-time project resolution from an explicit starting directory.
+///
+/// Reuses the existing walk-up traversal ([`find_project_config`], including
+/// `.xv.boundary` and `XV_NO_PARENT_CONFIG`) and the existing active-env
+/// selection ([`resolve_env`], which consults `XV_ENV` then `cli_env` then
+/// `default_env`). Installation resolves the ambient environment *now*, on
+/// purpose: the resolved name is what gets recorded and replayed.
+///
+/// Returns `Ok(None)` when no `.xv.toml` governs `start_dir`.
+#[allow(dead_code)]
+pub(crate) async fn resolve_project_at(
+    start_dir: &Path,
+    cli_env: Option<&str>,
+) -> Result<Option<ResolvedProject>> {
+    let Some((path, bytes, config)) = find_project_config_with_bytes(start_dir).await? else {
+        return Ok(None);
+    };
+    let environment = resolve_env(&config, cli_env)?.map(|(name, _profile)| name.to_string());
+    Ok(Some(ResolvedProject {
+        path: canonicalize_project_path(&path)?,
+        bytes_digest: crate::config::content_digest(&bytes),
+        environment,
+        config,
+    }))
+}
+
+/// Run-time project replay from an explicit path and an explicit environment
+/// name.
+///
+/// Unlike [`resolve_project_at`] this performs no traversal and consults
+/// **no** ambient selection source: not `XV_ENV`, not `default_env`. The
+/// caller replays the environment recorded at install time, so `None` means
+/// "no environment was recorded" and yields no profile. A missing file, or a
+/// recorded environment that the file no longer defines, is an error.
+#[allow(dead_code)]
+pub(crate) async fn load_project_at(
+    path: &Path,
+    environment: Option<&str>,
+) -> Result<ResolvedProject> {
+    let (bytes, config) = parse_file_with_bytes(path).await?;
+
+    let environment = match environment {
+        None => None,
+        Some(name) => {
+            if config.envs.contains_key(name) {
+                Some(name.to_string())
+            } else if config.envs.is_empty() {
+                return Err(CrosstacheError::env_not_defined_no_envs(name));
+            } else {
+                return Err(CrosstacheError::env_not_defined(
+                    name,
+                    config.envs.keys().cloned().collect(),
+                ));
+            }
+        }
+    };
+
+    Ok(ResolvedProject {
+        path: canonicalize_project_path(path)?,
+        bytes_digest: crate::config::content_digest(&bytes),
+        environment,
+        config,
+    })
+}
+
+#[allow(dead_code)]
+fn canonicalize_project_path(path: &Path) -> Result<PathBuf> {
+    std::fs::canonicalize(path).map_err(|e| {
+        CrosstacheError::config(format!("failed to canonicalize {}: {e}", path.display()))
+    })
 }
 
 /// One-shot guard — flips true on the first emit. We expose a
@@ -1084,5 +1217,137 @@ resource_group = "rg"
         assert_eq!(scan.exclude, vec!["dist/**", "*.lock"]);
         assert_eq!(scan.min_value_length, Some(12));
         assert_eq!(scan.patterns, vec!["aws-access-key-id", "github-token"]);
+    }
+
+    // ------------------------------------------------------------------
+    // Exact-input project resolution (scheduled target manifest, P1 task 3)
+    // ------------------------------------------------------------------
+
+    const PROJECT_FIXTURE: &str = r#"
+default_env = "prod"
+
+[env.prod]
+vault = "prod-vault"
+
+[env.staging]
+vault = "staging-vault"
+"#;
+
+    /// Install-time resolution reuses the existing walk-up traversal and
+    /// `resolve_env` selection, and reports the canonical file it parsed
+    /// together with the digest of those exact bytes.
+    #[tokio::test]
+    async fn resolve_project_at_reports_path_digest_and_environment() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let nested = root.join("a").join("b");
+        std::fs::create_dir_all(&nested).unwrap();
+        let project_path = root.join(".xv.toml");
+        std::fs::write(&project_path, PROJECT_FIXTURE).unwrap();
+
+        let resolved = resolve_project_at(&nested, None)
+            .await
+            .unwrap()
+            .expect("walk-up must find the ancestor .xv.toml");
+
+        assert_eq!(resolved.path, std::fs::canonicalize(&project_path).unwrap());
+        assert_eq!(
+            resolved.bytes_digest,
+            crate::config::content_digest(PROJECT_FIXTURE.as_bytes())
+        );
+        assert_eq!(resolved.environment.as_deref(), Some("prod"));
+        assert_eq!(
+            resolved.profile().and_then(|p| p.vault.as_deref()),
+            Some("prod-vault")
+        );
+    }
+
+    /// An explicit CLI `--env` flag selects the profile, exactly as
+    /// `resolve_env` does for every other caller.
+    #[tokio::test]
+    async fn resolve_project_at_honors_the_cli_env_flag() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join(".xv.toml"), PROJECT_FIXTURE).unwrap();
+
+        let resolved = resolve_project_at(temp.path(), Some("staging"))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(resolved.environment.as_deref(), Some("staging"));
+        assert_eq!(
+            resolved.profile().and_then(|p| p.vault.as_deref()),
+            Some("staging-vault")
+        );
+    }
+
+    /// A `.xv.boundary` still stops the walk-up: the traversal rules are
+    /// reused, not reimplemented.
+    #[tokio::test]
+    async fn resolve_project_at_stops_at_a_boundary_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        std::fs::write(root.join(".xv.toml"), PROJECT_FIXTURE).unwrap();
+        let child = root.join("child");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::write(child.join(".xv.boundary"), "").unwrap();
+
+        assert!(resolve_project_at(&child, None).await.unwrap().is_none());
+    }
+
+    /// Run-time replay reads exactly the recorded file and replays exactly
+    /// the recorded environment name. It reads no environment variable at
+    /// all (by construction), and it does not fall back to `default_env`:
+    /// `None` means "no environment was recorded", which is why this proves
+    /// the ambient selection chain is not consulted — `default_env = "prod"`
+    /// in the fixture would otherwise win.
+    #[tokio::test]
+    async fn load_project_at_replays_the_recorded_environment_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_path = temp.path().join(".xv.toml");
+        std::fs::write(&project_path, PROJECT_FIXTURE).unwrap();
+
+        let replayed = load_project_at(&project_path, Some("staging"))
+            .await
+            .unwrap();
+        assert_eq!(replayed.path, std::fs::canonicalize(&project_path).unwrap());
+        assert_eq!(
+            replayed.bytes_digest,
+            crate::config::content_digest(PROJECT_FIXTURE.as_bytes())
+        );
+        assert_eq!(replayed.environment.as_deref(), Some("staging"));
+        assert_eq!(
+            replayed.profile().and_then(|p| p.vault.as_deref()),
+            Some("staging-vault")
+        );
+
+        let none_recorded = load_project_at(&project_path, None).await.unwrap();
+        assert_eq!(none_recorded.environment, None);
+        assert!(none_recorded.profile().is_none());
+    }
+
+    /// A recorded environment that no longer exists fails closed with the
+    /// standard "not defined" error, listing the available names.
+    #[tokio::test]
+    async fn load_project_at_rejects_an_unknown_environment() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_path = temp.path().join(".xv.toml");
+        std::fs::write(&project_path, PROJECT_FIXTURE).unwrap();
+
+        let err = load_project_at(&project_path, Some("gone"))
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("gone"), "{msg}");
+        assert!(msg.contains("staging"), "{msg}");
+    }
+
+    /// A recorded project file that has gone missing is a hard error.
+    #[tokio::test]
+    async fn load_project_at_missing_file_is_an_error() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(load_project_at(&temp.path().join(".xv.toml"), None)
+            .await
+            .is_err());
     }
 }

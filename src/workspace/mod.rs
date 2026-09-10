@@ -384,8 +384,57 @@ pub(crate) async fn resolve_workspace_from(
     cwd: Option<&std::path::Path>,
     context_manager: &crate::config::ContextManager,
 ) -> Result<Option<Workspace>> {
+    Ok(Some(
+        resolve_workspace_snapshot_from(config, cwd, context_manager)
+            .await?
+            .workspace,
+    ))
+}
+
+/// A resolved workspace plus whether the context file participated in
+/// producing it.
+///
+/// The scheduled-target manifest pins the exact inputs that produced a
+/// target, and records the context path/digest only when context actually
+/// contributed — either as the configured workspace
+/// ([`WorkspaceSource::Context`]) or as the source of the degenerate
+/// workspace-of-one's vault.
+pub(crate) struct ResolvedWorkspaceSnapshot {
+    pub(crate) workspace: Workspace,
+    // Read by the scheduled-rotation target resolver (`schedule::target`),
+    // which lands in the next task of this spec.
+    #[allow(dead_code)]
+    pub(crate) context_contributed: bool,
+}
+
+/// Resolve the effective workspace from an **explicit** working directory and
+/// an already-loaded context snapshot.
+///
+/// This is [`resolve_workspace`] without the ambient reads: the caller
+/// supplies the cwd and the [`crate::config::ContextManager`], and neither is
+/// re-read part-way through resolution, so the recorded inputs and the
+/// resolved workspace cannot disagree. Never returns `None` for the same
+/// reason [`resolve_workspace`] does not.
+#[allow(dead_code)]
+pub(crate) async fn resolve_workspace_snapshot(
+    config: &Config,
+    cwd: &std::path::Path,
+    context_manager: &crate::config::ContextManager,
+) -> Result<ResolvedWorkspaceSnapshot> {
+    resolve_workspace_snapshot_from(config, Some(cwd), context_manager).await
+}
+
+async fn resolve_workspace_snapshot_from(
+    config: &Config,
+    cwd: Option<&std::path::Path>,
+    context_manager: &crate::config::ContextManager,
+) -> Result<ResolvedWorkspaceSnapshot> {
     if let Some(ws) = resolve_configured_workspace_from(config, cwd, context_manager).await? {
-        return Ok(Some(ws));
+        let context_contributed = ws.source == WorkspaceSource::Context;
+        return Ok(ResolvedWorkspaceSnapshot {
+            workspace: ws,
+            context_contributed,
+        });
     }
 
     // No configured workspace: synthesize the degenerate workspace-of-one over
@@ -398,7 +447,8 @@ pub(crate) async fn resolve_workspace_from(
     let backend_names = known_backend_names(config);
     let backend_name_refs: Vec<&str> = backend_names.iter().map(|s| s.as_str()).collect();
 
-    let vault = degenerate_default_vault(config, cwd, context_manager).await?;
+    let (vault, from_context) =
+        degenerate_default_vault_with_source(config, cwd, context_manager).await?;
     let alias = degenerate_alias(&vault, &backend_name_refs);
     let degenerate_entry = WorkspaceEntryConfig {
         vault,
@@ -412,7 +462,10 @@ pub(crate) async fn resolve_workspace_from(
         WorkspaceSource::Degenerate,
         &backend_name_refs,
     )?;
-    Ok(Some(ws))
+    Ok(ResolvedWorkspaceSnapshot {
+        workspace: ws,
+        context_contributed: from_context,
+    })
 }
 
 /// Pick the degenerate workspace-of-one's single alias.
@@ -464,12 +517,15 @@ fn active_kind_is_azure(config: &Config) -> bool {
 /// difference from `resolve_vault_name` is that the cross-boundary `.xv.toml`
 /// notice (a stderr line) is not re-emitted here, since the workspace-overlay
 /// pass above already inspected the same project config.
-async fn degenerate_default_vault(
+/// Returns the resolved vault together with `true` when it came from the
+/// context file's current vault (step 2 of the chain below) — the schedule
+/// target manifest records the context path/digest only in that case.
+async fn degenerate_default_vault_with_source(
     config: &Config,
     cwd: Option<&std::path::Path>,
     context_manager: &crate::config::ContextManager,
-) -> Result<String> {
-    let resolved: Result<String> = async {
+) -> Result<(String, bool)> {
+    let resolved: Result<(String, bool)> = async {
         // 1. Project `.xv.toml` env-profile vault (walk up from cwd).
         if let Some(cwd) = cwd {
             if let Ok(Some((_path, proj_cfg))) =
@@ -479,7 +535,7 @@ async fn degenerate_default_vault(
                     crate::config::project::resolve_env(&proj_cfg, config.env_flag.as_deref())?
                 {
                     if let Some(v) = profile.vault.as_deref() {
-                        return Ok(v.to_string());
+                        return Ok((v.to_string(), false));
                     }
                 }
             }
@@ -487,12 +543,12 @@ async fn degenerate_default_vault(
 
         // 2. Context current vault.
         if let Some(v) = context_manager.current_vault() {
-            return Ok(v.to_string());
+            return Ok((v.to_string(), true));
         }
 
         // 3. Config default vault.
         if !config.default_vault.is_empty() {
-            return Ok(config.default_vault.clone());
+            return Ok((config.default_vault.clone(), false));
         }
 
         Err(CrosstacheError::config(
@@ -502,7 +558,7 @@ async fn degenerate_default_vault(
     .await;
 
     match resolved {
-        Ok(name) => Ok(name),
+        Ok(resolved) => Ok(resolved),
         // Azure keeps the legacy hard-error: no implicit fallback.
         Err(e) if active_kind_is_azure(config) => Err(e),
         // Local / future offline backends fall back to their configured
@@ -510,10 +566,10 @@ async fn degenerate_default_vault(
         Err(_) => {
             if let Some(ref local) = config.local {
                 if let Some(ref v) = local.default_vault {
-                    return Ok(v.clone());
+                    return Ok((v.clone(), false));
                 }
             }
-            Ok("default".to_string())
+            Ok(("default".to_string(), false))
         }
     }
 }
@@ -907,5 +963,124 @@ vaults = [
             .expect("context workspace must resolve");
         assert_eq!(resolved.source, WorkspaceSource::Context);
         assert_eq!(resolved.entries[0].alias, "ctx");
+    }
+
+    // ------------------------------------------------------------------
+    // Explicit-input workspace snapshot (scheduled target manifest, task 3)
+    // ------------------------------------------------------------------
+
+    fn context_with_workspace() -> crate::config::ContextManager {
+        crate::config::ContextManager {
+            workspace: Some(WorkspaceState {
+                entries: vec![WorkspaceEntryConfig {
+                    vault: "context-vault".to_string(),
+                    backend: Some("local".to_string()),
+                    alias: Some("ctx".to_string()),
+                    default: true,
+                }],
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// A configured context workspace: the snapshot preserves the workspace
+    /// and reports that the context file contributed it.
+    #[tokio::test]
+    async fn snapshot_reports_context_contribution_for_a_context_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = Config::default();
+
+        let snapshot = resolve_workspace_snapshot(&config, temp.path(), &context_with_workspace())
+            .await
+            .unwrap();
+
+        assert_eq!(snapshot.workspace.source, WorkspaceSource::Context);
+        assert_eq!(snapshot.workspace.entries[0].alias, "ctx");
+        assert!(snapshot.context_contributed);
+    }
+
+    /// A `.xv.toml` overlay replaces context entirely, so context did not
+    /// contribute even though a context workspace exists.
+    #[tokio::test]
+    async fn snapshot_reports_no_context_contribution_for_a_project_overlay() {
+        let temp = tempfile::tempdir().unwrap();
+        let toml = r#"
+default_env = "dev"
+
+[env.dev]
+vaults = [
+  { vault = "project-vault", backend = "azure", alias = "proj", default = true },
+]
+"#;
+        std::fs::write(temp.path().join(".xv.toml"), toml).unwrap();
+        let config = Config {
+            backend: Some("azure".to_string()),
+            ..Default::default()
+        };
+
+        let snapshot = resolve_workspace_snapshot(&config, temp.path(), &context_with_workspace())
+            .await
+            .unwrap();
+
+        assert_eq!(snapshot.workspace.source, WorkspaceSource::ProjectToml);
+        assert!(!snapshot.context_contributed);
+    }
+
+    /// A degenerate workspace whose vault came from the context file's
+    /// current vault must report context participation, so the manifest can
+    /// pin the context path and digest.
+    #[tokio::test]
+    async fn snapshot_reports_context_contribution_for_a_degenerate_context_vault() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = Config {
+            backend: Some("local".to_string()),
+            ..Default::default()
+        };
+        let context_manager = crate::config::ContextManager {
+            current: Some(crate::config::VaultContext::new(
+                "ctx-current".to_string(),
+                None,
+                None,
+            )),
+            ..Default::default()
+        };
+
+        let snapshot = resolve_workspace_snapshot(&config, temp.path(), &context_manager)
+            .await
+            .unwrap();
+
+        assert_eq!(snapshot.workspace.source, WorkspaceSource::Degenerate);
+        assert_eq!(
+            snapshot.workspace.default_entry().unwrap().vault,
+            "ctx-current"
+        );
+        assert!(snapshot.context_contributed);
+    }
+
+    /// A degenerate workspace whose vault came from global config, not the
+    /// context file, must NOT report context participation.
+    #[tokio::test]
+    async fn snapshot_reports_no_context_contribution_for_a_config_default_vault() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = Config {
+            backend: Some("local".to_string()),
+            default_vault: "config-vault".to_string(),
+            ..Default::default()
+        };
+
+        let snapshot = resolve_workspace_snapshot(
+            &config,
+            temp.path(),
+            &crate::config::ContextManager::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(snapshot.workspace.source, WorkspaceSource::Degenerate);
+        assert_eq!(
+            snapshot.workspace.default_entry().unwrap().vault,
+            "config-vault"
+        );
+        assert!(!snapshot.context_contributed);
     }
 }
