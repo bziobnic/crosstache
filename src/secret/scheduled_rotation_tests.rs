@@ -172,7 +172,7 @@ async fn run(
     config: &Config,
     backend: &Arc<dyn Backend>,
     observer: &mut Recorder,
-) -> Result<DueRotationSummary> {
+) -> DueRotationResult {
     run_due_rotation_with_backend(
         config,
         backend.clone(),
@@ -280,7 +280,11 @@ async fn an_error_from_the_plan_propagates() {
     .await
     .unwrap_err();
 
-    assert!(matches!(err, CrosstacheError::InvalidArgument(_)));
+    // Typed as a refusal for the scheduler, and still the original error for
+    // the CLI, which is what keeps `xv rotate --due`'s output byte-identical.
+    assert_eq!(err.kind, DueRotationErrorKind::Refused);
+    let source: CrosstacheError = err.into();
+    assert!(matches!(source, CrosstacheError::InvalidArgument(_)));
     assert_eq!(value_of(&backend, "due-a").await, before);
 }
 
@@ -360,9 +364,68 @@ async fn a_total_discovery_failure_is_an_error_not_a_summary() {
 
     // No partial summary: the caller cannot tell "nothing due" from
     // "never looked", so a scheduled run must not record a green outcome.
+    assert_eq!(err.code(), "backend-unavailable");
+    // The real error is still there for a terminal caller.
+    let source: CrosstacheError = err.into();
     assert!(
-        err.to_string().contains("no-such-backend"),
-        "unexpected error: {err}"
+        source.to_string().contains("no-such-backend"),
+        "unexpected error: {source}"
+    );
+}
+
+/// The whole-run error is the value a scheduled runner is most likely to
+/// serialize verbatim, so nothing it renders on its own may name the vault or
+/// quote the backend's error body.
+#[tokio::test]
+async fn the_whole_run_error_carries_no_vault_name_or_error_body() {
+    let (_dir, _store, backend) = fixture();
+    seed(&backend, "due-a", due_policy()).await;
+    let registry = BackendRegistry::new(backend);
+
+    let err = run_due_rotation(
+        &test_config(),
+        &registry,
+        "no-such-backend",
+        VAULT,
+        &DueRotationOptions::default(),
+        &mut SilentObserver,
+    )
+    .await
+    .unwrap_err();
+
+    // Constant, closed-set renderings.
+    assert_eq!(err.kind, DueRotationErrorKind::BackendUnavailable);
+    assert_eq!(err.code(), "backend-unavailable");
+    assert_eq!(
+        err.message(),
+        "the backend could not be resolved or reached"
+    );
+
+    // The source names the backend; neither `Debug` nor `Display` may repeat it.
+    let body = err.source.to_string();
+    assert!(
+        body.contains("no-such-backend"),
+        "unexpected source: {body}"
+    );
+    for rendered in [format!("{err:?}"), format!("{err}")] {
+        for leak in ["no-such-backend", VAULT, body.as_str()] {
+            assert!(
+                !rendered.contains(leak),
+                "whole-run error leaked '{leak}': {rendered}"
+            );
+        }
+    }
+
+    // And the same holds for a run refused by the observer.
+    let refused = DueRotationError::new(
+        DueRotationErrorKind::Refused,
+        CrosstacheError::InvalidArgument(format!("vault '{VAULT}' has an unparseable policy")),
+    );
+    assert_eq!(refused.code(), "run-refused");
+    let rendered = format!("{refused:?} {refused}");
+    assert!(
+        !rendered.contains(VAULT),
+        "refusal leaked the vault: {rendered}"
     );
 }
 

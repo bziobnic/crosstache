@@ -28,7 +28,9 @@
 //! ## Failure model
 //!
 //! - A **total discovery failure** (unknown backend name, unreadable store,
-//!   list refused) returns `Err`. There is no partial answer to report: the
+//!   list refused) returns a [`DueRotationError`] — typed and name-free for the
+//!   same reason the summary is, since it is what a scheduled run records when
+//!   there is no summary at all. There is no partial answer to report: the
 //!   caller cannot tell "no secrets" apart from "could not look", and a
 //!   scheduled run must not record a green outcome for a vault it never read.
 //! - A **per-secret failure** (including an unparseable policy, when the
@@ -161,6 +163,154 @@ impl DueRotationFailure {
         self.category.message()
     }
 }
+
+/// Closed set of reasons a whole run never produced a summary.
+///
+/// The per-secret analogue is [`DueRotationFailureCategory`]; this is the
+/// analogue for the failures that end the run before (or instead of) any
+/// rotation. Same rule: derived from the [`CrosstacheError`] variant, never
+/// from message text, and every rendering is a constant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DueRotationErrorKind {
+    /// The backend could not be materialized (not attached, not configured)
+    /// or could not be reached at all.
+    BackendUnavailable,
+    /// The target vault does not exist.
+    VaultNotFound,
+    /// The backend refused the listing on authorization grounds.
+    PermissionDenied,
+    /// Anything else that stopped discovery.
+    Discovery,
+    /// The observer refused the run at the plan stage — nothing was written.
+    Refused,
+}
+
+impl DueRotationErrorKind {
+    /// Stable, kebab-case code. Part of what the scheduler persists.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::BackendUnavailable => "backend-unavailable",
+            Self::VaultNotFound => "vault-not-found",
+            Self::PermissionDenied => "permission-denied",
+            Self::Discovery => "discovery-failed",
+            Self::Refused => "run-refused",
+        }
+    }
+
+    /// A fixed, sanitized description. Constant per kind by construction, so it
+    /// can never carry a vault name or a backend error body.
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::BackendUnavailable => "the backend could not be resolved or reached",
+            Self::VaultNotFound => "the target vault does not exist",
+            Self::PermissionDenied => "the backend denied the listing",
+            Self::Discovery => "the vault could not be listed",
+            Self::Refused => "the run was refused before anything was rotated",
+        }
+    }
+
+    /// Classify a discovery error by its variant.
+    fn classify(error: &CrosstacheError) -> Self {
+        match error {
+            CrosstacheError::VaultNotFound { .. } => Self::VaultNotFound,
+            CrosstacheError::PermissionDenied(_) | CrosstacheError::AuthenticationError(_) => {
+                Self::PermissionDenied
+            }
+            CrosstacheError::BackendUnavailable { .. }
+            | CrosstacheError::AzureApiError(_)
+            | CrosstacheError::NetworkError(_)
+            | CrosstacheError::DnsResolutionError { .. }
+            | CrosstacheError::ConnectionTimeout(_)
+            | CrosstacheError::ConnectionRefused(_)
+            | CrosstacheError::SslError(_)
+            | CrosstacheError::RateLimited(_) => Self::BackendUnavailable,
+            _ => Self::Discovery,
+        }
+    }
+}
+
+/// A whole run that never happened.
+///
+/// This is the one value a scheduled runner is most likely to serialize
+/// verbatim, so it is name-free by construction: [`code`](Self::code) and
+/// [`message`](Self::message) are constants, and the `Debug` and `Display`
+/// impls are written by hand so the wrapped [`CrosstacheError`] — which may
+/// name the vault and quote a backend error body — cannot reach a state file
+/// through a stray `{:?}`.
+///
+/// The real error is still carried, for terminal callers: `?` in a function
+/// returning [`crate::error::Result`] unwraps it back to the original
+/// `CrosstacheError` through [`From`], which is how `xv rotate --due` keeps its
+/// pre-extraction output byte for byte.
+pub struct DueRotationError {
+    /// Why the run never happened.
+    pub kind: DueRotationErrorKind,
+    /// The underlying error. Private on purpose: reaching it is a deliberate
+    /// act (`into_source`, or `?` into a `CrosstacheError`), never something a
+    /// `{:?}` on this struct does by accident.
+    source: CrosstacheError,
+}
+
+impl DueRotationError {
+    fn new(kind: DueRotationErrorKind, source: CrosstacheError) -> Self {
+        Self { kind, source }
+    }
+
+    /// Wrap a discovery error, classifying it by variant.
+    fn discovery(source: CrosstacheError) -> Self {
+        Self::new(DueRotationErrorKind::classify(&source), source)
+    }
+
+    /// Stable code for this run's failure kind.
+    pub fn code(&self) -> &'static str {
+        self.kind.code()
+    }
+
+    /// Sanitized, constant message for this run's failure kind.
+    pub fn message(&self) -> &'static str {
+        self.kind.message()
+    }
+
+    /// The underlying error, for a caller that renders for a person.
+    // The scheduled runner uses `code`/`message`; the CLI adapter goes through
+    // `From`. This is the explicit escape hatch for anything else.
+    #[allow(dead_code)]
+    pub fn into_source(self) -> CrosstacheError {
+        self.source
+    }
+}
+
+// Hand-written: the derived impl would print `source`, which is exactly the
+// text that must not reach `last-run.json`.
+impl std::fmt::Debug for DueRotationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DueRotationError")
+            .field("kind", &self.kind)
+            .field("code", &self.code())
+            .field("message", &self.message())
+            .finish_non_exhaustive()
+    }
+}
+
+// Also constant. `std::error::Error::source` is deliberately NOT implemented:
+// a chain-printing formatter would otherwise reintroduce the error body.
+impl std::fmt::Display for DueRotationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message())
+    }
+}
+
+impl std::error::Error for DueRotationError {}
+
+impl From<DueRotationError> for CrosstacheError {
+    fn from(error: DueRotationError) -> Self {
+        error.source
+    }
+}
+
+/// Result of a due-rotation run: the summary, or a typed whole-run failure.
+pub type DueRotationResult = std::result::Result<DueRotationSummary, DueRotationError>;
 
 /// Aggregate result of a due-rotation run. Safe to serialize into scheduler
 /// state: counts and categories only.
@@ -297,10 +447,18 @@ pub async fn run_due_rotation(
     vault: &str,
     options: &DueRotationOptions,
     observer: &mut dyn DueRotationObserver,
-) -> Result<DueRotationSummary> {
+) -> DueRotationResult {
     let backend = registry
         .materialize(backend_name)
-        .map_err(CrosstacheError::from)?;
+        // Not `discovery`: a name that does not resolve to a backend is the
+        // backend being unavailable, whatever error variant the registry used
+        // to say so.
+        .map_err(|e| {
+            DueRotationError::new(
+                DueRotationErrorKind::BackendUnavailable,
+                CrosstacheError::from(e),
+            )
+        })?;
     run_due_rotation_with_backend(config, backend, backend_name, vault, options, observer).await
 }
 
@@ -318,8 +476,10 @@ pub(crate) async fn run_due_rotation_with_backend(
     vault: &str,
     options: &DueRotationOptions,
     observer: &mut dyn DueRotationObserver,
-) -> Result<DueRotationSummary> {
-    let statuses = evaluate_vault_policies(backend.as_ref(), vault).await?;
+) -> DueRotationResult {
+    let statuses = evaluate_vault_policies(backend.as_ref(), vault)
+        .await
+        .map_err(DueRotationError::discovery)?;
 
     let invalid: Vec<String> = statuses
         .iter()
@@ -347,7 +507,10 @@ pub(crate) async fn run_due_rotation_with_backend(
         due,
     };
 
-    if observer.on_plan(&plan)? == PlanDecision::Abort {
+    let decision = observer
+        .on_plan(&plan)
+        .map_err(|e| DueRotationError::new(DueRotationErrorKind::Refused, e))?;
+    if decision == PlanDecision::Abort {
         return Ok(summary);
     }
 

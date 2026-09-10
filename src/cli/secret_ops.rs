@@ -5840,8 +5840,12 @@ pub(crate) async fn execute_secret_rotate(
     use crate::secret::manager::SecretRequest;
     use crate::utils::interactive::InteractivePrompt;
 
-    // The vault was already resolved through the workspace seam by
-    // `execute_secret_rotate_direct` (rotate's sole caller) and handed in.
+    // Two callers, and both resolve the vault before calling:
+    //   - `execute_secret_rotate_direct`, the single-secret CLI path, resolves
+    //     it through the workspace seam;
+    //   - `crate::secret::scheduled_rotation::run_due_rotation_with_backend`
+    //     rotates each due secret in the vault it already listed.
+    // Neither can pass `None`, which is what the `expect` below asserts.
     let vault_name =
         vault.expect("execute_secret_rotate is only called with an already-resolved vault");
 
