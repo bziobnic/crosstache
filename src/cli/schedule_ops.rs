@@ -794,6 +794,13 @@ mod tests {
 
         let error = resolve_log_path(junction.join("rotate.log").to_str().unwrap()).unwrap_err();
         let message = error.to_string();
-        assert!(message.contains("reparse point"), "{message}");
+        // Rust's std reports a junction as a symlink on some Windows versions
+        // and only as a bare reparse point on others; either wording proves the
+        // walk refused it.
+        assert!(
+            message.contains("reparse point") || message.contains("symlink"),
+            "{message}"
+        );
+        assert!(message.contains("linked"), "{message}");
     }
 }
