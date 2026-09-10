@@ -166,6 +166,13 @@ mod tests {
         }
     }
 
+    /// Unix-only, and deliberately so: this is a byte-for-byte golden of a
+    /// systemd user unit, whose fixture paths are Unix paths and whose
+    /// `# --- <path> ---` separators are rendered by `Path::join`, which uses
+    /// a backslash on Windows. Re-deriving the expectation from `join` would
+    /// make the test agree with whatever the renderer does; instead the
+    /// Windows side gets its own structural test below.
+    #[cfg(unix)]
     #[test]
     fn systemd_preview_matches_the_golden() {
         let manifest = manifest();
@@ -310,6 +317,64 @@ WantedBy=timers.target
             rendered.find("xv-rotate.service ---") < rendered.find("xv-rotate.timer ---"),
             "{rendered}"
         );
+    }
+
+    /// The Windows counterpart to the golden: the header block and the
+    /// manifest preview are asserted with *Windows* fixture paths, so a
+    /// renderer that mangles a drive-letter path (or drops a header line)
+    /// fails on the platform where the golden cannot run. Structural
+    /// assertions only — no pinned unit body, since the `schtasks` path is
+    /// covered by `schtasks_preview_shows_the_creation_invocation`.
+    #[cfg(windows)]
+    #[test]
+    fn schtasks_preview_carries_windows_paths_through_the_header_and_manifest() {
+        let mut m = manifest();
+        m.execution.binary_path = r"C:\Program Files\xv\xv.exe".to_string();
+        m.execution.working_directory = r"C:\Users\alice\work\service".to_string();
+        m.execution.log_path = r"C:\Users\alice\AppData\Local\xv\rotate.log".to_string();
+        m.target.config_path = r"C:\Users\alice\AppData\Roaming\xv\xv.conf".to_string();
+        m.target.project_path = Some(r"C:\Users\alice\work\service\.xv.toml".to_string());
+
+        let mut s = schedule();
+        s.binary = PathBuf::from(r"C:\Program Files\xv\xv.exe");
+        s.log_path = PathBuf::from(&m.execution.log_path);
+        s.command = ScheduleCommand::ManifestRun {
+            manifest: PathBuf::from(
+                r"C:\Users\alice\AppData\Local\xv\schedules\rotation-default\manifest.json",
+            ),
+            working_directory: PathBuf::from(&m.execution.working_directory),
+        };
+
+        let out = render_install_preview(Platform::Schtasks, &s, &unit_paths(), &m);
+
+        for required in [
+            "# scheduler: Task Scheduler\n".to_string(),
+            "# schedule:  daily at 03:00\n".to_string(),
+            "# target:    payments -> aws-prod/payments-production\n".to_string(),
+            format!("# config:    {}\n", m.target.config_path),
+            format!(
+                "# project:   {} (environment production)\n",
+                m.target.project_path.as_deref().unwrap()
+            ),
+            format!("# cwd:       {}\n", m.execution.working_directory),
+            format!("# log:       {}\n", m.execution.log_path),
+            format!(
+                "\"binary_path\": \"{}\"",
+                m.execution.binary_path.escape_default()
+            ),
+        ] {
+            assert!(out.contains(&required), "missing {required:?}\n{out}");
+        }
+
+        // The manifest preview still masks the stamp and the run is still the
+        // pinned runner, not an ambient sweep.
+        assert!(
+            out.contains("\"installed_at\": \"<set-at-install>\""),
+            "{out}"
+        );
+        assert!(out.contains("schedule run --manifest"), "{out}");
+        assert!(!out.contains("rotate --due"), "{out}");
+        assert!(!out.contains("XDG_CONFIG_HOME"), "{out}");
     }
 
     #[test]

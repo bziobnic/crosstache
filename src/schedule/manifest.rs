@@ -544,6 +544,7 @@ pub fn remove_owned_manifest(paths: &ScheduleStatePaths) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schedule::fixture_abs;
 
     fn fixture_manifest() -> ScheduleManifestV1 {
         ScheduleManifestV1 {
@@ -556,15 +557,15 @@ mod tests {
                 minute: 0,
             },
             execution: ManifestExecution {
-                binary_path: "/opt/homebrew/bin/xv".to_string(),
+                binary_path: fixture_abs("/opt/homebrew/bin/xv"),
                 installed_version: "0.39.0".to_string(),
-                working_directory: "/Users/alice/work/service".to_string(),
-                log_path: "/Users/alice/.local/state/xv/rotate.log".to_string(),
+                working_directory: fixture_abs("/Users/alice/work/service"),
+                log_path: fixture_abs("/Users/alice/.local/state/xv/rotate.log"),
             },
             target: ManifestTarget {
-                config_path: "/Users/alice/.config/xv/xv.conf".to_string(),
+                config_path: fixture_abs("/Users/alice/.config/xv/xv.conf"),
                 config_digest: format!("sha256:{}", "9c".repeat(32)),
-                project_path: Some("/Users/alice/work/service/.xv.toml".to_string()),
+                project_path: Some(fixture_abs("/Users/alice/work/service/.xv.toml")),
                 project_digest: Some(format!("sha256:{}", "83".repeat(32))),
                 environment: Some("production".to_string()),
                 context_path: None,
@@ -817,7 +818,7 @@ mod tests {
     #[test]
     fn validate_v1_rejects_dot_dot_components() {
         let mut manifest = fixture_manifest();
-        manifest.target.config_path = "/Users/alice/../alice/xv.conf".to_string();
+        manifest.target.config_path = fixture_abs("/Users/alice/../alice/xv.conf");
         let error = validate_v1(&manifest).unwrap_err();
         assert!(error.to_string().contains("normalized"));
     }

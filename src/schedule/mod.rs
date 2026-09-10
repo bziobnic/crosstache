@@ -50,6 +50,34 @@ pub mod manifest;
 pub mod preview;
 pub mod target;
 
+/// Test-only fixture path shaping.
+///
+/// The manifest schema requires *host-absolute* paths, and a Unix-looking
+/// `/home/alice/...` is a **relative** path on Windows. Fixtures spelled that
+/// way made every test that set one field and asserted on it fail on the
+/// `execution.binary_path` check instead — testing the wrong thing on the one
+/// platform where the difference matters.
+///
+/// [`fixture_abs`] takes a Unix-shaped absolute fixture path and returns the
+/// host-absolute spelling of it: unchanged on Unix, rooted at `C:` with
+/// backslashes on Windows. Use it for every absolute path in a schedule test
+/// fixture.
+#[cfg(test)]
+pub(crate) fn fixture_abs(unix_path: &str) -> String {
+    debug_assert!(
+        unix_path.starts_with('/'),
+        "fixture_abs takes a Unix-absolute path: {unix_path}"
+    );
+    #[cfg(windows)]
+    {
+        format!("C:{}", unix_path.replace('/', "\\"))
+    }
+    #[cfg(not(windows))]
+    {
+        unix_path.to_string()
+    }
+}
+
 /// launchd job label and systemd/Task Scheduler unit name.
 const LAUNCHD_LABEL: &str = "com.crosstache.xv-rotate";
 const SYSTEMD_UNIT: &str = "xv-rotate";
