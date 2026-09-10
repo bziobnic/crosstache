@@ -59,7 +59,6 @@ pub struct SelectedBackendIdentity {
 
 #[derive(Serialize)]
 struct AzureIdentityFields<'a> {
-    kind: &'static str,
     registry_name: &'a str,
     tenant_id: Option<&'a str>,
     subscription_id: Option<&'a str>,
@@ -68,7 +67,6 @@ struct AzureIdentityFields<'a> {
 
 #[derive(Serialize)]
 struct AwsIdentityFields<'a> {
-    kind: &'static str,
     registry_name: &'a str,
     region: Option<&'a str>,
     profile: Option<&'a str>,
@@ -77,7 +75,6 @@ struct AwsIdentityFields<'a> {
 
 #[derive(Serialize)]
 struct LocalIdentityFields<'a> {
-    kind: &'static str,
     registry_name: &'a str,
     store_path: &'a str,
 }
@@ -102,7 +99,6 @@ fn aws_not_compiled_error(registry_name: &str) -> CrosstacheError {
 
 fn aws_identity(registry_name: &str, aws_cfg: &AwsConfig) -> Result<SelectedBackendIdentity> {
     let fields = AwsIdentityFields {
-        kind: "aws",
         registry_name,
         region: aws_cfg.region.as_deref(),
         profile: aws_cfg.profile.as_deref(),
@@ -119,7 +115,6 @@ fn azure_identity(registry_name: &str, config: &Config) -> Result<SelectedBacken
     let azure = config.azure_settings();
     let credential_priority = config.azure_credential_priority.to_string();
     let fields = AzureIdentityFields {
-        kind: "azure",
         registry_name,
         tenant_id: azure.tenant_id.as_deref(),
         subscription_id: azure.subscription_id.as_deref(),
@@ -191,7 +186,6 @@ fn local_identity(
     let store_path = identity_store_path(local_cfg)?;
     let store_path = store_path.to_string_lossy().into_owned();
     let fields = LocalIdentityFields {
-        kind: "local",
         registry_name,
         store_path: &store_path,
     };
@@ -319,7 +313,7 @@ mod tests {
         let identity = selected_backend_identity(&config, "azure").unwrap();
         assert_eq!(
             identity.digest,
-            "sha256:8e4299124a75dd77eb7abc7035506e06585777efdc5f384a2d6d46f300d6635c"
+            "sha256:49433c9d763a99b6c78191f780d42c9412f9d3bae54a4e768b539174fdc2f8f7"
         );
     }
 
@@ -439,7 +433,7 @@ mod tests {
         let identity = selected_backend_identity(&config, "local").unwrap();
         assert_eq!(
             identity.digest,
-            "sha256:db164ae7bb195db5495648df28aeefe6c25102d78f1d6cf75bfb8e6dc72944ec"
+            "sha256:42e179cdd7897f04bf449345624892db4cf4ffbe8f81a5a9c22527c98e187a81"
         );
     }
 
@@ -540,7 +534,7 @@ mod tests {
         let identity = selected_backend_identity(&config, "aws").unwrap();
         assert_eq!(
             identity.digest,
-            "sha256:73157a71995216cd9875738e2d51548b33942944a603c421e719dd7547e3718a"
+            "sha256:ff832498c059975dba4363d28c975c7823209ada9c3a4557ccb47b164d957be1"
         );
     }
 
@@ -799,7 +793,6 @@ mod tests {
         });
 
         let azure_fields = AzureIdentityFields {
-            kind: "azure",
             registry_name: "azure",
             tenant_id: Some("tenant-real"),
             subscription_id: Some("sub-real"),
@@ -810,7 +803,6 @@ mod tests {
 
         let local_identity = selected_backend_identity(&config, "local").unwrap();
         let local_fields = LocalIdentityFields {
-            kind: "local",
             registry_name: "local",
             store_path: "/tmp/xv-schedule-target-test/redaction-store",
         };
