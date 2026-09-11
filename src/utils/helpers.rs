@@ -2776,6 +2776,79 @@ mod windows_rename_tests {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Path normalization shared by every caller that *records* a path
+// ---------------------------------------------------------------------------
+
+/// Strip Windows' `\\?\` verbatim prefixes from a path.
+///
+/// `std::fs::canonicalize` returns verbatim paths on Windows (`\\?\C:\…`,
+/// `\\?\UNC\server\share\…`). Those are absolute and normalized, but they are
+/// not the form a user — or a previously recorded path — ever spells, so two
+/// canonicalizations of the same file must not be allowed to disagree just
+/// because one side kept the prefix. No-op on every other platform.
+///
+/// This lives here, rather than beside any one caller, because both
+/// `crate::config::project::canonicalize_project_path` (which produces the
+/// paths a schedule *compares against* at run time) and
+/// `crate::schedule::target::canonical_path_for_manifest` (which produces the
+/// paths a schedule *records* at install time) must agree exactly.
+#[cfg(windows)]
+pub(crate) fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy().into_owned();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = text.strip_prefix(r"\\?\") {
+        // Only a plain drive path survives without the prefix; anything else
+        // (a device path, say) keeps it rather than becoming a different path.
+        let bytes = rest.as_bytes();
+        if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+            return PathBuf::from(rest);
+        }
+    }
+    path
+}
+
+#[cfg(not(windows))]
+pub(crate) fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    path
+}
+
+/// `std::fs::canonicalize` with [`strip_verbatim_prefix`] applied, so the
+/// result is the one spelling every recorded path uses. The path must exist.
+pub(crate) fn canonicalize_without_verbatim_prefix(path: &Path) -> std::io::Result<PathBuf> {
+    std::fs::canonicalize(path).map(strip_verbatim_prefix)
+}
+
+/// Lexically normalize `path`, making it absolute against `base` when it is
+/// relative: resolve `.`/`..` in the string only, with no filesystem access
+/// and — deliberately — no symlink resolution.
+///
+/// The result satisfies what
+/// [`crate::schedule::manifest::validate_absolute_normalized_path`] requires
+/// (absolute, no `.`/`..` components) as long as `base` is itself absolute,
+/// and it keeps the spelling the caller actually used rather than whatever a
+/// symlink happens to point at today.
+pub(crate) fn lexically_normalize_from(base: &Path, path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    strip_verbatim_prefix(normalized)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

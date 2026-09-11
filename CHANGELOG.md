@@ -1,5 +1,44 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`xv schedule install --print` previews the pinned rotation target.** The
+  preview resolves the schedule's target exactly once and renders, in a new
+  fixed format, a header block (scheduler, cadence, the resolved
+  `<alias-or-vault> -> <backend>/<vault>` target, the backend and its identity
+  digest, the config file, the `.xv.toml` and environment that participated,
+  the working directory, the command and the log path), the `manifest.json` an
+  install would write — with `installed_at` shown as `<set-at-install>` — and
+  the manifest-runner unit file(s). It remains strictly read-only: no
+  directory, manifest, lock, unit or log is created and no scheduler is called.
+
+### Changed
+
+- **`xv schedule install` resolves and verifies its target before installing.**
+  Installation now requires a saved global `xv.conf` (a scheduled run replays a
+  saved configuration, not the environment you typed in), materializes only the
+  selected backend and verifies it read-only, and refuses an ambient
+  `XV_BACKEND` or `--backend` that differs from the backend the saved
+  configuration resolves to. With a workspace attached, `--vault` must name an
+  attached alias; an unattached name is refused with the attached aliases
+  rather than retried as a raw vault. With no workspace attached it is the raw
+  vault on the effective backend.
+- **`xv schedule` commands no longer create a local store or age key.** Target
+  resolution and the preview are provisioning-free; a store that has never been
+  opened is reported rather than silently created.
+
+### Known limitations
+
+- **Installed schedules are not target-pinned yet.** Until the manifest runner
+  ships, `xv schedule install` (without `--print`) still registers the legacy
+  `xv rotate --due --force --vault <alias-or-vault>` command and writes no
+  manifest, so the scheduled run still re-resolves its target at run time. The
+  `--vault` value it carries is the workspace alias when a workspace is
+  attached, and the raw vault otherwise — the form that survives run-time
+  re-resolution.
+
 ## v0.39.0 — Attachment key lifecycle (2026-09-06)
 
 ### Added

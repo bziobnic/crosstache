@@ -315,6 +315,11 @@ Rebuild with `cargo build --features aws` or install an AWS-enabled binary.",
         | crate::cli::Commands::AttachmentKey {
             command: crate::cli::attachment_key_ops::AttachmentKeyCommands::Initialize { .. },
         } => true,
+        // Installing a rotation schedule must describe a target that already
+        // exists, not bring one into being: `xv schedule install` verifies the
+        // selected backend read-only through its own lazy registry, and
+        // `--print` writes nothing at all.
+        crate::cli::Commands::Schedule { .. } => true,
         _ => false,
     };
 
@@ -371,6 +376,12 @@ Rebuild with `cargo build --features aws` or install an AWS-enabled binary.",
                 command: Some(crate::cli::commands::ScanCommands::Uninstall),
                 ..
             }
+            // `schedule status`/`uninstall` only talk to the OS scheduler, and
+            // `schedule install` resolves and verifies its own target through a
+            // lazy one-backend registry. Building the eager registry here would
+            // construct (and, for the local backend, create) a store before the
+            // handler has decided which backend the schedule even targets.
+            | crate::cli::Commands::Schedule { .. }
     );
 
     // Validate the effective backend config only for commands that actually

@@ -140,20 +140,74 @@ credentials and config it needs, and uninstalling never requires root. There is
 schedulers already do, and would hold decryption credentials for its whole
 lifetime.
 
-Review before committing to it:
+#### `--print` — review the whole thing before committing to it
 
 ```bash
-xv schedule install --vault v --print     # renders the unit, writes nothing
+xv schedule install --vault v --print     # read-only preview, writes nothing
 ```
 
-`--print` is also the way to drive a scheduler `xv` does not manage: it prints
-the exact command line to paste into cron, Kubernetes CronJob, or a CI schedule.
+`--print` resolves the target and verifies the backend read-only, then prints
+exactly what an install would produce:
+
+- a header block — scheduler, cadence, the resolved target
+  (`<alias-or-vault> -> <backend>/<vault>`), the backend and its identity
+  digest, the config file, the `.xv.toml` and environment that participated,
+  the working directory, the command, and the log path;
+- the `manifest.json` that would be written, verbatim, with `installed_at`
+  shown as `<set-at-install>` because the real timestamp is stamped by the
+  write itself;
+- the native unit file(s), and on Windows the exact `schtasks` invocation.
+
+The pinned unit carries the manifest path, `HOME`, the working directory the
+target was resolved in, and the log path — nothing else. In particular it does
+**not** set `XDG_CONFIG_HOME`: the manifest already names the exact
+configuration file and its digest, and an environment variable that redirects
+config resolution is a target-selection input a pinned unit may not add.
+
+It is a preview in the strict sense: it creates no directory, manifest, lock,
+result, unit or log, touches no existing file, and calls no scheduler.
+
+The `# command:` line shows the pinned manifest runner, which **has not shipped
+yet** (see below) — do not paste it into cron, a Kubernetes CronJob, or a CI
+schedule in this release, because there is no manifest for it to read and
+`xv schedule run` does not exist. To drive a scheduler `xv` does not manage
+today, use the same legacy command an install writes:
+
+```
+xv rotate --due --force --vault <alias-or-vault>
+```
+
+with `HOME` and `XDG_CONFIG_HOME` set the way the preview's header shows. The
+`# command:` line becomes the exact command line to paste once the manifest
+runner ships and installs start writing a manifest.
 
 #### What the scheduled job runs
 
+The preview shows the pinned runner:
+
 ```
-xv rotate --due --force --vault <vault>
+xv schedule run --manifest <state dir>/schedules/rotation-default/manifest.json
 ```
+
+**In this release that runner has not shipped yet, and installed schedules are
+not target-pinned.** `xv schedule install` (without `--print`) still writes the
+legacy command:
+
+```
+xv rotate --due --force --vault <alias-or-vault>
+```
+
+and writes no manifest. That command re-resolves the vault, the backend and
+the account at run time from whatever config, `.xv.toml` and context the
+scheduled process finds, so an installed schedule remains *legacy/unpinned*
+until the manifest runner lands.
+
+The `--vault` it carries is the value that survives that re-resolution: with a
+workspace attached it is the **alias** you gave (or the default entry's alias),
+because run-time resolution looks an attached alias up on its own backend and
+would otherwise read the real vault name as a raw vault on the *active*
+backend. With no workspace attached there are no aliases, so it is the raw
+vault name.
 
 `--due` bounds the blast radius to secrets that already carry a policy and are
 already past it; `--force` is required because there is no terminal to confirm
@@ -165,6 +219,15 @@ The unit contains only an absolute binary path, those arguments, a log path, and
 matters: a scheduled process does not inherit your shell's environment, and a job
 that resolves a different config than you tested against is the classic way this
 silently sweeps the wrong vault.
+
+#### `XV_STATE_HOME`
+
+The previewed manifest lives under the per-user state directory
+(`$XDG_STATE_HOME/xv/schedules/rotation-default/`, else
+`~/.local/state/xv/...`; `%LOCALAPPDATA%\xv\...` on Windows).
+`XV_STATE_HOME` overrides that root on every platform. It exists for tests and
+embedding only — it is **not** a target-selection input, it changes nothing
+about which vault or backend a schedule acts on, and an empty value is ignored.
 
 #### The limitation to plan around
 

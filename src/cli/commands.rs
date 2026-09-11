@@ -1614,9 +1614,11 @@ pub enum ScheduleCommands {
         #[arg(long, default_value = "03:00")]
         at: String,
 
-        /// Vault to sweep. Defaults to the configured `default_vault`; pin it
-        /// explicitly so the scheduled run cannot follow a context that changes
-        /// later.
+        /// Vault to sweep, resolved exactly once at install time. With a
+        /// workspace attached this must name an attached alias; with no
+        /// workspace it is the raw vault on the effective backend. An
+        /// unresolvable name is refused rather than retried. Defaults to the
+        /// workspace default entry; `--print` shows the resolved form.
         #[arg(long)]
         vault: Option<String>,
 

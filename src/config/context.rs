@@ -5,7 +5,7 @@
 
 use crate::error::{CrosstacheError, Result};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{debug, info};
 
@@ -109,6 +109,19 @@ pub struct ContextManager {
     /// field entirely) still load without error.
     #[serde(default)]
     pub workspace: Option<crate::workspace::WorkspaceState>,
+    /// The context file this manager was actually parsed from, and the
+    /// digest of those exact bytes. `None` when nothing was read from disk
+    /// (a default/global-missing manager), which is why this is not the same
+    /// as `context_file` — that names where a save *would* write.
+    #[serde(skip)]
+    pub(crate) loaded_from: Option<LoadedContextFile>,
+}
+
+/// Provenance of a [`ContextManager`] that was parsed from disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LoadedContextFile {
+    path: PathBuf,
+    digest: String,
 }
 
 impl ContextManager {
@@ -132,8 +145,9 @@ impl ContextManager {
     ///
     /// Display and server startup paths use this seam so project discovery
     /// and local-context discovery describe the same directory without
-    /// changing the process-wide current directory.
-    #[cfg(any(feature = "ui", test))]
+    /// changing the process-wide current directory. Schedule-target
+    /// resolution uses it for the same reason: the directory it records and
+    /// the directory it resolves against must be the same one.
     pub(crate) async fn load_for_cwd(cwd: &std::path::Path) -> Result<Self> {
         Self::load_from(Some(cwd)).await
     }
@@ -174,16 +188,66 @@ impl ContextManager {
             return Err(CrosstacheError::config("No local context found"));
         }
 
-        let content = tokio::fs::read_to_string(&context_path).await?;
-        let mut context: ContextManager = serde_json::from_str(&content)?;
+        let context = Self::read_context_file(&context_path, true).await?;
         maybe_warn_legacy_context(&context_path);
-        context.context_file = Some(context_path);
-        context.is_local = true;
 
         if let Some(ref path) = context.context_file {
             debug!("Loaded local context from: {}", path.display());
         }
         Ok(context)
+    }
+
+    /// Load the context file at **exactly** `path` and nothing else.
+    ///
+    /// No `cwd/.xv/context` probing, no `XV_CONTEXT_DIR` lookup, no global
+    /// fallback: this function reads no environment variable at all. A
+    /// missing file is an error, not an empty context. Used by the
+    /// scheduled-rotation runner to replay the exact context file recorded
+    /// at install time.
+    ///
+    /// `is_local` is derived from the path shape (a local context always
+    /// lives at `<dir>/.xv/context`; the global one at `<config>/xv/context`)
+    /// so `save()`/`scope_description()` keep describing the same file.
+    // Used by the scheduled-rotation target resolver (`schedule::target`),
+    // which lands in the next task of this spec.
+    #[allow(dead_code)]
+    pub(crate) async fn load_at(path: &Path) -> Result<Self> {
+        let is_local = path
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .map(|name| name == std::ffi::OsStr::new(".xv"))
+            .unwrap_or(false);
+        Self::read_context_file(path, is_local).await
+    }
+
+    /// Read and parse one context file, recording its path and the digest of
+    /// the exact bytes parsed.
+    async fn read_context_file(path: &Path, is_local: bool) -> Result<Self> {
+        let bytes = tokio::fs::read(path).await?;
+        let mut context: ContextManager = serde_json::from_slice(&bytes)?;
+        context.context_file = Some(path.to_path_buf());
+        context.is_local = is_local;
+        context.loaded_from = Some(LoadedContextFile {
+            path: path.to_path_buf(),
+            digest: crate::config::content_digest(&bytes),
+        });
+        Ok(context)
+    }
+
+    /// The context file this manager was parsed from, or `None` when it read
+    /// nothing from disk.
+    pub(crate) fn source_path(&self) -> Option<&Path> {
+        self.loaded_from
+            .as_ref()
+            .map(|source| source.path.as_path())
+    }
+
+    /// `sha256:<hex>` over the exact bytes of [`Self::source_path`], or
+    /// `None` when this manager read nothing from disk.
+    pub(crate) fn source_digest(&self) -> Option<&str> {
+        self.loaded_from
+            .as_ref()
+            .map(|source| source.digest.as_str())
     }
 
     /// Load context from global config directory
@@ -198,10 +262,7 @@ impl ContextManager {
             });
         }
 
-        let content = tokio::fs::read_to_string(&context_path).await?;
-        let mut context: ContextManager = serde_json::from_str(&content)?;
-        context.context_file = Some(context_path);
-        context.is_local = false;
+        let context = Self::read_context_file(&context_path, false).await?;
 
         if let Some(ref path) = context.context_file {
             debug!("Loaded global context from: {}", path.display());
@@ -800,5 +861,90 @@ mod tests {
                 .is_err(),
             "a corrupt discovered local context must fail closed"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Exact-input context loading (scheduled target manifest, P1 task 3)
+    // ------------------------------------------------------------------
+
+    fn context_json(vault: &str) -> String {
+        format!(
+            r#"{{"current":{{"vault_name":"{vault}","resource_group":null,"subscription_id":null,"storage_container":null,"last_used":"2024-01-01T00:00:00Z","usage_count":1}},"recent":[]}}"#
+        )
+    }
+
+    /// `load_at` reads exactly the path it is given: a `.xv/context` sitting
+    /// in the same tree is never probed, and no `XV_CONTEXT_DIR` lookup
+    /// happens (the function reads no environment variable at all, by
+    /// construction — so this needs no process-global env mutation).
+    #[tokio::test]
+    async fn load_at_reads_only_the_given_file() {
+        let temp = TempDir::new().unwrap();
+        let decoy_dir = temp.path().join(".xv");
+        std::fs::create_dir_all(&decoy_dir).unwrap();
+        std::fs::write(decoy_dir.join("context"), context_json("decoy-vault")).unwrap();
+
+        let recorded_path = temp.path().join("recorded-context");
+        let body = context_json("recorded-vault");
+        std::fs::write(&recorded_path, &body).unwrap();
+
+        let loaded = ContextManager::load_at(&recorded_path).await.unwrap();
+
+        assert_eq!(loaded.current_vault(), Some("recorded-vault"));
+        assert_eq!(loaded.source_path(), Some(recorded_path.as_path()));
+        assert_eq!(
+            loaded.source_digest(),
+            Some(crate::config::content_digest(body.as_bytes()).as_str())
+        );
+    }
+
+    /// A recorded context path that has gone missing is a hard error, not a
+    /// silent empty context.
+    #[tokio::test]
+    async fn load_at_missing_file_is_an_error() {
+        let temp = TempDir::new().unwrap();
+        assert!(ContextManager::load_at(&temp.path().join("nope"))
+            .await
+            .is_err());
+    }
+
+    /// A normally-loaded local context reports the file it actually read.
+    #[tokio::test]
+    async fn load_records_the_source_of_a_local_context_file() {
+        let _env_guard = context_dir_env_lock().lock().await;
+        let _context_override = EnvVarGuard::set("XV_CONTEXT_DIR", "");
+
+        let root = TempDir::new().unwrap();
+        let xv_dir = root.path().join(".xv");
+        std::fs::create_dir_all(&xv_dir).unwrap();
+        let body = context_json("local-current");
+        std::fs::write(xv_dir.join("context"), &body).unwrap();
+
+        let loaded = ContextManager::load_for_cwd(root.path()).await.unwrap();
+
+        assert_eq!(loaded.current_vault(), Some("local-current"));
+        assert_eq!(loaded.source_path(), Some(xv_dir.join("context").as_path()));
+        assert_eq!(
+            loaded.source_digest(),
+            Some(crate::config::content_digest(body.as_bytes()).as_str())
+        );
+    }
+
+    /// A context manager that read nothing from disk reports no source, even
+    /// though `context_file` names where it *would* be written.
+    #[tokio::test]
+    async fn a_context_that_read_no_file_has_no_source() {
+        let _env_guard = context_dir_env_lock().lock().await;
+        let _context_override = EnvVarGuard::set("XV_CONTEXT_DIR", "");
+
+        let config_home = TempDir::new().unwrap();
+        let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", config_home.path());
+
+        let root = TempDir::new().unwrap();
+        let loaded = ContextManager::load_for_cwd(root.path()).await.unwrap();
+
+        assert!(loaded.context_file.is_some());
+        assert_eq!(loaded.source_path(), None);
+        assert_eq!(loaded.source_digest(), None);
     }
 }

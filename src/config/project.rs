@@ -207,11 +207,34 @@ pub fn parse_str(s: &str) -> Result<ProjectConfig> {
 }
 
 /// Parse a `.xv.toml` file from disk asynchronously.
+///
+/// The crate's own traversal goes through [`parse_file_with_bytes`], which
+/// additionally hands back the exact bytes parsed; this stays as the module's
+/// single-file parse API.
+///
+/// `allow(dead_code)` is load-bearing despite this being `pub`: `src/main.rs`
+/// re-declares these modules, so the `xv` binary is its own crate in which a
+/// `pub` item no caller reaches really is dead code, and
+/// `clippy --all-targets -D warnings` fails on it.
+#[allow(dead_code)]
 pub async fn parse_file(path: &Path) -> Result<ProjectConfig> {
-    let content = tokio::fs::read_to_string(path)
+    Ok(parse_file_with_bytes(path).await?.1)
+}
+
+/// [`parse_file`], additionally returning the exact bytes that were parsed.
+///
+/// Callers that must digest the file (the schedule target manifest) hash
+/// *these* bytes rather than re-reading it, so a concurrent edit cannot make
+/// the recorded digest describe a different file than the one that produced
+/// the recorded target.
+async fn parse_file_with_bytes(path: &Path) -> Result<(Vec<u8>, ProjectConfig)> {
+    let bytes = tokio::fs::read(path)
         .await
         .map_err(|e| CrosstacheError::config(format!("failed to read {}: {e}", path.display())))?;
-    parse_str(&content)
+    let content = std::str::from_utf8(&bytes)
+        .map_err(|e| CrosstacheError::config(format!("failed to read {}: {e}", path.display())))?;
+    let cfg = parse_str(content)?;
+    Ok((bytes, cfg))
 }
 
 use std::path::PathBuf;
@@ -229,6 +252,18 @@ use std::path::PathBuf;
 /// root (or a boundary). Returns `Err` only if a found `.xv.toml`
 /// fails to parse.
 pub async fn find_project_config(start: &Path) -> Result<Option<(PathBuf, ProjectConfig)>> {
+    Ok(find_project_config_with_bytes(start)
+        .await?
+        .map(|(path, _bytes, cfg)| (path, cfg)))
+}
+
+/// [`find_project_config`], additionally returning the exact bytes of the
+/// `.xv.toml` that was parsed. Same traversal, boundary and
+/// `XV_NO_PARENT_CONFIG` rules — this is the single implementation both
+/// forms use.
+async fn find_project_config_with_bytes(
+    start: &Path,
+) -> Result<Option<(PathBuf, Vec<u8>, ProjectConfig)>> {
     let no_walk = std::env::var("XV_NO_PARENT_CONFIG")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
@@ -240,8 +275,8 @@ pub async fn find_project_config(start: &Path) -> Result<Option<(PathBuf, Projec
         // block *ancestor* discovery).
         let candidate = dir.join(".xv.toml");
         if tokio::fs::metadata(&candidate).await.is_ok() {
-            let cfg = parse_file(&candidate).await?;
-            return Ok(Some((candidate, cfg)));
+            let (bytes, cfg) = parse_file_with_bytes(&candidate).await?;
+            return Ok(Some((candidate, bytes, cfg)));
         }
 
         if no_walk {
@@ -405,6 +440,112 @@ pub(crate) fn resolve_env_with_source<'a>(
     }
 }
 
+/// A `.xv.toml` resolution recorded exactly enough to be replayed later.
+///
+/// Produced by [`resolve_project_at`] at schedule-install time and by
+/// [`load_project_at`] at run time; the run-time form must reproduce the
+/// install-time one for a target to be considered undrifted.
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedProject {
+    /// Canonical path of the `.xv.toml` that was parsed.
+    pub(crate) path: PathBuf,
+    /// `sha256:<hex>` over the exact bytes that were parsed.
+    pub(crate) bytes_digest: String,
+    /// The selected environment name, or `None` when the file contributes no
+    /// active environment.
+    pub(crate) environment: Option<String>,
+    /// The parsed file.
+    pub(crate) config: ProjectConfig,
+}
+
+impl ResolvedProject {
+    /// The selected `[env.*]` profile, if an environment was selected.
+    #[allow(dead_code)]
+    pub(crate) fn profile(&self) -> Option<&EnvProfile> {
+        self.environment
+            .as_deref()
+            .and_then(|name| self.config.envs.get(name))
+    }
+}
+
+/// Install-time project resolution from an explicit starting directory.
+///
+/// Reuses the existing walk-up traversal ([`find_project_config`], including
+/// `.xv.boundary` and `XV_NO_PARENT_CONFIG`) and the existing active-env
+/// selection ([`resolve_env`], which consults `XV_ENV` then `cli_env` then
+/// `default_env`). Installation resolves the ambient environment *now*, on
+/// purpose: the resolved name is what gets recorded and replayed.
+///
+/// Returns `Ok(None)` when no `.xv.toml` governs `start_dir`.
+pub(crate) async fn resolve_project_at(
+    start_dir: &Path,
+    cli_env: Option<&str>,
+) -> Result<Option<ResolvedProject>> {
+    let Some((path, bytes, config)) = find_project_config_with_bytes(start_dir).await? else {
+        return Ok(None);
+    };
+    let environment = resolve_env(&config, cli_env)?.map(|(name, _profile)| name.to_string());
+    Ok(Some(ResolvedProject {
+        path: canonicalize_project_path(&path)?,
+        bytes_digest: crate::config::content_digest(&bytes),
+        environment,
+        config,
+    }))
+}
+
+/// Run-time project replay from an explicit path and an explicit environment
+/// name.
+///
+/// Unlike [`resolve_project_at`] this performs no traversal and consults
+/// **no** ambient selection source: not `XV_ENV`, not `default_env`. The
+/// caller replays the environment recorded at install time, so `None` means
+/// "no environment was recorded" and yields no profile. A missing file, or a
+/// recorded environment that the file no longer defines, is an error.
+#[allow(dead_code)]
+pub(crate) async fn load_project_at(
+    path: &Path,
+    environment: Option<&str>,
+) -> Result<ResolvedProject> {
+    let (bytes, config) = parse_file_with_bytes(path).await?;
+
+    let environment = match environment {
+        None => None,
+        Some(name) => {
+            if config.envs.contains_key(name) {
+                Some(name.to_string())
+            } else if config.envs.is_empty() {
+                return Err(CrosstacheError::env_not_defined_no_envs(name));
+            } else {
+                return Err(CrosstacheError::env_not_defined(
+                    name,
+                    config.envs.keys().cloned().collect(),
+                ));
+            }
+        }
+    };
+
+    Ok(ResolvedProject {
+        path: canonicalize_project_path(path)?,
+        bytes_digest: crate::config::content_digest(&bytes),
+        environment,
+        config,
+    })
+}
+
+/// Canonicalize a discovered `.xv.toml` path.
+///
+/// Routed through [`crate::utils::helpers::canonicalize_without_verbatim_prefix`]
+/// rather than `std::fs::canonicalize` directly: on Windows the raw call keeps
+/// the `\\?\` verbatim prefix, and the schedule manifest records the *stripped*
+/// spelling at install time (`schedule::target::canonical_path_for_manifest`).
+/// Two spellings of one file would read as project-path drift and refuse an
+/// otherwise healthy scheduled run.
+fn canonicalize_project_path(path: &Path) -> Result<PathBuf> {
+    crate::utils::helpers::canonicalize_without_verbatim_prefix(path).map_err(|e| {
+        CrosstacheError::config(format!("failed to canonicalize {}: {e}", path.display()))
+    })
+}
+
 /// One-shot guard — flips true on the first emit. We expose a
 /// test-only reset to keep the assertion local; production code
 /// never resets it.
@@ -438,14 +579,78 @@ pub(crate) fn reset_cross_boundary_notice_for_test() {
     CROSS_BOUNDARY_NOTICE_EMITTED.store(false, Ordering::SeqCst);
 }
 
+/// Test-only synchronization for the process-global `XV_ENV` variable.
+///
+/// `resolve_env` reads `XV_ENV` and lets it beat `--env`, so any test that
+/// sets it — or that reaches `resolve_env` and would be wrong if someone else
+/// had set it — has to hold the same lock. That includes tests in other
+/// modules (`schedule::target`, `workspace`) which resolve an environment, so
+/// the lock is `pub(crate)` rather than private to this module's tests.
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Mutex;
+pub(crate) mod test_support {
+    use std::sync::{Mutex, MutexGuard};
 
     /// Guards tests that read or write the global `XV_ENV` env var so they
     /// don't race each other under cargo's default parallel test runner.
-    static XV_ENV_LOCK: Mutex<()> = Mutex::new(());
+    pub(crate) static XV_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Take the `XV_ENV` lock and restore the variable's original value when
+    /// the guard drops — including on a panic, so one failing test cannot
+    /// leak `XV_ENV` into every test that runs after it.
+    pub(crate) struct XvEnvGuard {
+        _lock: MutexGuard<'static, ()>,
+        previous: Option<String>,
+    }
+
+    impl XvEnvGuard {
+        pub(crate) fn acquire() -> Self {
+            // A poisoned lock only means some other test panicked while
+            // holding it; the data it guards is `()`, so recovering is safe
+            // and far more useful than cascading failures.
+            let lock = XV_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            Self {
+                _lock: lock,
+                previous: std::env::var("XV_ENV").ok(),
+            }
+        }
+    }
+
+    impl Drop for XvEnvGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var("XV_ENV", value),
+                None => std::env::remove_var("XV_ENV"),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::XvEnvGuard;
+    use super::*;
+
+    /// Install records the project path through
+    /// `schedule::target::canonical_path_for_manifest`; a later run
+    /// re-resolves it through `canonicalize_project_path`. If those two ever
+    /// spell the same file differently — the Windows `\\?\` verbatim prefix
+    /// was exactly that — drift refuses an otherwise healthy schedule. They
+    /// share one helper now, and this test pins that they agree.
+    #[test]
+    fn project_and_manifest_canonicalization_agree_on_the_same_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(".xv.toml");
+        std::fs::write(&file, b"").unwrap();
+
+        let via_project = canonicalize_project_path(&file).unwrap();
+        let via_manifest = crate::schedule::target::canonical_path_for_manifest(&file).unwrap();
+        assert_eq!(via_project, via_manifest);
+        assert!(
+            !via_project.to_string_lossy().starts_with(r"\\?\"),
+            "verbatim prefix leaked: {}",
+            via_project.display()
+        );
+    }
 
     #[test]
     fn project_config_default_is_empty() {
@@ -647,7 +852,7 @@ resource_group = "rg"
 
     #[test]
     fn resolve_env_uses_default_env_when_no_override() {
-        let _guard = XV_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = XvEnvGuard::acquire();
         let cfg = build_cfg(
             Some("dev"),
             &[
@@ -676,7 +881,7 @@ resource_group = "rg"
 
     #[test]
     fn resolve_env_cli_flag_overrides_default_env() {
-        let _guard = XV_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = XvEnvGuard::acquire();
         let cfg = build_cfg(
             Some("dev"),
             &[
@@ -700,7 +905,7 @@ resource_group = "rg"
 
     #[test]
     fn resolve_env_xv_env_overrides_cli_flag() {
-        let _guard = XV_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = XvEnvGuard::acquire();
         let cfg = build_cfg(
             Some("dev"),
             &[
@@ -726,7 +931,7 @@ resource_group = "rg"
 
     #[test]
     fn resolve_env_unknown_name_returns_env_not_defined() {
-        let _guard = XV_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = XvEnvGuard::acquire();
         let cfg = build_cfg(
             Some("dev"),
             &[
@@ -747,7 +952,7 @@ resource_group = "rg"
 
     #[test]
     fn resolve_env_no_default_no_override_errors_helpfully() {
-        let _guard = XV_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = XvEnvGuard::acquire();
         let cfg = build_cfg(None, &[("dev", EnvProfile::default())]);
         std::env::remove_var("XV_ENV");
         let err = resolve_env(&cfg, None).expect_err("must err");
@@ -766,7 +971,7 @@ resource_group = "rg"
         // Zero [env.*] blocks, no default_env, no --env, no XV_ENV: a
         // types-only project file contributes nothing env-related and
         // must not error.
-        let _guard = XV_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = XvEnvGuard::acquire();
         let cfg = build_cfg(None, &[]);
         std::env::remove_var("XV_ENV");
         let resolved = resolve_env(&cfg, None).expect("must not error");
@@ -778,7 +983,7 @@ resource_group = "rg"
         // Explicit --env against a file with zero [env.*] blocks must
         // still error (the user asked for a specific env by name), but
         // with a clearer message than an empty "available: " list.
-        let _guard = XV_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = XvEnvGuard::acquire();
         let cfg = build_cfg(None, &[]);
         std::env::remove_var("XV_ENV");
         let err = resolve_env(&cfg, Some("staging")).expect_err("must err");
@@ -808,7 +1013,7 @@ resource_group = "rg"
         // default_env is explicitly configured but no [env.*] blocks
         // exist at all — this is a real misconfiguration (not the "no
         // envs at all" absent-defaults case), and must keep erroring.
-        let _guard = XV_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = XvEnvGuard::acquire();
         let cfg = build_cfg(Some("dev"), &[]);
         std::env::remove_var("XV_ENV");
         let err = resolve_env(&cfg, None).expect_err("must err");
@@ -1084,5 +1289,164 @@ resource_group = "rg"
         assert_eq!(scan.exclude, vec!["dist/**", "*.lock"]);
         assert_eq!(scan.min_value_length, Some(12));
         assert_eq!(scan.patterns, vec!["aws-access-key-id", "github-token"]);
+    }
+
+    // ------------------------------------------------------------------
+    // Exact-input project resolution (scheduled target manifest, P1 task 3)
+    // ------------------------------------------------------------------
+
+    const PROJECT_FIXTURE: &str = r#"
+default_env = "prod"
+
+[env.prod]
+vault = "prod-vault"
+
+[env.staging]
+vault = "staging-vault"
+"#;
+
+    /// Install-time resolution reuses the existing walk-up traversal and
+    /// `resolve_env` selection, and reports the canonical file it parsed
+    /// together with the digest of those exact bytes.
+    #[tokio::test]
+    // The `XV_ENV` guard is a std `Mutex` held across awaits here. These
+    // tests run on tokio's single-threaded test runtime and nothing else
+    // acquires that lock from an async context, so it cannot deadlock.
+    #[allow(clippy::await_holding_lock)]
+    async fn resolve_project_at_reports_path_digest_and_environment() {
+        // `resolve_project_at` reaches `resolve_env`, which reads the
+        // process-global `XV_ENV`; serialize against the tests that set it.
+        let _guard = XvEnvGuard::acquire();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let nested = root.join("a").join("b");
+        std::fs::create_dir_all(&nested).unwrap();
+        let project_path = root.join(".xv.toml");
+        std::fs::write(&project_path, PROJECT_FIXTURE).unwrap();
+
+        let resolved = resolve_project_at(&nested, None)
+            .await
+            .unwrap()
+            .expect("walk-up must find the ancestor .xv.toml");
+
+        assert_eq!(
+            resolved.path,
+            crate::utils::helpers::canonicalize_without_verbatim_prefix(&project_path).unwrap()
+        );
+        assert_eq!(
+            resolved.bytes_digest,
+            crate::config::content_digest(PROJECT_FIXTURE.as_bytes())
+        );
+        assert_eq!(resolved.environment.as_deref(), Some("prod"));
+        assert_eq!(
+            resolved.profile().and_then(|p| p.vault.as_deref()),
+            Some("prod-vault")
+        );
+    }
+
+    /// An explicit CLI `--env` flag selects the profile, exactly as
+    /// `resolve_env` does for every other caller.
+    #[tokio::test]
+    // The `XV_ENV` guard is a std `Mutex` held across awaits here. These
+    // tests run on tokio's single-threaded test runtime and nothing else
+    // acquires that lock from an async context, so it cannot deadlock.
+    #[allow(clippy::await_holding_lock)]
+    async fn resolve_project_at_honors_the_cli_env_flag() {
+        // `resolve_project_at` reaches `resolve_env`, which reads the
+        // process-global `XV_ENV`; serialize against the tests that set it.
+        let _guard = XvEnvGuard::acquire();
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join(".xv.toml"), PROJECT_FIXTURE).unwrap();
+
+        let resolved = resolve_project_at(temp.path(), Some("staging"))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(resolved.environment.as_deref(), Some("staging"));
+        assert_eq!(
+            resolved.profile().and_then(|p| p.vault.as_deref()),
+            Some("staging-vault")
+        );
+    }
+
+    /// A `.xv.boundary` still stops the walk-up: the traversal rules are
+    /// reused, not reimplemented.
+    #[tokio::test]
+    // The `XV_ENV` guard is a std `Mutex` held across awaits here. These
+    // tests run on tokio's single-threaded test runtime and nothing else
+    // acquires that lock from an async context, so it cannot deadlock.
+    #[allow(clippy::await_holding_lock)]
+    async fn resolve_project_at_stops_at_a_boundary_marker() {
+        // `resolve_project_at` reaches `resolve_env`, which reads the
+        // process-global `XV_ENV`; serialize against the tests that set it.
+        let _guard = XvEnvGuard::acquire();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        std::fs::write(root.join(".xv.toml"), PROJECT_FIXTURE).unwrap();
+        let child = root.join("child");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::write(child.join(".xv.boundary"), "").unwrap();
+
+        assert!(resolve_project_at(&child, None).await.unwrap().is_none());
+    }
+
+    /// Run-time replay reads exactly the recorded file and replays exactly
+    /// the recorded environment name. It reads no environment variable at
+    /// all (by construction), and it does not fall back to `default_env`:
+    /// `None` means "no environment was recorded", which is why this proves
+    /// the ambient selection chain is not consulted — `default_env = "prod"`
+    /// in the fixture would otherwise win.
+    #[tokio::test]
+    async fn load_project_at_replays_the_recorded_environment_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_path = temp.path().join(".xv.toml");
+        std::fs::write(&project_path, PROJECT_FIXTURE).unwrap();
+
+        let replayed = load_project_at(&project_path, Some("staging"))
+            .await
+            .unwrap();
+        assert_eq!(
+            replayed.path,
+            crate::utils::helpers::canonicalize_without_verbatim_prefix(&project_path).unwrap()
+        );
+        assert_eq!(
+            replayed.bytes_digest,
+            crate::config::content_digest(PROJECT_FIXTURE.as_bytes())
+        );
+        assert_eq!(replayed.environment.as_deref(), Some("staging"));
+        assert_eq!(
+            replayed.profile().and_then(|p| p.vault.as_deref()),
+            Some("staging-vault")
+        );
+
+        let none_recorded = load_project_at(&project_path, None).await.unwrap();
+        assert_eq!(none_recorded.environment, None);
+        assert!(none_recorded.profile().is_none());
+    }
+
+    /// A recorded environment that no longer exists fails closed with the
+    /// standard "not defined" error, listing the available names.
+    #[tokio::test]
+    async fn load_project_at_rejects_an_unknown_environment() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_path = temp.path().join(".xv.toml");
+        std::fs::write(&project_path, PROJECT_FIXTURE).unwrap();
+
+        let err = load_project_at(&project_path, Some("gone"))
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("gone"), "{msg}");
+        assert!(msg.contains("staging"), "{msg}");
+    }
+
+    /// A recorded project file that has gone missing is a hard error.
+    #[tokio::test]
+    async fn load_project_at_missing_file_is_an_error() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(load_project_at(&temp.path().join(".xv.toml"), None)
+            .await
+            .is_err());
     }
 }

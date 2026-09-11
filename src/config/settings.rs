@@ -7,7 +7,7 @@ use crate::error::{CrosstacheError, Result};
 use crate::utils::format::OutputFormat;
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tabled::Tabled;
 
 // ---------------------------------------------------------------------------
@@ -1016,7 +1016,7 @@ pub(crate) async fn load_config_file_only() -> Result<Config> {
     // Load from configuration file if it exists
     let config_path = Config::get_config_path()?;
     if config_path.exists() {
-        config = load_from_file(&config_path).await?;
+        config = load_config_file_at(&config_path).await?;
     }
 
     Ok(config)
@@ -1032,12 +1032,51 @@ pub async fn load_config_no_validation() -> Result<Config> {
     Ok(config)
 }
 
-async fn load_from_file(path: &PathBuf) -> Result<Config> {
-    let contents = tokio::fs::read_to_string(path).await?;
+/// Load a config from **exactly** `path` and nothing else.
+///
+/// This is the whole of config loading that touches one file: it reads that
+/// path, parses it as TOML (JSON as fallback), and returns the result. It
+/// consults no environment variable — `XV_BACKEND`, `XV_ENV` and friends
+/// cannot reach it because `apply_environment_overrides` is not on its call
+/// path — and it never falls back to [`Config::get_config_path`]. A missing
+/// or unreadable file is an error, not an empty default.
+///
+/// Normal startup goes through [`load_config_file_only`] →
+/// [`load_config_no_validation`], which keep their existing "default path,
+/// missing file means defaults, then environment overrides" behavior. The
+/// explicit-path form exists for the scheduled-rotation runner, which must
+/// replay the exact configuration recorded at install time without any
+/// ambient influence.
+pub(crate) async fn load_config_file_at(path: &Path) -> Result<Config> {
+    Ok(load_config_file_at_with_bytes(path).await?.0)
+}
 
-    // Try to parse as TOML first, then JSON as fallback.
-    // If both fail, return the TOML error — the file is likely TOML with a syntax error.
-    let toml_err = match toml::from_str::<Config>(&contents) {
+/// [`load_config_file_at`], additionally returning the exact bytes that were
+/// parsed.
+///
+/// Callers that need to digest the configuration (the schedule target
+/// manifest) must hash *these* bytes rather than re-reading the file, so a
+/// concurrent edit cannot make the recorded digest describe a different file
+/// than the one that produced the recorded target.
+pub(crate) async fn load_config_file_at_with_bytes(path: &Path) -> Result<(Config, Vec<u8>)> {
+    let bytes = tokio::fs::read(path).await?;
+    let config = parse_config_bytes(path, &bytes)?;
+    Ok((config, bytes))
+}
+
+/// Parse config bytes with the historical TOML-first, JSON-fallback rule.
+///
+/// If both parses fail the TOML error is reported: the file is far more
+/// likely to be TOML with a syntax error than malformed JSON.
+fn parse_config_bytes(path: &Path, bytes: &[u8]) -> Result<Config> {
+    let contents = std::str::from_utf8(bytes).map_err(|_| {
+        CrosstacheError::config(format!(
+            "Failed to parse config file '{}': not valid UTF-8. Run 'xv init' to create a valid configuration.",
+            path.display()
+        ))
+    })?;
+
+    let toml_err = match toml::from_str::<Config>(contents) {
         Ok(config) => return Ok(config),
         Err(e) => {
             tracing::debug!("TOML parse failed: {}, trying JSON", e);
@@ -1045,7 +1084,7 @@ async fn load_from_file(path: &PathBuf) -> Result<Config> {
         }
     };
 
-    serde_json::from_str::<Config>(&contents).map_err(|_json_err| {
+    serde_json::from_str::<Config>(contents).map_err(|_json_err| {
         CrosstacheError::config(format!(
             "Failed to parse config file '{}': {}. Run 'xv init' to create a valid configuration.",
             path.display(),
@@ -1617,5 +1656,120 @@ default_vault = "myproj-kv"
             }
             _ => panic!("expected Aws variant"),
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Exact-input config loading (scheduled target manifest, P1 task 3)
+    // ------------------------------------------------------------------
+
+    /// A complete on-disk config body, serialized the same way `xv` writes it.
+    fn config_toml(backend: &str, default_vault: &str) -> String {
+        toml::to_string_pretty(&Config {
+            backend: Some(backend.to_string()),
+            default_vault: default_vault.to_string(),
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    /// `load_config_file_at` reads exactly the path it is given.
+    ///
+    /// Two different files loaded in the same process each yield their own
+    /// contents, and neither is the process's default config path. The
+    /// function takes no environment input at all — it has no `XV_BACKEND` /
+    /// `XV_ENV` read on its call path by construction, and does not call
+    /// `apply_environment_overrides` — so this asserts the file-selection
+    /// half of that property without mutating process-global environment
+    /// variables under parallel `cargo test`.
+    #[tokio::test]
+    async fn load_config_file_at_reads_only_the_given_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let a = temp.path().join("a.conf");
+        let b = temp.path().join("b.conf");
+        let a_body = config_toml("local", "vault-a");
+        let b_body = config_toml("aws", "vault-b");
+        std::fs::write(&a, &a_body).unwrap();
+        std::fs::write(&b, &b_body).unwrap();
+
+        let from_a = load_config_file_at(&a).await.unwrap();
+        let from_b = load_config_file_at(&b).await.unwrap();
+
+        assert_eq!(from_a.backend.as_deref(), Some("local"));
+        assert_eq!(from_a.default_vault, "vault-a");
+        assert_eq!(from_b.backend.as_deref(), Some("aws"));
+        assert_eq!(from_b.default_vault, "vault-b");
+
+        // Identical to parsing those exact bytes directly: no overlay of any
+        // kind, so nothing from the ambient environment or the default config
+        // path can have been folded in.
+        let direct: Config = toml::from_str(&a_body).unwrap();
+        assert_eq!(from_a.backend, direct.backend);
+        assert_eq!(from_a.default_vault, direct.default_vault);
+        assert_eq!(from_a.debug, direct.debug);
+        assert_eq!(from_a.subscription_id, direct.subscription_id);
+
+        assert_ne!(
+            a,
+            Config::get_config_path().unwrap(),
+            "fixture must not be the default config path for this assertion to mean anything"
+        );
+    }
+
+    /// The bytes returned alongside the config are the exact bytes parsed,
+    /// so the manifest can digest them without a read-then-reread race.
+    #[tokio::test]
+    async fn load_config_file_at_with_bytes_returns_the_parsed_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("xv.conf");
+        let body = config_toml("local", "vault-a");
+        std::fs::write(&path, &body).unwrap();
+
+        let (config, bytes) = load_config_file_at_with_bytes(&path).await.unwrap();
+
+        assert_eq!(config.backend.as_deref(), Some("local"));
+        assert_eq!(bytes, body.as_bytes());
+        assert_eq!(
+            crate::config::content_digest(&bytes),
+            crate::config::content_digest(&std::fs::read(&path).unwrap())
+        );
+    }
+
+    /// An explicit path that does not exist is a hard error: an unattended
+    /// scheduled run must never silently degrade to defaults.
+    #[tokio::test]
+    async fn load_config_file_at_missing_file_is_an_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("nope.conf");
+        assert!(load_config_file_at(&missing).await.is_err());
+    }
+
+    /// The JSON fallback of the previous private loader is preserved.
+    #[tokio::test]
+    async fn load_config_file_at_accepts_json_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("xv.conf");
+        let source = Config {
+            backend: Some("local".to_string()),
+            default_vault: "json-vault".to_string(),
+            ..Default::default()
+        };
+        std::fs::write(&path, serde_json::to_string(&source).unwrap()).unwrap();
+
+        let loaded = load_config_file_at(&path).await.unwrap();
+        assert_eq!(loaded.backend.as_deref(), Some("local"));
+        assert_eq!(loaded.default_vault, "json-vault");
+    }
+
+    /// A malformed file keeps the TOML-first error message users already see.
+    #[tokio::test]
+    async fn load_config_file_at_reports_the_toml_error_for_garbage() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("xv.conf");
+        std::fs::write(&path, "this is not = = valid").unwrap();
+
+        let err = load_config_file_at(&path).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("Failed to parse config file"), "{msg}");
+        assert!(msg.contains("xv init"), "{msg}");
     }
 }
