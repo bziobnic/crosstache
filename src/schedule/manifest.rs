@@ -95,6 +95,14 @@ pub enum StateRootSource {
 /// directory and the fixed files inside it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScheduleStatePaths {
+    /// The bare state root — `$XDG_STATE_HOME`, `~/.local/state`,
+    /// `%LOCALAPPDATA%` or the `XV_STATE_HOME` override — before the `xv/`
+    /// segment. Kept so everything xv puts under the state root is derived
+    /// from *one* resolution: the manifest directory and the default rotation
+    /// log used to resolve their roots independently, which on Windows put the
+    /// log under `XDG_STATE_HOME` (a Unix-only input) while the manifest went
+    /// to `%LOCALAPPDATA%`.
+    state_home: PathBuf,
     root: PathBuf,
     source: StateRootSource,
 }
@@ -103,6 +111,16 @@ impl ScheduleStatePaths {
     /// `<state root>/xv/schedules/rotation-default/`.
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// `<state root>/xv/rotate.log` — where an unattended rotation reports
+    /// when `--log-file` was not given.
+    ///
+    /// The same state root as [`Self::root`], deliberately: the unit's
+    /// `--manifest` argument and its log redirection must not be able to
+    /// disagree about which state root this install belongs to.
+    pub fn default_log_path(&self) -> PathBuf {
+        self.state_home.join("xv").join("rotate.log")
     }
 
     /// Which input selected [`Self::root`].
@@ -235,6 +253,7 @@ fn resolve_for(env: &ScheduleEnv, platform: HostPlatform) -> Result<ScheduleStat
 
     Ok(ScheduleStatePaths {
         root: state_root.join("xv").join("schedules").join(SCHEDULE_ID),
+        state_home: state_root,
         source,
     })
 }
@@ -755,6 +774,64 @@ mod tests {
         assert_eq!(paths.pinned_state_home(), None);
     }
 
+    /// The default rotation log and the pinned manifest must come from one
+    /// state-root resolution. They used to be computed separately — the log
+    /// read `XDG_STATE_HOME`/`$HOME/.local/state` on its own — so on Windows,
+    /// where `XDG_STATE_HOME` is not an input, an installing shell that had it
+    /// set produced a unit whose log lived under it and whose `--manifest`
+    /// argument lived under `%LOCALAPPDATA%`.
+    #[test]
+    fn the_default_log_path_shares_the_manifest_state_root() {
+        let xdg = ScheduleEnv {
+            xv_state_home: None,
+            xdg_state_home: Some("/xdg/state".to_string()),
+            home: Some("/home/alice".to_string()),
+            windows_local_data_dir: Some(PathBuf::from(r"C:\Users\alice\AppData\Local")),
+        };
+
+        let unix = resolve_for(&xdg, HostPlatform::Unix).unwrap();
+        assert_eq!(
+            unix.default_log_path(),
+            PathBuf::from("/xdg/state").join("xv").join("rotate.log")
+        );
+        assert!(unix.root().starts_with("/xdg/state"));
+
+        // Windows ignores XDG_STATE_HOME entirely; the log must follow the
+        // root the manifest actually uses, not the variable.
+        let windows = resolve_for(&xdg, HostPlatform::Windows).unwrap();
+        assert_eq!(
+            windows.default_log_path(),
+            PathBuf::from(r"C:\Users\alice\AppData\Local")
+                .join("xv")
+                .join("rotate.log")
+        );
+        assert!(windows.root().starts_with(r"C:\Users\alice\AppData\Local"));
+
+        // The Unix `HOME` fallback keeps its historical spelling.
+        let home_only = ScheduleEnv {
+            xdg_state_home: None,
+            ..xdg.clone()
+        };
+        let paths = resolve_for(&home_only, HostPlatform::Unix).unwrap();
+        assert_eq!(
+            paths.default_log_path(),
+            PathBuf::from("/home/alice/.local/state/xv/rotate.log")
+        );
+
+        // And an explicit override wins on every platform, for both.
+        let overridden = ScheduleEnv {
+            xv_state_home: Some("/override/state".to_string()),
+            ..xdg.clone()
+        };
+        for platform in [HostPlatform::Unix, HostPlatform::Windows] {
+            let paths = resolve_for(&overridden, platform).unwrap();
+            assert_eq!(
+                paths.default_log_path(),
+                PathBuf::from("/override/state/xv/rotate.log")
+            );
+        }
+    }
+
     /// An empty override is ignored for the *source* too, not just the path —
     /// otherwise the unit would pin an empty variable that resolves nowhere.
     #[test]
@@ -923,6 +1000,7 @@ mod tests {
     fn load_manifest_reports_unknown_schema_version_for_reinstall() {
         let dir = tempfile::tempdir().unwrap();
         let paths = ScheduleStatePaths {
+            state_home: dir.path().to_path_buf(),
             root: dir.path().to_path_buf(),
             source: StateRootSource::Home,
         };
@@ -1047,6 +1125,7 @@ mod tests {
 
     fn temp_paths(dir: &tempfile::TempDir) -> ScheduleStatePaths {
         ScheduleStatePaths {
+            state_home: dir.path().to_path_buf(),
             root: dir.path().join("xv").join("schedules").join(SCHEDULE_ID),
             source: StateRootSource::Home,
         }
@@ -1130,6 +1209,7 @@ mod tests {
         let linked_root = dir.path().join("linked-root");
         std::os::unix::fs::symlink(&real_dir, &linked_root).unwrap();
         let paths = ScheduleStatePaths {
+            state_home: dir.path().to_path_buf(),
             root: linked_root,
             source: StateRootSource::Home,
         };

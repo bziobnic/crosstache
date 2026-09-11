@@ -1622,8 +1622,10 @@ pub enum ScheduleCommands {
         #[arg(long)]
         vault: Option<String>,
 
-        /// Where the scheduled run's output is appended (default:
-        /// `$XDG_STATE_HOME/xv/rotate.log`, else `~/.local/state/xv/rotate.log`).
+        /// Where the scheduled run's output is appended. Defaults to
+        /// `rotate.log` under the same state root as the pinned manifest:
+        /// `$XDG_STATE_HOME/xv/rotate.log`, else `~/.local/state/xv/rotate.log`
+        /// (on Windows, `%LOCALAPPDATA%\xv\rotate.log`).
         #[arg(long)]
         log_file: Option<String>,
 

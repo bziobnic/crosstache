@@ -446,6 +446,19 @@ fn write_file_no_follow_with_mode(
             let mut current = PathBuf::new();
             for component in parent.components() {
                 current.push(component.as_os_str());
+                // The prefix (`C:`, `\\?\C:`, `\\server\share`) and the root
+                // separator name a volume, not a directory entry. Statting them
+                // is both pointless — neither can be a symlink, and neither can
+                // be created — and actively wrong on Windows: a bare volume
+                // path such as `\\?\C:` opens the volume device, and asking it
+                // for file information fails with ERROR_INVALID_FUNCTION
+                // ("Incorrect function. (os error 1)"). That is what a verbatim
+                // path — anything that has been through `fs::canonicalize` —
+                // produces here, so the walk starts at the first real
+                // component and the traversal checks below are unchanged.
+                if !matches!(component, std::path::Component::Normal(_)) {
+                    continue;
+                }
                 match std::fs::symlink_metadata(&current) {
                     Ok(metadata) if metadata.file_type().is_symlink() => {
                         return Err(CrosstacheError::config(format!(
@@ -468,7 +481,12 @@ fn write_file_no_follow_with_mode(
                             ))
                         })?;
                     }
-                    Err(e) => return Err(CrosstacheError::config(e.to_string())),
+                    Err(e) => {
+                        return Err(CrosstacheError::config(format!(
+                            "Failed to inspect path component '{}': {e}",
+                            current.display()
+                        )))
+                    }
                 }
             }
         }

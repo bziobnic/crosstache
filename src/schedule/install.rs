@@ -1166,6 +1166,25 @@ mod tests {
 
     // -- fixtures -----------------------------------------------------------
 
+    /// Taking `install.lock` must work under a state root that came out of
+    /// `fs::canonicalize`. On Windows that is a verbatim path (`\\?\C:\...`),
+    /// and the private-file helper used to stat every path component including
+    /// the bare volume prefix — which opens the volume device and fails with
+    /// `ERROR_INVALID_FUNCTION` ("Incorrect function. (os error 1)"), so
+    /// `xv schedule uninstall` refused before it classified anything.
+    #[test]
+    fn the_store_opens_under_a_canonicalized_state_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = std::fs::canonicalize(dir.path()).unwrap();
+        let paths = crate::schedule::manifest::test_paths_in(&canonical);
+
+        let store =
+            RealOwnedScheduleStore::open(&paths).expect("the install lock must be takeable");
+
+        assert!(paths.install_lock_path().exists());
+        drop(store);
+    }
+
     fn manifest_path() -> PathBuf {
         PathBuf::from(fixture_abs(
             "/home/u/.local/state/xv/schedules/rotation-default/manifest.json",

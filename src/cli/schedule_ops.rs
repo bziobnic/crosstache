@@ -83,18 +83,6 @@ fn home_dir() -> Result<PathBuf> {
     })
 }
 
-/// Default log destination: `$XDG_STATE_HOME/xv/rotate.log`, else
-/// `~/.local/state/xv/rotate.log`.
-fn default_log_path(home: &Path) -> PathBuf {
-    std::env::var("XDG_STATE_HOME")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".local/state"))
-        .join("xv")
-        .join("rotate.log")
-}
-
 /// The path of *this* binary, so the unit keeps working when PATH changes or
 /// the user's shell init is not sourced.
 fn current_exe() -> Result<PathBuf> {
@@ -268,14 +256,24 @@ fn resolve_log_path(log_file: &str) -> Result<PathBuf> {
 
 /// Build the schedule from flags plus the current process's environment.
 ///
-/// `state_home` is `ScheduleStatePaths::pinned_state_home` for the paths the
-/// manifest is being written to: the unit has to carry whichever variable
-/// picked that root, or the scheduled run will look somewhere else for it.
+/// `state_paths` is the *resolved* state directory the manifest is being
+/// written to. Everything rooted in the state directory comes from it: the
+/// default log destination (`<state root>/xv/rotate.log`) and
+/// `pinned_state_home`, the variable the unit has to carry so a scheduled run
+/// that inherits none of the installing shell's environment resolves the same
+/// root rather than looking somewhere else for its manifest.
+///
+/// Deliberately one resolver. The default log path used to read
+/// `XDG_STATE_HOME`/`$HOME/.local/state` itself, which agrees with
+/// [`crate::schedule::manifest::resolve`] on Unix and disagrees with it on
+/// Windows — where `XDG_STATE_HOME` is not an input at all — so an installing
+/// shell with that variable set produced a unit whose log lived under it and
+/// whose `--manifest` argument lived under `%LOCALAPPDATA%`.
 fn build_schedule(
     interval: ScheduleInterval,
     command: ScheduleCommand,
     log_file: Option<String>,
-    state_home: Option<(&'static str, PathBuf)>,
+    state_paths: &manifest::ScheduleStatePaths,
 ) -> Result<RotationSchedule> {
     let home = home_dir()?;
     // One spelling of the executable everywhere: the manifest, the preview's
@@ -283,7 +281,7 @@ fn build_schedule(
     let binary = recorded_binary_path()?;
     let log_path = match log_file {
         Some(raw) => resolve_log_path(&raw)?,
-        None => default_log_path(&home),
+        None => state_paths.default_log_path(),
     };
 
     Ok(RotationSchedule {
@@ -292,7 +290,7 @@ fn build_schedule(
         binary,
         log_path,
         home,
-        state_home,
+        state_home: state_paths.pinned_state_home(),
     })
 }
 
@@ -325,7 +323,7 @@ async fn execute_install(
             working_directory: resolved.working_directory.clone(),
         },
         log_file,
-        state_paths.pinned_state_home(),
+        &state_paths,
     )?;
     let paths = UnitPaths::for_platform(platform, &schedule.home);
     let manifest_v1 = build_manifest(&schedule, &resolved)?;
