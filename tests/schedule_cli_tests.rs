@@ -812,8 +812,8 @@ cache_ttl_secs = 0
 clipboard_timeout = 0
 
 [local]
-store_path = "{store}"
-key_file = "{key}"
+store_path = '{store}'
+key_file = '{key}'
 default_vault = "default"
 "#,
         store = store.display(),
@@ -1027,10 +1027,23 @@ fn schedule_run_is_hidden_from_help() {
 
 #[test]
 fn an_installing_shells_state_home_is_pinned_into_the_unit() {
-    // The bug: a user whose profile sets XDG_STATE_HOME gets a manifest under
-    // it and a unit pointing there, but launchd and systemd user units export
-    // no XDG_STATE_HOME — so at fire time the runner recomputes
-    // $HOME/.local/state/... and refuses the manifest it was just handed.
+    // The bug: a user whose profile sets the state-home variable gets a
+    // manifest under it and a unit pointing there, but launchd and systemd
+    // user units export no such variable — so at fire time the runner
+    // recomputes $HOME/.local/state/... and refuses the manifest it was just
+    // handed.
+    //
+    // Which variable that is, is platform-dependent and the design says so:
+    // `XDG_STATE_HOME` is a *Unix* state root
+    // (`docs/superpowers/specs/2026-09-09-scheduled-target-manifest-design.md`,
+    // "Files and ownership"), while `XV_STATE_HOME` overrides on every
+    // platform. Setting XDG_STATE_HOME on Windows selects nothing, so the test
+    // asks with the variable this platform actually resolves.
+    let state_var = if cfg!(windows) {
+        "XV_STATE_HOME"
+    } else {
+        "XDG_STATE_HOME"
+    };
     let (_cmd, _tmp, store) = xv_isolated_local_with_opts(false, false);
     use_the_store_once(&store);
     let root = store.parent().unwrap();
@@ -1038,7 +1051,7 @@ fn an_installing_shells_state_home_is_pinned_into_the_unit() {
     std::fs::create_dir_all(&state).unwrap();
 
     let out = xv_cmd_for(&store)
-        .env("XDG_STATE_HOME", &state)
+        .env(state_var, &state)
         .args(["schedule", "install", "--print", "--vault", "prod-kv"])
         .output()
         .unwrap();
@@ -1060,14 +1073,22 @@ fn an_installing_shells_state_home_is_pinned_into_the_unit() {
         "expected {} in:\n{combined}",
         expected.display()
     );
-    // ...so the unit must carry the variable that put it there.
+    // ...the default log must come from that same root, or the unit's two
+    // halves would describe two different installs.
+    let expected_log = state.join("xv").join("rotate.log");
     assert!(
-        combined.contains(&format!("XDG_STATE_HOME={}", state.display()))
+        combined.contains(&expected_log.display().to_string()),
+        "expected the log at {} in:\n{combined}",
+        expected_log.display()
+    );
+    // ...so the unit must carry the variable that put them there.
+    assert!(
+        combined.contains(&format!("{state_var}={}", state.display()))
             || combined.contains(&format!(
-                "<key>XDG_STATE_HOME</key>\n        <string>{}</string>",
+                "<key>{state_var}</key>\n        <string>{}</string>",
                 state.display()
             )),
-        "the unit does not pin XDG_STATE_HOME:\n{combined}"
+        "the unit does not pin {state_var}:\n{combined}"
     );
 }
 
@@ -1479,10 +1500,15 @@ fn changed_config_bytes_refuse_the_run() {
     let out = fixture.run();
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
     assert_eq!(out.status.code(), Some(3), "{stderr}");
+    // Against the path *as the manifest recorded it*, which is what the
+    // refusal prints: on Windows the fixture holds the canonicalized (verbatim,
+    // long-name) spelling and xv records the canonical one with the verbatim
+    // prefix stripped, so comparing to `fixture.config_path()` compares two
+    // spellings of the same file.
     assert!(
         stderr.contains(&format!(
             "config_digest changed; review {} and reinstall",
-            fixture.config_path().display()
+            recorded(&fixture.manifest, "/target/config_path")
         )),
         "{stderr}"
     );
@@ -1755,14 +1781,17 @@ fn a_pinned_sweep_does_not_invalidate_its_own_context() {
 fn a_missing_working_directory_refuses_the_run() {
     let fixture = pinned_run_fixture(&[], |_| {});
     let before = fixture.value();
-    let body = std::fs::read_to_string(&fixture.manifest).unwrap();
-    let gone = fixture.root.join("gone");
-    let edited = body.replace(
-        &format!("\"working_directory\": \"{}\"", json_path(&fixture.root)),
-        &format!("\"working_directory\": \"{}\"", json_path(&gone)),
-    );
-    assert_ne!(edited, body, "manifest shape changed: {body}");
-    std::fs::write(&fixture.manifest, edited).unwrap();
+    // Derived from the recorded value so the result is absolute and normalized
+    // in whatever spelling this platform records, and so it certainly does not
+    // exist.
+    edit_manifest(&fixture.manifest, |json| {
+        let recorded = json["execution"]["working_directory"]
+            .as_str()
+            .expect("the manifest records a working directory")
+            .to_string();
+        json["execution"]["working_directory"] =
+            serde_json::Value::String(format!("{recorded}-gone"));
+    });
 
     let out = fixture.run();
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
@@ -1827,6 +1856,39 @@ fn a_changed_backend_identity_refuses_the_run() {
         .expect(&stderr);
     assert!(config_at < identity_at, "{stderr}");
     assert_eq!(fixture.value(), before);
+}
+
+/// Edit the published manifest through `serde_json`, not by substituting a
+/// path string the test happens to hold.
+///
+/// The recorded spelling of a path is *xv's*, not the fixture's: the fixture
+/// canonicalizes its tempdir, which on Windows yields a verbatim
+/// `\\?\C:\...` path (and resolves an 8.3 short name such as `RUNNER~1` to
+/// its long form), while the manifest records the canonical path with the
+/// verbatim prefix stripped. A `body.replace(<fixture path>)` therefore matches
+/// nothing and silently leaves the manifest unedited — which is a passing
+/// `replace` and a failing assertion, on Windows only.
+fn edit_manifest(path: &std::path::Path, edit: impl FnOnce(&mut serde_json::Value)) {
+    let body = std::fs::read_to_string(path).unwrap();
+    let mut json: serde_json::Value =
+        serde_json::from_str(&body).unwrap_or_else(|e| panic!("manifest is not JSON: {e}\n{body}"));
+    edit(&mut json);
+    std::fs::write(
+        path,
+        format!("{}\n", serde_json::to_string_pretty(&json).unwrap()),
+    )
+    .unwrap();
+}
+
+/// A string field of the published manifest, by JSON pointer — the spelling xv
+/// recorded, which is what it prints back in a drift refusal.
+fn recorded(manifest: &std::path::Path, pointer: &str) -> String {
+    let body = std::fs::read_to_string(manifest).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    json.pointer(pointer)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_else(|| panic!("manifest has no string at {pointer}:\n{body}"))
+        .to_string()
 }
 
 /// A path as it appears inside the JSON/TOML fixtures (Windows separators are
