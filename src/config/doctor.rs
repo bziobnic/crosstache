@@ -803,6 +803,9 @@ pub fn cache_health_check(cache_dir: &Path) -> DoctorCheck {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    // Only the Unix permission-mode tests below name `Path` directly; on
+    // Windows the import would be unused.
+    #[cfg(unix)]
     use std::path::Path;
 
     use crate::config::{

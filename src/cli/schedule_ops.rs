@@ -9,9 +9,14 @@ use std::path::{Path, PathBuf};
 use crate::cli::commands::ScheduleCommands;
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
-use crate::schedule::manifest::{
-    self as manifest, ManifestCadence, ManifestExecution, ScheduleManifestV1,
+use crate::schedule::drift;
+use crate::schedule::install::{
+    install_transactional, uninstall_owned, InstallPlan, RealOwnedScheduleStore,
 };
+use crate::schedule::manifest::{
+    self as manifest, ManifestCadence, ManifestExecution, ManifestTarget, ScheduleManifestV1,
+};
+use crate::schedule::ownership::{self, Ownership, SchedulerProbe};
 use crate::schedule::preview::render_install_preview;
 use crate::schedule::target::{
     canonical_path_for_manifest, manifest_path_string, resolve_install_target,
@@ -20,8 +25,10 @@ use crate::schedule::target::{
 use crate::schedule::{
     self, Platform, ProcessRunner, RotationSchedule, ScheduleCommand, ScheduleInterval, UnitPaths,
 };
+use crate::secret::scheduled_rotation::{
+    run_due_rotation, DueRotationOptions, DueRotationSummary, SilentObserver,
+};
 use crate::utils::output;
-use crate::workspace::WorkspaceSource;
 
 pub(crate) async fn execute_schedule_command(
     command: ScheduleCommands,
@@ -36,9 +43,36 @@ pub(crate) async fn execute_schedule_command(
             print,
             force,
         } => execute_install(&interval, &at, vault, log_file, print, force, &config).await,
-        ScheduleCommands::Status => execute_status(&config).await,
+        ScheduleCommands::Status => execute_status().await,
         ScheduleCommands::Uninstall => execute_uninstall().await,
+        ScheduleCommands::Run { manifest } => execute_run(&manifest).await,
     }
+}
+
+/// The scheduler this process should talk to.
+///
+/// Always the real one in a release build: the whole switch below is behind
+/// `cfg(debug_assertions)`, so a shipped `xv` contains no fake runner and reads
+/// no environment variable to choose one.
+///
+/// In a debug build `XV_SCHEDULE_RUNNER=fake` swaps in
+/// [`crate::schedule::testing::RecordingRunner`]. That exists because
+/// `launchctl`, `systemctl --user` and `schtasks` act on the invoking user's
+/// live session under a fixed global job name — `HOME` does not sandbox them —
+/// so a CLI test that spawned `xv schedule uninstall` for real would deregister
+/// the developer's own rotation schedule.
+#[cfg(debug_assertions)]
+fn schedule_runner() -> Box<dyn schedule::CommandRunner> {
+    use crate::schedule::testing;
+    match std::env::var(testing::RUNNER_VAR).as_deref() {
+        Ok(testing::FAKE) => Box::new(testing::RecordingRunner::from_env()),
+        _ => Box::new(ProcessRunner),
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn schedule_runner() -> Box<dyn schedule::CommandRunner> {
+    Box::new(ProcessRunner)
 }
 
 /// Home directory used for both the unit location and the scheduled process's
@@ -47,18 +81,6 @@ fn home_dir() -> Result<PathBuf> {
     dirs::home_dir().ok_or_else(|| {
         CrosstacheError::config("could not determine the home directory".to_string())
     })
-}
-
-/// Default log destination: `$XDG_STATE_HOME/xv/rotate.log`, else
-/// `~/.local/state/xv/rotate.log`.
-fn default_log_path(home: &Path) -> PathBuf {
-    std::env::var("XDG_STATE_HOME")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".local/state"))
-        .join("xv")
-        .join("rotate.log")
 }
 
 /// The path of *this* binary, so the unit keeps working when PATH changes or
@@ -232,28 +254,26 @@ fn resolve_log_path(log_file: &str) -> Result<PathBuf> {
     Ok(resolved)
 }
 
-/// The `--vault` value the interim legacy install carries.
-///
-/// The installed legacy command re-resolves this string at run time through
-/// [`crate::cli::helpers::resolve_vault_ref_with_workspace`], which looks it up
-/// as an attached workspace alias first and only falls back to a raw vault name
-/// on the *active* backend. So in a configured workspace the alias is the value
-/// that survives the round trip: handing it the real vault instead would be
-/// read as a raw name on the active backend, sweeping the wrong backend for any
-/// alias attached to another one. In the degenerate workspace-of-one there is
-/// no alias to look up, and the raw vault is exactly what resolution expects.
-fn legacy_vault_argument(resolved: &ResolvedScheduleTarget) -> String {
-    match resolved.workspace_source {
-        WorkspaceSource::Context | WorkspaceSource::ProjectToml => resolved.entry.alias.clone(),
-        WorkspaceSource::Degenerate => resolved.target.vault.clone(),
-    }
-}
-
 /// Build the schedule from flags plus the current process's environment.
+///
+/// `state_paths` is the *resolved* state directory the manifest is being
+/// written to. Everything rooted in the state directory comes from it: the
+/// default log destination (`<state root>/xv/rotate.log`) and
+/// `pinned_state_home`, the variable the unit has to carry so a scheduled run
+/// that inherits none of the installing shell's environment resolves the same
+/// root rather than looking somewhere else for its manifest.
+///
+/// Deliberately one resolver. The default log path used to read
+/// `XDG_STATE_HOME`/`$HOME/.local/state` itself, which agrees with
+/// [`crate::schedule::manifest::resolve`] on Unix and disagrees with it on
+/// Windows — where `XDG_STATE_HOME` is not an input at all — so an installing
+/// shell with that variable set produced a unit whose log lived under it and
+/// whose `--manifest` argument lived under `%LOCALAPPDATA%`.
 fn build_schedule(
     interval: ScheduleInterval,
     command: ScheduleCommand,
     log_file: Option<String>,
+    state_paths: &manifest::ScheduleStatePaths,
 ) -> Result<RotationSchedule> {
     let home = home_dir()?;
     // One spelling of the executable everywhere: the manifest, the preview's
@@ -261,7 +281,7 @@ fn build_schedule(
     let binary = recorded_binary_path()?;
     let log_path = match log_file {
         Some(raw) => resolve_log_path(&raw)?,
-        None => default_log_path(&home),
+        None => state_paths.default_log_path(),
     };
 
     Ok(RotationSchedule {
@@ -269,13 +289,8 @@ fn build_schedule(
         command,
         binary,
         log_path,
-        // Carry the *current* config location into the unit so the scheduled run
-        // resolves the same configuration the user just tested against.
-        config_home: std::env::var("XDG_CONFIG_HOME")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .map(PathBuf::from),
         home,
+        state_home: state_paths.pinned_state_home(),
     })
 }
 
@@ -298,43 +313,30 @@ async fn execute_install(
     // context that may since have changed.
     let resolved = resolve_target(vault.as_deref(), config).await?;
 
+    // `resolve_from_process_env` only computes paths; it creates nothing, so
+    // this is safe on the `--print` path too.
+    let state_paths = manifest::resolve_from_process_env()?;
+    let schedule = build_schedule(
+        interval,
+        ScheduleCommand::ManifestRun {
+            manifest: state_paths.manifest_path(),
+            working_directory: resolved.working_directory.clone(),
+        },
+        log_file,
+        &state_paths,
+    )?;
+    let paths = UnitPaths::for_platform(platform, &schedule.home);
+    let manifest_v1 = build_manifest(&schedule, &resolved)?;
+
     if print {
         // Dry run: show exactly what installation would write — the pinned
         // manifest and the units that read it — and write nothing at all.
-        // `resolve_from_process_env` only computes paths; it creates nothing.
-        let state_paths = manifest::resolve_from_process_env()?;
-        let manifest_path = state_paths.manifest_path();
-        // `build_schedule` already records the executable and the log path in
-        // the manifest's spelling, so the preview, the manifest and the unit
-        // all read the same strings.
-        let schedule = build_schedule(
-            interval,
-            ScheduleCommand::ManifestRun {
-                manifest: manifest_path.clone(),
-                working_directory: resolved.working_directory.clone(),
-            },
-            log_file,
-        )?;
-        let paths = UnitPaths::for_platform(platform, &schedule.home);
-        let manifest = build_manifest(&schedule, &resolved)?;
         print!(
             "{}",
-            render_install_preview(platform, &schedule, &paths, &manifest)
+            render_install_preview(platform, &schedule, &paths, &manifest_v1)
         );
         return Ok(());
     }
-
-    // Until the pinned runner ships, the *installed* command is still the
-    // legacy sweep against the resolved real vault. Nothing is written to the
-    // schedule state directory, so there is no manifest for a runner to read.
-    let schedule = build_schedule(
-        interval,
-        ScheduleCommand::LegacyRotateDue {
-            vault: Some(legacy_vault_argument(&resolved)),
-        },
-        log_file,
-    )?;
-    let paths = UnitPaths::for_platform(platform, &schedule.home);
 
     if !force {
         output::warn(&format!(
@@ -366,17 +368,43 @@ async fn execute_install(
         }
     }
 
-    schedule::install(platform, &schedule, &paths, &ProcessRunner)?;
+    // The manifest is the target; the unit is only a pointer to it. Both are
+    // published by one transaction so a failure cannot leave a job without a
+    // manifest to read, or — on reinstall — destroy the schedule the user
+    // already had. `installed_at` is stamped here rather than in
+    // `build_manifest` because the preview must stay deterministic (it renders
+    // the placeholder) and because the recorded time should be the moment the
+    // target was actually pinned.
+    let now = chrono::Utc::now();
+    let manifest_bytes = stamp_and_serialize_manifest(manifest_v1, now)?;
+    let plan = InstallPlan::new(platform, schedule.clone(), paths.clone(), manifest_bytes)?;
+    // Stages 1 and 2 — resolving the target and rendering the manifest and
+    // units — mutate nothing, which is why they (and the confirmation prompt)
+    // deliberately run before the lock is taken: a person deciding at a prompt
+    // must not hold an exclusive lock while they think.
+    //
+    // Opening the store takes the exclusive `install.lock` and holds it until
+    // the transaction ends, so a second installer cannot interleave with this
+    // one.
+    let mut store = RealOwnedScheduleStore::open(&state_paths)?;
+    let report = install_transactional(&plan, &mut store, schedule_runner().as_ref(), now)?;
+    let manifest_path = report.manifest_path.clone();
 
     output::success(&format!(
-        "Installed a {} rotation schedule: {}.",
+        "{} a {} rotation schedule: {}.",
+        if report.replaced_prior_schedule {
+            "Reinstalled"
+        } else {
+            "Installed"
+        },
         platform.name(),
         schedule.interval.describe()
     ));
-    output::info(&format!("  Command: {}", schedule.command_line()));
-    output::info(&format!("  Log:     {}", schedule.log_path.display()));
+    output::info(&format!("  Command:  {}", schedule.command_line()));
+    output::info(&format!("  Manifest: {}", manifest_path.display()));
+    output::info(&format!("  Log:      {}", schedule.log_path.display()));
     for unit in schedule::unit_paths_for(platform, &paths) {
-        output::info(&format!("  Unit:    {}", unit.display()));
+        output::info(&format!("  Unit:     {}", unit.display()));
     }
     output::hint(
         "A scheduled run has no terminal, so any credential that needs interaction will fail \
@@ -387,9 +415,29 @@ async fn execute_install(
     Ok(())
 }
 
+/// Stamp `installed_at`, validate, and serialize the manifest's exact bytes.
+///
+/// `now` is a parameter so the whole sequence is testable end to end. What
+/// makes it worth extracting is the ordering: validation runs *before*
+/// serialization, so a manifest this build would refuse to load never reaches
+/// the install transaction — the alternative is an installed job that fails
+/// every night on a file only a reinstall can fix.
+fn stamp_and_serialize_manifest(
+    mut manifest_v1: ScheduleManifestV1,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Vec<u8>> {
+    // Seconds precision and a `Z` suffix: the schema requires UTC, and the
+    // stamp is read by people and compared for drift, not used as a clock.
+    manifest_v1.installed_at = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    manifest::validate_v1(&manifest_v1)?;
+    Ok(manifest::serialize_manifest(&manifest_v1))
+}
+
 /// Assemble the manifest installation would write for this schedule and
-/// target. `installed_at` is a placeholder: the real value is stamped by the
-/// write itself, and the preview renders it as `<set-at-install>`.
+/// target. `installed_at` is left empty: [`execute_install`] stamps it just
+/// before writing, and the preview renders the empty value as
+/// `<set-at-install>`. Keeping it out of here is what lets the preview be
+/// deterministic and byte-comparable across runs.
 fn build_manifest(
     schedule: &RotationSchedule,
     resolved: &ResolvedScheduleTarget,
@@ -460,151 +508,1125 @@ async fn resolve_target(vault: Option<&str>, config: &Config) -> Result<Resolved
     .await
 }
 
-async fn execute_status(config: &Config) -> Result<()> {
-    let platform = Platform::detect()?;
-    let home = home_dir()?;
-    let paths = UnitPaths::for_platform(platform, &home);
-
-    let status = schedule::status(platform, &paths, &ProcessRunner)?;
-
-    if status.installed {
-        output::success(&format!(
-            "A {} rotation schedule is installed.",
-            platform.name()
-        ));
-    } else {
-        output::info(&format!(
-            "No {} rotation schedule is installed.",
-            platform.name()
-        ));
+/// Accept only the manifest path this user's own installation owns.
+///
+/// The scheduler passes `--manifest` verbatim, so whoever can influence that
+/// argument — a hand-edited unit, a foreign job reusing our subcommand — picks
+/// what gets rotated. Comparing against the owned location makes the flag a
+/// consistency check rather than a target-selection input, which is what
+/// invariant 2 requires of everything outside the manifest.
+///
+/// Both sides are compared in the same canonical form so `/tmp/...` and
+/// `/private/tmp/...` on macOS are not mistaken for different files. The path
+/// need not exist yet: a missing manifest is a separate, more useful error than
+/// "wrong path", and it is reported as one.
+fn check_owned_manifest_path(supplied: &Path, owned: &Path) -> Result<()> {
+    if !supplied.is_absolute() {
+        return Err(CrosstacheError::config(format!(
+            "'xv schedule run --manifest' requires an absolute path: '{}'. This command is \
+             scheduler plumbing; the installed job passes the right path itself.",
+            supplied.display()
+        )));
     }
-    output::info(&format!("  {}", status.detail));
-
-    for unit in schedule::unit_paths_for(platform, &paths) {
-        output::info(&format!(
-            "  Unit:    {} ({})",
-            unit.display(),
-            if unit.exists() { "present" } else { "absent" }
-        ));
-    }
-
-    let log = default_log_path(&home);
-    output::info(&format!(
-        "  Log:     {} ({})",
-        log.display(),
-        if log.exists() {
-            "present"
-        } else {
-            "not yet written"
+    // A symlink here would let the checked path and the read path be two
+    // different files. `load_manifest` refuses one too; refusing it before the
+    // comparison keeps the equality below honest.
+    match std::fs::symlink_metadata(supplied) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(CrosstacheError::config(format!(
+                "Refusing symlinked schedule manifest '{}'; reinstall the schedule with \
+                 'xv schedule install' to regenerate it.",
+                supplied.display()
+            )));
         }
-    ));
-
-    if !status.installed {
-        output::hint("Install one with 'xv schedule install --vault <vault>'.");
-        return Ok(());
+        // Everything else — not a symlink, or the metadata call itself failed
+        // (NotFound, permission denied, an I/O error) — falls through on
+        // purpose. This check exists only to reject a symlink; it is not the
+        // existence or readability check. A path that cannot be stat'ed still
+        // has to pass the equality below, and `load_manifest` then opens the
+        // owned path no-follow and surfaces the real error there, where the
+        // message can name reinstall.
+        _ => {}
     }
-
-    // What the schedule will actually act on, so status answers the real
-    // question — "will anything rotate tonight?" — not just "is a job present?".
-    let vault_hint = if config.default_vault.is_empty() {
-        "<resolved from context at run time>".to_string()
-    } else {
-        config.default_vault.clone()
-    };
-    output::info(&format!("  Vault:   {vault_hint}"));
-    output::hint("Run 'xv rotate --check' to see which secrets the next sweep would rotate.");
+    if comparable_form(supplied) != comparable_form(owned) {
+        return Err(CrosstacheError::config(format!(
+            "'xv schedule run --manifest {}' does not name this user's schedule manifest \
+             ('{}'). Reinstall the schedule with 'xv schedule install' so its job points at the \
+             owned manifest.",
+            supplied.display(),
+            owned.display()
+        )));
+    }
     Ok(())
 }
 
+/// The path with its *directory* canonicalized, leaving the file name alone so
+/// a not-yet-existing manifest still compares correctly.
+fn comparable_form(path: &Path) -> PathBuf {
+    let Some(parent) = path.parent() else {
+        return path.to_path_buf();
+    };
+    let base = canonical_path_for_manifest(parent).unwrap_or_else(|_| parent.to_path_buf());
+    match path.file_name() {
+        Some(name) => base.join(name),
+        None => base,
+    }
+}
+
+/// `xv schedule run --manifest <path>` — the pinned scheduled sweep.
+///
+/// Ordering is the security property: the path check, the bounded,
+/// symlink-refusing manifest load, and the full drift validation all happen
+/// before anything that could construct a backend, so a malformed, oversized,
+/// symlinked, foreign or drifted manifest cannot reach a provider — let alone
+/// mutate a secret.
+///
+/// **No target-selection input comes from the environment.** Nothing on this
+/// path reads `XV_BACKEND` or `XV_ENV`, nothing reads or writes the ambient
+/// context file — the sweep passes `track_context_usage: false`, precisely
+/// because a usage bump would change the very bytes `context_digest` pins —
+/// and the directory the scheduler happened to start the process in does not
+/// select anything: the run sets the process cwd to the recorded
+/// `working_directory` before the sweep, so ambient-cwd helpers see the
+/// directory the manifest names. Every selection input comes out of the
+/// manifest.
+///
+/// Two environment reads remain, and neither selects a target: the state root
+/// (`XV_STATE_HOME`/`XDG_STATE_HOME`), which locates the owned manifest and is
+/// pinned into the unit at install time, and `XV_NO_PARENT_CONFIG`, which
+/// `resolve_record_types` consults when loading custom `[types.*]` schemas
+/// from the recorded project file — record *shapes*, not which vault or
+/// backend is rotated. (Install refuses when that variable would change
+/// project discovery; see `drift`.)
+async fn execute_run(supplied_manifest: &Path) -> Result<()> {
+    let state_paths = manifest::resolve_from_process_env()?;
+    let owned = state_paths.manifest_path();
+    check_owned_manifest_path(supplied_manifest, &owned)?;
+
+    if !owned.exists() {
+        return Err(CrosstacheError::config(format!(
+            "the pinned schedule manifest '{}' is missing; reinstall the schedule with \
+             'xv schedule install'.",
+            owned.display()
+        )));
+    }
+
+    // Bounded, no-follow, schema-validated. Any failure names reinstall,
+    // because a manifest this process cannot trust is not something a
+    // scheduled run may work around.
+    let manifest::ScheduleManifest::V1(manifest) =
+        manifest::load_manifest(&state_paths).map_err(|e| {
+            CrosstacheError::config(format!(
+                "{e}. Reinstall the schedule with 'xv schedule install' to regenerate it."
+            ))
+        })?;
+
+    // Recompute the recorded target from the recorded inputs. This reads
+    // files and nothing else — no backend is constructed until it returns a
+    // non-refusing verdict (design invariant 4).
+    let report = drift::validate_recorded_target(
+        &manifest,
+        &recorded_binary_path()?,
+        env!("CARGO_PKG_VERSION"),
+    )
+    .await;
+
+    for warning in &report.warnings {
+        output::warn(&warning.detail);
+    }
+
+    if report.is_refused() {
+        return refused_drift_outcome(&report).into_cli_result();
+    }
+
+    execute_pinned_run(&manifest).await.into_cli_result()
+}
+
+/// What the run did, in the shape `last-run.json` needs.
+///
+/// **Seam for PR 3 (outcome persistence).** Nothing here is written to disk
+/// yet; the runner returns this draft instead of persisting it so the file
+/// format, its locking and its retention can land as one change. Everything a
+/// result file needs is already in it, and everything in it is safe to
+/// serialize: counts, a fixed state token, and a diagnostic whose code and
+/// message come from closed sets (`DueRotationFailureCategory::code`,
+/// `DueRotationErrorKind::code`, or the drift fields) — never from a secret
+/// name, a vault value, or a provider error body.
+// The three persisted fields are read by PR 3's outcome writer; the runner
+// itself only needs `error` to decide the exit.
+#[derive(Debug)]
+#[allow(dead_code)]
+pub(crate) struct RunOutcomeDraft {
+    pub(crate) state: RunState,
+    pub(crate) summary: Option<DueRotationSummary>,
+    pub(crate) diagnostic: Option<RunDiagnostic>,
+    /// The error this outcome exits with. Deliberately not part of the
+    /// persisted shape: it is the human-facing CLI error, which may name the
+    /// vault and quote a provider message, while `diagnostic` is the redacted
+    /// form a result file may keep.
+    error: Option<CrosstacheError>,
+}
+
+/// The `state` field of a scheduled run's outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunState {
+    Success,
+    PartialFailure,
+    Failed,
+    RefusedDrift,
+}
+
+impl RunState {
+    /// The literal written to `last-run.json` (PR 3).
+    #[allow(dead_code)]
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            RunState::Success => "success",
+            RunState::PartialFailure => "partial_failure",
+            RunState::Failed => "failed",
+            RunState::RefusedDrift => "refused_drift",
+        }
+    }
+}
+
+/// A redacted diagnostic: a stable code plus a sanitized message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RunDiagnostic {
+    pub(crate) code: String,
+    pub(crate) message: String,
+}
+
+impl RunOutcomeDraft {
+    /// Turn the draft into the process's exit behavior.
+    pub(crate) fn into_cli_result(self) -> Result<()> {
+        match self.error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+}
+
+/// The refusal outcome for a full validation report.
+fn refused_drift_outcome(report: &drift::DriftReport) -> RunOutcomeDraft {
+    refused_drift_from_reasons(&report.reasons)
+}
+
+/// Print drift reasons and build the refusal outcome.
+///
+/// One stderr line per reason, in manifest-field order, plus a hint naming the
+/// only operation that accepts a changed target. The exit is the ordinary
+/// configuration-error code (3) via [`CrosstacheError::config`]. Used both for
+/// a full [`drift::DriftReport`] and for the single-reason refusals the run
+/// itself discovers (a working directory that has since gone, a config file
+/// that has since become unreadable, a vault that no longer verifies).
+fn refused_drift_from_reasons(reasons: &[drift::DriftReason]) -> RunOutcomeDraft {
+    output::error("The recorded rotation target has changed; refusing to rotate.");
+    for reason in reasons {
+        output::error(&format!("  - {}", reason.detail));
+    }
+    output::hint("Review the changes, then run 'xv schedule install' to accept the new target.");
+
+    let fields: Vec<&str> = reasons.iter().map(|reason| reason.field).collect();
+    RunOutcomeDraft {
+        state: RunState::RefusedDrift,
+        summary: None,
+        diagnostic: Some(RunDiagnostic {
+            code: "target_drift".to_string(),
+            // Field names only — the same closed set the manifest schema
+            // defines, never a path or a file's contents.
+            message: format!(
+                "{} changed; review the recorded target and reinstall",
+                fields.join(" and ")
+            ),
+        }),
+        error: Some(CrosstacheError::config(format!(
+            "the recorded rotation target has drifted ({} reason(s) reported above); reinstall \
+             the schedule with 'xv schedule install' to accept the new target.",
+            reasons.len()
+        ))),
+    }
+}
+
+/// Run the sweep the manifest pinned, after drift validation has passed.
+///
+/// Every input is the recorded one: the process moves to the recorded working
+/// directory (helpers reached from rotation — record-type resolution, for one
+/// — still read the ambient directory, and the recorded one is the directory
+/// the target was resolved in), the configuration is re-read from the recorded
+/// path rather than taken from the process config, and only the recorded
+/// registry backend is constructed. `runtime_open_existing_local` is set so a
+/// local store that has gone missing is an error instead of being invented.
+///
+/// Returns a [`RunOutcomeDraft`] on **every** path, including the failures
+/// before rotation starts: an unattended run has to be able to record what it
+/// did (or refused to do), and a bare `Err` here would be the one outcome
+/// PR 3's result file could not describe.
+async fn execute_pinned_run(manifest: &ScheduleManifestV1) -> RunOutcomeDraft {
+    let working_directory = Path::new(&manifest.execution.working_directory);
+    if std::env::set_current_dir(working_directory).is_err() {
+        // Validation checked this directory moments ago, so this is a race (or
+        // a permission change) rather than ordinary drift — but it is the same
+        // condition and the same advice, so it is reported the same way.
+        return refused_drift_from_reasons(&[drift::DriftReason::missing_at(
+            "working_directory",
+            &manifest.execution.working_directory,
+        )]);
+    }
+
+    pin_recorded_environment(&manifest.target);
+
+    run_recorded_sweep(manifest).await
+}
+
+/// Pin `XV_ENV` in this process to the recorded environment — or remove it
+/// when the manifest recorded none.
+///
+/// [`prepare_recorded_config`]'s `env_flag` is not sufficient on its own:
+/// `project::resolve_env` reads `XV_ENV` *first* and falls back to the flag
+/// second, and a scheduler unit cannot unset a variable the user manager
+/// already exported into every job it starts (systemd `environment.d`,
+/// `launchctl setenv`). An ambient `XV_ENV` would therefore outrank the pinned
+/// target, and for a manifest that recorded no environment it would select one
+/// installation never approved.
+///
+/// Mutating the process environment is acceptable *here and nowhere else*:
+/// `xv schedule run` is a one-shot process whose whole job is to replay one
+/// recorded target, it is still single-threaded when this runs, and nothing
+/// after it wants the inherited value. Library code must never do this — it
+/// would reach into a caller's process.
+fn pin_recorded_environment(target: &ManifestTarget) {
+    match target.environment.as_deref() {
+        Some(environment) => std::env::set_var("XV_ENV", environment),
+        None => std::env::remove_var("XV_ENV"),
+    }
+}
+
+/// The configuration the pinned sweep runs under: the file read back from the
+/// recorded path, with the recorded `.xv.toml` environment replayed onto it.
+///
+/// Installation resolved `XV_ENV`/`--env` once and wrote the winning name into
+/// `target.environment`; the runner replays that name and consults neither
+/// ambient source (spec: scheduled-target-manifest, invariant 2). Drift
+/// validation already replays it for *its* recomputation, but the sweep itself
+/// ran with `env_flag: None` — so any helper reached from rotation that
+/// resolves a project profile (`Config::resolve_vault_name`,
+/// `resolve_group`, `resolve_record_types`'s project walk) would fall back to
+/// the project file's `default_env`, or fail closed when the file defines
+/// environments and none is selected.
+///
+/// `env_flag` is only half the fix. `project::resolve_env` consults `XV_ENV`
+/// first and the flag second, and while the rendered units carry no `XV_ENV`
+/// of their own they cannot *unset* one a user manager already exported into
+/// every job it starts (systemd `environment.d`, `launchctl setenv`). The
+/// other half is in [`execute_pinned_run`], which pins `XV_ENV` in the
+/// runner's own process before the sweep.
+///
+/// The profile itself is **not** folded into the config here. The sweep's
+/// backend and vault come literally from the manifest (`run_due_rotation`
+/// performs no workspace, context, or vault-name resolution), so folding
+/// `backend`/`vault` would re-resolve a selection the manifest already pinned.
+/// `None` is replayed as `None`: no environment was recorded, so none is
+/// selected.
+fn prepare_recorded_config(mut config: Config, target: &ManifestTarget) -> Config {
+    // A local store that has gone missing is an error, never something this
+    // run invents.
+    config.runtime_open_existing_local = true;
+    config.env_flag = target.environment.clone();
+    config
+}
+
+/// The pinned sweep, from the recorded working directory.
+///
+/// Split from [`execute_pinned_run`] so every step after the process-global
+/// `set_current_dir` is unit-testable: a test can exercise the config re-read
+/// and the vault verification without moving the test runner's own working
+/// directory.
+async fn run_recorded_sweep(manifest: &ScheduleManifestV1) -> RunOutcomeDraft {
+    let config_path = Path::new(&manifest.target.config_path);
+    let Ok((file_config, _bytes)) =
+        crate::config::settings::load_config_file_at_with_bytes(config_path).await
+    else {
+        return refused_drift_from_reasons(&[drift::DriftReason::missing_at(
+            "config_path",
+            &manifest.target.config_path,
+        )]);
+    };
+    let file_config = prepare_recorded_config(file_config, &manifest.target);
+
+    let backend_name = manifest.target.backend_name.as_str();
+    let vault = manifest.target.vault.as_str();
+    let entry = crate::workspace::WorkspaceEntry {
+        alias: manifest.target.workspace_alias.clone().unwrap_or_else(|| {
+            // The degenerate workspace's own labelling rule — the same one
+            // `select_entry` and drift validation use, so one vault never has
+            // two alias spellings.
+            crate::workspace::degenerate_alias_for(&file_config, vault)
+        }),
+        backend: backend_name.to_string(),
+        vault: vault.to_string(),
+        default: true,
+    };
+
+    // The same read-only verification installation performed, against the same
+    // target: a vault this process cannot list is not one it may rotate. The
+    // provider's error body is deliberately dropped — this reason is written
+    // to an unattended log.
+    if crate::schedule::target::probe_selected_target(&file_config, &entry)
+        .await
+        .is_err()
+    {
+        return refused_drift_from_reasons(&[drift::DriftReason::new(
+            "vault",
+            format!(
+                "vault '{vault}' on '{backend_name}' no longer verifies; review the vault and \
+                 reinstall"
+            ),
+        )]);
+    }
+
+    let registry = match crate::backend::BackendRegistry::with_lazy(
+        &file_config,
+        std::slice::from_ref(&entry.backend),
+    ) {
+        Ok(registry) => registry,
+        Err(error) => {
+            // Not drift — the target still resolves, this process just could
+            // not build it. Recorded with the same closed-set code the
+            // due-rotation service uses for an unusable backend.
+            let message = "the recorded backend could not be constructed";
+            output::error(&format!(
+                "cannot construct the recorded backend '{backend_name}': {error}"
+            ));
+            return RunOutcomeDraft {
+                state: RunState::Failed,
+                summary: None,
+                diagnostic: Some(RunDiagnostic {
+                    code: "backend-unavailable".to_string(),
+                    message: message.to_string(),
+                }),
+                error: Some(CrosstacheError::config(format!(
+                    "cannot construct the recorded backend '{backend_name}'"
+                ))),
+            };
+        }
+    };
+
+    output::step(&format!(
+        "Scheduled rotation sweep of '{vault}' on backend '{backend_name}'."
+    ));
+
+    match run_due_rotation(
+        &file_config,
+        &registry,
+        backend_name,
+        vault,
+        &DueRotationOptions::default(),
+        &mut SilentObserver,
+    )
+    .await
+    {
+        Ok(summary) if summary.failed == 0 => {
+            output::success(&format!(
+                "Rotated {} of {} due secret(s) in '{vault}'.",
+                summary.rotated, summary.due
+            ));
+            RunOutcomeDraft {
+                state: RunState::Success,
+                summary: Some(summary),
+                diagnostic: None,
+                error: None,
+            }
+        }
+        Ok(summary) => {
+            // A partial batch must not look like a success — the same rule
+            // (and the same configuration-error exit) `xv rotate --due` uses.
+            let mut codes: Vec<&'static str> = summary
+                .failures
+                .iter()
+                .map(|failure| failure.code())
+                .collect();
+            codes.sort_unstable();
+            codes.dedup();
+            let error = CrosstacheError::config(format!(
+                "rotated {} of {} due secret(s) in '{vault}'; {} failed ({})",
+                summary.rotated,
+                summary.due,
+                summary.failed,
+                codes.join(", ")
+            ));
+            output::error(&error.to_string());
+            RunOutcomeDraft {
+                state: RunState::PartialFailure,
+                diagnostic: summary.failures.first().map(|failure| RunDiagnostic {
+                    code: failure.code().to_string(),
+                    message: failure.message().to_string(),
+                }),
+                summary: Some(summary),
+                error: Some(error),
+            }
+        }
+        Err(failure) => {
+            // Whole-run failure: the vault was never read, so there is no
+            // honest summary to record. The redacted code/message go to the
+            // outcome; the source error is what the process exits with.
+            let diagnostic = RunDiagnostic {
+                code: failure.code().to_string(),
+                message: failure.message().to_string(),
+            };
+            RunOutcomeDraft {
+                state: RunState::Failed,
+                summary: None,
+                diagnostic: Some(diagnostic),
+                error: Some(failure.into()),
+            }
+        }
+    }
+}
+
+/// Read-only diagnosis of what is installed.
+///
+/// Two independent answers, kept apart on purpose: what the scheduler says,
+/// and what is on disk. It contacts no provider — vault verification belongs
+/// to install and to the run itself — and it never claims a target it cannot
+/// read from the manifest. PR 3 replaces this rendering with the design's full
+/// seven-dimension view; what is here is the honest subset.
+async fn execute_status() -> Result<()> {
+    let platform = Platform::detect()?;
+    let home = home_dir()?;
+    let unit_paths = UnitPaths::for_platform(platform, &home);
+    let state_paths = manifest::resolve_from_process_env()?;
+
+    let report = ownership::inspect_ownership(
+        platform,
+        &unit_paths,
+        &state_paths,
+        schedule_runner().as_ref(),
+    )?;
+
+    // Read the recorded target *before* the headline: a managed schedule whose
+    // target has drifted will refuse tonight, and announcing it as healthy and
+    // then contradicting that four lines later is not a diagnosis.
+    let recorded = match report.state {
+        Ownership::Managed | Ownership::OrphanedManifest => {
+            Some(read_recorded_target(&state_paths).await?)
+        }
+        _ => None,
+    };
+    let refuses = matches!(
+        recorded,
+        Some(RecordedTarget::Read { ref drift, .. }) if drift.is_refused()
+    );
+
+    match &report.state {
+        Ownership::Managed if refuses => output::error(&format!(
+            "The installed {} rotation schedule is unsafe to run.",
+            platform.name()
+        )),
+        Ownership::Managed => output::success(&format!(
+            "A {} rotation schedule is installed.",
+            platform.name()
+        )),
+        Ownership::LegacyUnpinned { .. } => output::warn(&format!(
+            "A legacy {} rotation schedule is installed.",
+            platform.name()
+        )),
+        Ownership::OrphanedManifest => output::warn(&format!(
+            "A rotation manifest exists but no {} is installed.",
+            platform.name()
+        )),
+        Ownership::Foreign { .. } => output::warn(&format!(
+            "Something xv did not write is at a path the {} rotation schedule owns.",
+            platform.name()
+        )),
+        // A scheduler that would not answer is not evidence of absence.
+        Ownership::Absent => match &report.scheduler {
+            SchedulerProbe::Error(_) => output::warn(&format!(
+                "Could not determine whether a {} rotation schedule is installed.",
+                platform.name()
+            )),
+            _ => output::info(&format!(
+                "No {} rotation schedule is installed.",
+                platform.name()
+            )),
+        },
+    }
+
+    if let Some(label) = report.state.label() {
+        output::info(&format!("  Ownership: {label}"));
+    }
+    match &report.scheduler {
+        SchedulerProbe::Error(detail) => output::error(&format!("  Scheduler: error ({detail})")),
+        probe => output::info(&format!("  Scheduler: {}", probe.describe())),
+    }
+
+    match &report.state {
+        Ownership::LegacyUnpinned { command_line } => {
+            output::info(&format!(
+                "  Command:   {}",
+                if command_line.is_empty() {
+                    "unknown (the scheduler did not report one)"
+                } else {
+                    command_line
+                }
+            ));
+            output::info(&format!(
+                "  Target:    {}",
+                ownership::unverified_target_note(command_line)
+            ));
+            output::hint(
+                "Replace it explicitly with 'xv schedule install --vault <alias-or-vault>'.",
+            );
+        }
+        Ownership::Managed | Ownership::OrphanedManifest => {
+            // Echo the name the schedule was installed with, so the hint is a
+            // command the user can paste. Only the placeholder is left when
+            // the manifest could not be read at all.
+            let vault_arg = recorded
+                .as_ref()
+                .and_then(RecordedTarget::install_argument)
+                .unwrap_or("<alias-or-vault>")
+                .to_string();
+            if let Some(recorded) = recorded {
+                recorded.report();
+            }
+            if matches!(report.state, Ownership::OrphanedManifest) {
+                output::hint(&format!(
+                    "Run 'xv schedule install --vault {vault_arg}' to repair the schedule, \
+                     or 'xv schedule uninstall' to remove the manifest.",
+                ));
+            } else if refuses {
+                output::hint(&format!(
+                    "Review the changes, then run 'xv schedule install --vault {vault_arg}' \
+                     to accept the new target.",
+                ));
+            }
+        }
+        Ownership::Foreign { paths } => {
+            for path in paths {
+                output::info(&format!("  Path:      {}", path.display()));
+            }
+            output::hint(
+                "xv will not overwrite or remove a file it did not write. Move it aside, then \
+                 run 'xv schedule install --vault <alias-or-vault>'.",
+            );
+        }
+        Ownership::Absent => {
+            output::hint("Install one with 'xv schedule install --vault <alias-or-vault>'.");
+        }
+    }
+
+    Ok(())
+}
+
+/// What `status` could learn from `manifest.json`.
+enum RecordedTarget {
+    /// The manifest is there but unusable; the message says why.
+    Unreadable(String),
+    /// The recorded target and what recomputing it says today.
+    Read {
+        /// The name the user installed with: the recorded workspace alias, or
+        /// the real vault in the degenerate (no workspace) case. This is what
+        /// a reinstall hint must echo — telling someone to rerun
+        /// `--vault <the real vault>` when they installed `--vault payments`
+        /// would send them at a different target.
+        alias: String,
+        summary: String,
+        drift: drift::DriftReport,
+    },
+}
+
+impl RecordedTarget {
+    /// The `--vault` value a reinstall hint should name, when it is known.
+    fn install_argument(&self) -> Option<&str> {
+        match self {
+            Self::Unreadable(_) => None,
+            Self::Read { alias, .. } => Some(alias.as_str()),
+        }
+    }
+
+    /// Print the `Target:` and `Drift:` lines.
+    fn report(&self) {
+        match self {
+            Self::Unreadable(detail) => {
+                output::error(&format!("  Target:    unreadable ({detail})"));
+                output::hint("Reinstall the schedule with 'xv schedule install' to regenerate it.");
+            }
+            Self::Read { summary, drift, .. } => {
+                output::info(&format!("  Target:    {summary}"));
+                output::info(&format!(
+                    "  Drift:     {}",
+                    match drift.verdict {
+                        drift::DriftVerdict::Valid => "valid",
+                        drift::DriftVerdict::Warning => "warning",
+                        drift::DriftVerdict::Refuse => "refused",
+                    }
+                ));
+                for reason in drift.warnings.iter().chain(drift.reasons.iter()) {
+                    output::info(&format!("  - {}", reason.detail));
+                }
+            }
+        }
+    }
+}
+
+/// Read the recorded target and recompute it.
+///
+/// Reads files only: the same recomputation a scheduled run performs before it
+/// constructs anything, which is what lets `status` say "this would refuse
+/// tonight" without touching the provider.
+async fn read_recorded_target(
+    state_paths: &manifest::ScheduleStatePaths,
+) -> Result<RecordedTarget> {
+    let manifest::ScheduleManifest::V1(recorded) = match manifest::load_manifest(state_paths) {
+        Ok(manifest) => manifest,
+        Err(error) => return Ok(RecordedTarget::Unreadable(error.to_string())),
+    };
+
+    let alias = recorded
+        .target
+        .workspace_alias
+        .clone()
+        .unwrap_or_else(|| recorded.target.vault.clone());
+    let summary = format!(
+        "{alias} -> {}/{}",
+        recorded.target.backend_name, recorded.target.vault
+    );
+
+    let drift = drift::validate_recorded_target(
+        &recorded,
+        &recorded_binary_path()?,
+        env!("CARGO_PKG_VERSION"),
+    )
+    .await;
+    Ok(RecordedTarget::Read {
+        alias,
+        summary,
+        drift,
+    })
+}
+
+/// Remove the schedule and the manifest, and nothing else.
+///
+/// Runs under the same `install.lock` an install takes, so an uninstall cannot
+/// interleave with a reinstall. What it may remove is fixed by the design's
+/// ownership table; every other file in the state directory — the last
+/// outcome, both lock inodes, `recovery/`, the log, anything the user left
+/// there — is retained, and so is anything at an owned path that xv did not
+/// write.
 async fn execute_uninstall() -> Result<()> {
     let platform = Platform::detect()?;
     let home = home_dir()?;
-    let paths = UnitPaths::for_platform(platform, &home);
+    let unit_paths = UnitPaths::for_platform(platform, &home);
+    let state_paths = manifest::resolve_from_process_env()?;
 
-    if schedule::uninstall(platform, &paths, &ProcessRunner)? {
+    let report = {
+        let mut store = RealOwnedScheduleStore::open(&state_paths)?;
+        uninstall_owned(
+            platform,
+            &unit_paths,
+            &mut store,
+            schedule_runner().as_ref(),
+        )?
+        // The store is dropped here, releasing `install.lock`.
+    };
+
+    if report.removed_anything() {
         output::success(&format!(
             "Removed the {} rotation schedule.",
             platform.name()
         ));
-    } else {
+        if report.removed_manifest {
+            output::info(&format!(
+                "  Removed:   {}",
+                state_paths.manifest_path().display()
+            ));
+        }
+        for unit in &report.removed_units {
+            output::info(&format!("  Removed:   {}", unit.display()));
+        }
+        output::info(
+            "  Retained:  the last-run record, both lock files, recovery evidence and the \
+             rotation log.",
+        );
+    } else if report.scheduler_error.is_none() {
         output::info(&format!(
             "No {} rotation schedule was installed; nothing to remove.",
             platform.name()
         ));
     }
+
+    for path in &report.foreign {
+        output::warn(&format!(
+            "  Retained:  {} (xv did not write it, so it was left alone)",
+            path.display()
+        ));
+    }
+
+    remove_schedule_dir_if_empty(&state_paths);
+
+    if let Some(detail) = report.scheduler_error.clone() {
+        // Not absence, and not something to paper over. What is true depends on
+        // what actually happened: with the files gone the scheduler may still
+        // hold a registration; with nothing removed we simply do not know what
+        // is installed.
+        let situation = if report.removed_anything() {
+            "the rotation schedule's files were removed but the scheduler could not be asked to \
+             deregister it"
+        } else {
+            "nothing was removed and the scheduler could not be asked whether anything is \
+             registered"
+        };
+        return Err(CrosstacheError::config(format!(
+            "{situation} ({detail}). Check the scheduler and re-run 'xv schedule uninstall'."
+        )));
+    }
     Ok(())
+}
+
+/// Remove the schedule's own directory once nothing is left in it.
+///
+/// In practice `install.lock` is retained and keeps it non-empty; this exists
+/// so a directory that *is* empty — an install that never got past its lock
+/// being cleaned up by hand — does not linger. The parent `schedules/`
+/// directory is never touched, and a failure here is not worth an error: the
+/// schedule is already gone.
+fn remove_schedule_dir_if_empty(paths: &manifest::ScheduleStatePaths) {
+    if let Ok(mut entries) = std::fs::read_dir(paths.root()) {
+        if entries.next().is_none() {
+            let _ = std::fs::remove_dir(paths.root());
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schedule::manifest::ManifestTarget;
-    use crate::workspace::WorkspaceEntry;
 
-    fn resolved(
-        source: WorkspaceSource,
-        alias: &str,
-        backend: &str,
-        vault: &str,
-    ) -> ResolvedScheduleTarget {
-        ResolvedScheduleTarget {
-            target: ManifestTarget {
-                config_path: "/home/u/.config/xv/xv.conf".to_string(),
+    /// A real owned path under a tempdir, so canonicalization has something to
+    /// resolve on hosts where the temp root is itself a symlink (macOS).
+    fn owned_in(dir: &Path) -> PathBuf {
+        let root = dir.join("xv").join("schedules").join("rotation-default");
+        std::fs::create_dir_all(&root).unwrap();
+        root.join("manifest.json")
+    }
+
+    /// A manifest whose every field passes `validate_v1`, rooted at `dir` so
+    /// the paths are absolute and normalized on the host running the test.
+    fn valid_manifest(dir: &Path) -> ScheduleManifestV1 {
+        let p = |name: &str| dir.join(name).to_string_lossy().to_string();
+        ScheduleManifestV1 {
+            schema_version: 1,
+            schedule_id: manifest::SCHEDULE_ID.to_string(),
+            installed_at: String::new(),
+            cadence: ManifestCadence {
+                kind: "daily".to_string(),
+                hour: 3,
+                minute: 0,
+            },
+            execution: ManifestExecution {
+                binary_path: p("xv"),
+                installed_version: "0.39.0".to_string(),
+                working_directory: p("work"),
+                log_path: p("rotate.log"),
+            },
+            target: crate::schedule::manifest::ManifestTarget {
+                config_path: p("xv.conf"),
                 config_digest: format!("sha256:{}", "0".repeat(64)),
                 project_path: None,
                 project_digest: None,
                 environment: None,
                 context_path: None,
                 context_digest: None,
-                workspace_source: "context".to_string(),
-                workspace_alias: Some(alias.to_string()),
-                backend_name: backend.to_string(),
+                workspace_source: "degenerate".to_string(),
+                workspace_alias: None,
+                backend_name: "local".to_string(),
                 backend_kind: "local".to_string(),
                 backend_identity: format!("sha256:{}", "1".repeat(64)),
-                vault: vault.to_string(),
+                vault: "default".to_string(),
             },
-            entry: WorkspaceEntry {
-                alias: alias.to_string(),
-                backend: backend.to_string(),
-                vault: vault.to_string(),
-                default: true,
-            },
-            workspace_source: source,
-            working_directory: PathBuf::from("/home/u/work"),
         }
     }
 
-    /// The bug this guards: run-time re-resolution looks `--vault` up as an
-    /// attached alias first and otherwise treats it as a raw vault on the
-    /// *active* backend. Carrying the resolved real vault for an alias
-    /// attached to a non-active backend would sweep the active backend's
-    /// same-named vault instead.
-    #[test]
-    fn legacy_vault_argument_carries_the_alias_in_a_configured_workspace() {
-        let context = resolved(WorkspaceSource::Context, "stage", "local-b", "stage-vault");
-        assert_eq!(legacy_vault_argument(&context), "stage");
-
-        let project = resolved(
-            WorkspaceSource::ProjectToml,
-            "stage",
-            "local-b",
-            "stage-vault",
-        );
-        assert_eq!(legacy_vault_argument(&project), "stage");
+    /// A config file selecting a local store that was never created, so the
+    /// read-only probe fails the way a vanished store does.
+    fn unopened_local_config(dir: &Path) -> PathBuf {
+        let path = dir.join("xv.conf");
+        let store = dir.join("never-opened-store");
+        let key = dir.join("never-opened-key.txt");
+        // The two paths go in as TOML *literal* strings (single quotes): a
+        // Windows temp path is full of backslashes, and in a basic string
+        // `\U`/`\n`/`\t` are escape sequences, so the file would not parse at
+        // all — the drift run would then stop at `config_path is missing or
+        // unreadable` and never reach the vault probe this test is about.
+        std::fs::write(
+            &path,
+            format!(
+                "backend = \"local\"\ndebug = false\nsubscription_id = \"\"\ndefault_vault = \"default\"\n\
+                 default_resource_group = \"\"\ndefault_location = \"\"\ntenant_id = \"\"\n\
+                 output_json = false\nno_color = true\ncache_enabled = false\ncache_ttl_secs = 0\n\
+                 clipboard_timeout = 0\n\n[local]\nstore_path = '{}'\nkey_file = '{}'\n\
+                 default_vault = \"default\"\n",
+                store.display(),
+                key.display()
+            ),
+        )
+        .unwrap();
+        path
     }
 
-    /// In the degenerate workspace-of-one there is no alias to look up — the
-    /// synthesized alias is a label, not a name resolution accepts — so the
-    /// raw vault is the only value that round-trips.
     #[test]
-    fn legacy_vault_argument_carries_the_raw_vault_in_the_degenerate_workspace() {
-        let degenerate = resolved(
-            WorkspaceSource::Degenerate,
-            "local:stage-vault",
-            "local",
-            "stage-vault",
+    fn the_sweep_config_replays_the_recorded_environment() {
+        // Installation resolved `XV_ENV`/`--env` once; the sweep replays that
+        // name through `env_flag`, which is what `project::resolve_env` reads
+        // for every project-profile lookup rotation can reach. Without it the
+        // sweep ran unselected and a project file defining environments (with
+        // no `default_env`) failed closed under it.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest = valid_manifest(tmp.path());
+        manifest.target.environment = Some("production".to_string());
+
+        let loaded = Config::default();
+        assert_eq!(loaded.env_flag, None, "a config read off disk selects none");
+
+        let prepared = prepare_recorded_config(loaded, &manifest.target);
+
+        assert_eq!(prepared.env_flag.as_deref(), Some("production"));
+        // The other half of the preparation is unchanged: a vanished local
+        // store is an error, not something this run creates.
+        assert!(prepared.runtime_open_existing_local);
+    }
+
+    #[test]
+    fn no_recorded_environment_selects_none() {
+        // A target with no `.xv.toml` environment must not inherit one: the
+        // replay clears the field rather than leaving whatever was there.
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = valid_manifest(tmp.path());
+        assert_eq!(manifest.target.environment, None, "fixture shape changed");
+
+        let loaded = Config {
+            env_flag: Some("staging".to_string()),
+            ..Config::default()
+        };
+
+        let prepared = prepare_recorded_config(loaded, &manifest.target);
+
+        assert_eq!(prepared.env_flag, None);
+    }
+
+    /// The runner pins `XV_ENV` in its own process, because `env_flag` alone
+    /// loses to an inherited one (`project::resolve_env` reads the variable
+    /// first) and a unit cannot unset what a user manager exported.
+    #[test]
+    fn the_runner_pins_the_recorded_environment_over_an_inherited_one() {
+        let _guard = crate::config::project::test_support::XvEnvGuard::acquire();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest = valid_manifest(tmp.path());
+        manifest.target.environment = Some("production".to_string());
+
+        std::env::set_var("XV_ENV", "staging");
+        pin_recorded_environment(&manifest.target);
+
+        assert_eq!(std::env::var("XV_ENV").ok().as_deref(), Some("production"));
+    }
+
+    /// A manifest that recorded no environment must leave the process with
+    /// none — an inherited `XV_ENV` would otherwise select a profile that
+    /// installation never approved, and can fail the run closed.
+    #[test]
+    fn no_recorded_environment_removes_an_inherited_one() {
+        let _guard = crate::config::project::test_support::XvEnvGuard::acquire();
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = valid_manifest(tmp.path());
+        assert_eq!(manifest.target.environment, None, "fixture shape changed");
+
+        std::env::set_var("XV_ENV", "staging");
+        pin_recorded_environment(&manifest.target);
+
+        assert!(std::env::var("XV_ENV").is_err(), "XV_ENV must be removed");
+    }
+
+    #[tokio::test]
+    async fn a_vault_that_no_longer_verifies_produces_a_refused_drift_draft() {
+        // The "selected vault no longer verifies" row of the drift table: the
+        // run must produce an outcome, not a bare error, and the reason must
+        // not carry the provider's error body into an unattended log.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest = valid_manifest(tmp.path());
+        manifest.target.config_path = unopened_local_config(tmp.path())
+            .to_string_lossy()
+            .to_string();
+
+        let draft = run_recorded_sweep(&manifest).await;
+
+        assert_eq!(draft.state, RunState::RefusedDrift);
+        let diagnostic = draft.diagnostic.expect("a refusal carries a diagnostic");
+        assert_eq!(diagnostic.code, "target_drift");
+        assert_eq!(
+            diagnostic.message,
+            "vault changed; review the recorded target and reinstall"
         );
-        assert_eq!(legacy_vault_argument(&degenerate), "stage-vault");
+        let rendered = draft.error.expect("a refusal exits non-zero").to_string();
+        for leak in ["never-opened-store", "never-opened-key", "age", "decrypt"] {
+            assert!(!rendered.contains(leak), "leaked '{leak}': {rendered}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_recorded_config_produces_a_draft() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = valid_manifest(tmp.path());
+
+        let draft = run_recorded_sweep(&manifest).await;
+
+        assert_eq!(draft.state, RunState::RefusedDrift);
+        assert_eq!(
+            draft.diagnostic.expect("diagnostic").message,
+            "config_path changed; review the recorded target and reinstall"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_working_directory_that_cannot_be_entered_produces_a_draft() {
+        // `valid_manifest`'s working directory does not exist, so the chdir
+        // fails and the process's own directory is never changed.
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = valid_manifest(tmp.path());
+
+        let draft = execute_pinned_run(&manifest).await;
+
+        assert_eq!(draft.state, RunState::RefusedDrift);
+        assert_eq!(
+            draft.diagnostic.expect("diagnostic").message,
+            "working_directory changed; review the recorded target and reinstall"
+        );
+        assert!(draft.error.is_some());
+    }
+
+    /// State paths rooted in a tempdir, through the real resolver.
+    fn state_paths_in(dir: &Path) -> manifest::ScheduleStatePaths {
+        manifest::test_paths_in(dir)
+    }
+
+    /// Stamp, validate and publish in one step — the two halves production
+    /// runs through the install transaction, so the ordering assertions below
+    /// still test the real sequence.
+    fn stamp_and_write_manifest(
+        paths: &manifest::ScheduleStatePaths,
+        manifest_v1: ScheduleManifestV1,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<PathBuf> {
+        let bytes = stamp_and_serialize_manifest(manifest_v1, now)?;
+        manifest::write_manifest_atomic(paths, &bytes)?;
+        Ok(paths.manifest_path())
+    }
+
+    #[test]
+    fn stamp_and_write_manifest_publishes_a_manifest_the_runner_can_load() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = state_paths_in(tmp.path());
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-10T15:04:05.987Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        let written =
+            stamp_and_write_manifest(&paths, valid_manifest(tmp.path()), now).expect("writes");
+        assert_eq!(written, paths.manifest_path());
+
+        // The whole point of the write is that the runner can read it back.
+        let crate::schedule::manifest::ScheduleManifest::V1(loaded) =
+            manifest::load_manifest(&paths).expect("loads back");
+        // Seconds precision, UTC, `Z` — sub-second noise would make two
+        // manifests written in the same second compare unequal for no reason.
+        assert_eq!(loaded.installed_at, "2026-09-10T15:04:05Z");
+        assert_eq!(loaded.target.vault, "default");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_written_manifest_is_owner_private_inside_an_owner_private_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = state_paths_in(tmp.path());
+        let written =
+            stamp_and_write_manifest(&paths, valid_manifest(tmp.path()), chrono::Utc::now())
+                .expect("writes");
+
+        let file = std::fs::metadata(&written).unwrap().permissions().mode() & 0o777;
+        assert_eq!(file, 0o600, "manifest mode {file:o}");
+        let dir = std::fs::metadata(paths.root())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(dir, 0o700, "state directory mode {dir:o}");
+    }
+
+    #[test]
+    fn an_invalid_manifest_is_refused_before_anything_is_written() {
+        // Writing first and validating later would leave an installed job
+        // pointing at a file this same build refuses to load — a failure only
+        // a reinstall can clear, discovered at 3am.
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = state_paths_in(tmp.path());
+        let mut invalid = valid_manifest(tmp.path());
+        invalid.execution.working_directory = "relative/work".to_string();
+
+        let err = stamp_and_write_manifest(&paths, invalid, chrono::Utc::now())
+            .expect_err("an invalid manifest is refused");
+        assert!(err.to_string().contains("absolute path"), "{err}");
+        assert!(
+            !paths.manifest_path().exists(),
+            "a refused write left a file"
+        );
+    }
+
+    #[test]
+    fn the_owned_manifest_path_is_accepted_even_before_it_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let owned = owned_in(tmp.path());
+        // Nothing written yet: "missing" is a separate, more useful error than
+        // "wrong path", so the check itself must not depend on existence.
+        check_owned_manifest_path(&owned, &owned).expect("the owned path is accepted");
+        std::fs::write(&owned, b"{}").unwrap();
+        check_owned_manifest_path(&owned, &owned).expect("still accepted once written");
+    }
+
+    #[test]
+    fn a_relative_manifest_path_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let owned = owned_in(tmp.path());
+        let err = check_owned_manifest_path(Path::new("manifest.json"), &owned)
+            .expect_err("relative paths are refused");
+        assert!(err.to_string().contains("absolute"), "{err}");
+    }
+
+    #[test]
+    fn a_foreign_absolute_manifest_path_is_refused() {
+        // Whoever picks the manifest picks what gets rotated, so a path
+        // outside the owned location is refused even when it parses fine.
+        let tmp = tempfile::tempdir().unwrap();
+        let owned = owned_in(tmp.path());
+        let foreign = tmp.path().join("elsewhere.json");
+        std::fs::write(&foreign, b"{}").unwrap();
+        let err =
+            check_owned_manifest_path(&foreign, &owned).expect_err("a foreign path is refused");
+        assert!(err.to_string().contains("does not name"), "{err}");
+        assert!(err.to_string().contains("Reinstall"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_at_the_manifest_path_is_refused() {
+        // Otherwise the path this check compares and the file the loader reads
+        // could be two different things.
+        let tmp = tempfile::tempdir().unwrap();
+        let owned = owned_in(tmp.path());
+        let real = tmp.path().join("real.json");
+        std::fs::write(&real, b"{}").unwrap();
+        std::os::unix::fs::symlink(&real, &owned).unwrap();
+        let err = check_owned_manifest_path(&owned, &owned).expect_err("a symlink is refused");
+        assert!(err.to_string().contains("symlink"), "{err}");
     }
 
     /// The recorded executable must be a path the manifest schema accepts on

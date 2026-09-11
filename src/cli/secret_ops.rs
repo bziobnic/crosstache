@@ -3140,6 +3140,7 @@ pub(crate) async fn execute_secret_rotate_direct(
         force,
         interval,
         &config,
+        true, // interactive single-secret rotate: bump context usage
     )
     .await?;
 
@@ -3325,42 +3326,24 @@ async fn collect_rotation_status(
     String,
     Vec<(String, crate::secret::rotation::RotationStatus)>,
 )> {
-    use crate::secret::rotation::{evaluate, RotationStatus};
-
     let reg = registry.ok_or_else(|| {
         CrosstacheError::config(
             "No backend registry available. Run 'xv config show' to check your configuration.",
         )
     })?;
 
-    // Same resolution as a single-secret rotate, minus the name: `--due` and
-    // `--check` are vault-scoped, and a write verb never searches attached
-    // vaults, so the default entry (or explicit `--vault`) is the target.
+    // Same resolution as a single-secret rotate, minus the name: `--check` is
+    // vault-scoped, and a write verb never searches attached vaults, so the
+    // default entry (or explicit `--vault`) is the target.
     let (backend, _backend_name, vault_name, _resolved) =
         resolve_rotate_target("", vault, config, reg).await?;
 
-    let secrets = backend
-        .secrets()
-        .list_secrets(&vault_name, None)
-        .await
-        .map_err(CrosstacheError::from)?;
-
-    let now = chrono::Utc::now();
-    let mut rows: Vec<(String, RotationStatus)> = secrets
-        .into_iter()
-        .map(|s| {
-            // `updated_on` on a summary is a display string (and empty on some
-            // backends), so it is not usable as a machine baseline. A policy
-            // with no `xv:rotated_at` therefore evaluates as due-once, which
-            // then stamps a real timestamp. `xv update --rotate-every` stamps
-            // one at policy-set time so this is not the normal path.
-            let status = evaluate(&s.tags, None, now);
-            (s.name, status)
-        })
-        .filter(|(_, status)| !matches!(status, RotationStatus::NoPolicy))
-        .collect();
-    rows.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok((vault_name, rows))
+    // The evaluation itself lives with the due-rotation service, so `--check`
+    // and a scheduled run can never disagree about which secrets are due.
+    let statuses =
+        crate::secret::scheduled_rotation::evaluate_vault_policies(backend.as_ref(), &vault_name)
+            .await?;
+    Ok((vault_name, statuses))
 }
 
 /// `xv rotate --check` — report rotation status without changing anything.
@@ -3465,6 +3448,14 @@ async fn execute_rotate_check(
 }
 
 /// `xv rotate --due` — rotate every secret whose policy has come due.
+///
+/// This is the terminal adapter over
+/// [`crate::secret::scheduled_rotation::run_due_rotation_with_backend`]: it
+/// resolves the target ambiently (workspace/context/`--vault`), renders the
+/// plan, asks for the one batch confirmation, and turns the service's summary
+/// into today's messages and exit codes. The discovery/rotate loop itself is
+/// shared with the scheduled runner, which resolves nothing and renders
+/// nothing.
 async fn execute_rotate_due(
     vault: Option<String>,
     length: usize,
@@ -3474,105 +3465,164 @@ async fn execute_rotate_due(
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
-    use crate::utils::interactive::InteractivePrompt;
+    use crate::secret::scheduled_rotation::{run_due_rotation_with_backend, DueRotationOptions};
 
-    let (vault_name, statuses) = collect_rotation_status(vault.clone(), &config, registry).await?;
+    let reg = registry.ok_or_else(|| {
+        CrosstacheError::config(
+            "No backend registry available. Run 'xv config show' to check your configuration.",
+        )
+    })?;
 
-    let invalid: Vec<&str> = statuses
-        .iter()
-        .filter(|(_, s)| s.is_invalid())
-        .map(|(n, _)| n.as_str())
-        .collect();
-    if !invalid.is_empty() {
-        // Fail rather than skip: an unreadable policy means we cannot know
-        // whether that secret is overdue, and silently passing over it would
-        // make a green `--due` run misleading.
-        return Err(CrosstacheError::InvalidArgument(format!(
-            "{} secret(s) in '{vault_name}' have an unparseable rotation interval: {}. Fix them \
-             with 'xv update <name> --rotate-every <interval>' before running --due, so this run \
-             cannot silently skip an overdue secret.",
-            invalid.len(),
-            invalid.join(", ")
-        )));
-    }
+    // Same resolution as a single-secret rotate, minus the name: `--due` is
+    // vault-scoped, and a write verb never searches attached vaults, so the
+    // default entry (or explicit `--vault`) is the target. Resolved ONCE here
+    // and handed to the service, rather than re-resolved per secret.
+    let (backend, backend_name, vault_name, _resolved) =
+        resolve_rotate_target("", vault, &config, reg).await?;
 
-    let due: Vec<String> = statuses
-        .iter()
-        .filter(|(_, s)| s.is_due())
-        .map(|(n, _)| n.clone())
-        .collect();
+    let mut observer = CliDueRotationObserver {
+        vault_name: vault_name.clone(),
+        force,
+        stage: DueRotationStage::Planned,
+        failures: Vec::new(),
+    };
 
-    if due.is_empty() {
-        output::success(&format!(
-            "Nothing due in '{vault_name}' ({} policy-managed secret(s)).",
-            statuses.len()
-        ));
-        return Ok(());
-    }
-
-    output::info(&format!(
-        "{} secret(s) due for rotation in '{vault_name}': {}",
-        due.len(),
-        due.join(", ")
-    ));
-
-    // One confirmation for the batch, rather than per secret.
-    if !force {
-        let prompt = InteractivePrompt::new();
-        if !prompt.confirm(
-            &format!(
-                "Rotate {} secret(s)? Each gets a newly generated value and a new version.",
-                due.len()
-            ),
-            false,
-        )? {
-            output::info("Rotation cancelled.");
-            return Ok(());
-        }
-    }
-
-    let mut rotated = 0usize;
-    let mut failures: Vec<(String, String)> = Vec::new();
-
-    for name in &due {
-        // Rotate each secret through the same single-secret path, so record
-        // handling, reserved-key guards, and audit/git hooks all apply
-        // identically to a manual rotate. `--every` is not passed: `--due`
-        // acts on the existing policy and must never redefine it.
-        match execute_secret_rotate_direct(
-            name,
-            vault.clone(),
+    let summary = run_due_rotation_with_backend(
+        &config,
+        backend,
+        &backend_name,
+        &vault_name,
+        &DueRotationOptions {
             length,
             charset,
-            generator.clone(),
-            false,
-            false,
-            true, // already confirmed for the batch
-            None,
-            config.clone(),
-            registry,
-        )
-        .await
-        {
-            Ok(()) => rotated += 1,
-            Err(e) => failures.push((name.clone(), e.to_string())),
+            generator,
+            // Terminal path: keep the pre-extraction behavior of bumping the
+            // context's usage counters for the rotated vault.
+            track_context_usage: true,
+        },
+        &mut observer,
+    )
+    .await?;
+
+    observer.finish(&summary)
+}
+
+/// Where a `--due` run stopped, so the tail message matches what was printed.
+enum DueRotationStage {
+    /// Nothing due, or the person declined: the plan already said so.
+    Aborted,
+    /// The rotation loop ran.
+    Planned,
+}
+
+/// Terminal rendering for `xv rotate --due`. Every message here is the one the
+/// pre-extraction implementation printed, in the same order.
+struct CliDueRotationObserver {
+    vault_name: String,
+    force: bool,
+    stage: DueRotationStage,
+    /// `(secret name, error text)` for the end-of-run report. Local to the
+    /// terminal adapter — none of this reaches the service's summary.
+    failures: Vec<(String, String)>,
+}
+
+impl crate::secret::scheduled_rotation::DueRotationObserver for CliDueRotationObserver {
+    fn on_plan(
+        &mut self,
+        plan: &crate::secret::scheduled_rotation::DueRotationPlan,
+    ) -> Result<crate::secret::scheduled_rotation::PlanDecision> {
+        use crate::secret::scheduled_rotation::PlanDecision;
+        use crate::utils::interactive::InteractivePrompt;
+
+        let vault_name = &self.vault_name;
+
+        if !plan.invalid.is_empty() {
+            // Fail rather than skip: an unreadable policy means we cannot know
+            // whether that secret is overdue, and silently passing over it would
+            // make a green `--due` run misleading.
+            return Err(CrosstacheError::InvalidArgument(format!(
+                "{} secret(s) in '{vault_name}' have an unparseable rotation interval: {}. Fix them \
+                 with 'xv update <name> --rotate-every <interval>' before running --due, so this run \
+                 cannot silently skip an overdue secret.",
+                plan.invalid.len(),
+                plan.invalid.join(", ")
+            )));
         }
+
+        if plan.due.is_empty() {
+            output::success(&format!(
+                "Nothing due in '{vault_name}' ({} policy-managed secret(s)).",
+                plan.policy_managed
+            ));
+            self.stage = DueRotationStage::Aborted;
+            return Ok(PlanDecision::Abort);
+        }
+
+        output::info(&format!(
+            "{} secret(s) due for rotation in '{vault_name}': {}",
+            plan.due.len(),
+            plan.due.join(", ")
+        ));
+
+        // One confirmation for the batch, rather than per secret.
+        if !self.force {
+            let prompt = InteractivePrompt::new();
+            if !prompt.confirm(
+                &format!(
+                    "Rotate {} secret(s)? Each gets a newly generated value and a new version.",
+                    plan.due.len()
+                ),
+                false,
+            )? {
+                output::info("Rotation cancelled.");
+                self.stage = DueRotationStage::Aborted;
+                return Ok(PlanDecision::Abort);
+            }
+        }
+
+        Ok(PlanDecision::Proceed)
     }
 
-    if failures.is_empty() {
-        output::success(&format!("Rotated {rotated} secret(s) in '{vault_name}'."));
-        return Ok(());
+    fn on_failure(
+        &mut self,
+        name: &str,
+        _category: crate::secret::scheduled_rotation::DueRotationFailureCategory,
+        error: &CrosstacheError,
+    ) {
+        self.failures.push((name.to_string(), error.to_string()));
     }
+}
 
-    // Report every failure — a partial batch must not look like a success.
-    for (name, err) in &failures {
-        output::error(&format!("  {name}: {err}"));
+impl CliDueRotationObserver {
+    /// Render the end-of-run result and produce `--due`'s exit behavior.
+    fn finish(
+        &self,
+        summary: &crate::secret::scheduled_rotation::DueRotationSummary,
+    ) -> Result<()> {
+        if matches!(self.stage, DueRotationStage::Aborted) {
+            return Ok(());
+        }
+
+        let vault_name = &self.vault_name;
+        if self.failures.is_empty() {
+            output::success(&format!(
+                "Rotated {} secret(s) in '{vault_name}'.",
+                summary.rotated
+            ));
+            return Ok(());
+        }
+
+        // Report every failure — a partial batch must not look like a success.
+        for (name, err) in &self.failures {
+            output::error(&format!("  {name}: {err}"));
+        }
+        Err(CrosstacheError::config(format!(
+            "rotated {} of {} due secret(s) in '{vault_name}'; {} failed (listed above)",
+            summary.rotated,
+            summary.due,
+            self.failures.len()
+        )))
     }
-    Err(CrosstacheError::config(format!(
-        "rotated {rotated} of {} due secret(s) in '{vault_name}'; {} failed (listed above)",
-        due.len(),
-        failures.len()
-    )))
 }
 
 /// Capability error for `xv rotate --native` on a backend without native
@@ -5776,7 +5826,7 @@ pub(crate) async fn execute_complete_folders(config: Config) -> Result<()> {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn execute_secret_rotate(
+pub(crate) async fn execute_secret_rotate(
     reg: &BackendRegistry,
     backend_name: &str,
     name: &str,
@@ -5789,19 +5839,38 @@ async fn execute_secret_rotate(
     // When `Some`, also set/refresh the secret's rotation policy.
     rotation_interval: Option<chrono::Duration>,
     config: &Config,
+    // Whether to bump the ambient context's `last_used`/`usage_count` for the
+    // rotated vault. Interactive callers pass `true`; batch/scheduled callers
+    // pass `false` — see the comment at the tracking block below.
+    track_context_usage: bool,
 ) -> Result<()> {
     use crate::config::ContextManager;
     use crate::secret::manager::SecretRequest;
     use crate::utils::interactive::InteractivePrompt;
 
-    // The vault was already resolved through the workspace seam by
-    // `execute_secret_rotate_direct` (rotate's sole caller) and handed in.
+    // Two callers, and both resolve the vault before calling:
+    //   - `execute_secret_rotate_direct`, the single-secret CLI path, resolves
+    //     it through the workspace seam;
+    //   - `crate::secret::scheduled_rotation::run_due_rotation_with_backend`
+    //     rotates each due secret in the vault it already listed.
+    // Neither can pass `None`, which is what the `expect` below asserts.
     let vault_name =
         vault.expect("execute_secret_rotate is only called with an already-resolved vault");
 
-    // Update context usage tracking
-    let mut context_manager = ContextManager::load().await?;
-    let _ = context_manager.update_usage(&vault_name).await;
+    // Update context usage tracking — INTERACTIVE ONLY.
+    //
+    // `update_usage` rewrites the ambient context file whenever `current`
+    // names the rotated vault. A context-pinned scheduled install records a
+    // digest of exactly those bytes (`ManifestTarget::context_digest`), and
+    // `drift::recompute_context` refuses on any byte change — so a scheduled
+    // sweep that bumped the counter would invalidate its own schedule after
+    // the first successful rotation. A scheduled run must therefore neither
+    // load nor save the ambient context; it passes `false` and this whole
+    // block is skipped.
+    if track_context_usage {
+        let mut context_manager = ContextManager::load().await?;
+        let _ = context_manager.update_usage(&vault_name).await;
+    }
 
     // Check if the secret exists first
     let existing_secret = reg

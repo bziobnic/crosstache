@@ -1622,8 +1622,10 @@ pub enum ScheduleCommands {
         #[arg(long)]
         vault: Option<String>,
 
-        /// Where the scheduled run's output is appended (default:
-        /// `$XDG_STATE_HOME/xv/rotate.log`, else `~/.local/state/xv/rotate.log`).
+        /// Where the scheduled run's output is appended. Defaults to
+        /// `rotate.log` under the same state root as the pinned manifest:
+        /// `$XDG_STATE_HOME/xv/rotate.log`, else `~/.local/state/xv/rotate.log`
+        /// (on Windows, `%LOCALAPPDATA%\xv\rotate.log`).
         #[arg(long)]
         log_file: Option<String>,
 
@@ -1644,6 +1646,20 @@ pub enum ScheduleCommands {
 
     /// Remove the rotation schedule. Succeeds when none is installed.
     Uninstall,
+
+    /// Private scheduler plumbing: replay the pinned rotation manifest.
+    ///
+    /// Hidden because it is not a verb a person invokes — the launchd,
+    /// systemd and Task Scheduler entries `xv schedule install` writes are
+    /// its only callers, and it accepts nothing but the manifest path this
+    /// user's own installation owns.
+    #[command(hide = true)]
+    Run {
+        /// Absolute path to the owned `manifest.json`. Any other path is
+        /// refused: whoever picks the manifest picks what gets rotated.
+        #[arg(long)]
+        manifest: std::path::PathBuf,
+    },
 }
 
 /// Git-native versioning subcommands for the local store.

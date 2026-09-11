@@ -278,9 +278,14 @@ pub(crate) struct ResolvedScheduleTarget {
     pub(crate) target: ManifestTarget,
     /// The workspace entry that produced [`Self::target`] — its `vault` is
     /// the real vault to sweep, on registry backend `backend`, and its
-    /// `alias` is the name the interim legacy install carries.
+    /// `alias` is the name a person recognizes it by.
+    // Everything the *manifest* records already lives in `target`; these two
+    // survive for the status/drift reporting that reads the resolved entry
+    // back, which lands in a later task of this series.
+    #[allow(dead_code)]
     pub(crate) entry: WorkspaceEntry,
     /// Which resolution layer produced the workspace.
+    #[allow(dead_code)]
     pub(crate) workspace_source: WorkspaceSource,
     /// The canonical working directory resolution ran in, recorded so the
     /// scheduled run replays the same `.xv.toml`/context discovery.
@@ -317,7 +322,7 @@ pub(crate) fn manifest_path_string(field: &str, path: &Path) -> Result<String> {
     })
 }
 
-fn workspace_source_label(source: WorkspaceSource) -> &'static str {
+pub(crate) fn workspace_source_label(source: WorkspaceSource) -> &'static str {
     match source {
         WorkspaceSource::ProjectToml => "project",
         WorkspaceSource::Context => "context",
@@ -391,6 +396,22 @@ async fn resolve_install_target_from(
     // 3. The `.xv.toml` governing that directory, and the environment it
     //    selects right now — installation resolves `XV_ENV`/`--env` once and
     //    records the result; the runner replays it.
+    //
+    //    First: refuse to pin a target that only resolves because
+    //    `XV_NO_PARENT_CONFIG` is hiding an ancestor project file. The
+    //    scheduler's environment does not carry that variable, so the run
+    //    would discover the ancestor and refuse forever.
+    if let Some(hidden) =
+        suppressed_parent_project(&cwd, crate::config::project::parent_config_suppressed()).await?
+    {
+        return Err(CrosstacheError::invalid_argument(format!(
+            "XV_NO_PARENT_CONFIG is hiding the project file '{}', which governs this directory \
+             without it. A scheduled run inherits no environment, so it would resolve that file \
+             and refuse the sweep as drifted. Unset XV_NO_PARENT_CONFIG, or install the schedule \
+             from the project root, before scheduling rotation here.",
+            hidden.display()
+        )));
+    }
     let project = crate::config::project::resolve_project_at(&cwd, cli_env).await?;
 
     // The effective configuration for resolution: the saved file, plus the
@@ -490,6 +511,31 @@ async fn resolve_install_target_from(
     })
 }
 
+/// The `.xv.toml` that `XV_NO_PARENT_CONFIG` is currently hiding from
+/// discovery, if any.
+///
+/// `suppressed` is the variable's effect, passed in rather than read so this
+/// is testable without touching the process environment. When it is set, the
+/// cwd-only discovery is compared with the walk-up discovery: a different file
+/// (or a file where cwd-only found none) is the case installation must refuse,
+/// because the runner always walks up.
+async fn suppressed_parent_project(cwd: &Path, suppressed: bool) -> Result<Option<PathBuf>> {
+    if !suppressed {
+        return Ok(None);
+    }
+    let here = crate::config::project::find_project_config_walking(cwd, false)
+        .await?
+        .map(|(path, _)| path);
+    let walked = crate::config::project::find_project_config_walking(cwd, true)
+        .await?
+        .map(|(path, _)| path);
+    Ok(match (here, walked) {
+        (Some(here), Some(walked)) if here != walked => Some(walked),
+        (None, Some(walked)) => Some(walked),
+        _ => None,
+    })
+}
+
 /// Apply `--vault` to the resolved workspace.
 ///
 /// In a configured workspace `--vault` names an attached alias and nothing
@@ -535,25 +581,30 @@ fn select_entry(
 /// verifies here is a target the scheduled run can actually read. Listed
 /// secret names are discarded; only the vault and backend names, which
 /// already appear in ordinary CLI output, reach an error message.
-async fn verify_selected_target(config: &Config, entry: &WorkspaceEntry) -> Result<()> {
+pub(crate) async fn verify_selected_target(config: &Config, entry: &WorkspaceEntry) -> Result<()> {
+    probe_selected_target(config, entry)
+        .await
+        .map_err(|e| target_unavailable(entry, e))
+}
+
+/// [`verify_selected_target`] without the install-time wording.
+///
+/// The scheduled runner performs the same probe but must report a *drift
+/// reason*, which may not carry a provider error body into a log written
+/// unattended. It gets the raw [`crate::backend::error::BackendError`] and
+/// discards it; installation, which is interactive, keeps it.
+pub(crate) async fn probe_selected_target(
+    config: &Config,
+    entry: &WorkspaceEntry,
+) -> std::result::Result<(), crate::backend::error::BackendError> {
     let mut probe = config.clone();
     probe.runtime_open_existing_local = true;
 
     let registry =
-        crate::backend::BackendRegistry::with_lazy(&probe, std::slice::from_ref(&entry.backend))
-            .map_err(|e| target_unavailable(entry, e))?;
-    let backend = registry
-        .materialize(&entry.backend)
-        .map_err(|e| target_unavailable(entry, e))?;
-    backend
-        .health_check()
-        .await
-        .map_err(|e| target_unavailable(entry, e))?;
-    backend
-        .secrets()
-        .list_secrets(&entry.vault, None)
-        .await
-        .map_err(|e| target_unavailable(entry, e))?;
+        crate::backend::BackendRegistry::with_lazy(&probe, std::slice::from_ref(&entry.backend))?;
+    let backend = registry.materialize(&entry.backend)?;
+    backend.health_check().await?;
+    backend.secrets().list_secrets(&entry.vault, None).await?;
     Ok(())
 }
 
@@ -572,6 +623,54 @@ fn target_unavailable(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `XV_NO_PARENT_CONFIG` hiding an ancestor `.xv.toml` is reported, so
+    /// installation can refuse to pin a target the scheduled run — which does
+    /// not inherit that variable — would resolve differently.
+    #[tokio::test]
+    async fn a_suppressed_ancestor_project_is_reported() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join(".xv.toml"), "").unwrap();
+        let child = root.join("service");
+        std::fs::create_dir_all(&child).unwrap();
+
+        let hidden = suppressed_parent_project(&child, true)
+            .await
+            .expect("discovery succeeds")
+            .expect("the ancestor is hidden");
+        assert_eq!(hidden, root.join(".xv.toml"));
+
+        // Without the variable there is nothing to report: the walk-up
+        // discovery is what installation already used.
+        assert!(suppressed_parent_project(&child, false)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    /// The allowed case: the directory has its own `.xv.toml`, so suppressing
+    /// the walk-up changes nothing about which file governs it.
+    #[tokio::test]
+    async fn a_project_file_in_the_directory_itself_is_not_suppressed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join(".xv.toml"), "").unwrap();
+        let child = root.join("service");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::write(child.join(".xv.toml"), "").unwrap();
+
+        assert!(suppressed_parent_project(&child, true)
+            .await
+            .unwrap()
+            .is_none());
+        // And a tree with no project file at all is likewise fine.
+        let empty = tempfile::tempdir().unwrap();
+        assert!(suppressed_parent_project(empty.path(), true)
+            .await
+            .unwrap()
+            .is_none());
+    }
     use crate::config::settings::{AzureConfig, AzureCredentialType, LocalConfig};
 
     fn base_config() -> Config {

@@ -208,9 +208,8 @@ impl ContextManager {
     /// `is_local` is derived from the path shape (a local context always
     /// lives at `<dir>/.xv/context`; the global one at `<config>/xv/context`)
     /// so `save()`/`scope_description()` keep describing the same file.
-    // Used by the scheduled-rotation target resolver (`schedule::target`),
-    // which lands in the next task of this spec.
-    #[allow(dead_code)]
+    // Used by the scheduled-rotation runner's drift validation
+    // (`schedule::drift`).
     pub(crate) async fn load_at(path: &Path) -> Result<Self> {
         let is_local = path
             .parent()

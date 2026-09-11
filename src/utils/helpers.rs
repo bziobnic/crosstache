@@ -18,20 +18,15 @@ type FileMode = u32;
 enum FileOpenBehavior {
     Replace,
     Exclusive,
-    #[cfg(any(feature = "file-ops", feature = "ui", test))]
+    /// Open-or-create an empty file to hold an advisory lock on. Ungated: the
+    /// rotation schedule's `install.lock` needs it in every build, including
+    /// `--no-default-features`.
     Lock,
 }
 
 impl FileOpenBehavior {
     fn is_lock(self) -> bool {
-        #[cfg(any(feature = "file-ops", feature = "ui", test))]
-        {
-            matches!(self, Self::Lock)
-        }
-        #[cfg(not(any(feature = "file-ops", feature = "ui", test)))]
-        {
-            false
-        }
+        matches!(self, Self::Lock)
     }
 }
 
@@ -243,7 +238,6 @@ pub fn read_file_no_follow(path: &Path) -> Result<Vec<u8>> {
 }
 
 /// Create a new private file without following symlinks.
-#[cfg(test)]
 pub fn write_private_file_no_follow_create_new(
     path: &Path,
     content: &[u8],
@@ -255,7 +249,6 @@ pub fn write_private_file_no_follow_create_new(
 ///
 /// Missing parent directories are created owner-only (0700 on Unix), and the
 /// lock file itself is created owner-only (0600 on Unix).
-#[cfg(any(feature = "file-ops", feature = "ui", test))]
 pub fn open_private_lock_file_no_follow(path: &Path) -> Result<std::fs::File> {
     write_file_no_follow_with_mode(path, &[], FileOpenBehavior::Lock, 0o600, 0o700)
 }
@@ -398,7 +391,6 @@ fn write_file_no_follow_with_mode(
         let (access_mode, create_mode) = match behavior {
             FileOpenBehavior::Replace => (libc::O_WRONLY, libc::O_TRUNC),
             FileOpenBehavior::Exclusive => (libc::O_WRONLY, libc::O_EXCL),
-            #[cfg(any(feature = "file-ops", feature = "ui", test))]
             FileOpenBehavior::Lock => (libc::O_RDWR, libc::O_EXCL),
         };
         let mut fd = unsafe {
@@ -454,6 +446,19 @@ fn write_file_no_follow_with_mode(
             let mut current = PathBuf::new();
             for component in parent.components() {
                 current.push(component.as_os_str());
+                // The prefix (`C:`, `\\?\C:`, `\\server\share`) and the root
+                // separator name a volume, not a directory entry. Statting them
+                // is both pointless — neither can be a symlink, and neither can
+                // be created — and actively wrong on Windows: a bare volume
+                // path such as `\\?\C:` opens the volume device, and asking it
+                // for file information fails with ERROR_INVALID_FUNCTION
+                // ("Incorrect function. (os error 1)"). That is what a verbatim
+                // path — anything that has been through `fs::canonicalize` —
+                // produces here, so the walk starts at the first real
+                // component and the traversal checks below are unchanged.
+                if !matches!(component, std::path::Component::Normal(_)) {
+                    continue;
+                }
                 match std::fs::symlink_metadata(&current) {
                     Ok(metadata) if metadata.file_type().is_symlink() => {
                         return Err(CrosstacheError::config(format!(
@@ -476,7 +481,12 @@ fn write_file_no_follow_with_mode(
                             ))
                         })?;
                     }
-                    Err(e) => return Err(CrosstacheError::config(e.to_string())),
+                    Err(e) => {
+                        return Err(CrosstacheError::config(format!(
+                            "Failed to inspect path component '{}': {e}",
+                            current.display()
+                        )))
+                    }
                 }
             }
         }
@@ -498,7 +508,6 @@ fn write_file_no_follow_with_mode(
             FileOpenBehavior::Exclusive => {
                 options.create_new(true);
             }
-            #[cfg(any(feature = "file-ops", feature = "ui", test))]
             FileOpenBehavior::Lock => {
                 options.read(true);
             }

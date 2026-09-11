@@ -19,9 +19,9 @@
 //! client secrets, credential file contents, environment values, local age
 //! identities, secret names or secret values.
 //!
-//! PR 1 consumes the schema, the state paths and the preview serializer;
-//! the storage primitives and the run/recovery paths are consumed by the
-//! manifest runner in PR 2. Those still-unconsumed items carry a per-item
+//! Install writes and validates the manifest and the runner loads it back;
+//! the last-run, lock and recovery paths belong to the runner and install
+//! transaction still to come. Those still-unconsumed items carry a per-item
 //! `allow(dead_code)` rather than the module carrying a blanket one, so a
 //! genuinely unused item added later still shows up as a warning.
 
@@ -70,11 +70,41 @@ enum HostPlatform {
     Windows,
 }
 
+/// Which input selected the state root.
+///
+/// Install has to know this, not just the resulting path. A scheduled process
+/// inherits none of the installing shell's environment, so if an environment
+/// variable chose the root, the installed unit must carry that variable or the
+/// run will recompute a *different* root and refuse its own manifest. The
+/// native fallbacks need no pinning: they derive from `HOME`, which the unit
+/// already sets, or from the Windows local-data directory, which is a property
+/// of the account rather than the shell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StateRootSource {
+    /// `XV_STATE_HOME`, with the value that selected the root.
+    XvStateHome(String),
+    /// `XDG_STATE_HOME`, with the value that selected the root.
+    XdgStateHome(String),
+    /// The Unix `$HOME/.local/state` fallback.
+    Home,
+    /// The Windows local-data directory.
+    WindowsLocalData,
+}
+
 /// Resolved, owned paths for the `rotation-default` schedule's state
 /// directory and the fixed files inside it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScheduleStatePaths {
+    /// The bare state root — `$XDG_STATE_HOME`, `~/.local/state`,
+    /// `%LOCALAPPDATA%` or the `XV_STATE_HOME` override — before the `xv/`
+    /// segment. Kept so everything xv puts under the state root is derived
+    /// from *one* resolution: the manifest directory and the default rotation
+    /// log used to resolve their roots independently, which on Windows put the
+    /// log under `XDG_STATE_HOME` (a Unix-only input) while the manifest went
+    /// to `%LOCALAPPDATA%`.
+    state_home: PathBuf,
     root: PathBuf,
+    source: StateRootSource,
 }
 
 impl ScheduleStatePaths {
@@ -83,38 +113,81 @@ impl ScheduleStatePaths {
         &self.root
     }
 
+    /// `<state root>/xv/rotate.log` — where an unattended rotation reports
+    /// when `--log-file` was not given.
+    ///
+    /// The same state root as [`Self::root`], deliberately: the unit's
+    /// `--manifest` argument and its log redirection must not be able to
+    /// disagree about which state root this install belongs to.
+    pub fn default_log_path(&self) -> PathBuf {
+        self.state_home.join("xv").join("rotate.log")
+    }
+
+    /// Which input selected [`Self::root`].
+    // Production reads the derived `pinned_state_home()`; the raw source is
+    // what the resolution tests assert on, and what a later status/diagnostic
+    // task needs to explain where the state directory came from.
+    #[allow(dead_code)]
+    pub fn source(&self) -> &StateRootSource {
+        &self.source
+    }
+
+    /// The `(variable, value)` pair an installed unit must set so the
+    /// scheduled process resolves this same state root, or `None` when the
+    /// root came from a native fallback the unit already reproduces.
+    ///
+    /// This is not target selection: the manifest path is written into the
+    /// unit as an absolute string either way, and `xv schedule run` compares
+    /// what it was handed against what it recomputes. Pinning the variable is
+    /// what makes those two agree for a user whose shell profile sets one.
+    pub fn pinned_state_home(&self) -> Option<(&'static str, PathBuf)> {
+        match &self.source {
+            StateRootSource::XvStateHome(value) => Some(("XV_STATE_HOME", PathBuf::from(value))),
+            StateRootSource::XdgStateHome(value) => Some(("XDG_STATE_HOME", PathBuf::from(value))),
+            StateRootSource::Home | StateRootSource::WindowsLocalData => None,
+        }
+    }
+
     /// `manifest.json` — the pinned target, owned by install/reinstall.
     pub fn manifest_path(&self) -> PathBuf {
         self.root.join("manifest.json")
     }
 
     /// `last-run.json` — owned by the scheduled runner.
-    // PR 2 (manifest runner) reads this; nothing in PR 1 does.
+    // The scheduled runner and the install transaction consume these; the
+    // renderer/runner scaffolding does not.
     #[allow(dead_code)]
     pub fn last_run_path(&self) -> PathBuf {
         self.root.join("last-run.json")
     }
 
     /// `run.lock` — persistent lock inode owned by the scheduled runner.
-    // PR 2 (manifest runner) reads this; nothing in PR 1 does.
+    // The scheduled runner and the install transaction consume these; the
+    // renderer/runner scaffolding does not.
     #[allow(dead_code)]
     pub fn run_lock_path(&self) -> PathBuf {
         self.root.join("run.lock")
     }
 
     /// `install.lock` — persistent lock inode owned by install/reinstall/uninstall.
-    // PR 2 (manifest runner) reads this; nothing in PR 1 does.
-    #[allow(dead_code)]
     pub fn install_lock_path(&self) -> PathBuf {
         self.root.join("install.lock")
     }
 
     /// `recovery/` — created only when an install rollback is incomplete.
-    // PR 2 (manifest runner) reads this; nothing in PR 1 does.
-    #[allow(dead_code)]
     pub fn recovery_dir(&self) -> PathBuf {
         self.root.join("recovery")
     }
+}
+
+/// Test-only: state paths rooted in `dir`, through the real resolver.
+#[cfg(test)]
+pub(crate) fn test_paths_in(dir: &Path) -> ScheduleStatePaths {
+    resolve(&ScheduleEnv {
+        xv_state_home: Some(dir.to_string_lossy().to_string()),
+        ..Default::default()
+    })
+    .expect("an explicit override always resolves")
 }
 
 fn non_empty(value: Option<String>) -> Option<String> {
@@ -136,8 +209,6 @@ pub fn resolve_from_process_env() -> Result<ScheduleStatePaths> {
 
 /// Resolve state paths for the current build's platform. Pure function of
 /// `env`; performs no environment or filesystem access itself.
-// PR 2 (manifest runner) reads this; nothing in PR 1 does.
-#[allow(dead_code)]
 pub fn resolve(env: &ScheduleEnv) -> Result<ScheduleStatePaths> {
     let platform = if cfg!(windows) {
         HostPlatform::Windows
@@ -148,15 +219,21 @@ pub fn resolve(env: &ScheduleEnv) -> Result<ScheduleStatePaths> {
 }
 
 fn resolve_for(env: &ScheduleEnv, platform: HostPlatform) -> Result<ScheduleStatePaths> {
-    let state_root = if let Some(overridden) = non_empty(env.xv_state_home.clone()) {
-        PathBuf::from(overridden)
+    let (state_root, source) = if let Some(overridden) = non_empty(env.xv_state_home.clone()) {
+        (
+            PathBuf::from(&overridden),
+            StateRootSource::XvStateHome(overridden),
+        )
     } else {
         match platform {
             HostPlatform::Unix => {
                 if let Some(xdg) = non_empty(env.xdg_state_home.clone()) {
-                    PathBuf::from(xdg)
+                    (PathBuf::from(&xdg), StateRootSource::XdgStateHome(xdg))
                 } else if let Some(home) = non_empty(env.home.clone()) {
-                    PathBuf::from(home).join(".local").join("state")
+                    (
+                        PathBuf::from(home).join(".local").join("state"),
+                        StateRootSource::Home,
+                    )
                 } else {
                     return Err(CrosstacheError::config(
                         "Cannot determine the schedule state directory: HOME is not set and no XDG_STATE_HOME or XV_STATE_HOME override was provided",
@@ -164,7 +241,7 @@ fn resolve_for(env: &ScheduleEnv, platform: HostPlatform) -> Result<ScheduleStat
                 }
             }
             HostPlatform::Windows => match env.windows_local_data_dir.clone() {
-                Some(local_data) => local_data,
+                Some(local_data) => (local_data, StateRootSource::WindowsLocalData),
                 None => {
                     return Err(CrosstacheError::config(
                         "Cannot determine the schedule state directory: the Windows local-data directory could not be resolved and no XV_STATE_HOME override was provided",
@@ -176,6 +253,8 @@ fn resolve_for(env: &ScheduleEnv, platform: HostPlatform) -> Result<ScheduleStat
 
     Ok(ScheduleStatePaths {
         root: state_root.join("xv").join("schedules").join(SCHEDULE_ID),
+        state_home: state_root,
+        source,
     })
 }
 
@@ -258,9 +337,11 @@ struct SchemaVersionPeek {
 /// not a cosmetic defect. Only UTC is accepted: two manifests written in
 /// different local offsets must still compare and sort as written.
 ///
-/// This runs on load and on write, never on the preview — the preview
+/// [`validate_v1`] runs on load and — since install validates before
+/// serializing — on write too, but never on the preview: the preview
 /// manifest's `installed_at` is deliberately empty and is rendered as
-/// `<set-at-install>` by [`serialize_manifest_preview`].
+/// `<set-at-install>` by [`serialize_manifest_preview`], which does not
+/// validate.
 fn validate_installed_at(value: &str) -> Result<()> {
     if value.is_empty() {
         return Err(CrosstacheError::config(
@@ -317,7 +398,12 @@ fn validate_digest(field: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_v1(manifest: &ScheduleManifestV1) -> Result<()> {
+/// Validate a v1 manifest.
+///
+/// Called on every load *and* by install before serializing, so a manifest
+/// this build would refuse to read is never written in the first place — the
+/// alternative is discovering the defect at 3am, from a job that cannot run.
+pub(crate) fn validate_v1(manifest: &ScheduleManifestV1) -> Result<()> {
     if manifest.schedule_id != SCHEDULE_ID {
         return Err(CrosstacheError::config(format!(
             "schedule manifest field 'schedule_id' must be '{SCHEDULE_ID}': {}",
@@ -393,8 +479,6 @@ pub fn serialize_manifest_preview(manifest: &ScheduleManifestV1) -> String {
 
 /// Deterministic pretty JSON bytes for the real on-disk manifest, terminated
 /// with a trailing newline.
-// PR 2 (manifest runner) reads this; nothing in PR 1 does.
-#[allow(dead_code)]
 pub fn serialize_manifest(manifest: &ScheduleManifestV1) -> Vec<u8> {
     let mut bytes =
         serde_json::to_vec_pretty(manifest).expect("schedule manifest is always valid JSON");
@@ -468,8 +552,6 @@ fn read_manifest_bytes(paths: &ScheduleStatePaths) -> Result<Vec<u8>> {
 ///
 /// An unknown `schema_version` produces a targeted error naming reinstall,
 /// rather than a generic deserialization failure.
-// PR 2 (manifest runner) reads this; nothing in PR 1 does.
-#[allow(dead_code)]
 pub fn load_manifest(paths: &ScheduleStatePaths) -> Result<ScheduleManifest> {
     let bytes = read_manifest_bytes(paths)?;
 
@@ -500,8 +582,6 @@ pub fn load_manifest(paths: &ScheduleStatePaths) -> Result<ScheduleManifest> {
 
 /// Atomically write `manifest.json`, creating the owning private directory
 /// (`0700` on Unix) if needed. The file is written private (`0600` on Unix).
-// PR 2 (manifest runner) reads this; nothing in PR 1 does.
-#[allow(dead_code)]
 pub fn write_manifest_atomic(paths: &ScheduleStatePaths, bytes: &[u8]) -> Result<()> {
     create_private_dir(paths.root()).map_err(|error| {
         CrosstacheError::config(format!(
@@ -514,8 +594,6 @@ pub fn write_manifest_atomic(paths: &ScheduleStatePaths, bytes: &[u8]) -> Result
 
 /// Remove only `manifest.json`. Refuses if it is a symlink; a missing file
 /// is not an error.
-// PR 2 (manifest runner) reads this; nothing in PR 1 does.
-#[allow(dead_code)]
 pub fn remove_owned_manifest(paths: &ScheduleStatePaths) -> Result<()> {
     let path = paths.manifest_path();
     match std::fs::symlink_metadata(&path) {
@@ -637,6 +715,136 @@ mod tests {
             paths.root(),
             Path::new("/home/alice/.local/state/xv/schedules/rotation-default")
         );
+    }
+
+    /// The root alone is not enough: install has to tell the unit which
+    /// variable produced it, or a scheduled run that inherits none of them
+    /// recomputes a different root and refuses its own manifest.
+    #[test]
+    fn resolve_reports_which_input_selected_the_root() {
+        let overridden = ScheduleEnv {
+            xv_state_home: Some("/override/state".to_string()),
+            xdg_state_home: Some("/xdg/state".to_string()),
+            home: Some("/home/alice".to_string()),
+            windows_local_data_dir: None,
+        };
+        let paths = resolve_for(&overridden, HostPlatform::Unix).unwrap();
+        assert_eq!(
+            paths.source(),
+            &StateRootSource::XvStateHome("/override/state".to_string())
+        );
+        assert_eq!(
+            paths.pinned_state_home(),
+            Some(("XV_STATE_HOME", PathBuf::from("/override/state")))
+        );
+
+        let xdg = ScheduleEnv {
+            xv_state_home: None,
+            ..overridden.clone()
+        };
+        let paths = resolve_for(&xdg, HostPlatform::Unix).unwrap();
+        assert_eq!(
+            paths.source(),
+            &StateRootSource::XdgStateHome("/xdg/state".to_string())
+        );
+        assert_eq!(
+            paths.pinned_state_home(),
+            Some(("XDG_STATE_HOME", PathBuf::from("/xdg/state")))
+        );
+
+        // The native fallbacks need no pin: the unit already sets HOME, and
+        // the Windows local-data directory is a property of the account.
+        let home_only = ScheduleEnv {
+            xv_state_home: None,
+            xdg_state_home: None,
+            ..overridden.clone()
+        };
+        let paths = resolve_for(&home_only, HostPlatform::Unix).unwrap();
+        assert_eq!(paths.source(), &StateRootSource::Home);
+        assert_eq!(paths.pinned_state_home(), None);
+
+        let windows = ScheduleEnv {
+            xv_state_home: None,
+            xdg_state_home: None,
+            home: None,
+            windows_local_data_dir: Some(PathBuf::from(r"C:\Users\alice\AppData\Local")),
+        };
+        let paths = resolve_for(&windows, HostPlatform::Windows).unwrap();
+        assert_eq!(paths.source(), &StateRootSource::WindowsLocalData);
+        assert_eq!(paths.pinned_state_home(), None);
+    }
+
+    /// The default rotation log and the pinned manifest must come from one
+    /// state-root resolution. They used to be computed separately — the log
+    /// read `XDG_STATE_HOME`/`$HOME/.local/state` on its own — so on Windows,
+    /// where `XDG_STATE_HOME` is not an input, an installing shell that had it
+    /// set produced a unit whose log lived under it and whose `--manifest`
+    /// argument lived under `%LOCALAPPDATA%`.
+    #[test]
+    fn the_default_log_path_shares_the_manifest_state_root() {
+        let xdg = ScheduleEnv {
+            xv_state_home: None,
+            xdg_state_home: Some("/xdg/state".to_string()),
+            home: Some("/home/alice".to_string()),
+            windows_local_data_dir: Some(PathBuf::from(r"C:\Users\alice\AppData\Local")),
+        };
+
+        let unix = resolve_for(&xdg, HostPlatform::Unix).unwrap();
+        assert_eq!(
+            unix.default_log_path(),
+            PathBuf::from("/xdg/state").join("xv").join("rotate.log")
+        );
+        assert!(unix.root().starts_with("/xdg/state"));
+
+        // Windows ignores XDG_STATE_HOME entirely; the log must follow the
+        // root the manifest actually uses, not the variable.
+        let windows = resolve_for(&xdg, HostPlatform::Windows).unwrap();
+        assert_eq!(
+            windows.default_log_path(),
+            PathBuf::from(r"C:\Users\alice\AppData\Local")
+                .join("xv")
+                .join("rotate.log")
+        );
+        assert!(windows.root().starts_with(r"C:\Users\alice\AppData\Local"));
+
+        // The Unix `HOME` fallback keeps its historical spelling.
+        let home_only = ScheduleEnv {
+            xdg_state_home: None,
+            ..xdg.clone()
+        };
+        let paths = resolve_for(&home_only, HostPlatform::Unix).unwrap();
+        assert_eq!(
+            paths.default_log_path(),
+            PathBuf::from("/home/alice/.local/state/xv/rotate.log")
+        );
+
+        // And an explicit override wins on every platform, for both.
+        let overridden = ScheduleEnv {
+            xv_state_home: Some("/override/state".to_string()),
+            ..xdg.clone()
+        };
+        for platform in [HostPlatform::Unix, HostPlatform::Windows] {
+            let paths = resolve_for(&overridden, platform).unwrap();
+            assert_eq!(
+                paths.default_log_path(),
+                PathBuf::from("/override/state/xv/rotate.log")
+            );
+        }
+    }
+
+    /// An empty override is ignored for the *source* too, not just the path —
+    /// otherwise the unit would pin an empty variable that resolves nowhere.
+    #[test]
+    fn an_empty_override_pins_nothing() {
+        let env = ScheduleEnv {
+            xv_state_home: Some(String::new()),
+            xdg_state_home: Some(String::new()),
+            home: Some("/home/alice".to_string()),
+            windows_local_data_dir: None,
+        };
+        let paths = resolve_for(&env, HostPlatform::Unix).unwrap();
+        assert_eq!(paths.source(), &StateRootSource::Home);
+        assert_eq!(paths.pinned_state_home(), None);
     }
 
     #[test]
@@ -792,7 +1000,9 @@ mod tests {
     fn load_manifest_reports_unknown_schema_version_for_reinstall() {
         let dir = tempfile::tempdir().unwrap();
         let paths = ScheduleStatePaths {
+            state_home: dir.path().to_path_buf(),
             root: dir.path().to_path_buf(),
+            source: StateRootSource::Home,
         };
         std::fs::create_dir_all(paths.root()).unwrap();
         std::fs::write(
@@ -915,7 +1125,9 @@ mod tests {
 
     fn temp_paths(dir: &tempfile::TempDir) -> ScheduleStatePaths {
         ScheduleStatePaths {
+            state_home: dir.path().to_path_buf(),
             root: dir.path().join("xv").join("schedules").join(SCHEDULE_ID),
+            source: StateRootSource::Home,
         }
     }
 
@@ -996,7 +1208,11 @@ mod tests {
 
         let linked_root = dir.path().join("linked-root");
         std::os::unix::fs::symlink(&real_dir, &linked_root).unwrap();
-        let paths = ScheduleStatePaths { root: linked_root };
+        let paths = ScheduleStatePaths {
+            state_home: dir.path().to_path_buf(),
+            root: linked_root,
+            source: StateRootSource::Home,
+        };
 
         let error = load_manifest(&paths).unwrap_err();
         assert!(error.to_string().contains("symlink"));
