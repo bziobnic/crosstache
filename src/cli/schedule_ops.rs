@@ -1153,6 +1153,18 @@ async fn execute_uninstall() -> Result<()> {
         ));
     }
 
+    // A foreign unit at an owned path stops uninstall from deregistering, so
+    // the job is still registered and will still fire. "Removed the ... rotation
+    // schedule." on its own would be a false reading of that, and the one
+    // person who can move the file aside is reading this line.
+    if let Some(path) = &report.deregistration_blocked_by {
+        output::warn(&format!(
+            "  Retained:  the scheduler registration was left in place because {} is not managed \
+             by xv.",
+            path.display()
+        ));
+    }
+
     remove_schedule_dir_if_empty(&state_paths);
 
     if let Some(detail) = report.scheduler_error.clone() {

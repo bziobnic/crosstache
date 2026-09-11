@@ -939,3 +939,140 @@ fn refusals_and_warnings_interleave_in_manifest_field_order() {
         ]
     );
 }
+
+// ---------------------------------------------------------------------------
+// Retained history and in-place upgrades
+// ---------------------------------------------------------------------------
+
+/// Uninstall retains `last-run.json`, so `status` afterwards has history to
+/// show — and hiding it would make the retention invisible to the only person
+/// who could act on it. The absent block therefore still renders `Last run:`,
+/// labelled `(previous install)` because the installation that wrote it is
+/// gone.
+#[test]
+fn an_absent_schedule_still_shows_a_retained_outcome_as_history() {
+    let report = ScheduleStatusReport {
+        scheduler: SchedulerState::Absent,
+        next_run: NextRun::Unknown,
+        ownership: Ownership::Absent,
+        manifest: None,
+        manifest_error: None,
+        drift: None,
+        unit_drift: None,
+        executable: None,
+        last_run: LastRunStatus::Outcome {
+            outcome: outcome(RunState::Success),
+            previous_install: true,
+        },
+        log: LogStatus::Unknown,
+    };
+
+    assert_in_order(
+        &render(&report),
+        &[
+            "[info] No systemd user timer rotation schedule is installed.",
+            "  Last run:  success; 2026-09-10T03:00:00Z to 2026-09-10T03:00:02Z; 2 due, \
+             2 rotated, 0 failed (previous install)",
+            "[hint] Install one with 'xv schedule install --vault <alias-or-vault>'.",
+        ],
+    );
+    assert!(
+        status_failure(&report, Platform::Systemd).is_none(),
+        "retained history is not a failure"
+    );
+}
+
+/// A host that never ran the schedule has no history, and `Last run:  never`
+/// under "nothing is installed" would be noise, not information.
+#[test]
+fn an_absent_schedule_with_no_history_says_nothing_about_the_last_run() {
+    let report = ScheduleStatusReport {
+        scheduler: SchedulerState::Absent,
+        next_run: NextRun::Unknown,
+        ownership: Ownership::Absent,
+        manifest: None,
+        manifest_error: None,
+        drift: None,
+        unit_drift: None,
+        executable: None,
+        last_run: LastRunStatus::Never,
+        log: LogStatus::Unknown,
+    };
+
+    let rendered = render(&report);
+    assert!(!rendered.contains("Last run:"), "{rendered}");
+}
+
+/// The design's drift table: a binary at the same canonical path reporting a
+/// new version is a warning, the run is allowed, and *status recommends a
+/// reinstall* so the rendered unit and the recorded schema are refreshed. The
+/// recommendation has to be a command the reader can paste, which means the
+/// alias they installed with.
+#[test]
+fn an_in_place_upgrade_warns_and_recommends_a_reinstall() {
+    let mut report = healthy();
+    report.drift = Some(DriftReport {
+        verdict: DriftVerdict::Warning,
+        reasons: Vec::new(),
+        warnings: vec![DriftReason::new(
+            "installed_version",
+            "installed_version changed from 0.39.0 to 0.40.0 at the same binary path; reinstall \
+             the schedule ('xv schedule install') to refresh the rendered unit",
+        )],
+    });
+    report.executable = Some(ExecutableStatus {
+        current_version: "0.40.0".to_string(),
+        ..executable()
+    });
+
+    let rendered = render(&report);
+    assert_in_order(
+        &rendered,
+        &[
+            "[ok] A systemd user timer rotation schedule is installed.",
+            "  Drift:     warning",
+            "  - installed_version changed from 0.39.0 to 0.40.0 at the same binary path; \
+             reinstall the schedule ('xv schedule install') to refresh the rendered unit",
+            "  Binary:    /home/alice/bin/xv (installed 0.39.0, current 0.40.0)",
+            "[hint] Reinstall the schedule with 'xv schedule install --vault payments' to \
+             refresh the rendered unit and the recorded version.",
+        ],
+    );
+    assert!(
+        status_failure(&report, Platform::Systemd).is_none(),
+        "an in-place upgrade is a warning, not a refusal"
+    );
+}
+
+/// The reinstall recommendation belongs to the warning, not to every managed
+/// schedule: a refusing schedule already gets the "accept the new target" hint,
+/// and printing both would give one reader two different reinstall sentences.
+#[test]
+fn a_refusing_schedule_gets_the_drift_hint_and_not_the_upgrade_one() {
+    let mut report = healthy();
+    report.drift = Some(DriftReport {
+        verdict: DriftVerdict::Refuse,
+        reasons: vec![DriftReason::new(
+            "config_digest",
+            "config_digest changed; review /home/alice/.config/xv/xv.conf and reinstall",
+        )],
+        warnings: vec![DriftReason::new(
+            "installed_version",
+            "installed_version changed from 0.39.0 to 0.40.0 at the same binary path; reinstall \
+             the schedule ('xv schedule install') to refresh the rendered unit",
+        )],
+    });
+
+    let rendered = render(&report);
+    assert!(
+        rendered.contains(
+            "[hint] Review the changes, then run 'xv schedule install --vault payments' to \
+             accept the new target."
+        ),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("to refresh the rendered unit and the recorded version"),
+        "two reinstall hints for one schedule: {rendered}"
+    );
+}

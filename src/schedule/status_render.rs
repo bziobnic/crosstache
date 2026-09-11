@@ -292,6 +292,17 @@ pub(crate) fn render_status(
                             "Review the changes, then run 'xv schedule install --vault {alias}' \
                              to accept the new target."
                         ));
+                    } else if has_warnings(report) {
+                        // The design's drift table: a same-path binary at a new
+                        // version is a warning, the run is allowed, and status
+                        // *recommends a reinstall* so the rendered unit and the
+                        // recorded schema are refreshed. The reason line already
+                        // says what changed; this is the action, in the paste-able
+                        // form every other hint uses.
+                        hints.push(format!(
+                            "Reinstall the schedule with 'xv schedule install --vault {alias}' \
+                             to refresh the rendered unit and the recorded version."
+                        ));
                     }
                 }
                 // Ownership said a manifest is there and the loader found
@@ -315,6 +326,15 @@ pub(crate) fn render_status(
             );
         }
         Ownership::Absent => {
+            // Uninstall retains `last-run.json`, so there may still be history
+            // here — and history nothing renders is retention the user cannot
+            // see. `collect_last_run` has already labelled it `(previous
+            // install)`, because the installation that wrote it is gone. A host
+            // that never ran the sweep says nothing: `Last run:  never` under
+            // "nothing is installed" is noise.
+            if !matches!(report.last_run, LastRunStatus::Never) {
+                render_last_run(&mut lines, &report.last_run);
+            }
             hints.push(format!(
                 "Install one with 'xv schedule install --vault {VAULT_PLACEHOLDER}'."
             ));
@@ -451,6 +471,15 @@ fn render_drift(lines: &mut Vec<String>, report: &ScheduleStatusReport) {
     for reason in target.into_iter().chain(unit_reasons.iter()) {
         lines.push(format!("  - {}", reason.detail));
     }
+}
+
+/// Whether the recorded target still recomputes but with something worth
+/// saying — today, only an in-place version change at the same binary path.
+fn has_warnings(report: &ScheduleStatusReport) -> bool {
+    report
+        .drift
+        .as_ref()
+        .is_some_and(|drift| !drift.warnings.is_empty())
 }
 
 /// `<recorded path> (installed X, current Y)`.

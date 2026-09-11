@@ -213,15 +213,14 @@ Under the per-user state directory, in `schedules/rotation-default/`:
 | File | Written by | Lifetime |
 |------|------------|----------|
 | `manifest.json` | install/reinstall | removed by `uninstall` |
-| `last-run.json` | the scheduled run — **forthcoming (not written yet)** | retained by reinstall and `uninstall` |
-| `run.lock` | the scheduled run — **forthcoming (not written yet)** | persistent lock inode; retained |
+| `last-run.json` | the scheduled run | retained by reinstall and `uninstall` |
+| `run.lock` | the scheduled run | persistent lock inode; retained |
 | `install.lock` | install/reinstall/uninstall | persistent lock inode; retained |
 | `recovery/` | an install rollback that could not finish | created only then; retained |
 
-`last-run.json` and `run.lock` are listed because `uninstall` already retains
-them if it finds them: this release's scheduled run writes neither, so nothing
-records the outcome of a firing and **concurrent firings are not serialized**.
-Both ship with last-run/next-run reporting.
+`last-run.json` records the outcome of each firing and `run.lock` serializes
+concurrent firings; `xv schedule status` reports both as `Last run:`. Neither is
+ever recreated by reinstalling, which is why neither is `uninstall`'s to take.
 
 The rotation log lives outside that directory (`~/.local/state/xv/rotate.log` by
 default on Linux/macOS, `%LOCALAPPDATA%\xv\rotate.log` on Windows — always
@@ -314,15 +313,86 @@ A file at an owned path that `xv` did not write — anything without its
 than adopted or overwritten. `status` reports it as `foreign` and leaves it
 alone.
 
-#### What `uninstall` removes, and what it keeps
+#### What `uninstall` and reinstall touch, exactly
 
 `xv schedule uninstall` deregisters the job and removes exactly two things: the
-native unit file(s) or task entry, and `manifest.json`. It **keeps**
-`last-run.json`, both lock files, `recovery/`, the rotation log, anything else
-in the state directory, and any file at an owned path that `xv` did not write
-(reported, not removed). Removing nothing is success — it is safe in teardown
-scripts — but a scheduler that fails for a reason other than "no such job" is
-reported as an error rather than as absence.
+native unit file(s) or task entry, and `manifest.json`. A reinstall replaces
+those same two things and nothing else. Everything in the state directory that
+is *not* in that owned set is somebody's evidence, and none of it is recreated
+by reinstalling:
+
+| Artifact | `uninstall` | reinstall |
+|---|---|---|
+| `com.crosstache.xv-rotate.plist` / `xv-rotate.service` + `.timer` / the `crosstache-xv-rotate` task | removed | re-rendered and re-registered |
+| `manifest.json` | removed | replaced; `installed_at` and the recorded binary version are updated |
+| `last-run.json` | retained | retained, and labelled `(previous install)` until a new run completes |
+| `run.lock` | retained (inode) | retained (inode) |
+| `install.lock` | retained (inode) | retained (inode) |
+| `recovery/` and its snapshots | retained | retained |
+| the rotation log (`--log-file`, default `~/.local/state/xv/rotate.log`) | retained | retained; the directory is (re)created |
+| anything else you left in the state directory | retained | retained |
+| a file at an owned path that `xv` did not write | retained and reported | refused; the install does not proceed |
+| a similarly named job of your own in the same unit directory | retained | untouched |
+
+Deleting a lock file would stop it excluding anything, so both lock inodes are
+permanent. The state directory itself is removed only if it ends up genuinely
+empty, which in practice it does not — `install.lock` alone keeps it — and the
+parent `schedules/` directory is never removed.
+
+Removing nothing is success: `uninstall` is safe in teardown scripts and on hosts
+that never had a schedule. A scheduler that fails for a reason other than "no
+such job" is reported as an error rather than as absence.
+
+One case deliberately stops short of deregistering. If a file `xv` did not write
+sits at an owned *unit* path, `uninstall` leaves both that file and the
+scheduler registration alone, and says so:
+
+```text
+[ok] Removed the systemd user timer rotation schedule.
+  Removed:   /home/alice/.local/state/xv/schedules/rotation-default/manifest.json
+  Retained:  /home/alice/.config/systemd/user/xv-rotate.timer (xv did not write it, so it was left alone)
+  Retained:  the scheduler registration was left in place because /home/alice/.config/systemd/user/xv-rotate.timer is not managed by xv.
+```
+
+Tearing down a job whose unit file is yours, and then calling that file
+"retained", would retain nothing. A foreign `manifest.json` is different: it sits
+inside `xv`'s own private state directory, and the registration it would shield
+is `xv`'s own, pointing at units this same call just removed — so the job *is*
+deregistered and only the foreign manifest stays.
+
+#### Retained history: `(previous install)`
+
+An outcome in `last-run.json` is bound to the exact `manifest.json` bytes that
+produced it. After a reinstall — or after an `uninstall` — the record is still
+there but no longer describes the installation you have now, so `status` marks
+it:
+
+```text
+  Last run:  success; 2026-09-10T03:00:00Z to 2026-09-10T03:00:02Z; 2 due, 2 rotated, 0 failed (previous install)
+```
+
+The label disappears the first time a run completes under the new manifest. After
+`uninstall`, the same line appears under `[info] No ... rotation schedule is
+installed.` — the history is retained, so it is also shown.
+
+#### After you upgrade `xv` in place
+
+Replacing the binary at the same path is the normal case and is **not** drift.
+The scheduled run is allowed, with one warning line, and `status` recommends a
+reinstall so the rendered unit and the manifest schema are refreshed:
+
+```text
+[ok] A systemd user timer rotation schedule is installed.
+  Drift:     warning
+  - installed_version changed from 0.39.0 to 0.40.0 at the same binary path; reinstall the schedule ('xv schedule install') to refresh the rendered unit
+  Binary:    /home/alice/bin/xv (installed 0.39.0, current 0.40.0)
+[hint] Reinstall the schedule with 'xv schedule install --vault payments' to refresh the rendered unit and the recorded version.
+```
+
+A binary at a *different* path, or a recorded path that no longer holds a regular
+executable file, is a `binary_path` refusal — the run exits with the
+configuration-error code and rotates nothing. That is the difference between "the
+same job, upgraded" and "some other program is about to rotate your secrets".
 
 #### `XV_STATE_HOME`
 

@@ -2965,3 +2965,435 @@ fn an_unreadable_orphaned_manifest_exits_three() {
     );
     drop(fixture.tmp);
 }
+
+// ---------------------------------------------------------------------------
+// Uninstall retention, retained history, and in-place upgrades
+// ---------------------------------------------------------------------------
+
+/// `xv schedule uninstall` under the fake scheduler, returning stdout+stderr.
+fn schedule_uninstall(root: &std::path::Path, state: &std::path::Path) -> (Option<i32>, String) {
+    let log = root.join("uninstall-calls.log");
+    let mut cmd = xv_cmd_in(root);
+    fake_scheduler(&mut cmd, &log);
+    let out = cmd
+        .env("XV_BACKEND", "local")
+        .env("XV_STATE_HOME", state)
+        .args(["schedule", "uninstall"])
+        .output()
+        .unwrap();
+    (
+        out.status.code(),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ),
+    )
+}
+
+/// Write every file the design's retention table says uninstall keeps, and
+/// return them.
+fn seed_retained_evidence(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let recovery = dir.join("recovery").join("20260909T000000Z-manifest.json");
+    std::fs::create_dir_all(recovery.parent().unwrap()).unwrap();
+    let files = vec![
+        dir.join("last-run.json"),
+        dir.join("run.lock"),
+        recovery,
+        dir.join("notes-the-user-left.txt"),
+    ];
+    for (n, path) in files.iter().enumerate() {
+        std::fs::write(path, format!("evidence {n}")).unwrap();
+    }
+    files
+}
+
+/// The whole owned set, removed: the manifest-run unit files a current install
+/// renders *and* `manifest.json`. Everything else in the directory stays, the
+/// directory itself stays (`install.lock` alone keeps it non-empty), and the
+/// parent `schedules/` directory is never a candidate for removal.
+#[test]
+fn uninstall_removes_the_pinned_units_and_retains_every_record() {
+    let Some(platform) = host_platform() else {
+        return;
+    };
+    if platform == Platform::Schtasks {
+        // No unit file to seed, and this test may not register a real task.
+        return;
+    }
+    let fixture = pinned_run_fixture(&[], |_| {});
+    let dir = fixture.manifest.parent().unwrap().to_path_buf();
+    let units = seed_units_for_manifest(platform, &fixture.root, &fixture.manifest);
+    let retained = seed_retained_evidence(&dir);
+    let log_path = fixture.root.join(".local/state/xv/rotate.log");
+    std::fs::create_dir_all(log_path.parent().unwrap()).unwrap();
+    std::fs::write(&log_path, "a rotation happened\n").unwrap();
+
+    let (code, out) = schedule_uninstall(&fixture.root, &fixture.state);
+    assert_eq!(code, Some(0), "{out}");
+
+    for unit in &units {
+        assert!(!unit.exists(), "{} survived: {out}", unit.display());
+        assert!(
+            out.contains(&format!("Removed:   {}", unit.display())),
+            "{out}"
+        );
+    }
+    assert!(!fixture.manifest.exists(), "{out}");
+    for (n, path) in retained.iter().enumerate() {
+        assert_eq!(
+            std::fs::read_to_string(path).ok(),
+            Some(format!("evidence {n}")),
+            "uninstall took or rewrote {}: {out}",
+            path.display()
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(&log_path).unwrap(),
+        "a rotation happened\n",
+        "{out}"
+    );
+    // The lock inode survives: removing it would stop it excluding anything.
+    assert!(dir.join("install.lock").exists(), "{out}");
+    // Retained files mean the directory is not empty, so it must remain — and
+    // its parent is never removed in any case.
+    assert!(dir.exists(), "{out}");
+    assert!(dir.parent().unwrap().exists(), "{out}");
+    assert!(
+        out.contains("Retained:"),
+        "uninstall did not say what it kept: {out}"
+    );
+    drop(fixture.tmp);
+}
+
+/// A foreign `manifest.json` retains the manifest, and nothing else.
+///
+/// The deregistration guard exists for a unit file at a path the *scheduler*
+/// reads: leaving that job registered while calling its unit "retained" would
+/// retain nothing. `manifest.json` is not that — it lives in xv's own private
+/// state directory, and the registration it would be protecting is xv's own,
+/// pointing at xv's own units. So the units go, the job is deregistered, and
+/// only the foreign manifest stays.
+#[test]
+fn uninstall_deregisters_when_only_the_manifest_is_foreign() {
+    let Some(platform) = host_platform() else {
+        return;
+    };
+    if platform == Platform::Schtasks {
+        return;
+    }
+    let fixture = pinned_run_fixture(&[], |_| {});
+    let units = seed_units_for_manifest(platform, &fixture.root, &fixture.manifest);
+    let alien = "{\"schedule_id\":\"somebody-elses\"}\n";
+    std::fs::write(&fixture.manifest, alien).unwrap();
+
+    let log = fixture.root.join("uninstall-calls.log");
+    let mut cmd = xv_cmd_in(&fixture.root);
+    fake_scheduler(&mut cmd, &log);
+    let out = cmd
+        .env("XV_BACKEND", "local")
+        .env("XV_STATE_HOME", &fixture.state)
+        .args(["schedule", "uninstall"])
+        .output()
+        .unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{combined}");
+
+    let calls = scheduler_calls(&log);
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.contains(expected_deregistration(platform))),
+        "a foreign manifest suppressed a deregistration it does not own: {calls:?}"
+    );
+    for unit in &units {
+        assert!(!unit.exists(), "{} survived: {combined}", unit.display());
+    }
+    assert_eq!(
+        std::fs::read_to_string(&fixture.manifest).unwrap(),
+        alien,
+        "uninstall touched a manifest xv did not write: {combined}"
+    );
+    assert!(
+        combined.contains(&format!("Retained:  {}", fixture.manifest.display())),
+        "{combined}"
+    );
+    assert!(
+        !combined.contains("is not managed by xv"),
+        "nothing blocked the deregistration, so nothing may claim it did: {combined}"
+    );
+    drop(fixture.tmp);
+}
+
+/// When a foreign *unit* does block deregistration, the success line has to say
+/// so. "Removed the ... rotation schedule." while the job is still registered
+/// and will fire tonight is the one reading the user must not be left with.
+#[test]
+fn uninstall_says_why_it_left_the_registration_in_place() {
+    let Some(platform) = host_platform() else {
+        return;
+    };
+    if platform == Platform::Schtasks {
+        return;
+    }
+    let fixture = pinned_run_fixture(&[], |_| {});
+    let paths = UnitPaths::for_platform(platform, &fixture.root);
+    std::fs::create_dir_all(&paths.dir).unwrap();
+    let foreign = seed_legacy_units(platform, &fixture.root, "v")[0].clone();
+    std::fs::write(&foreign, "# my own job\n").unwrap();
+
+    let (code, out) = schedule_uninstall(&fixture.root, &fixture.state);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(
+        out.contains(&format!(
+            "the scheduler registration was left in place because {} is not managed by xv",
+            foreign.display()
+        )),
+        "the success line did not say the job is still registered: {out}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&foreign).unwrap(),
+        "# my own job\n",
+        "{out}"
+    );
+    drop(fixture.tmp);
+}
+
+/// Uninstall retains history, and `status` afterwards has to show it — history
+/// nothing renders is retention the user cannot see. Labelled `(previous
+/// install)`, because the installation that produced it is gone.
+#[test]
+fn uninstall_keeps_the_last_run_visible_as_history() {
+    if host_platform().is_none() {
+        return;
+    }
+    let fixture = pinned_run_fixture(&[], |_| {});
+    let run = fixture.run();
+    assert_eq!(
+        run.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(read_outcome(&fixture.state)["state"], "success");
+
+    let (code, out) = schedule_uninstall(&fixture.root, &fixture.state);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(last_run_path(&fixture.state).exists(), "{out}");
+
+    let (status_code, status) = schedule_status_with(&fixture.root, &fixture.state, "fake");
+    assert_eq!(status_code, Some(0), "{status}");
+    assert!(
+        status.contains("rotation schedule is installed."),
+        "expected the absent headline: {status}"
+    );
+    assert!(
+        status.contains("  Last run:  success;") && status.contains("(previous install)"),
+        "uninstall's retained history is invisible in status: {status}"
+    );
+    drop(fixture.tmp);
+}
+
+/// A reinstall preserves the outcome but must not present it as this
+/// installation's own: the record is bound to the manifest digest that produced
+/// it, and the label goes away only when a new run completes.
+#[test]
+fn a_reinstall_keeps_the_outcome_as_history_until_a_new_run_completes() {
+    if host_platform().is_none() {
+        return;
+    }
+    let fixture = pinned_run_fixture(&[], |_| {});
+    let first = fixture.run();
+    assert_eq!(
+        first.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first_digest = manifest_digest_of(&fixture.manifest);
+    assert_eq!(
+        read_outcome(&fixture.state)["manifest_digest"]
+            .as_str()
+            .unwrap(),
+        first_digest
+    );
+
+    // Reinstall. The cadence changes and the recorded target does not, so the
+    // manifest digest differs while the follow-up run still has somewhere to
+    // go. (The manifest is republished the way installation publishes it; the
+    // fake scheduler cannot satisfy an install's verification queries, and
+    // that a real reinstall leaves `last-run.json`, both locks and the log
+    // alone is locked down in `schedule::install`'s unit tests.)
+    let reinstalled = install_manifest(&fixture.root, &fixture.state, &["--at", "04:15"]);
+    assert_eq!(reinstalled, fixture.manifest);
+    let second_digest = manifest_digest_of(&fixture.manifest);
+    assert_ne!(
+        second_digest, first_digest,
+        "the fixture's reinstall did not change the manifest"
+    );
+    assert!(
+        last_run_path(&fixture.state).exists(),
+        "the reinstall discarded the run record"
+    );
+
+    let (code, out) = schedule_status_with(&fixture.root, &fixture.state, "fake");
+    assert_eq!(code, Some(0), "{out}");
+    assert!(
+        out.contains("  Last run:  success;") && out.contains("(previous install)"),
+        "a retained outcome was presented as the new installation's own: {out}"
+    );
+
+    // A completed run under the new installation replaces it, and the label
+    // goes with it. Nothing is due any more, so this is a zero-rotation sweep
+    // — still a completed run, which is the whole point.
+    let second = fixture.run();
+    assert_eq!(
+        second.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let outcome = read_outcome(&fixture.state);
+    assert_eq!(outcome["state"], "success");
+    assert_eq!(
+        outcome["manifest_digest"].as_str().unwrap(),
+        second_digest,
+        "the new run did not bind to the reinstalled manifest"
+    );
+
+    let (code, out) = schedule_status_with(&fixture.root, &fixture.state, "fake");
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.contains("  Last run:  success;"), "{out}");
+    assert!(
+        !out.contains("(previous install)"),
+        "the new installation's own outcome is still labelled as history: {out}"
+    );
+    drop(fixture.tmp);
+}
+
+/// Rewrite one top-level string field of the published manifest.
+fn patch_manifest(manifest: &std::path::Path, field: &str, value: &str) {
+    let body = std::fs::read_to_string(manifest).unwrap();
+    let mut json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    json["execution"][field] = serde_json::Value::String(value.to_string());
+    std::fs::write(
+        manifest,
+        format!("{}\n", serde_json::to_string_pretty(&json).unwrap()),
+    )
+    .unwrap();
+}
+
+/// The ordinary in-place upgrade: `xv` was replaced at the same path and now
+/// reports a different version. The pinned run is *allowed*, with a warning on
+/// stderr, and status recommends a reinstall so the rendered unit and the
+/// recorded schema are refreshed.
+///
+/// The two versions are arranged by recording an older one in the manifest
+/// rather than by building a second binary: the runner compares its own
+/// `CARGO_PKG_VERSION` against the recorded value, which is exactly the
+/// comparison an upgrade changes.
+#[test]
+fn an_in_place_upgrade_is_allowed_with_a_warning_and_status_recommends_a_reinstall() {
+    let Some(platform) = host_platform() else {
+        return;
+    };
+    let fixture = pinned_run_fixture(&[], |_| {});
+    patch_manifest(&fixture.manifest, "installed_version", "0.0.1-older");
+    if platform != Platform::Schtasks {
+        seed_units_for_manifest(platform, &fixture.root, &fixture.manifest);
+    }
+
+    let out = fixture.run();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "an in-place upgrade may not refuse the run: {stderr}"
+    );
+    assert!(
+        stderr.contains(&format!(
+            "installed_version changed from 0.0.1-older to {} at the same binary path",
+            env!("CARGO_PKG_VERSION")
+        )),
+        "the allowed run said nothing about the version change: {stderr}"
+    );
+    let outcome = read_outcome(&fixture.state);
+    assert_eq!(outcome["state"], "success");
+    assert_eq!(outcome["summary"]["rotated"], 1, "{stderr}");
+    assert_ne!(
+        fixture.value(),
+        "pinned-value",
+        "the allowed run did not actually rotate: {stderr}"
+    );
+
+    if platform == Platform::Schtasks {
+        drop(fixture.tmp);
+        return;
+    }
+    let (code, status) = schedule_status_with(&fixture.root, &fixture.state, "fake:installed");
+    assert_eq!(
+        code,
+        Some(0),
+        "an in-place upgrade is a warning, not a failure: {status}"
+    );
+    assert!(status.contains("  Drift:     warning"), "{status}");
+    assert!(
+        status.contains(&format!(
+            "  Binary:    {} (installed 0.0.1-older, current {})",
+            env!("CARGO_BIN_EXE_xv"),
+            env!("CARGO_PKG_VERSION")
+        )),
+        "{status}"
+    );
+    assert!(
+        status.contains(
+            "[hint] Reinstall the schedule with 'xv schedule install --vault default' to refresh \
+             the rendered unit and the recorded version."
+        ),
+        "status did not recommend a reinstall: {status}"
+    );
+    drop(fixture.tmp);
+}
+
+/// The other half of the drift table's executable row: a *changed* path refuses
+/// the run, and a recorded path that is *gone* refuses too. Both are
+/// `binary_path`, both exit with the configuration-error code, and neither is
+/// softened into the in-place-upgrade warning.
+#[test]
+fn a_recorded_binary_that_moved_or_vanished_is_still_a_refusal() {
+    let Some(platform) = host_platform() else {
+        return;
+    };
+    let fixture = pinned_run_fixture(&[], |_| {});
+    let gone = fixture.root.join("no-such-xv");
+    patch_manifest(&fixture.manifest, "binary_path", &json_path(&gone));
+    // Rendered from the patched manifest, so the unit and the manifest still
+    // agree: the finding under test is the missing executable, not unit drift.
+    if platform != Platform::Schtasks {
+        seed_units_for_manifest(platform, &fixture.root, &fixture.manifest);
+    }
+
+    let out = fixture.run();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
+    assert!(stderr.contains("binary_path"), "{stderr}");
+    assert_eq!(read_outcome(&fixture.state)["state"], "refused_drift");
+    assert_eq!(fixture.value(), "pinned-value", "the refused run rotated");
+
+    if platform == Platform::Schtasks {
+        drop(fixture.tmp);
+        return;
+    }
+    // `status` compares the recorded path with itself, so this is the branch
+    // where "the recorded executable is missing" is the finding rather than
+    // "this is not the recorded executable".
+    let (code, status) = schedule_status_with(&fixture.root, &fixture.state, "fake:installed");
+    assert_eq!(code, Some(3), "{status}");
+    assert!(status.contains("  Drift:     refused"), "{status}");
+    assert!(status.contains("binary_path"), "{status}");
+    drop(fixture.tmp);
+}
