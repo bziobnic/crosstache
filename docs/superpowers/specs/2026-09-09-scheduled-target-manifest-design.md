@@ -1,8 +1,9 @@
 # Scheduled rotation target manifest
 
 > **Status:** Shipped — PR #444 (schema/resolver), PR #445
-> (runner/drift/transaction), PR 3 (outcomes/status/native gates). Deviations
-> recorded in progress ledger; see CHANGELOG.
+> (runner/drift/transaction), PR 3 (outcomes/status/native gates).
+> Deviations from this document are recorded in `CHANGELOG.md` and in those
+> pull requests.
 > **Tasks:** A03-01 through A03-10, with REL02, REL03, REL04, REL05 and REL07 as delivery gates.
 > **Golden outputs:** [`2026-09-09-scheduled-target-manifest-goldens.md`](2026-09-09-scheduled-target-manifest-goldens.md).
 

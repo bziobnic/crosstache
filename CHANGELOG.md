@@ -22,7 +22,17 @@
   keeps two firings from rotating the same vault at once: a second concurrent
   run logs one line and exits cleanly without touching the active run's
   outcome. `status` also parses and reports the scheduler's own next-run time
-  where the platform exposes one.
+  where the platform exposes one in a form that names its own time zone; a bare
+  local wall clock (what Task Scheduler prints) reports `unknown` rather than
+  being stamped with the host's current UTC offset, which is the wrong offset
+  across a daylight-saving boundary.
+- **`xv schedule status` fails when a schedule `xv` installed is not
+  registered.** Deregistering a rotation job without removing its files
+  (`systemctl --user disable --now`, `launchctl bootout`) leaves ownership
+  reading `managed` while nothing will ever fire. Status now reports
+  `Scheduler: not registered` for any artifact it found on disk, and a managed
+  one that the scheduler has no record of is an `[error]` exiting `3` with a
+  reinstall hint instead of `[ok]` exiting `0`.
 
 ### Changed
 

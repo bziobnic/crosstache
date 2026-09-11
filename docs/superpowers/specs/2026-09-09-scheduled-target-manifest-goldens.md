@@ -1,8 +1,9 @@
 # Scheduled target manifest golden outputs
 
 > **Status:** Shipped — PR #444 (schema/resolver), PR #445
-> (runner/drift/transaction), PR 3 (outcomes/status/native gates). Deviations
-> recorded in progress ledger; see CHANGELOG.
+> (runner/drift/transaction), PR 3 (outcomes/status/native gates).
+> Deviations from this document are recorded in `CHANGELOG.md` and in those
+> pull requests.
 >
 > Normative examples for the
 > [scheduled target manifest design](2026-09-09-scheduled-target-manifest-design.md).

@@ -501,8 +501,10 @@ manifest at 3 a.m.
 `xv schedule status` is read-only — it never contacts the secrets provider —
 and always reports the same independent dimensions: ownership, the intended
 target, drift, the executable, the last run, the next run, and the log. What
-follows are the full states from the golden outputs; every one of them is
-literal `xv schedule status` output for its scenario, not paraphrased.
+follows are the states from the golden outputs, in the goldens' own wording.
+The first two are complete blocks; the drift-refusal and the orphaned-manifest
+examples are **excerpts** — a real run renders the full dimension set, and these
+show only the lines that matter for that state.
 
 A healthy schedule that has not fired yet:
 
@@ -543,8 +545,11 @@ The same schedule after a successful firing:
 `Next run` is genuinely platform-dependent: launchd rarely exposes a
 parseable next-fire time at all (`launchctl print` does not reliably report
 one), so macOS schedules commonly show `unknown` even when healthy. systemd
-and Task Scheduler report it more often, but a Task Scheduler value under some
-locales still renders `unknown` rather than being guessed.
+reports it whenever the timer is loaded. Task Scheduler prints a value in the
+machine's own short-date format **and with no time zone**, so unless it happens
+to name its own offset it renders `unknown`: attributing the host's current UTC
+offset to a wall-clock time in the future is wrong across a daylight-saving
+boundary, and a confidently wrong instant is worse than none.
 
 A target that no longer matches what was installed (see
 [Drift](#when-a-run-refuses-drift) above for the full example) fails status
@@ -560,6 +565,22 @@ with exit `3`:
   Last run:  refused_drift; 2026-09-10T03:00:00Z; exit 3; target_drift
   Next run:  2026-09-11T03:00:00Z
 [hint] Review the changes, then run 'xv schedule install --vault payments' to accept the new target.
+```
+
+A schedule whose files are still on disk but which the scheduler has no record
+of — `systemctl --user disable --now xv-rotate.timer`, `launchctl bootout`, or a
+user session that never loaded it — is `managed` and **will not fire**. Status
+says so and fails with exit `3`, because nothing else about the block would
+tell you:
+
+```text
+[error] The systemd user timer rotation schedule is not registered.
+  Ownership: managed
+  Scheduler: not registered
+  Schedule:  daily at 03:00
+  Target:    payments -> aws-prod/payments-production
+  Drift:     valid
+[hint] Run 'xv schedule install --vault payments' to register it again.
 ```
 
 A schedule from an older `xv`, with no manifest at all (see
@@ -594,7 +615,7 @@ invokes) use the project's ordinary exit-code table
 | Situation | Exit |
 |---|---|
 | `[ok]`, `[warn]` or `[info]` status — including `legacy-unpinned`, `orphaned-manifest`, and "nothing installed" | `0` |
-| `[error]` status: drift would refuse the next run, the recorded target could not be read, or the scheduler itself could not be queried | `3` (configuration error) |
+| `[error]` status: drift would refuse the next run, the recorded target could not be read, the scheduler has no record of a unit `xv` installed, or the scheduler itself could not be queried | `3` (configuration error) |
 | `schedule run --manifest ...`: target drift, a missing/malformed manifest, or any refusal before backend construction | `3` (configuration error) |
 | `schedule run --manifest ...`: a second concurrent firing that lost the `run.lock` race | `0` — it is not a failure, just a skip (see [Concurrency](#concurrency-overlapping-runs)) |
 | `schedule run --manifest ...`: the sweep ran and rotated everything due | `0`, `last-run.json` state `success` |

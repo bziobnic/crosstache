@@ -65,9 +65,14 @@ now shipped):
 - A systemd install that is deregistered mid-way (timer removed, service left,
   or vice versa) is currently reported as `foreign` rather than as a specific
   half-deleted state.
-- Real (non-fake) native install/register/query integration is exercised only
-  through `.github/workflows/schedule-native.yml`'s ephemeral round trip and
-  the `XV_SCHEDULE_RUNNER=fake` unit-test path; there is no unit-level test
+- Real (non-fake) native coverage is partial and differs by platform.
+  `.github/workflows/schedule-native.yml` lints the *rendered* launchd plist
+  and systemd units with `plutil`/`systemd-analyze`, but on Windows it creates a
+  **synthetic harmless task** (`/TR "cmd /c exit 0"`, triggered once in 2099)
+  purely to check that the `schtasks /Query` XML and LIST shapes our parsers
+  read are the shapes Windows prints — it never registers the rendered `/TR`,
+  whose quoting is covered only by the unit snapshot. Everything else runs
+  through the `XV_SCHEDULE_RUNNER=fake` path; there is no unit-level test
   against the real `launchctl`/`systemctl`/`schtasks` binaries.
 - `manifest.json` stayed `schema_version: 1` when `target.vault_selection` was
   added on top of the PR 2 shape (a pre-`vault_selection` manifest is now
