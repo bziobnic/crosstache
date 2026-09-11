@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Managed by crosstache (xv schedule). Edits are overwritten on reinstall. -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.crosstache.xv-rotate</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string><HOME>/bin dir/xv</string>
+        <string>schedule</string>
+        <string>run</string>
+        <string>--manifest</string>
+        <string><HOME>/state root/xv/schedules/rotation-default/manifest.json</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string><HOME></string>
+        <key>XV_STATE_HOME</key>
+        <string><HOME>/state root</string>
+    </dict>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>3</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+    <key>WorkingDirectory</key>
+    <string><HOME>/work dir</string>
+    <key>StandardOutPath</key>
+    <string><HOME>/log dir/rotate.log</string>
+    <key>StandardErrorPath</key>
+    <string><HOME>/log dir/rotate.log</string>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

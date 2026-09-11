@@ -1404,6 +1404,19 @@ fn pinned_run_fixture(extra: &[&str], before_install: impl FnOnce(&std::path::Pa
     // Canonical, because that is the spelling the manifest records (macOS
     // hands out `/var/...` tempdirs that canonicalize to `/private/var/...`).
     let root = std::fs::canonicalize(tmp.path()).unwrap();
+    pinned_run_fixture_in(tmp, root, store, extra, before_install)
+}
+
+/// [`pinned_run_fixture`] over a root the caller chose, so a test can put the
+/// whole target — config, store, state root and working directory — at a path
+/// containing spaces.
+fn pinned_run_fixture_in(
+    tmp: tempfile::TempDir,
+    root: std::path::PathBuf,
+    store: std::path::PathBuf,
+    extra: &[&str],
+    before_install: impl FnOnce(&std::path::Path),
+) -> PinnedRun {
     use_the_store_once(&store);
 
     // The decoy: a second local store holding the same due secret name in the
@@ -1418,16 +1431,30 @@ fn pinned_run_fixture(extra: &[&str], before_install: impl FnOnce(&std::path::Pa
     let decoy_key = root.join("key-b").join("key-b.txt");
     std::fs::create_dir_all(&decoy_store).unwrap();
     std::fs::create_dir_all(decoy_key.parent().unwrap()).unwrap();
+    // The *config's own* spelling of the key path, which is the one beside the
+    // store rather than `root`'s: on macOS a tempdir is handed out as
+    // `/var/...` and canonicalizes to `/private/var/...`, so replacing the
+    // canonical spelling silently matched nothing and left the decoy store
+    // sharing the pinned identity — which made `local-b` unusable as a
+    // *schedule target*, not just as a decoy.
+    let pinned_key = store
+        .parent()
+        .expect("the store has a parent")
+        .join("key.txt");
     let swapped = original
         .replace(
             &store.to_string_lossy().replace('\\', "\\\\"),
             &decoy_store.to_string_lossy().replace('\\', "\\\\"),
         )
         .replace(
-            &root.join("key.txt").to_string_lossy().replace('\\', "\\\\"),
+            &pinned_key.to_string_lossy().replace('\\', "\\\\"),
             &decoy_key.to_string_lossy().replace('\\', "\\\\"),
         );
-    assert_ne!(swapped, original, "fixture config shape changed");
+    assert!(
+        swapped.contains(&decoy_store.to_string_lossy().replace('\\', "\\\\"))
+            && swapped.contains(&decoy_key.to_string_lossy().replace('\\', "\\\\")),
+        "fixture config shape changed: neither the store nor the key was repointed"
+    );
     std::fs::write(&conf, &swapped).unwrap();
     set_secret(&store, "STALE", "decoy-value");
     make_due(&store, "STALE");
@@ -1908,7 +1935,8 @@ fn json_path(path: &std::path::Path) -> String {
 // ---------------------------------------------------------------------------
 
 use crosstache::schedule::{
-    render, Platform, RotationSchedule, ScheduleCommand, ScheduleInterval, UnitPaths,
+    render, unit_paths_for, Platform, RotationSchedule, ScheduleCommand, ScheduleInterval,
+    UnitPaths,
 };
 
 /// The platform this host schedules on, or `None` when it has no scheduler we
@@ -3396,4 +3424,742 @@ fn a_recorded_binary_that_moved_or_vanished_is_still_a_refusal() {
     assert!(status.contains("  Drift:     refused"), "{status}");
     assert!(status.contains("binary_path"), "{status}");
     drop(fixture.tmp);
+}
+
+// ---------------------------------------------------------------------------
+// The target-isolation matrix
+//
+// Every row of the design's isolation list (the "Verification strategy" section
+// of docs/superpowers/specs/2026-09-09-scheduled-target-manifest-design.md) and
+// the test that proves it. Each row asserts BOTH halves: the intended mutation
+// in the pinned store, and a decoy target that is byte-for-byte untouched.
+//
+// | isolation row | proved by |
+// |---|---|
+// | same real vault name on two named local backends | `a_pinned_run_rotates_the_recorded_target_and_nothing_else` — the fixture's decoy *is* `local-b/default`, holding its own due `STALE` |
+// | a workspace alias mapped to a different real vault than a same-named raw vault | `an_alias_that_shadows_a_raw_vault_rotates_the_alias_target` |
+// | two project `[env.*]` profiles selecting different vaults | `a_second_project_profile_cannot_redirect_the_sweep` |
+// | a state root / store path containing spaces | `a_target_whose_paths_contain_spaces_rotates_only_the_pinned_vault` |
+// | invocation from a changed cwd | every `run_pinned` runs from `<root>/elsewhere`, never the recorded directory; the plain case is `a_pinned_run_rotates_the_recorded_target_and_nothing_else` |
+// | conflicting `XV_BACKEND`/`XV_ENV`/`XV_CONTEXT_DIR`/`XDG_CONFIG_HOME` on the child | `no_ambient_selection_input_can_redirect_the_sweep` |
+// | missing config | `a_missing_config_file_refuses_the_run` (changed bytes: `changed_config_bytes_refuse_the_run`) |
+// | missing project | `a_missing_project_file_refuses_the_run` (changed: `a_changed_project_file_refuses_the_run`) |
+// | missing context | `a_missing_context_file_refuses_the_run` (changed: `a_changed_participating_context_refuses_the_run`) |
+// | missing working directory | `a_missing_working_directory_refuses_the_run` |
+// | missing executable | `a_recorded_binary_that_moved_or_vanished_is_still_a_refusal` |
+// | missing backend entry | `a_removed_backend_entry_refuses_the_run` |
+// ---------------------------------------------------------------------------
+
+/// An isolated local store at a path the caller chooses — the same shape
+/// `xv_isolated_local_with_opts` builds, so a fixture can put the whole target
+/// somewhere with spaces in it.
+fn isolated_local_at(
+    parent: &std::path::Path,
+    name: &str,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    let root = parent.join(name);
+    let store = root.join("store");
+    let key = root.join("key.txt");
+    std::fs::create_dir_all(root.join(".config").join("xv")).unwrap();
+    std::fs::create_dir_all(&store).unwrap();
+    let config = format!(
+        r#"backend = "local"
+debug = false
+subscription_id = ""
+default_vault = "default"
+default_resource_group = ""
+default_location = ""
+tenant_id = ""
+output_json = false
+no_color = true
+cache_enabled = false
+cache_ttl_secs = 0
+clipboard_timeout = 0
+
+[local]
+store_path = "{store}"
+key_file = "{key}"
+default_vault = "default"
+audit = false
+git = false
+"#,
+        store = json_path(&store),
+        key = json_path(&key),
+    );
+    std::fs::write(root.join(".config").join("xv").join("xv.conf"), config).unwrap();
+    (root, store)
+}
+
+/// Run `xv` against a *raw* vault by repointing the config's default vault at it
+/// for the duration of the command, then restoring the file byte for byte.
+///
+/// There is no per-command `--vault`: a vault is whatever the resolution chain
+/// selects, so a fixture that needs a secret in a second raw vault has to move
+/// the default. Restoring the exact prior bytes matters — `config_digest` pins
+/// them, and a fixture that left the file rewritten would be testing config
+/// drift instead of whatever it meant to test.
+fn xv_in_vault(root: &std::path::Path, vault: &str, args: &[&str]) -> String {
+    let conf = root.join(".config").join("xv").join("xv.conf");
+    let original = std::fs::read_to_string(&conf).unwrap();
+    let repointed = original.replace(
+        "default_vault = \"default\"",
+        &format!("default_vault = \"{vault}\""),
+    );
+    assert!(
+        vault == "default" || repointed != original,
+        "fixture config shape changed"
+    );
+    std::fs::write(&conf, &repointed).unwrap();
+    // An attached workspace's default entry outranks the config default, so a
+    // fixture that reaches a *raw* vault has to step out of the workspace for
+    // the duration of the command. Both files are restored byte for byte.
+    let context = root.join(".xv").join("context");
+    let attached = std::fs::read(&context).ok();
+    if attached.is_some() {
+        std::fs::remove_file(&context).unwrap();
+    }
+    let out = xv_cmd_for(&root.join("store")).args(args).output().unwrap();
+    std::fs::write(&conf, &original).unwrap();
+    if let Some(bytes) = attached {
+        std::fs::write(&context, bytes).unwrap();
+    }
+    assert!(
+        out.status.success(),
+        "xv {args:?} in vault '{vault}' failed: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// A due secret named `STALE` in the raw vault `vault`, valued `<vault>-value`.
+fn seed_due_secret_in_vault(root: &std::path::Path, vault: &str) {
+    let value = format!("{vault}-value");
+    xv_in_vault(root, vault, &["set", "STALE", "--value", &value]);
+    xv_in_vault(
+        root,
+        vault,
+        &[
+            "update",
+            "STALE",
+            "--tag",
+            "xv:rotate_every=30d",
+            "--tag",
+            "xv:rotated_at=2020-01-01T00:00:00Z",
+        ],
+    );
+}
+
+fn secret_value_in_vault(root: &std::path::Path, vault: &str) -> String {
+    xv_in_vault(root, vault, &["get", "STALE", "--raw"])
+}
+
+/// `xv` in the fixture root with an explicit `--env`, for a project file that
+/// defines environments and no `default_env`.
+fn xv_in_env(store: &std::path::Path, env: &str, args: &[&str]) -> String {
+    let mut cmd = xv_cmd_for(store);
+    let out = cmd.args(args).args(["--env", env]).output().unwrap();
+    assert!(
+        out.status.success(),
+        "xv {args:?} --env {env} failed: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// The refusal a drift check owes: the configuration-error exit code and the
+/// manifest field that refused, named.
+fn assert_refused(out: &std::process::Output, field: &str) -> String {
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
+    assert!(
+        stderr.contains(field),
+        "the refusal does not name {field}:\n{stderr}"
+    );
+    assert!(stderr.to_lowercase().contains("reinstall"), "{stderr}");
+    stderr
+}
+
+/// A context attaching one alias to a real vault of a different name, on the
+/// active backend.
+const SHADOWING_ALIAS_CONTEXT: &str = r#"{
+  "current": null,
+  "recent": [],
+  "workspace": {
+    "entries": [
+      { "vault": "real-vault", "backend": "local", "alias": "shadow", "default": true }
+    ]
+  }
+}
+"#;
+
+/// An alias whose *name* is also a real vault must rotate the vault it points
+/// at, never the vault that shares its name.
+///
+/// The manifest records the resolved vault, so this is the case where a runner
+/// that re-resolved `--vault shadow` against anything — or one that recorded the
+/// alias and resolved it later — would sweep the wrong store subtree.
+#[test]
+fn an_alias_that_shadows_a_raw_vault_rotates_the_alias_target() {
+    let fixture = pinned_run_fixture(&["--vault", "shadow"], |root| {
+        seed_due_secret_in_vault(root, "shadow");
+        seed_due_secret_in_vault(root, "real-vault");
+        std::fs::create_dir_all(root.join(".xv")).unwrap();
+        std::fs::write(root.join(".xv").join("context"), SHADOWING_ALIAS_CONTEXT).unwrap();
+    });
+    let recorded = std::fs::read_to_string(&fixture.manifest).unwrap();
+    assert!(
+        recorded.contains("\"workspace_alias\": \"shadow\""),
+        "{recorded}"
+    );
+    assert!(recorded.contains("\"vault\": \"real-vault\""), "{recorded}");
+    let decoy_before = fixture.decoy_snapshot();
+
+    let out = fixture.run();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+
+    assert_ne!(
+        secret_value_in_vault(&fixture.root, "real-vault"),
+        "real-vault-value",
+        "the vault behind the alias did not rotate: {stderr}"
+    );
+    assert_eq!(
+        secret_value_in_vault(&fixture.root, "shadow"),
+        "shadow-value",
+        "the same-named raw vault was swept: {stderr}"
+    );
+    assert_eq!(
+        fixture.decoy_snapshot(),
+        decoy_before,
+        "the run touched the decoy backend"
+    );
+    drop(fixture.tmp);
+}
+
+/// Two project profiles, two vaults: the sweep replays the one installation
+/// selected, even when `XV_ENV` in the scheduled process names the other.
+#[test]
+fn a_second_project_profile_cannot_redirect_the_sweep() {
+    let project =
+        "[env.production]\nvault = \"prod-vault\"\n\n[env.staging]\nvault = \"stage-vault\"\n";
+    let fixture = pinned_run_fixture(&["--env", "production"], |root| {
+        // The profiles name vaults that must already exist — a schedule is only
+        // installed against a target this machine can read — and a project file
+        // defining environments with no `default_env` fails every command that
+        // does not select one, so the vaults are seeded first, by name.
+        seed_due_secret_in_vault(root, "prod-vault");
+        seed_due_secret_in_vault(root, "stage-vault");
+        std::fs::write(root.join(".xv.toml"), project).unwrap();
+    });
+    let recorded = std::fs::read_to_string(&fixture.manifest).unwrap();
+    assert!(
+        recorded.contains("\"environment\": \"production\""),
+        "{recorded}"
+    );
+    assert!(recorded.contains("\"vault\": \"prod-vault\""), "{recorded}");
+    let decoy_before = fixture.decoy_snapshot();
+
+    // The scheduled process carries `XV_ENV=staging` — the other profile, with
+    // the other vault.
+    let out = run_pinned_with_ambient_env(&fixture, "staging");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+
+    assert_ne!(
+        xv_in_env(&fixture.store, "production", &["get", "STALE", "--raw"]),
+        "prod-vault-value",
+        "the recorded profile's vault did not rotate: {stderr}"
+    );
+    assert_eq!(
+        xv_in_env(&fixture.store, "staging", &["get", "STALE", "--raw"]),
+        "stage-vault-value",
+        "the ambient profile's vault was swept: {stderr}"
+    );
+    assert_eq!(fixture.decoy_snapshot(), decoy_before);
+    drop(fixture.tmp);
+}
+
+/// [`run_pinned`] with a specific `XV_ENV` in the scheduled process.
+fn run_pinned_with_ambient_env(fixture: &PinnedRun, env: &str) -> std::process::Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_xv"))
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", &fixture.root)
+        .env("XDG_CONFIG_HOME", fixture.root.join(".config"))
+        .env("NO_COLOR", "1")
+        .env("XV_BACKEND", "azure")
+        .env("XV_ENV", env)
+        .env("XV_STATE_HOME", &fixture.state)
+        .current_dir(&fixture.elsewhere)
+        .args([
+            "schedule",
+            "run",
+            "--manifest",
+            fixture.manifest.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap()
+}
+
+/// Every path in the recorded target — config, store, state root, working
+/// directory, log — contains a space, on every platform.
+#[test]
+fn a_target_whose_paths_contain_spaces_rotates_only_the_pinned_vault() {
+    let tmp = tempfile::tempdir().unwrap();
+    let parent = std::fs::canonicalize(tmp.path()).unwrap();
+    let (root, store) = isolated_local_at(&parent, "a target with spaces");
+    let fixture = pinned_run_fixture_in(tmp, root, store, &[], |_| {});
+
+    let recorded = std::fs::read_to_string(&fixture.manifest).unwrap();
+    assert!(
+        recorded.contains("a target with spaces"),
+        "the fixture did not put a space in the recorded paths: {recorded}"
+    );
+    let before = fixture.value();
+    let decoy_before = fixture.decoy_snapshot();
+
+    let out = fixture.run();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert_ne!(fixture.value(), before, "{stderr}");
+    assert_eq!(fixture.decoy_snapshot(), decoy_before);
+    drop(fixture.tmp);
+}
+
+/// A context attaching the decoy backend as the workspace default, for the
+/// hostile `XV_CONTEXT_DIR`.
+const DECOY_CONTEXT: &str = r#"{
+  "current": null,
+  "recent": [],
+  "workspace": {
+    "entries": [
+      { "vault": "default", "backend": "local", "alias": "decoy", "default": true }
+    ]
+  }
+}
+"#;
+
+/// Not one ambient selection input may reach the target: a contradicting
+/// backend, a contradicting environment, a context directory attaching the
+/// decoy as the workspace default, and a config home whose `xv.conf` *is* the
+/// decoy store. All four at once, and the sweep still lands on the pinned
+/// vault.
+#[test]
+fn no_ambient_selection_input_can_redirect_the_sweep() {
+    let fixture = pinned_run_fixture(&[], |_| {});
+    let before = fixture.value();
+    let decoy_before = fixture.decoy_snapshot();
+
+    // A *valid, attractive* decoy: the fixture's own config with the store path
+    // swapped, so a runner that read it would rotate the decoy rather than fail.
+    let hostile_config = fixture.root.join("hostile config home");
+    std::fs::create_dir_all(hostile_config.join("xv")).unwrap();
+    let original = std::fs::read_to_string(fixture.config_path()).unwrap();
+    let swapped = original.replace(&json_path(&fixture.store), &json_path(&fixture.decoy_store));
+    assert_ne!(swapped, original, "fixture config shape changed");
+    std::fs::write(hostile_config.join("xv").join("xv.conf"), swapped).unwrap();
+    let hostile_context = fixture.root.join("hostile context dir");
+    std::fs::create_dir_all(&hostile_context).unwrap();
+    std::fs::write(hostile_context.join("context"), DECOY_CONTEXT).unwrap();
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_xv"))
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", &fixture.root)
+        .env("XDG_CONFIG_HOME", &hostile_config)
+        .env("XV_CONTEXT_DIR", &hostile_context)
+        .env("XV_BACKEND", "azure")
+        .env("XV_ENV", "no-such-environment")
+        .env("NO_COLOR", "1")
+        .env("XV_STATE_HOME", &fixture.state)
+        .current_dir(&fixture.elsewhere)
+        .args([
+            "schedule",
+            "run",
+            "--manifest",
+            fixture.manifest.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert_ne!(
+        fixture.value(),
+        before,
+        "the pinned vault did not rotate: {stderr}"
+    );
+    assert_eq!(
+        fixture.decoy_snapshot(),
+        decoy_before,
+        "an ambient input redirected the sweep at the decoy"
+    );
+    drop(fixture.tmp);
+}
+
+#[test]
+fn a_missing_config_file_refuses_the_run() {
+    let fixture = pinned_run_fixture(&[], |_| {});
+    let before = fixture.value();
+    let body = std::fs::read_to_string(fixture.config_path()).unwrap();
+    std::fs::remove_file(fixture.config_path()).unwrap();
+
+    let out = fixture.run();
+    let stderr = assert_refused(&out, "config_path is missing or unreadable");
+
+    // Put it back so the pinned store is readable again.
+    std::fs::write(fixture.config_path(), &body).unwrap();
+    assert_eq!(
+        fixture.value(),
+        before,
+        "a refused run must not rotate: {stderr}"
+    );
+}
+
+#[test]
+fn a_missing_project_file_refuses_the_run() {
+    let project = "default_env = \"production\"\n\n[env.production]\nvault = \"default\"\n";
+    let fixture = pinned_run_fixture(&[], |root| {
+        std::fs::write(root.join(".xv.toml"), project).unwrap();
+    });
+    let before = fixture.value();
+    std::fs::remove_file(fixture.root.join(".xv.toml")).unwrap();
+
+    let out = fixture.run();
+    assert_refused(&out, "project_path is missing or unreadable");
+    assert_eq!(fixture.value(), before);
+}
+
+#[test]
+fn a_missing_context_file_refuses_the_run() {
+    let context = r#"{
+  "current": null,
+  "recent": [],
+  "workspace": {
+    "entries": [
+      { "vault": "default", "backend": "local", "alias": "pinned", "default": true }
+    ]
+  }
+}
+"#;
+    let fixture = pinned_run_fixture(&[], |root| {
+        std::fs::create_dir_all(root.join(".xv")).unwrap();
+        std::fs::write(root.join(".xv").join("context"), context).unwrap();
+    });
+    let before = fixture.value();
+    std::fs::remove_file(fixture.root.join(".xv").join("context")).unwrap();
+
+    let out = fixture.run();
+    assert_refused(&out, "context_path is missing or unreadable");
+    assert_eq!(fixture.value(), before);
+}
+
+/// A schedule pinned to a *named* backend refuses once that backend is no
+/// longer configured — and rotates neither store on the way out.
+#[test]
+fn a_removed_backend_entry_refuses_the_run() {
+    let context = r#"{
+  "current": null,
+  "recent": [],
+  "workspace": {
+    "entries": [
+      { "vault": "default", "backend": "local", "alias": "pinned", "default": true },
+      { "vault": "default", "backend": "local-b", "alias": "attached" }
+    ]
+  }
+}
+"#;
+    let fixture = pinned_run_fixture(&["--vault", "attached"], |root| {
+        std::fs::create_dir_all(root.join(".xv")).unwrap();
+        std::fs::write(root.join(".xv").join("context"), context).unwrap();
+    });
+    let recorded = std::fs::read_to_string(&fixture.manifest).unwrap();
+    assert!(
+        recorded.contains("\"backend_name\": \"local-b\""),
+        "{recorded}"
+    );
+    // Read outside the workspace: with two entries attached, both holding a
+    // `STALE`, an unqualified union read is ambiguous by design.
+    let before = secret_value_in_vault(&fixture.root, "default");
+    let decoy_before = fixture.decoy_snapshot();
+
+    // Drop the named backend the schedule is pinned to.
+    let body = std::fs::read_to_string(fixture.config_path()).unwrap();
+    let without = body
+        .split("[named_backends.local-b]")
+        .next()
+        .expect("the fixture config declares the named backend")
+        .to_string();
+    assert_ne!(without, body, "fixture config shape changed");
+    std::fs::write(fixture.config_path(), &without).unwrap();
+
+    let out = fixture.run();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
+    assert!(
+        stderr.contains("backend_name 'local-b' is no longer a configured backend"),
+        "the refusal does not name the backend that went missing:\n{stderr}"
+    );
+
+    std::fs::write(fixture.config_path(), &body).unwrap();
+    assert_eq!(
+        secret_value_in_vault(&fixture.root, "default"),
+        before,
+        "a refused run must not rotate"
+    );
+    assert_eq!(fixture.decoy_snapshot(), decoy_before);
+    drop(fixture.tmp);
+}
+
+// ---------------------------------------------------------------------------
+// The real install transaction, end to end
+//
+// Everything above either previews (`--print`) or seeds artifacts directly.
+// This is the one place the *transaction* runs for real — it renders, publishes
+// the manifest, writes the unit files, registers, and verifies the scheduler's
+// own answer — and then walks the whole lifecycle over it. The scheduler is
+// still a fake (`XV_SCHEDULE_RUNNER=fake:registered`, debug builds only): it
+// answers the verification queries out of what it was actually asked to
+// register, and remembers that across the test's several processes, so nothing
+// is registered on the machine running the test.
+// ---------------------------------------------------------------------------
+
+/// The scenario every step of the round trip uses: a scheduler that answers for
+/// what it was asked to register, and reports a next fire time.
+const REGISTERING_SCHEDULER: &str = "fake:registered,next=2026-09-10T03:00:00Z";
+
+/// The invocation that *registers* the schedule on this platform.
+fn expected_registration(platform: Platform) -> &'static str {
+    match platform {
+        Platform::Launchd => "launchctl bootstrap gui/",
+        Platform::Systemd => "systemctl --user enable --now xv-rotate.timer",
+        Platform::Schtasks => "schtasks /Create /TN crosstache-xv-rotate",
+    }
+}
+
+/// `xv schedule <verb>` against the registering fake, sharing one invocation log
+/// (and therefore one remembered registration) across the whole round trip.
+fn round_trip_xv(
+    root: &std::path::Path,
+    state: &std::path::Path,
+    log: &std::path::Path,
+    args: &[&str],
+) -> (Option<i32>, String) {
+    let out = xv_cmd_in(root)
+        .env("XV_BACKEND", "local")
+        .env("XV_STATE_HOME", state)
+        .env("XV_SCHEDULE_RUNNER", REGISTERING_SCHEDULER)
+        .env("XV_SCHEDULE_RUNNER_LOG", log)
+        .args(args)
+        .output()
+        .unwrap();
+    (
+        out.status.code(),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ),
+    )
+}
+
+#[test]
+fn install_status_reinstall_uninstall_round_trip() {
+    let Some(platform) = host_platform() else {
+        return;
+    };
+    let (_cmd, tmp, store) = xv_isolated_local_with_opts(false, false);
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    use_the_store_once(&store);
+    let state = root.join("state");
+    let log = root.join("scheduler-calls.log");
+    let manifest = state
+        .join("xv")
+        .join("schedules")
+        .join("rotation-default")
+        .join("manifest.json");
+    let units = unit_paths_for(platform, &UnitPaths::for_platform(platform, &root));
+    let conf = root.join(".config").join("xv").join("xv.conf");
+    let log_file = root.join(".local/state/xv/rotate.log");
+
+    // ---- install --------------------------------------------------------
+    let (code, out) = round_trip_xv(
+        &root,
+        &state,
+        &log,
+        &["schedule", "install", "--force", "--vault", "default"],
+    );
+    assert_eq!(
+        code,
+        Some(0),
+        "the real transaction did not complete: {out}"
+    );
+    assert!(
+        out.contains(&format!(
+            "Installed a {} rotation schedule: daily at 03:00.",
+            platform.name()
+        )),
+        "{out}"
+    );
+    assert!(manifest.exists(), "the manifest was not published: {out}");
+    for unit in &units {
+        assert!(unit.exists(), "{} was not written: {out}", unit.display());
+    }
+    let calls = scheduler_calls(&log);
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.contains(expected_registration(platform))),
+        "the schedule was never registered: {calls:?}"
+    );
+
+    // ---- status: healthy, never run -------------------------------------
+    let (code, status) = round_trip_xv(&root, &state, &log, &["schedule", "status"]);
+    assert_eq!(code, Some(0), "a healthy schedule exits zero: {status}");
+    for line in [
+        format!("[ok] A {} rotation schedule is installed.", platform.name()),
+        "  Ownership: managed".to_string(),
+        "  Schedule:  daily at 03:00".to_string(),
+        "  Target:    default -> local/default".to_string(),
+        "  Backend:   local (local)".to_string(),
+        format!("  Config:    {}", conf.display()),
+        "  Project:   none".to_string(),
+        format!("  Cwd:       {}", root.display()),
+        "  Drift:     valid".to_string(),
+        format!(
+            "  Binary:    {} (installed {}, current {})",
+            env!("CARGO_BIN_EXE_xv"),
+            env!("CARGO_PKG_VERSION"),
+            env!("CARGO_PKG_VERSION")
+        ),
+        "  Last run:  never".to_string(),
+        format!("  Log:       {} (not yet written)", log_file.display()),
+    ] {
+        assert!(status.contains(&line), "missing {line:?} in:\n{status}");
+    }
+    if platform != Platform::Schtasks {
+        // Task Scheduler reports its next run in the machine's display
+        // language, so the fake refuses to invent one.
+        assert!(
+            status.contains("  Next run:  2026-09-10T03:00:00Z"),
+            "{status}"
+        );
+    }
+    assert!(!status.contains("[hint]"), "{status}");
+
+    // ---- a config edit makes status refuse ------------------------------
+    let body = std::fs::read_to_string(&conf).unwrap();
+    std::fs::write(&conf, format!("{body}\n# a later edit\n")).unwrap();
+    let (code, drifted) = round_trip_xv(&root, &state, &log, &["schedule", "status"]);
+    assert_eq!(code, Some(3), "{drifted}");
+    assert!(
+        drifted.contains(&format!(
+            "[error] The installed {} rotation schedule is unsafe to run.",
+            platform.name()
+        )),
+        "{drifted}"
+    );
+    assert!(drifted.contains("  Drift:     refused"), "{drifted}");
+    assert!(
+        drifted.contains(&format!(
+            "  - config_digest changed; review {} and reinstall",
+            conf.display()
+        )),
+        "{drifted}"
+    );
+
+    // ---- reinstall accepts the new target -------------------------------
+    let before_reinstall = scheduler_calls(&log).len();
+    let (code, out) = round_trip_xv(
+        &root,
+        &state,
+        &log,
+        &["schedule", "install", "--force", "--vault", "default"],
+    );
+    assert_eq!(code, Some(0), "{out}");
+    assert!(
+        out.contains(&format!(
+            "Reinstalled a {} rotation schedule",
+            platform.name()
+        )),
+        "a second install must report itself as a reinstall: {out}"
+    );
+    let calls = scheduler_calls(&log);
+    assert!(
+        calls[before_reinstall..]
+            .iter()
+            .any(|call| call.contains(expected_registration(platform))),
+        "the reinstall did not re-register: {:?}",
+        &calls[before_reinstall..]
+    );
+    let (code, status) = round_trip_xv(&root, &state, &log, &["schedule", "status"]);
+    assert_eq!(code, Some(0), "{status}");
+    assert!(status.contains("  Drift:     valid"), "{status}");
+
+    // ---- the pinned run, and the outcome status reports ------------------
+    set_secret(&store, "STALE", "pinned-value");
+    make_due(&store, "STALE");
+    let elsewhere = root.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let run = run_pinned(&elsewhere, &root, &state, &manifest);
+    let run_out = format!(
+        "{}{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(run.status.code(), Some(0), "{run_out}");
+    assert_ne!(
+        secret_value(&store, "STALE"),
+        "pinned-value",
+        "the pinned run rotated nothing: {run_out}"
+    );
+
+    let (code, status) = round_trip_xv(&root, &state, &log, &["schedule", "status"]);
+    assert_eq!(code, Some(0), "{status}");
+    assert!(
+        status.contains("  Last run:  success;") && status.contains("1 due, 1 rotated, 0 failed"),
+        "{status}"
+    );
+    assert!(!status.contains("(previous install)"), "{status}");
+
+    // ---- uninstall: owned artifacts gone, history retained ---------------
+    let before_uninstall = scheduler_calls(&log).len();
+    let (code, out) = round_trip_xv(&root, &state, &log, &["schedule", "uninstall"]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(
+        out.contains(&format!(
+            "Removed the {} rotation schedule.",
+            platform.name()
+        )),
+        "{out}"
+    );
+    assert!(!manifest.exists(), "{out}");
+    for unit in &units {
+        assert!(!unit.exists(), "{} survived: {out}", unit.display());
+    }
+    let calls = scheduler_calls(&log);
+    assert!(
+        calls[before_uninstall..]
+            .iter()
+            .any(|call| call.contains(expected_deregistration(platform))),
+        "uninstall did not deregister: {:?}",
+        &calls[before_uninstall..]
+    );
+
+    // ---- status afterwards: absent, with the history it retained ---------
+    let (code, status) = round_trip_xv(&root, &state, &log, &["schedule", "status"]);
+    assert_eq!(code, Some(0), "{status}");
+    assert!(
+        status.contains(&format!(
+            "[info] No {} rotation schedule is installed.",
+            platform.name()
+        )),
+        "{status}"
+    );
+    assert!(
+        status.contains("  Last run:  success;") && status.contains("(previous install)"),
+        "uninstall must keep the history visible: {status}"
+    );
+    drop(tmp);
 }

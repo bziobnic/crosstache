@@ -1891,6 +1891,135 @@ mod tests {
         assert!(launchd_domain_target().ends_with("/com.crosstache.xv-rotate"));
     }
 
+    // -----------------------------------------------------------------------
+    // Whole-artifact snapshots
+    //
+    // The assertions above pin individual lines; these pin the *files*, on
+    // every host, so a stray field, a reordering or a lost escape cannot slip
+    // through unremarked. The expected text lives under
+    // `tests/fixtures/schedule/` and is compared literally after one
+    // normalization: the fixture root is replaced by `<HOME>` and path
+    // separators by `/`, so one fixture serves Unix and Windows. Nothing else
+    // is rewritten — no rendered artifact carries a version or a timestamp.
+    // -----------------------------------------------------------------------
+
+    /// The schedule every snapshot renders: spaces in every path, a pinned
+    /// state root, and a cadence with both an hour and a minute.
+    fn snapshot_schedule() -> RotationSchedule {
+        let home = PathBuf::from(fixture_abs("/home/a user"));
+        RotationSchedule {
+            interval: ScheduleInterval::Daily {
+                hour: 3,
+                minute: 30,
+            },
+            command: ScheduleCommand::ManifestRun {
+                manifest: home.join("state root/xv/schedules/rotation-default/manifest.json"),
+                working_directory: home.join("work dir"),
+            },
+            binary: home.join("bin dir/xv"),
+            log_path: home.join("log dir/rotate.log"),
+            home: home.clone(),
+            state_home: Some(("XV_STATE_HOME", home.join("state root"))),
+        }
+    }
+
+    fn snapshot_paths() -> UnitPaths {
+        UnitPaths {
+            dir: PathBuf::from(fixture_abs("/home/a user/unit dir")),
+        }
+    }
+
+    /// Replace the fixture root with `<HOME>` and Windows separators with `/`.
+    fn normalize_snapshot(rendered: &str) -> String {
+        let home = fixture_abs("/home/a user");
+        rendered.replace(&home, "<HOME>").replace('\\', "/")
+    }
+
+    #[test]
+    #[ignore = "fixture generator; run explicitly to refresh tests/fixtures/schedule"]
+    fn regenerate_snapshots() {
+        let schedule = snapshot_schedule();
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/schedule");
+        let launchd = render(Platform::Launchd, &schedule, &snapshot_paths());
+        std::fs::write(
+            dir.join("launchd.plist"),
+            normalize_snapshot(&launchd[0].contents),
+        )
+        .unwrap();
+        let systemd = render(Platform::Systemd, &schedule, &snapshot_paths());
+        std::fs::write(
+            dir.join("systemd.service"),
+            normalize_snapshot(&systemd[0].contents),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("systemd.timer"),
+            normalize_snapshot(&systemd[1].contents),
+        )
+        .unwrap();
+        let args = schtasks_create_args(&schedule);
+        let rendered = args.iter().map(|a| format!("{a}\n")).collect::<String>();
+        std::fs::write(dir.join("schtasks.args"), normalize_snapshot(&rendered)).unwrap();
+        let at = args.iter().position(|a| a == "/TR").unwrap();
+        std::fs::write(
+            dir.join("schtasks.tr"),
+            format!("{}\n", normalize_snapshot(&args[at + 1])),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn the_launchd_plist_matches_its_snapshot() {
+        let units = render(Platform::Launchd, &snapshot_schedule(), &snapshot_paths());
+        assert_eq!(units.len(), 1);
+        assert_eq!(
+            normalize_snapshot(&units[0].contents),
+            include_str!("../../tests/fixtures/schedule/launchd.plist"),
+        );
+    }
+
+    #[test]
+    fn the_systemd_units_match_their_snapshots() {
+        let units = render(Platform::Systemd, &snapshot_schedule(), &snapshot_paths());
+        assert_eq!(units.len(), 2);
+        assert_eq!(
+            normalize_snapshot(&units[0].contents),
+            include_str!("../../tests/fixtures/schedule/systemd.service"),
+        );
+        assert_eq!(
+            normalize_snapshot(&units[1].contents),
+            include_str!("../../tests/fixtures/schedule/systemd.timer"),
+        );
+    }
+
+    /// The Task Scheduler argument *vector*, one argument per line — the shape
+    /// that makes a lost or merged argument visible. The `/TR` line is the
+    /// whole command Task Scheduler stores, quoting included.
+    #[test]
+    fn the_schtasks_arguments_match_their_snapshot() {
+        let schedule = snapshot_schedule();
+        let args = schtasks_create_args(&schedule);
+        let rendered = args
+            .iter()
+            .map(|arg| format!("{arg}\n"))
+            .collect::<String>();
+        assert_eq!(
+            normalize_snapshot(&rendered),
+            include_str!("../../tests/fixtures/schedule/schtasks.args"),
+        );
+        // The `/TR` string specifically: it is the only place the command line,
+        // the working directory, the state-root pin and the log redirection
+        // appear together, and Task Scheduler stores it verbatim.
+        let run_at = args
+            .iter()
+            .position(|arg| arg == "/TR")
+            .expect("a /TR flag");
+        assert_eq!(
+            normalize_snapshot(&args[run_at + 1]),
+            include_str!("../../tests/fixtures/schedule/schtasks.tr").trim_end_matches('\n'),
+        );
+    }
+
     #[test]
     fn no_unit_ever_contains_a_credential_shaped_value() {
         // Guard against a future change threading auth into the unit: the

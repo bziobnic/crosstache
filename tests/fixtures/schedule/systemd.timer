@@ -1,0 +1,13 @@
+# Managed by crosstache (xv schedule). Edits are overwritten on reinstall.
+[Unit]
+Description=crosstache due-secret rotation schedule
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+# Run a missed sweep once the machine is back, rather than skipping a day.
+Persistent=true
+# Spread load and avoid every host rotating at the same instant.
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
