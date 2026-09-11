@@ -35,28 +35,45 @@ Remaining provider and surface gaps:
 Operator matrix: [`docs/attachments.md`](./docs/attachments.md#rename-and-move).
 Design history: [`2026-09-06-attachment-transfer-design.md`](./docs/superpowers/specs/2026-09-06-attachment-transfer-design.md).
 
-### P1 — Persist a scheduled target manifest
-
-`xv schedule` embeds an explicit `--vault` when supplied and otherwise pins the
-current non-empty global `default_vault`; only a schedule with neither resolves
-its vault name at execution time. It still does not pin the full target identity:
-backend or named-backend instance, project environment/workspace alias, config
-path, and working directory can differ in the scheduler session, so a same-named
-vault may resolve against the wrong provider or fail. Installation should persist
-and validate an explicit resolved target manifest. Define upgrade, missing-target,
-drift-reporting, and uninstall behavior and exercise the manifest on real
-scheduler runners where practical.
-
 ### P2 — Distinguish scheduled-rotation failure categories
 
 `DueRotationFailureCategory::classify` keys off the `CrosstacheError` variant on
 purpose, but the rotation path it classifies (`execute_secret_rotate` in
 `src/cli/secret_ops.rs`) wraps most provider failures in `CrosstacheError::config`,
 so a denied write, an unreachable backend and a generator that failed all reach
-the scheduler as `rotate-failed`. The categories exist and are carried back in
-the run summary (nothing persists them yet — `last-run.json` is not written in
-this release); they are just not discriminating. Fix it in the rotation path — propagate the typed
-backend error instead of re-wrapping — rather than by matching on error text.
+the scheduler as `rotate-failed`. The categories exist and are now persisted —
+`last-run.json`'s `diagnostic.code` carries the classification through to
+`xv schedule status` — but they still collapse to `rotate-failed` because
+`execute_secret_rotate` re-wraps every provider error before the schedule
+runner's due-rotation service ever sees the typed variant. Fix it in the
+rotation path — propagate the typed backend error instead of re-wrapping —
+rather than by matching on error text.
+
+### P3 — Scheduled-rotation manifest/status follow-ups
+
+Smaller gaps identified while shipping the target manifest, drift refusal and
+outcome/status reporting (`docs/superpowers/specs/2026-09-09-scheduled-target-manifest-design.md`,
+now shipped):
+
+- The default `rotate.log` path is derived by walking up from the state root
+  rather than a single documented rule; an ancestor that does not exist yet
+  can make the derivation surprising. Document or simplify the walk.
+- Windows unit rendering does not quote `schtasks /TR` against every
+  metacharacter (e.g. `&`, `^`) a manifest or log path could contain.
+- `xv schedule status` on Windows issues five separate scheduler calls to
+  assemble one report; consolidate where `schtasks` output allows it.
+- A systemd install that is deregistered mid-way (timer removed, service left,
+  or vice versa) is currently reported as `foreign` rather than as a specific
+  half-deleted state.
+- Real (non-fake) native install/register/query integration is exercised only
+  through `.github/workflows/schedule-native.yml`'s ephemeral round trip and
+  the `XV_SCHEDULE_RUNNER=fake` unit-test path; there is no unit-level test
+  against the real `launchctl`/`systemctl`/`schtasks` binaries.
+- `manifest.json` stayed `schema_version: 1` when `target.vault_selection` was
+  added on top of the PR 2 shape (a pre-`vault_selection` manifest is now
+  refused as unreadable rather than versioned); a future incompatible manifest
+  change should get its own `schema_version` rather than repeating that
+  pattern.
 
 ### P1 — Finish cache invalidation on vault removal
 

@@ -1436,6 +1436,7 @@ vault. `xv schedule` puts it in the host's scheduler:
 
 ```bash
 xv schedule install --vault myproj-prod-kv       # daily at 03:00
+xv schedule install --vault payments             # 'payments' is an attached workspace alias here
 xv schedule install --vault v --interval hourly --at 00:15
 xv schedule status
 xv schedule uninstall
@@ -1444,16 +1445,29 @@ xv schedule uninstall
 `xv schedule` installs a **per-user** job in the platform's own scheduler —
 launchd on macOS, a systemd user timer on Linux, Task Scheduler on Windows. No
 daemon, nothing system-wide, no root. The job is **target-pinned**: install
-records the config, project, workspace, backend identity and vault it resolved
-in a `manifest.json`, and the unit runs `xv schedule run --manifest <path>` and
-nothing else. If any recorded input has changed, the run refuses before touching
-a backend and `xv schedule status` says so — reinstall is how you accept a new
-target. A schedule installed by an older `xv` is labelled `legacy-unpinned` and
-is replaced by an explicit `xv schedule install`, never automatically. The unit
-holds only a binary path, the manifest path, a log path, the working directory
-the target was resolved in, and `HOME` — plus `XV_STATE_HOME`/`XDG_STATE_HOME`
-when one of them selected the state root, so the job can find the manifest it
-owns. Never credentials, never a vault name, and never `XDG_CONFIG_HOME`.
+resolves `--vault` exactly once — as an attached **workspace alias** when a
+workspace is configured (an unattached name is refused with the aliases that
+*are* attached, rather than silently retried as something else), or as a raw
+vault name on the effective backend when no workspace is attached — and
+records that config, project, workspace, backend identity and vault in a
+`manifest.json`. The unit itself only runs the hidden manifest runner
+(`xv schedule run --manifest <path>`); that command is scheduler plumbing, not
+something you run by hand. If any recorded input has changed, the run refuses
+before touching a backend and `xv schedule status` says so — reinstall is how
+you accept a new target. A schedule installed by an older `xv` is labelled
+`legacy-unpinned` and is replaced by an explicit `xv schedule install`, never
+automatically. The unit holds only a binary path, the manifest path, a log
+path, the working directory the target was resolved in, and `HOME` — plus
+`XV_STATE_HOME`/`XDG_STATE_HOME` when one of them selected the state root, so
+the job can find the manifest it owns. Never credentials, never a vault name,
+and never `XDG_CONFIG_HOME`.
+
+`xv schedule status` is read-only and always reports the same dimensions:
+ownership (`managed`/`legacy-unpinned`/`orphaned-manifest`/`foreign`), the
+resolved target, drift, the recorded vs. current executable, the last run
+(state, counts, or `never`/`running since ...`/`interrupted after ...`), the
+next run (or `unknown` when the scheduler does not expose one), and the log.
+It exits non-zero when the schedule would refuse its next run.
 
 ```bash
 xv schedule install --vault v --print   # render the unit, write nothing
@@ -1462,6 +1476,10 @@ xv schedule install --vault v --print   # render the unit, write nothing
 `--print` also gives you the exact command line for a scheduler `xv` does not
 manage (cron, a Kubernetes CronJob, a CI schedule) — usable only with the same
 pinned environment it prints.
+
+Full operator reference — every manifest field, the drift table, overlap
+handling, retained history and the exit codes — is in
+[`docs/rotation.md`](docs/rotation.md#xv-schedule--run-the-sweep-automatically).
 
 One thing to plan around: a scheduled run has no terminal, so a credential that
 needs interaction fails there even though it works for you now. Verify with

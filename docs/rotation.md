@@ -15,6 +15,10 @@ AWS Secrets Manager's rotation Lambda.
 - [Rotation policies](#rotation-policies)
 - [Acting on due secrets](#acting-on-due-secrets)
 - [`xv schedule` — run the sweep automatically](#xv-schedule--run-the-sweep-automatically)
+  - [Manifest target fields](#manifest-target-fields)
+  - [Concurrency: overlapping runs](#concurrency-overlapping-runs)
+  - [Status at a glance](#status-at-a-glance)
+  - [Exit codes](#exit-codes)
 - [Where the schedule actually lives](#where-the-schedule-actually-lives)
 - [Native rotation (AWS)](#native-rotation-aws)
 - [What rotation does not do](#what-rotation-does-not-do)
@@ -206,9 +210,55 @@ names the exact configuration file and its digest, so a variable that redirects
 config resolution would be a second, unversioned answer to "what does this job
 rotate?" that can disagree with the manifest.
 
+#### Manifest target fields
+
+`manifest.json` is a versioned, unknown-field-denying schema. Every field
+`xv schedule status` can report drift or a target summary for comes from here:
+
+| Field | Meaning | Null when |
+|---|---|---|
+| `schema_version` | Fixed `1` for this shape. | never |
+| `schedule_id` | Fixed `rotation-default`. | never |
+| `installed_at` | RFC 3339 timestamp of the (re)install that wrote this file. | never |
+| `cadence.kind`/`hour`/`minute` | The install's `--interval`/`--at`. | never |
+| `execution.binary_path` | Canonical path to the `xv` that installed the schedule. | never |
+| `execution.installed_version` | `xv` version at install time; compared against the current version at run time (warning, not drift, if the path is unchanged). | never |
+| `execution.working_directory` | Canonicalized install `cwd`; the runner `chdir`s here before the sweep. | never |
+| `execution.log_path` | Where the scheduled run's output is appended. | never |
+| `target.config_path`/`config_digest` | The global `xv.conf` path and a SHA-256 of its exact bytes. | never — a saved config is required to install |
+| `target.project_path`/`project_digest` | The `.xv.toml` that participated, and its digest. | no project file participated |
+| `target.environment` | The project environment (`.xv.toml [env.*]`) selected at install. | no project environment participated |
+| `target.context_path`/`context_digest` | The personal context file that participated, and its digest. | no context file participated |
+| `target.workspace_source` | `project`, `context`, or `degenerate` — which layer produced the target. | never |
+| `target.workspace_alias` | The attached workspace alias `--vault` named or resolved to. | a degenerate (no-workspace) target |
+| `target.backend_name`/`backend_kind` | The selected registry backend's name and kind (`azure`/`aws`/`local`). | never |
+| `target.backend_identity` | A schedule-specific SHA-256 digest over that backend instance's identity-bearing fields (account/tenant/subscription for Azure; region/profile/endpoint for AWS; canonical store path for local). Never the credentials themselves. | never |
+| `target.vault` | The real vault name resolved at install. | never |
+| `target.vault_selection` | `explicit` (install was given `--vault`) or `implicit` (resolved from the workspace/config default). Only an implicit **degenerate** target is re-derived and can drift when the default changes. | never |
+
+`config_digest`, `project_digest` and `context_digest` are digests of exactly
+the bytes read during resolution — never source bytes, never secret material.
+See the [design's manifest schema](superpowers/specs/2026-09-09-scheduled-target-manifest-design.md#manifest-schema)
+and its [golden `manifest.json`](superpowers/specs/2026-09-09-scheduled-target-manifest-goldens.md#schedule-install---print)
+for a complete worked example.
+
 #### Where the schedule's files live
 
-Under the per-user state directory, in `schedules/rotation-default/`:
+The schedule directory sits under the per-user **state** root, which is
+independent of the config directory:
+
+| Platform | State root |
+|---|---|
+| Linux/macOS with `XDG_STATE_HOME` set | `$XDG_STATE_HOME/xv/schedules/rotation-default/` |
+| Linux/macOS fallback | `~/.local/state/xv/schedules/rotation-default/` |
+| Windows | `%LOCALAPPDATA%\xv\schedules\rotation-default\` |
+| Any platform, test/embedding override | `$XV_STATE_HOME/xv/schedules/rotation-default/` |
+
+`XV_STATE_HOME` takes priority over `XDG_STATE_HOME` on Unix; an empty value is
+ignored on both. See [`XV_STATE_HOME`](#xv_state_home) below for why it is
+never a target-selection input.
+
+Within that directory (`schedules/rotation-default/`):
 
 | File | Written by | Lifetime |
 |------|------------|----------|
@@ -375,6 +425,44 @@ The label disappears the first time a run completes under the new manifest. Afte
 `uninstall`, the same line appears under `[info] No ... rotation schedule is
 installed.` — the history is retained, so it is also shown.
 
+#### Concurrency: overlapping runs
+
+Every `xv schedule run` — the scheduler firing on cadence, or you invoking the
+same command by hand while it does — takes a nonblocking exclusive `run.lock`
+before it reads config, checks drift, or touches a backend. Exactly one runner
+wins the lock; that is the run that owns `last-run.json` for this firing.
+
+The runner that loses logs one line to the scheduled job's own log and exits
+successfully, without overwriting the active run's outcome or starting a
+second sweep:
+
+```text
+schedule rotation skipped: another run is already_running
+```
+
+Between the lock being acquired and the outcome being written, `last-run.json`
+is a `running` record. A process that is killed mid-sweep — `kill -9`, a host
+reboot, an OOM — leaves that record in place forever unless something notices.
+`xv schedule status` distinguishes the two cases by trying the same
+nonblocking lock:
+
+```text
+  Last run:  running since 2026-09-10T03:00:00Z
+```
+
+is a run that is (as far as `status` can tell) still actually in flight — the
+lock is held, so *something* has it. Once that something is confirmed gone —
+`status` itself can take the lock — the same record renders:
+
+```text
+  Last run:  interrupted after 2026-09-10T03:00:00Z (no runner holds the lock)
+```
+
+`interrupted` is not a `state` value in the JSON; it is `status`'s
+interpretation of a `running` record with no lock holder. The lock files
+(`run.lock`, `install.lock`) are permanent inodes — deleting one would stop it
+excluding anything — and neither is ever removed by `uninstall` or reinstall.
+
 #### After you upgrade `xv` in place
 
 Replacing the binary at the same path is the normal case and is **not** drift.
@@ -407,6 +495,116 @@ Whichever variable selected the root at install time is pinned into the unit, so
 the scheduled process computes the same manifest path the installing shell did.
 Without that pin the two would disagree and the job would refuse its own
 manifest at 3 a.m.
+
+#### Status at a glance
+
+`xv schedule status` is read-only — it never contacts the secrets provider —
+and always reports the same independent dimensions: ownership, the intended
+target, drift, the executable, the last run, the next run, and the log. What
+follows are the full states from the golden outputs; every one of them is
+literal `xv schedule status` output for its scenario, not paraphrased.
+
+A healthy schedule that has not fired yet:
+
+```text
+[ok] A systemd user timer rotation schedule is installed.
+  Ownership: managed
+  Schedule:  daily at 03:00
+  Target:    payments -> aws-prod/payments-production
+  Backend:   aws-prod (aws)
+  Config:    /home/alice/.config/xv/xv.conf
+  Project:   /home/alice/work/service/.xv.toml (environment production)
+  Cwd:       /home/alice/work/service
+  Drift:     valid
+  Binary:    /home/alice/bin/xv (installed 0.39.0, current 0.39.0)
+  Last run:  never
+  Next run:  2026-09-10T03:00:00Z
+  Log:       /home/alice/.local/state/xv/rotate.log (not yet written)
+```
+
+The same schedule after a successful firing:
+
+```text
+[ok] A systemd user timer rotation schedule is installed.
+  Ownership: managed
+  Schedule:  daily at 03:00
+  Target:    payments -> aws-prod/payments-production
+  Backend:   aws-prod (aws)
+  Config:    /home/alice/.config/xv/xv.conf
+  Project:   /home/alice/work/service/.xv.toml (environment production)
+  Cwd:       /home/alice/work/service
+  Drift:     valid
+  Binary:    /home/alice/bin/xv (installed 0.39.0, current 0.39.0)
+  Last run:  success; 2026-09-10T03:00:00Z to 2026-09-10T03:00:02Z; 2 due, 2 rotated, 0 failed
+  Next run:  unknown (scheduler did not report a next run)
+  Log:       /home/alice/.local/state/xv/rotate.log (present)
+```
+
+`Next run` is genuinely platform-dependent: launchd rarely exposes a
+parseable next-fire time at all (`launchctl print` does not reliably report
+one), so macOS schedules commonly show `unknown` even when healthy. systemd
+and Task Scheduler report it more often, but a Task Scheduler value under some
+locales still renders `unknown` rather than being guessed.
+
+A target that no longer matches what was installed (see
+[Drift](#when-a-run-refuses-drift) above for the full example) fails status
+with exit `3`:
+
+```text
+[error] The installed systemd user timer rotation schedule is unsafe to run.
+  Ownership: managed
+  Target:    payments -> aws-prod/payments-production
+  Drift:     refused
+  - project_digest changed; review /home/alice/work/service/.xv.toml and reinstall
+  - backend_identity changed for aws-prod; review the account/provider and reinstall
+  Last run:  refused_drift; 2026-09-10T03:00:00Z; exit 3; target_drift
+  Next run:  2026-09-11T03:00:00Z
+[hint] Review the changes, then run 'xv schedule install --vault payments' to accept the new target.
+```
+
+A schedule from an older `xv`, with no manifest at all (see
+[Replacing a legacy schedule](#replacing-a-legacy-schedule)):
+
+```text
+[warn] A legacy systemd user timer rotation schedule is installed.
+  Ownership: legacy-unpinned
+  Command:   /home/alice/bin/xv rotate --due --force --vault payments-production
+  Target:    unverified (the legacy unit does not record backend or account identity)
+[hint] Replace it explicitly with 'xv schedule install --vault <alias-or-vault>'.
+```
+
+A manifest with no native unit registered — deleted by hand, or the scheduler
+lost its registration — is `orphaned-manifest`, not `legacy-unpinned`: its
+target is still fully known, there is simply nothing installed to run it:
+
+```text
+[warn] A rotation manifest exists but no systemd user timer is installed.
+  Ownership: orphaned-manifest
+  Target:    payments -> aws-prod/payments-production
+  Drift:     valid
+[hint] Run 'xv schedule install --vault payments' to repair the schedule, or 'xv schedule uninstall' to remove the manifest.
+```
+
+#### Exit codes
+
+`xv schedule status` and `xv schedule run` (the manifest runner the scheduler
+invokes) use the project's ordinary exit-code table
+([`exit-codes.md`](exit-codes.md)):
+
+| Situation | Exit |
+|---|---|
+| `[ok]`, `[warn]` or `[info]` status — including `legacy-unpinned`, `orphaned-manifest`, and "nothing installed" | `0` |
+| `[error]` status: drift would refuse the next run, the recorded target could not be read, or the scheduler itself could not be queried | `3` (configuration error) |
+| `schedule run --manifest ...`: target drift, a missing/malformed manifest, or any refusal before backend construction | `3` (configuration error) |
+| `schedule run --manifest ...`: a second concurrent firing that lost the `run.lock` race | `0` — it is not a failure, just a skip (see [Concurrency](#concurrency-overlapping-runs)) |
+| `schedule run --manifest ...`: the sweep ran and rotated everything due | `0`, `last-run.json` state `success` |
+| `schedule run --manifest ...`: the sweep ran but some due secrets failed to rotate | non-zero, `last-run.json` state `partial_failure` or `failed` |
+
+`xv schedule install`/`uninstall` follow the same convention as every other
+mutating command: `0` on success, non-zero (commonly `2` for a bad flag or `3`
+for an unresolvable target) on failure. None of these are new codes — `3` is
+the same "Configuration error" family every other unattended-target failure in
+`xv` already uses.
 
 #### The limitation to plan around
 

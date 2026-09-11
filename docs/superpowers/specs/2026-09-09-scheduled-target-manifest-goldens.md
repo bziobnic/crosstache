@@ -1,6 +1,10 @@
 # Scheduled target manifest golden outputs
 
-> **Status:** Normative examples for the
+> **Status:** Shipped — PR #444 (schema/resolver), PR #445
+> (runner/drift/transaction), PR 3 (outcomes/status/native gates). Deviations
+> recorded in progress ledger; see CHANGELOG.
+>
+> Normative examples for the
 > [scheduled target manifest design](2026-09-09-scheduled-target-manifest-design.md).
 > Paths, hashes, timestamps and versions below are fixed fixture values. Tests
 > may normalize only those values.
