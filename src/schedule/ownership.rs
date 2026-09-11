@@ -636,11 +636,31 @@ mod tests {
         }
     }
 
-    fn legacy_schedule() -> RotationSchedule {
-        schedule_with(ScheduleCommand::LegacyRotateDue {
-            vault: Some("payments-production".to_string()),
-        })
+    /// A legacy schedule whose paths are spelled the way a **Unix** host wrote
+    /// them, deliberately not through [`fixture_abs`].
+    ///
+    /// launchd plists and systemd units exist only on Unix, so their bytes are
+    /// always Unix-shaped whatever host is reading them back. Running the
+    /// Windows spelling through this fixture tests nothing real and cannot
+    /// round-trip: `C:\home\alice\bin\xv` inside a quoted `ExecStart=` comes
+    /// back out of systemd's backslash-escape rules as `C:homealicebinxv`.
+    fn legacy_unix_schedule() -> RotationSchedule {
+        RotationSchedule {
+            interval: ScheduleInterval::Daily {
+                hour: 3,
+                minute: 30,
+            },
+            command: ScheduleCommand::LegacyRotateDue {
+                vault: Some("payments-production".to_string()),
+            },
+            binary: PathBuf::from(LEGACY_UNIX_BINARY),
+            log_path: PathBuf::from("/home/alice/.local/state/xv/rotate.log"),
+            home: PathBuf::from("/home/alice"),
+            state_home: None,
+        }
     }
+
+    const LEGACY_UNIX_BINARY: &str = "/home/alice/bin/xv";
 
     fn pinned_schedule(manifest: &Path) -> RotationSchedule {
         schedule_with(ScheduleCommand::ManifestRun {
@@ -724,7 +744,7 @@ mod tests {
     fn a_legacy_unit_without_a_manifest_is_legacy_unpinned_with_its_real_command() {
         for platform in [Platform::Launchd, Platform::Systemd] {
             let f = fixture();
-            seed_units(platform, &legacy_schedule(), &f.units);
+            seed_units(platform, &legacy_unix_schedule(), &f.units);
             let report = inspect_ownership(platform, &f.units, &f.state, &registered()).unwrap();
             let Ownership::LegacyUnpinned { command_line } = report.state else {
                 panic!(
@@ -739,7 +759,7 @@ mod tests {
                 "{platform:?}: {command_line}"
             );
             assert!(
-                command_line.starts_with(&fixture_abs("/home/alice/bin/xv")),
+                command_line.starts_with(LEGACY_UNIX_BINARY),
                 "{platform:?}: {command_line}"
             );
         }

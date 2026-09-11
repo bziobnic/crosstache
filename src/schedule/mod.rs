@@ -160,10 +160,11 @@ impl CommandRunner for ProcessRunner {
 pub(crate) fn decode_console_output(bytes: &[u8]) -> String {
     match utf16le_body(bytes) {
         Some(body) => {
-            let units: Vec<u16> = body
-                .chunks_exact(2)
-                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-                .collect();
+            // `as_chunks` over `chunks_exact`: same pairs, and the trailing odd
+            // byte of a BOM-prefixed odd-length buffer is still dropped — it is
+            // half a code unit and there is nothing to decode it into.
+            let (pairs, _odd_tail) = body.as_chunks::<2>();
+            let units: Vec<u16> = pairs.iter().copied().map(u16::from_le_bytes).collect();
             String::from_utf16_lossy(&units)
         }
         None => String::from_utf8_lossy(bytes).to_string(),

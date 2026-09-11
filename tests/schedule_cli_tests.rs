@@ -1192,6 +1192,88 @@ fn run_pinned_without_ambient_env(
         .unwrap()
 }
 
+/// [`run_pinned`] with a specific `XV_ENV` inherited from the surrounding
+/// user manager.
+///
+/// Units carry no `XV_ENV` of their own, but they also cannot *unset* one that
+/// systemd `environment.d` or `launchctl setenv` exported into every job the
+/// user manager starts — so this is the shape a real scheduled run can be
+/// handed, and the recorded environment still has to win.
+fn run_pinned_with_ambient_env(
+    elsewhere: &std::path::Path,
+    root: &std::path::Path,
+    state: &std::path::Path,
+    manifest: &std::path::Path,
+    xv_env: &str,
+) -> std::process::Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_xv"))
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", root)
+        .env("XDG_CONFIG_HOME", root.join(".config"))
+        .env("NO_COLOR", "1")
+        .env("XV_STATE_HOME", state)
+        .env("XV_ENV", xv_env)
+        .current_dir(elsewhere)
+        .args(["schedule", "run", "--manifest", manifest.to_str().unwrap()])
+        .output()
+        .unwrap()
+}
+
+/// `xv vault create <vault>` in the pinned store, under the given project
+/// environment (a project file that defines environments and no `default_env`
+/// makes every ordinary command name one).
+fn create_vault(store: &std::path::Path, vault: &str, env: &str) {
+    let out = xv_cmd_for(store)
+        .args(["vault", "create", vault, "--env", env])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// [`set_secret`] into whatever vault the named environment selects.
+///
+/// `xv set` has no `--vault`; the project environment is how a vault other
+/// than the configured default is addressed without writing a context file,
+/// which would otherwise participate in the recorded target.
+fn set_secret_in_env(store: &std::path::Path, env: &str, name: &str, value: &str) {
+    let out = xv_cmd_for(store)
+        .args(["set", name, "--value", value, "--env", env])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// [`make_due`] for a secret in whatever vault the named environment selects.
+fn make_due_in_env(store: &std::path::Path, env: &str, name: &str) {
+    let out = xv_cmd_for(store)
+        .args([
+            "update",
+            name,
+            "--env",
+            env,
+            "--tag",
+            "xv:rotate_every=30d",
+            "--tag",
+            "xv:rotated_at=2020-01-01T00:00:00Z",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 fn set_secret(store: &std::path::Path, name: &str, value: &str) {
     let out = xv_cmd_for(store)
         .args(["set", name, "--value", value])
@@ -1279,6 +1361,16 @@ impl PinnedRun {
 
     fn run_without_ambient_env(&self) -> std::process::Output {
         run_pinned_without_ambient_env(&self.elsewhere, &self.root, &self.state, &self.manifest)
+    }
+
+    fn run_with_ambient_env(&self, xv_env: &str) -> std::process::Output {
+        run_pinned_with_ambient_env(
+            &self.elsewhere,
+            &self.root,
+            &self.state,
+            &self.manifest,
+            xv_env,
+        )
     }
 }
 
@@ -1454,6 +1546,95 @@ fn the_sweep_replays_the_recorded_environment() {
         "the sweep fell back to ambient env resolution: {stderr}"
     );
     assert_ne!(value(), before, "the pinned secret must rotate: {stderr}");
+    drop(fixture.tmp);
+}
+
+/// An `XV_ENV` inherited from the user manager may not outrank the recorded
+/// environment.
+///
+/// `project::resolve_env` reads `XV_ENV` *first* and the config's `env_flag`
+/// second, and a rendered unit cannot unset a variable systemd
+/// `environment.d` / `launchctl setenv` exported into every job — so the
+/// runner pins `XV_ENV` in its own process to the recorded name before the
+/// sweep. Here the manifest records `production` (vault `default`) while the
+/// inherited environment says `staging` (vault `staging`): the production
+/// vault must rotate, and the staging vault must be left exactly as it was.
+#[test]
+fn an_ambient_xv_env_does_not_override_the_recorded_environment() {
+    let project = "[env.production]\nvault = \"default\"\n\n\
+                   [env.staging]\nvault = \"staging\"\n\n\
+                   [[types.deploy-token.fields]]\nname = \"token\"\nkind = \"secret\"\nprimary = true\n";
+    let fixture = pinned_run_fixture(&["--env", "production"], |root| {
+        let store = root.join("store");
+        std::fs::write(root.join(".xv.toml"), project).unwrap();
+        create_vault(&store, "staging", "production");
+        set_secret_in_env(&store, "staging", "STALE", "staging-value");
+        make_due_in_env(&store, "staging", "STALE");
+    });
+
+    let recorded = std::fs::read_to_string(&fixture.manifest).unwrap();
+    assert!(
+        recorded.contains("\"environment\": \"production\""),
+        "{recorded}"
+    );
+
+    let production = || secret_value_in_env(&fixture.store, "STALE", Some("production"));
+    let staging = || secret_value_in_env(&fixture.store, "STALE", Some("staging"));
+    let before = production();
+    assert_eq!(before, "pinned-value");
+    assert_eq!(staging(), "staging-value");
+
+    let out = fixture.run_with_ambient_env("staging");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert_ne!(
+        production(),
+        before,
+        "the recorded production vault must rotate: {stderr}"
+    );
+    assert_eq!(
+        staging(),
+        "staging-value",
+        "the inherited XV_ENV selected the staging vault: {stderr}"
+    );
+    drop(fixture.tmp);
+}
+
+/// An inherited `XV_ENV` may not *invent* a selection for a manifest that
+/// recorded none.
+///
+/// The project file here defines no environments at all, so installation
+/// records `environment: null`. An ambient `XV_ENV` naming anything at all
+/// would then fail closed the moment something in the rotation path resolves a
+/// project profile — the sweep has to remove the variable, not merely ignore
+/// it.
+#[test]
+fn an_ambient_xv_env_cannot_select_where_the_manifest_recorded_none() {
+    let project =
+        "[[types.deploy-token.fields]]\nname = \"token\"\nkind = \"secret\"\nprimary = true\n";
+    let fixture = pinned_run_fixture(&[], |root| {
+        std::fs::write(root.join(".xv.toml"), project).unwrap();
+    });
+
+    let recorded = std::fs::read_to_string(&fixture.manifest).unwrap();
+    assert!(
+        recorded.contains("\"environment\": null"),
+        "the fixture must record no environment: {recorded}"
+    );
+
+    let before = fixture.value();
+    let out = fixture.run_with_ambient_env("staging");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert!(
+        !stderr.contains("no environments") && !stderr.contains("not defined"),
+        "the sweep fell back to ambient env resolution: {stderr}"
+    );
+    assert_ne!(
+        fixture.value(),
+        before,
+        "the pinned secret must rotate: {stderr}"
+    );
     drop(fixture.tmp);
 }
 

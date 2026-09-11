@@ -261,12 +261,20 @@ pub struct DueRotationError {
     /// The underlying error. Private on purpose: reaching it is a deliberate
     /// act (`into_source`, or `?` into a `CrosstacheError`), never something a
     /// `{:?}` on this struct does by accident.
-    source: CrosstacheError,
+    ///
+    /// Boxed so this struct stays small: `CrosstacheError` is a large enum, and
+    /// [`DueRotationResult`] is returned by value from every sweep entry point,
+    /// which would otherwise make the `Ok` path pay for the error's size
+    /// (clippy's `result_large_err`).
+    source: Box<CrosstacheError>,
 }
 
 impl DueRotationError {
     fn new(kind: DueRotationErrorKind, source: CrosstacheError) -> Self {
-        Self { kind, source }
+        Self {
+            kind,
+            source: Box::new(source),
+        }
     }
 
     /// Wrap a discovery error, classifying it by variant.
@@ -289,7 +297,7 @@ impl DueRotationError {
     // `From`. This is the explicit escape hatch for anything else.
     #[allow(dead_code)]
     pub fn into_source(self) -> CrosstacheError {
-        self.source
+        *self.source
     }
 }
 
@@ -317,7 +325,7 @@ impl std::error::Error for DueRotationError {}
 
 impl From<DueRotationError> for CrosstacheError {
     fn from(error: DueRotationError) -> Self {
-        error.source
+        *error.source
     }
 }
 

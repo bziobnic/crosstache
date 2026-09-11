@@ -775,7 +775,32 @@ async fn execute_pinned_run(manifest: &ScheduleManifestV1) -> RunOutcomeDraft {
         )]);
     }
 
+    pin_recorded_environment(&manifest.target);
+
     run_recorded_sweep(manifest).await
+}
+
+/// Pin `XV_ENV` in this process to the recorded environment — or remove it
+/// when the manifest recorded none.
+///
+/// [`prepare_recorded_config`]'s `env_flag` is not sufficient on its own:
+/// `project::resolve_env` reads `XV_ENV` *first* and falls back to the flag
+/// second, and a scheduler unit cannot unset a variable the user manager
+/// already exported into every job it starts (systemd `environment.d`,
+/// `launchctl setenv`). An ambient `XV_ENV` would therefore outrank the pinned
+/// target, and for a manifest that recorded no environment it would select one
+/// installation never approved.
+///
+/// Mutating the process environment is acceptable *here and nowhere else*:
+/// `xv schedule run` is a one-shot process whose whole job is to replay one
+/// recorded target, it is still single-threaded when this runs, and nothing
+/// after it wants the inherited value. Library code must never do this — it
+/// would reach into a caller's process.
+fn pin_recorded_environment(target: &ManifestTarget) {
+    match target.environment.as_deref() {
+        Some(environment) => std::env::set_var("XV_ENV", environment),
+        None => std::env::remove_var("XV_ENV"),
+    }
 }
 
 /// The configuration the pinned sweep runs under: the file read back from the
@@ -789,9 +814,14 @@ async fn execute_pinned_run(manifest: &ScheduleManifestV1) -> RunOutcomeDraft {
 /// resolves a project profile (`Config::resolve_vault_name`,
 /// `resolve_group`, `resolve_record_types`'s project walk) would fall back to
 /// the project file's `default_env`, or fail closed when the file defines
-/// environments and none is selected. Setting `env_flag` is the whole fix:
-/// `project::resolve_env` consults `XV_ENV` first and the flag second, and the
-/// rendered units deliberately carry no `XV_ENV`, so the recorded name wins.
+/// environments and none is selected.
+///
+/// `env_flag` is only half the fix. `project::resolve_env` consults `XV_ENV`
+/// first and the flag second, and while the rendered units carry no `XV_ENV`
+/// of their own they cannot *unset* one a user manager already exported into
+/// every job it starts (systemd `environment.d`, `launchctl setenv`). The
+/// other half is in [`execute_pinned_run`], which pins `XV_ENV` in the
+/// runner's own process before the sweep.
 ///
 /// The profile itself is **not** folded into the config here. The sweep's
 /// backend and vault come literally from the manifest (`run_due_rotation`
@@ -1325,13 +1355,18 @@ mod tests {
         let path = dir.join("xv.conf");
         let store = dir.join("never-opened-store");
         let key = dir.join("never-opened-key.txt");
+        // The two paths go in as TOML *literal* strings (single quotes): a
+        // Windows temp path is full of backslashes, and in a basic string
+        // `\U`/`\n`/`\t` are escape sequences, so the file would not parse at
+        // all — the drift run would then stop at `config_path is missing or
+        // unreadable` and never reach the vault probe this test is about.
         std::fs::write(
             &path,
             format!(
                 "backend = \"local\"\ndebug = false\nsubscription_id = \"\"\ndefault_vault = \"default\"\n\
                  default_resource_group = \"\"\ndefault_location = \"\"\ntenant_id = \"\"\n\
                  output_json = false\nno_color = true\ncache_enabled = false\ncache_ttl_secs = 0\n\
-                 clipboard_timeout = 0\n\n[local]\nstore_path = \"{}\"\nkey_file = \"{}\"\n\
+                 clipboard_timeout = 0\n\n[local]\nstore_path = '{}'\nkey_file = '{}'\n\
                  default_vault = \"default\"\n",
                 store.display(),
                 key.display()
@@ -1379,6 +1414,38 @@ mod tests {
         let prepared = prepare_recorded_config(loaded, &manifest.target);
 
         assert_eq!(prepared.env_flag, None);
+    }
+
+    /// The runner pins `XV_ENV` in its own process, because `env_flag` alone
+    /// loses to an inherited one (`project::resolve_env` reads the variable
+    /// first) and a unit cannot unset what a user manager exported.
+    #[test]
+    fn the_runner_pins_the_recorded_environment_over_an_inherited_one() {
+        let _guard = crate::config::project::test_support::XvEnvGuard::acquire();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest = valid_manifest(tmp.path());
+        manifest.target.environment = Some("production".to_string());
+
+        std::env::set_var("XV_ENV", "staging");
+        pin_recorded_environment(&manifest.target);
+
+        assert_eq!(std::env::var("XV_ENV").ok().as_deref(), Some("production"));
+    }
+
+    /// A manifest that recorded no environment must leave the process with
+    /// none — an inherited `XV_ENV` would otherwise select a profile that
+    /// installation never approved, and can fail the run closed.
+    #[test]
+    fn no_recorded_environment_removes_an_inherited_one() {
+        let _guard = crate::config::project::test_support::XvEnvGuard::acquire();
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = valid_manifest(tmp.path());
+        assert_eq!(manifest.target.environment, None, "fixture shape changed");
+
+        std::env::set_var("XV_ENV", "staging");
+        pin_recorded_environment(&manifest.target);
+
+        assert!(std::env::var("XV_ENV").is_err(), "XV_ENV must be removed");
     }
 
     #[tokio::test]
