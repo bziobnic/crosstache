@@ -105,10 +105,15 @@ pub fn inspect_ownership(
 
     let mut units: Vec<(PathBuf, Vec<u8>)> = Vec::new();
     for path in unit_paths_for(platform, unit_paths) {
-        match classify_owned_unit(&path)? {
-            ArtifactState::Owned(bytes) => units.push((path, bytes)),
-            ArtifactState::Absent => {}
-            ArtifactState::Foreign(_) => foreign.push(path),
+        match classify_owned_unit(&path) {
+            Ok(ArtifactState::Owned(bytes)) => units.push((path, bytes)),
+            Ok(ArtifactState::Absent) => {}
+            Ok(ArtifactState::Foreign(_)) => foreign.push(path),
+            // A unit we cannot open is a unit we cannot prove we wrote, which
+            // is the definition of foreign here — and `status` must never
+            // abort on one dimension it could not read when it can still
+            // answer every other.
+            Err(_) => foreign.push(path),
         }
     }
 
@@ -424,7 +429,7 @@ pub(crate) fn plist_program_arguments(text: &str) -> Option<Vec<String>> {
     }
 }
 
-fn xml_unescape(s: &str) -> String {
+pub(crate) fn xml_unescape(s: &str) -> String {
     // `&amp;` last: unescaping it first would turn `&amp;lt;` into `<`.
     s.replace("&lt;", "<")
         .replace("&gt;", ">")

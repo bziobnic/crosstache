@@ -47,8 +47,8 @@ use crate::schedule::manifest::{
 };
 use crate::schedule::outcome::{load_outcome, RunGuard, RunOutcome, RunOutcomeV1, RunState};
 use crate::schedule::ownership::{
-    inspect_ownership, manifest_argument, plist_program_arguments, schtasks_task_to_run,
-    systemd_exec_start, Ownership,
+    inspect_ownership, plist_program_arguments, schtasks_task_to_run, systemd_exec_start,
+    xml_unescape, Ownership,
 };
 use crate::schedule::{
     launchd_calendar_pairs, launchd_domain_target, systemd_on_calendar, CommandRunner, Platform,
@@ -169,15 +169,38 @@ impl UnitDriftReport {
     /// One reason per field: two mismatching arguments of the same command are
     /// one problem with one repair.
     fn push(&mut self, field: &'static str) {
+        self.push_detail(
+            field,
+            format!("{field} differs between the installed unit and the manifest; reinstall"),
+        );
+    }
+
+    /// A reason whose wording is not the plain "differs" sentence — today only
+    /// a unit that could not be read at all.
+    fn push_detail(&mut self, field: &'static str, detail: String) {
         if self.reasons.iter().any(|reason| reason.field == field) {
             return;
         }
-        self.reasons.push(DriftReason::new(
-            field,
-            format!("{field} differs between the installed unit and the manifest; reinstall"),
-        ));
+        self.reasons.push(DriftReason::new(field, detail));
+    }
+
+    /// Sort into the fixed field order, so the same three problems read the
+    /// same way whichever platform found them — the property `DriftReport`
+    /// already guarantees for target drift.
+    fn sorted(mut self) -> Self {
+        self.reasons.sort_by_key(|reason| {
+            UNIT_FIELD_ORDER
+                .iter()
+                .position(|field| *field == reason.field)
+                .unwrap_or(UNIT_FIELD_ORDER.len())
+        });
+        self
     }
 }
+
+/// The order unit-drift reasons are reported in: what it runs, when it runs,
+/// where it writes.
+const UNIT_FIELD_ORDER: [&str; 3] = [UNIT_COMMAND, UNIT_CADENCE, UNIT_LOG_PATH];
 
 /// Field name for a unit whose executable or manifest argument disagrees.
 pub(crate) const UNIT_COMMAND: &str = "unit_command";
@@ -525,11 +548,16 @@ pub(crate) fn inspect_unit_drift(
 
     match platform {
         Platform::Launchd => {
-            let Some(text) = owned_unit_text(&unit_paths.launchd_plist())? else {
-                return Ok(report);
+            let text = match owned_unit_text(&unit_paths.launchd_plist()) {
+                UnitText::Owned(text) => text,
+                UnitText::NotOurs => return Ok(report),
+                UnitText::Unreadable => {
+                    report.push_detail(UNIT_COMMAND, unreadable_unit_detail());
+                    return Ok(report.sorted());
+                }
             };
             match plist_program_arguments(&text) {
-                Some(argv) => check_command(&mut report, &argv, manifest, &manifest_path),
+                Some(argv) => check_command(&mut report, platform, &argv, manifest, &manifest_path),
                 None => report.push(UNIT_COMMAND),
             }
             if let Some(interval) = interval {
@@ -543,49 +571,67 @@ pub(crate) fn inspect_unit_drift(
                 }
             }
             match plist_string_value(&text, "StandardOutPath") {
-                Some(log) if same_path(&log, &manifest.execution.log_path) => {}
+                Some(log) if same_path(platform, &log, &manifest.execution.log_path) => {}
                 _ => report.push(UNIT_LOG_PATH),
             }
         }
         Platform::Systemd => {
-            if let Some(text) = owned_unit_text(&unit_paths.systemd_service())? {
-                match systemd_exec_start(&text) {
-                    Some(argv) => check_command(&mut report, &argv, manifest, &manifest_path),
-                    None => report.push(UNIT_COMMAND),
-                }
-                match systemd_append_target(&text) {
-                    Some(log) if same_path(&log, &manifest.execution.log_path) => {}
-                    _ => report.push(UNIT_LOG_PATH),
-                }
-            }
-            if let Some(text) = owned_unit_text(&unit_paths.systemd_timer())? {
-                if let Some(interval) = interval {
-                    let expected = systemd_on_calendar(interval);
-                    match field_value(&text, "OnCalendar") {
-                        Some(actual) if actual == expected => {}
-                        _ => report.push(UNIT_CADENCE),
+            match owned_unit_text(&unit_paths.systemd_service()) {
+                UnitText::Owned(text) => {
+                    match systemd_exec_start(&text) {
+                        Some(argv) => {
+                            check_command(&mut report, platform, &argv, manifest, &manifest_path)
+                        }
+                        None => report.push(UNIT_COMMAND),
+                    }
+                    match systemd_append_target(&text) {
+                        Some(log) if same_path(platform, &log, &manifest.execution.log_path) => {}
+                        _ => report.push(UNIT_LOG_PATH),
                     }
                 }
+                UnitText::NotOurs => {}
+                UnitText::Unreadable => report.push_detail(UNIT_COMMAND, unreadable_unit_detail()),
+            }
+            match owned_unit_text(&unit_paths.systemd_timer()) {
+                UnitText::Owned(text) => {
+                    if let Some(interval) = interval {
+                        let expected = systemd_on_calendar(interval);
+                        match field_value(&text, "OnCalendar") {
+                            Some(actual) if actual == expected => {}
+                            _ => report.push(UNIT_CADENCE),
+                        }
+                    }
+                }
+                UnitText::NotOurs => {}
+                UnitText::Unreadable => report.push_detail(UNIT_CADENCE, unreadable_unit_detail()),
             }
         }
         Platform::Schtasks => {
             // Task Scheduler holds the whole definition, so both queries are
             // against the registered task rather than a file.
-            let listing = runner.run(
+            if let Ok(out) = runner.run(
                 "schtasks",
                 &["/Query", "/TN", SCHTASKS_NAME, "/V", "/FO", "LIST"],
-            );
-            if let Ok(out) = listing {
+            ) {
                 if out.ok() {
                     match schtasks_task_to_run(&out.stdout) {
                         Some(command) => {
-                            if !command.contains(&manifest.execution.binary_path)
-                                || !command.contains(&manifest_path.to_string_lossy().to_string())
-                            {
-                                report.push(UNIT_COMMAND);
-                            }
-                            if !command.contains(&manifest.execution.log_path) {
-                                report.push(UNIT_LOG_PATH);
+                            let invocation = parse_schtasks_invocation(&command);
+                            let argv: Vec<String> = invocation
+                                .binary
+                                .into_iter()
+                                .chain(
+                                    invocation
+                                        .manifest
+                                        .into_iter()
+                                        .flat_map(|manifest| ["--manifest".to_string(), manifest]),
+                                )
+                                .collect();
+                            check_command(&mut report, platform, &argv, manifest, &manifest_path);
+                            match invocation.log {
+                                Some(log)
+                                    if same_path(platform, &log, &manifest.execution.log_path) => {}
+                                _ => report.push(UNIT_LOG_PATH),
                             }
                         }
                         None => report.push(UNIT_COMMAND),
@@ -602,37 +648,175 @@ pub(crate) fn inspect_unit_drift(
         }
     }
 
-    Ok(report)
+    Ok(report.sorted())
+}
+
+/// One sentence for a unit that is there but will not open. Says nothing about
+/// *why* beyond that: the OS error text can quote another user's path.
+fn unreadable_unit_detail() -> String {
+    "the installed unit could not be read; check its permissions, then reinstall".to_string()
+}
+
+/// The pieces of a registered task's `Task To Run` command line.
+///
+/// Task Scheduler hands back one string, and the four facts that must match the
+/// manifest are buried in it. Substring containment is not a comparison —
+/// `rotate.log.old` contains `rotate.log` — so the string is tokenized with
+/// `cmd`'s quoting rules and each element is compared as a path.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct SchtasksInvocation {
+    binary: Option<String>,
+    manifest: Option<String>,
+    log: Option<String>,
+}
+
+/// Parse the `/TR` shape [`crate::schedule::schtasks_create_args`] renders:
+/// `cmd /c [set "VAR=v" && ][cd /d "<dir>" && ]"<xv>" schedule run --manifest
+/// "<manifest>" >> "<log>" 2>&1`.
+fn parse_schtasks_invocation(command: &str) -> SchtasksInvocation {
+    let tokens = windows_tokenize(command);
+    // The executable is whatever runs `schedule run`, wherever the `set`/`cd`
+    // prelude ends.
+    let binary = tokens
+        .windows(2)
+        .position(|pair| pair[0] == "schedule" && pair[1] == "run")
+        .and_then(|index| index.checked_sub(1))
+        .and_then(|index| tokens.get(index).cloned());
+    let manifest = manifest_argument_of(&tokens).map(str::to_string);
+    let log = tokens.iter().enumerate().find_map(|(index, token)| {
+        // Both `>> "log"` and `>>"log"` reach us, and `1>>` is the same
+        // redirect spelled out.
+        let rest = token
+            .strip_prefix(">>")
+            .or_else(|| token.strip_prefix("1>>"))?;
+        if rest.is_empty() {
+            tokens.get(index + 1).cloned()
+        } else {
+            Some(rest.to_string())
+        }
+    });
+    SchtasksInvocation {
+        binary,
+        manifest,
+        log,
+    }
+}
+
+/// `cmd`'s tokenization, enough of it: whitespace separates, double quotes
+/// group, and there is no backslash escape inside them (a Windows path ends in
+/// `\\` often enough that treating it as an escape would corrupt paths).
+fn windows_tokenize(command: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    let mut started = false;
+    for c in command.chars() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                started = true;
+            }
+            c if c.is_whitespace() && !quoted => {
+                if started {
+                    tokens.push(std::mem::take(&mut current));
+                    started = false;
+                }
+            }
+            c => {
+                current.push(c);
+                started = true;
+            }
+        }
+    }
+    if started {
+        tokens.push(current);
+    }
+    tokens
 }
 
 /// The executable and the manifest argument, from an argv the unit carries.
+///
+/// Compared element by element. An earlier version joined the argv back into a
+/// single string and re-parsed it, which turned `--manifest /s p/manifest.json`
+/// into the token `/s` and refused a perfectly healthy install whose state
+/// directory happened to contain a space. An argv is already the answer; there
+/// is nothing to re-lex.
 fn check_command(
     report: &mut UnitDriftReport,
+    platform: Platform,
     argv: &[String],
     manifest: &ScheduleManifestV1,
     manifest_path: &Path,
 ) {
     match argv.first() {
-        Some(binary) if same_path(binary, &manifest.execution.binary_path) => {}
+        Some(binary) if same_path(platform, binary, &manifest.execution.binary_path) => {}
         _ => report.push(UNIT_COMMAND),
     }
-    let command_line = argv.join(" ");
-    match manifest_argument(&command_line) {
-        Some(recorded) if Path::new(&recorded) == manifest_path => {}
+    match manifest_argument_of(argv) {
+        Some(recorded) if same_path(platform, recorded, &manifest_path.to_string_lossy()) => {}
         _ => report.push(UNIT_COMMAND),
     }
 }
 
-/// Bytes of an owned unit file, or `None` when it is absent or not ours.
-fn owned_unit_text(path: &Path) -> Result<Option<String>> {
-    Ok(match classify_owned_unit(path)? {
-        ArtifactState::Owned(bytes) => Some(String::from_utf8_lossy(&bytes).into_owned()),
-        ArtifactState::Absent | ArtifactState::Foreign(_) => None,
-    })
+/// The value of `--manifest` in an argv: the following element, or the tail of
+/// a `--manifest=<path>` element. Never a substring of anything else.
+fn manifest_argument_of(argv: &[String]) -> Option<&str> {
+    for (index, argument) in argv.iter().enumerate() {
+        if argument == "--manifest" {
+            return argv
+                .get(index + 1)
+                .map(String::as_str)
+                .filter(|v| !v.is_empty());
+        }
+        if let Some(value) = argument.strip_prefix("--manifest=") {
+            return (!value.is_empty()).then_some(value);
+        }
+    }
+    None
 }
 
-fn same_path(left: &str, right: &str) -> bool {
-    Path::new(left) == Path::new(right)
+/// What reading an owned unit path produced.
+enum UnitText {
+    /// A unit carrying our marker.
+    Owned(String),
+    /// Absent, or something we did not write: ownership's story, not drift's.
+    NotOurs,
+    /// Present but unreadable — a permission problem, usually. `status` must
+    /// still answer every other dimension, so this is reported rather than
+    /// raised.
+    Unreadable,
+}
+
+fn owned_unit_text(path: &Path) -> UnitText {
+    match classify_owned_unit(path) {
+        Ok(ArtifactState::Owned(bytes)) => {
+            UnitText::Owned(String::from_utf8_lossy(&bytes).into_owned())
+        }
+        Ok(ArtifactState::Absent) | Ok(ArtifactState::Foreign(_)) => UnitText::NotOurs,
+        Err(_) => UnitText::Unreadable,
+    }
+}
+
+/// Path equality as the *inspected platform* defines it.
+///
+/// Windows compares paths case-insensitively and accepts either separator, so
+/// a task registered as `C:/Users/alice/bin/XV.EXE` names the same executable
+/// the manifest recorded as `C:\\Users\\alice\\bin\\xv.exe`; refusing that would be a
+/// false accusation. Unix paths are bytes and are compared as such.
+///
+/// The platform is a parameter rather than a `cfg`, because the caller may be
+/// inspecting a platform it is not running on — every renderer test does.
+fn same_path(platform: Platform, left: &str, right: &str) -> bool {
+    match platform {
+        Platform::Schtasks => windows_path_key(left) == windows_path_key(right),
+        _ => Path::new(left) == Path::new(right),
+    }
+}
+
+fn windows_path_key(path: &str) -> String {
+    path.replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_lowercase()
 }
 
 /// The recorded cadence as an interval, when its `kind` is one this build
@@ -655,11 +839,15 @@ fn manifest_interval(cadence: &ManifestCadence) -> Option<ScheduleInterval> {
     }
 }
 
-/// `<key>K</key> <string>V</string>` from a plist.
+/// `<key>K</key> <string>V</string>` from a plist, unescaped.
+///
+/// The unescaping matters: a log path containing `&` is written as `&amp;`,
+/// and comparing the escaped text with the manifest would refuse a healthy
+/// install.
 fn plist_string_value(text: &str, key: &str) -> Option<String> {
     let after = text.split_once(&format!("<key>{key}</key>"))?.1;
     let value = after.split_once("<string>")?.1.split_once("</string>")?.0;
-    Some(value.trim().to_string())
+    Some(xml_unescape(value.trim()))
 }
 
 /// The `StartCalendarInterval` dict as ordered key/value pairs.
@@ -1221,6 +1409,272 @@ mod tests {
             report.reasons[0].detail,
             "unit_command differs between the installed unit and the manifest; reinstall"
         );
+    }
+
+    /// A manifest, a binary and a log under paths that contain spaces — and,
+    /// for the plist, an `&` that has to survive XML escaping. The earlier
+    /// joined-string comparison refused every one of these.
+    fn spaced_schedule(manifest: &Path) -> RotationSchedule {
+        RotationSchedule {
+            interval: ScheduleInterval::Daily { hour: 3, minute: 0 },
+            command: ScheduleCommand::ManifestRun {
+                manifest: manifest.to_path_buf(),
+                working_directory: PathBuf::from(fixture_abs("/home/alice/my work")),
+            },
+            binary: PathBuf::from(fixture_abs("/home/alice/my bin/xv")),
+            log_path: PathBuf::from(fixture_abs("/home/alice/my logs/rotate & audit.log")),
+            home: PathBuf::from(fixture_abs("/home/alice")),
+            state_home: None,
+        }
+    }
+
+    /// A fixture whose state root and unit directory both contain a space.
+    fn spaced_fixture() -> Fixture {
+        let tmp = tempfile::tempdir().unwrap();
+        let units = UnitPaths {
+            dir: tmp.path().join("my units"),
+        };
+        let state = test_paths_in(&tmp.path().join("my state"));
+        std::fs::create_dir_all(&units.dir).unwrap();
+        Fixture {
+            _tmp: tmp,
+            units,
+            state,
+        }
+    }
+
+    #[test]
+    fn a_healthy_install_under_spaced_paths_is_not_drift() {
+        for platform in unix_platforms() {
+            let f = spaced_fixture();
+            assert!(
+                f.state.manifest_path().to_string_lossy().contains(' '),
+                "the fixture must actually exercise a spaced path"
+            );
+            let schedule = spaced_schedule(&f.state.manifest_path());
+            let mut manifest = manifest_for(&schedule);
+            manifest.execution.working_directory = fixture_abs("/home/alice/my work");
+            seed_units(platform, &schedule, &f.units);
+            let report =
+                inspect_unit_drift(platform, &f.units, &f.state, &manifest, &registered()).unwrap();
+            assert!(report.is_empty(), "{platform:?}: {report:?}");
+        }
+    }
+
+    #[test]
+    fn a_spaced_manifest_path_that_really_differs_is_still_drift() {
+        for platform in unix_platforms() {
+            let f = spaced_fixture();
+            // The same spaced prefix, a different file: a comparison that
+            // truncated at the first space would call this healthy.
+            let installed = f.state.manifest_path().with_file_name("manifest.json.old");
+            let schedule = spaced_schedule(&installed);
+            let mut manifest = manifest_for(&schedule);
+            manifest.execution.working_directory = fixture_abs("/home/alice/my work");
+            seed_units(platform, &schedule, &f.units);
+            let report =
+                inspect_unit_drift(platform, &f.units, &f.state, &manifest, &registered()).unwrap();
+            assert_eq!(fields(&report), vec![UNIT_COMMAND], "{platform:?}");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Task Scheduler command parsing
+    // -----------------------------------------------------------------------
+
+    /// The `/TR` string `schtasks_create_args` renders, for a given executable,
+    /// manifest, working directory and log.
+    fn task_command(binary: &str, manifest: &str, dir: &str, log: &str) -> String {
+        format!("cmd /c cd /d \"{dir}\" && \"{binary}\" schedule run --manifest \"{manifest}\" >> \"{log}\" 2>&1")
+    }
+
+    fn schtasks_report(
+        state: &ScheduleStatePaths,
+        manifest: &ScheduleManifestV1,
+        units: &UnitPaths,
+        command: &str,
+    ) -> UnitDriftReport {
+        let listing = format!(
+            "TaskName:      \\crosstache-xv-rotate\r\nTask To Run:   {command}\r\nStatus:        Ready\r\n"
+        );
+        let runner = registered()
+            .answering("/V /FO LIST", 0, &listing, "")
+            // The cadence is checked from the XML, which this fixture does not
+            // provide; a failed query contributes no reason.
+            .answering("/XML", 1, "", "ERROR");
+        inspect_unit_drift(Platform::Schtasks, units, state, manifest, &runner).unwrap()
+    }
+
+    fn windows_fixture() -> (Fixture, ScheduleManifestV1) {
+        let f = fixture();
+        let mut manifest = manifest_for(&pinned_schedule(
+            &f.state.manifest_path(),
+            ScheduleInterval::Daily { hour: 3, minute: 0 },
+            "/home/alice/rotate.log",
+        ));
+        manifest.execution.binary_path = "C:\\Program Files\\xv\\xv.exe".to_string();
+        manifest.execution.log_path = "C:\\Users\\alice\\state\\rotate.log".to_string();
+        (f, manifest)
+    }
+
+    #[test]
+    fn a_registered_task_matching_the_manifest_has_no_unit_drift() {
+        let (f, manifest) = windows_fixture();
+        let command = task_command(
+            &manifest.execution.binary_path,
+            &f.state.manifest_path().to_string_lossy(),
+            "C:\\Users\\alice\\my work",
+            &manifest.execution.log_path,
+        );
+        let report = schtasks_report(&f.state, &manifest, &f.units, &command);
+        assert!(report.is_empty(), "{report:?}");
+    }
+
+    #[test]
+    fn a_registered_task_differing_only_in_case_or_separator_is_not_drift() {
+        let (f, manifest) = windows_fixture();
+        let command = task_command(
+            "C:/Program Files/XV/XV.EXE",
+            &f.state.manifest_path().to_string_lossy(),
+            "C:\\Users\\alice\\my work",
+            "C:/Users/Alice/state/Rotate.log",
+        );
+        let report = schtasks_report(&f.state, &manifest, &f.units, &command);
+        assert!(report.is_empty(), "{report:?}");
+    }
+
+    #[test]
+    fn a_registered_task_logging_to_a_longer_path_is_drift() {
+        // The containment bug in one test: `rotate.log.old` contains
+        // `rotate.log`.
+        let (f, manifest) = windows_fixture();
+        let command = task_command(
+            &manifest.execution.binary_path,
+            &f.state.manifest_path().to_string_lossy(),
+            "C:\\Users\\alice\\my work",
+            "C:\\Users\\alice\\state\\rotate.log.old",
+        );
+        let report = schtasks_report(&f.state, &manifest, &f.units, &command);
+        assert_eq!(fields(&report), vec![UNIT_LOG_PATH]);
+    }
+
+    #[test]
+    fn a_registered_task_running_another_executable_is_drift() {
+        let (f, manifest) = windows_fixture();
+        let command = task_command(
+            "C:\\Program Files\\xv\\xv.exe.bak",
+            &f.state.manifest_path().to_string_lossy(),
+            "C:\\Users\\alice\\my work",
+            &manifest.execution.log_path,
+        );
+        let report = schtasks_report(&f.state, &manifest, &f.units, &command);
+        assert_eq!(fields(&report), vec![UNIT_COMMAND]);
+    }
+
+    #[test]
+    fn the_task_command_is_parsed_into_its_pieces() {
+        let parsed = parse_schtasks_invocation(&task_command(
+            "C:\\Program Files\\xv\\xv.exe",
+            "C:\\Users\\alice\\my state\\manifest.json",
+            "C:\\work dir",
+            "C:\\logs\\rotate & audit.log",
+        ));
+        assert_eq!(
+            parsed,
+            SchtasksInvocation {
+                binary: Some("C:\\Program Files\\xv\\xv.exe".to_string()),
+                manifest: Some("C:\\Users\\alice\\my state\\manifest.json".to_string()),
+                log: Some("C:\\logs\\rotate & audit.log".to_string()),
+            }
+        );
+        // The state-root `set` prelude and an unspaced redirect both parse.
+        let parsed = parse_schtasks_invocation(
+            "cmd /c set \"XV_STATE_HOME=C:\\s\" && \"C:\\xv.exe\" schedule run --manifest \"C:\\m.json\" >>\"C:\\r.log\" 2>&1",
+        );
+        assert_eq!(parsed.binary.as_deref(), Some("C:\\xv.exe"));
+        assert_eq!(parsed.manifest.as_deref(), Some("C:\\m.json"));
+        assert_eq!(parsed.log.as_deref(), Some("C:\\r.log"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Ordering and unreadable units
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn unit_drift_reasons_come_out_in_a_fixed_order() {
+        for platform in unix_platforms() {
+            let f = fixture();
+            let schedule = pinned_schedule(
+                &f.state.root().join("other.json"),
+                ScheduleInterval::Daily { hour: 3, minute: 0 },
+                "/home/alice/elsewhere.log",
+            );
+            let mut manifest = manifest_for(&schedule);
+            manifest.execution.log_path = fixture_abs("/home/alice/rotate.log");
+            manifest.cadence.hour = 17;
+            seed_units(platform, &schedule, &f.units);
+            let report =
+                inspect_unit_drift(platform, &f.units, &f.state, &manifest, &registered()).unwrap();
+            assert_eq!(
+                fields(&report),
+                vec![UNIT_COMMAND, UNIT_CADENCE, UNIT_LOG_PATH],
+                "{platform:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unreadable_unit_is_reported_instead_of_aborting_status() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let f = fixture();
+        let schedule = pinned_schedule(
+            &f.state.manifest_path(),
+            ScheduleInterval::Daily { hour: 3, minute: 0 },
+            "/home/alice/rotate.log",
+        );
+        let manifest = manifest_for(&schedule);
+        seed_manifest(&f.state, &manifest);
+        seed_units(Platform::Systemd, &schedule, &f.units);
+        let service = f.units.dir.join("xv-rotate.service");
+        std::fs::set_permissions(&service, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&service).is_ok() {
+            // Running as root: the mode proves nothing, so there is nothing to
+            // assert here.
+            return;
+        }
+
+        let report = collect_status(
+            Platform::Systemd,
+            &f.units,
+            &f.state,
+            &registered(),
+            Path::new(&manifest.execution.binary_path),
+            "0.39.0",
+        )
+        .await
+        .unwrap();
+
+        // Every other dimension still answered...
+        assert_eq!(report.scheduler, SchedulerState::Installed);
+        assert!(report.manifest.is_some());
+        // ... and the unreadable unit is reported, not raised.
+        let unit_drift = report.unit_drift.expect("a manifest was loaded");
+        assert_eq!(fields(&unit_drift), vec![UNIT_COMMAND]);
+        assert!(
+            unit_drift.reasons[0].detail.contains("could not be read"),
+            "{:?}",
+            unit_drift.reasons[0]
+        );
+        // Ownership cannot claim a unit it could not open.
+        assert!(
+            matches!(report.ownership, Ownership::Foreign { ref paths } if paths == &vec![service.clone()]),
+            "{:?}",
+            report.ownership
+        );
+
+        std::fs::set_permissions(&service, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
 
     fn fields(report: &UnitDriftReport) -> Vec<&'static str> {
