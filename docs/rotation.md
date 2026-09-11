@@ -224,7 +224,9 @@ records the outcome of a firing and **concurrent firings are not serialized**.
 Both ship with last-run/next-run reporting.
 
 The rotation log lives outside that directory (`~/.local/state/xv/rotate.log` by
-default, or wherever `--log-file` pointed) and is likewise never removed.
+default on Linux/macOS, `%LOCALAPPDATA%\xv\rotate.log` on Windows — always
+`xv/rotate.log` under the same state root as the manifest — or wherever
+`--log-file` pointed) and is likewise never removed.
 Everything is owner-private: `0700` directories and `0600` files on Unix, an
 owner-and-SYSTEM DACL on Windows.
 
