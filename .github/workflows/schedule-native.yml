@@ -1,0 +1,228 @@
+# Native validation for the artifacts `xv schedule install` writes.
+#
+# The ordinary test suite never touches a real scheduler: `launchctl`,
+# `systemctl --user` and `schtasks` act on the invoking user's live session
+# under a fixed global job name, so a developer running `cargo test` must not
+# risk deregistering the rotation schedule they actually rely on. That leaves
+# one thing untested anywhere: whether the text we render is text the platform
+# would actually accept. This workflow is where that is checked — with each
+# platform's own validator, never by registering our job.
+#
+# Nothing here executes a rotation. Linux and macOS only *lint* rendered files;
+# Windows does register a task, but a uniquely named, far-future, harmless one
+# (`cmd /c exit 0`), and deletes it in an `always()` step.
+#
+# Opt-in: `workflow_dispatch`, plus pull requests that touch the scheduling code,
+# its snapshots, or this file. Deliberately no `schedule:` trigger — there is
+# nothing here to watch for drift on a timer.
+name: Schedule native validation
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'src/schedule/**'
+      - 'src/cli/schedule_ops.rs'
+      - 'tests/fixtures/schedule/**'
+      - '.github/workflows/schedule-native.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  native:
+    name: Validate rendered artifacts (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: schedule-native-${{ matrix.os }}
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libssl-dev \
+            pkg-config \
+            libxcb1-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            libx11-dev \
+            libxrandr-dev \
+            libxi-dev \
+            libxcursor-dev
+
+      - name: Build xv
+        run: cargo build --bin xv
+
+      # An isolated target, the same shape the CLI tests build: a global config
+      # of its own, a local store opened once (a schedule is only installed
+      # against a target that already exists), and a state root under it. The
+      # path deliberately contains a space — quoting in the rendered unit is
+      # exactly what a native validator can confirm and a string assertion
+      # cannot.
+      - name: Render the units for an isolated target
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sandbox="$RUNNER_TEMP/schedule sandbox"
+          rm -rf "$sandbox"
+          mkdir -p "$sandbox/.config/xv" "$sandbox/store" "$sandbox/rendered"
+          cat > "$sandbox/.config/xv/xv.conf" <<EOF
+          backend = "local"
+          debug = false
+          subscription_id = ""
+          default_vault = "default"
+          default_resource_group = ""
+          default_location = ""
+          tenant_id = ""
+          output_json = false
+          no_color = true
+          cache_enabled = false
+          cache_ttl_secs = 0
+          clipboard_timeout = 0
+
+          [local]
+          store_path = "$sandbox/store"
+          key_file = "$sandbox/key.txt"
+          default_vault = "default"
+          EOF
+          export HOME="$sandbox"
+          export XDG_CONFIG_HOME="$sandbox/.config"
+          export XV_STATE_HOME="$sandbox/state"
+          export XV_NO_PARENT_CONFIG=1
+          export XV_BACKEND=local
+          export NO_COLOR=1
+          # Belt and braces: `--print` touches no scheduler, and the fake makes
+          # that unmistakable if that ever stops being true.
+          export XV_SCHEDULE_RUNNER=fake
+          xv="$GITHUB_WORKSPACE/target/debug/xv"
+          "$xv" list > /dev/null
+          "$xv" schedule install --print --vault default > "$sandbox/preview.txt"
+          cat "$sandbox/preview.txt"
+          # Split the preview's `# --- <path> ---` blocks into files named after
+          # the unit each one would be installed as.
+          python3 - "$sandbox/preview.txt" "$sandbox/rendered" <<'PY'
+          import os, sys
+
+          preview, out_dir = sys.argv[1], sys.argv[2]
+          text = open(preview, encoding="utf-8").read()
+          written = []
+          for block in text.split("\n# --- ")[1:]:
+              header, _, body = block.partition("\n")
+              header = header.strip()
+              if not header.endswith("---"):
+                  continue
+              path = header[: -len("---")].strip()
+              name = os.path.basename(path)
+              if not name.endswith((".plist", ".service", ".timer")):
+                  continue
+              if not body.endswith("\n"):
+                  body += "\n"
+              target = os.path.join(out_dir, name)
+              with open(target, "w", encoding="utf-8") as handle:
+                  handle.write(body)
+              written.append(name)
+          if not written:
+              sys.exit(f"no unit block found in {preview}")
+          print("rendered:", ", ".join(written))
+          PY
+
+      - name: Verify the systemd units
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rendered="$RUNNER_TEMP/schedule sandbox/rendered"
+          service="$rendered/xv-rotate.service"
+          timer="$rendered/xv-rotate.timer"
+          test -f "$service" && test -f "$timer"
+          systemd-analyze --version
+          systemd-analyze verify "$service" "$timer"
+          # The units are installed into the *user* manager, so verify them
+          # there too when this systemd knows the switch.
+          if systemd-analyze --help 2>&1 | grep -q -- '--user'; then
+            systemd-analyze --user verify "$service" "$timer"
+          else
+            echo "systemd-analyze has no --user switch on this runner; system-manager verify only"
+          fi
+
+      - name: Lint the launchd plist
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          plist="$RUNNER_TEMP/schedule sandbox/rendered/com.crosstache.xv-rotate.plist"
+          test -f "$plist"
+          plutil -lint "$plist"
+          # The keys launchd needs, read back through plutil rather than grep, so
+          # a plist that lints but does not *parse* into the expected shape fails
+          # here rather than at 3am.
+          plutil -extract Label raw "$plist"
+          plutil -extract ProgramArguments.0 raw "$plist"
+          plutil -extract StartCalendarInterval.Hour raw "$plist"
+
+      # Task Scheduler has no unit file to lint: the registration *is* the
+      # artifact. So this one really does create a task — but a uniquely named
+      # one, triggered once in 2099, running `cmd /c exit 0`. It is never the xv
+      # runner, and no rotation can happen even if the trigger somehow fired.
+      - name: Create and query an ephemeral Task Scheduler entry
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $task = "crosstache-xv-rotate-ci-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          "task=$task" | Out-File -FilePath $env:GITHUB_ENV -Append
+          schtasks /Create /TN $task /TR "cmd /c exit 0" /SC ONCE /ST 03:00 /SD 01/01/2099 /F
+          if ($LASTEXITCODE -ne 0) { throw "schtasks /Create failed ($LASTEXITCODE)" }
+
+          $xml = (schtasks /Query /TN $task /XML | Out-String)
+          if ($LASTEXITCODE -ne 0) { throw "schtasks /Query /XML failed ($LASTEXITCODE)" }
+          Write-Host $xml
+          # The shapes `verify_schtasks_cadence` reads: an ISO-8601
+          # <StartBoundary> and a <TimeTrigger>/<CalendarTrigger> element.
+          if ($xml -notmatch '<StartBoundary>2099-01-01T03:00:00') {
+            throw "the registered task has no ISO-8601 StartBoundary at the requested time"
+          }
+          if ($xml -notmatch '<Command>cmd</Command>') {
+            throw "the registered task is not the harmless command this job asked for"
+          }
+
+          $list = (schtasks /Query /TN $task /V /FO LIST | Out-String)
+          if ($LASTEXITCODE -ne 0) { throw "schtasks /Query /V /FO LIST failed ($LASTEXITCODE)" }
+          Write-Host $list
+          # The shape `schtasks_task_to_run` reads.
+          if ($list -notmatch '(?m)^Task To Run:') {
+            throw "the detailed query has no 'Task To Run:' line"
+          }
+
+      - name: Delete the ephemeral Task Scheduler entry
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $task = $env:task
+          if (-not $task) {
+            Write-Host "no task name recorded; nothing to delete"
+            exit 0
+          }
+          schtasks /Delete /TN $task /F
+          if ($LASTEXITCODE -ne 0) {
+            # Never fail the job on cleanup: the task may never have been
+            # created. Say so loudly instead — a leaked task on a throwaway
+            # runner is a report, not a failure.
+            Write-Host "::warning::could not delete $task (exit $LASTEXITCODE)"
+          }
+          exit 0

@@ -10,7 +10,7 @@ releases — they are part of the scripting contract.
 | `0`   | Success               | command completed                               |
 | `1`   | Unknown / catch-all   | unrecoverable I/O, JSON parse, regex, etc.      |
 | `2`   | Invalid argument / attachment integrity | bad CLI flag; clap parse failure; typed `xv-attachment-*` failures (see [attachment errors](attachments.md#structured-attachment-errors)) |
-| `3`   | Configuration error   | missing required config; invalid config file; env not defined in `.xv.toml`; backend unavailable (`xv-backend-unavailable`); `xv doctor` unresolved problems |
+| `3`   | Configuration error   | missing required config; invalid config file; env not defined in `.xv.toml`; backend unavailable (`xv-backend-unavailable`); `xv doctor` unresolved problems; a rotation schedule's recorded target drifted or could not be read (`xv schedule status`/`schedule run`, see [rotation.md](rotation.md#exit-codes)) |
 | `10`  | Secret not found      | `xv get` on a missing secret                    |
 | `11`  | Vault not found       | `xv vault info` on a missing vault              |
 | `12`  | Invalid secret name   | name fails sanitization rules                   |

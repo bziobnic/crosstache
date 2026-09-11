@@ -10,7 +10,7 @@
 //! This module owns three things: locating the per-platform state directory
 //! ([`ScheduleStatePaths`]), the versioned on-disk schema
 //! ([`ScheduleManifestV1`] / [`ScheduleManifest`]), and the bounded,
-//! symlink-safe storage primitives ([`load_manifest`], [`write_manifest_atomic`],
+//! symlink-safe storage primitives ([`load_manifest_with_bytes`], [`write_manifest_atomic`],
 //! [`remove_owned_manifest`]) built on top of the shared helpers in
 //! `crate::utils::helpers`.
 //!
@@ -34,6 +34,15 @@ use crate::utils::helpers::{atomic_write_file_no_follow, create_private_dir, rea
 
 /// Fixed identifier for the single schedule xv currently manages.
 pub const SCHEDULE_ID: &str = "rotation-default";
+
+/// `target.vault_selection` when the install did not pass `--vault`: the
+/// target is "whatever the degenerate workspace's default vault is", so the
+/// default moving is drift.
+pub const VAULT_SELECTION_IMPLICIT: &str = "implicit";
+
+/// `target.vault_selection` when the install named a vault explicitly. The
+/// name is pinned; a moving default does not affect it.
+pub const VAULT_SELECTION_EXPLICIT: &str = "explicit";
 
 /// Manifest files are capped at this size before they are ever parsed.
 const MAX_MANIFEST_BYTES: usize = 64 * 1024;
@@ -153,18 +162,14 @@ impl ScheduleStatePaths {
         self.root.join("manifest.json")
     }
 
-    /// `last-run.json` — owned by the scheduled runner.
-    // The scheduled runner and the install transaction consume these; the
-    // renderer/runner scaffolding does not.
-    #[allow(dead_code)]
+    /// `last-run.json` — owned by the scheduled runner, read by `status`, and
+    /// deliberately retained by `uninstall`.
     pub fn last_run_path(&self) -> PathBuf {
         self.root.join("last-run.json")
     }
 
-    /// `run.lock` — persistent lock inode owned by the scheduled runner.
-    // The scheduled runner and the install transaction consume these; the
-    // renderer/runner scaffolding does not.
-    #[allow(dead_code)]
+    /// `run.lock` — persistent lock inode owned by the scheduled runner, and
+    /// probed by `status` to tell a live run from an interrupted one.
     pub fn run_lock_path(&self) -> PathBuf {
         self.root.join("run.lock")
     }
@@ -299,6 +304,11 @@ pub struct ManifestTarget {
     pub backend_kind: String,
     pub backend_identity: String,
     pub vault: String,
+    /// Whether `vault` was chosen by the installer (`explicit`) or read out
+    /// of the resolution chain (`implicit`). Drift validation needs the
+    /// difference: only an implicit target has to be re-derived, because only
+    /// it can move without its recorded name changing.
+    pub vault_selection: String,
 }
 
 /// Version 1 of `manifest.json`.
@@ -381,7 +391,7 @@ pub(crate) fn validate_absolute_normalized_path(field: &str, value: &str) -> Res
     Ok(())
 }
 
-fn validate_digest(field: &str, value: &str) -> Result<()> {
+pub(crate) fn validate_digest(field: &str, value: &str) -> Result<()> {
     let invalid = || {
         CrosstacheError::config(format!(
             "schedule manifest field '{field}' must be a sha256 digest of the form 'sha256:<64 lowercase hex chars>': {value}"
@@ -450,6 +460,16 @@ pub(crate) fn validate_v1(manifest: &ScheduleManifestV1) -> Result<()> {
         )));
     }
 
+    match manifest.target.vault_selection.as_str() {
+        VAULT_SELECTION_IMPLICIT | VAULT_SELECTION_EXPLICIT => {}
+        other => {
+            return Err(CrosstacheError::config(format!(
+                "schedule manifest field 'target.vault_selection' must be one of \
+                 '{VAULT_SELECTION_IMPLICIT}', '{VAULT_SELECTION_EXPLICIT}': {other}"
+            )));
+        }
+    }
+
     match manifest.target.workspace_source.as_str() {
         "project" | "context" | "degenerate" => {}
         other => {
@@ -491,7 +511,7 @@ pub fn serialize_manifest(manifest: &ScheduleManifestV1) -> Vec<u8> {
 // ---------------------------------------------------------------------------
 
 /// Reject a path if it exists and is itself a symlink, without following it.
-fn reject_if_symlink(path: &Path) -> Result<()> {
+pub(crate) fn reject_if_symlink(path: &Path) -> Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => Err(CrosstacheError::config(format!(
             "Refusing symlinked schedule state path '{}'",
@@ -548,11 +568,17 @@ fn read_manifest_bytes(paths: &ScheduleStatePaths) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// Load and validate `manifest.json`, dispatching on its `schema_version`.
+/// Load and validate `manifest.json`, dispatching on its `schema_version`,
+/// and return the exact bytes that were parsed.
 ///
 /// An unknown `schema_version` produces a targeted error naming reinstall,
 /// rather than a generic deserialization failure.
-pub fn load_manifest(paths: &ScheduleStatePaths) -> Result<ScheduleManifest> {
+///
+/// The scheduled runner binds its outcome to `sha256(<these bytes>)`, so it
+/// must hash what it actually read — not a re-serialization of the parsed
+/// value (which would silently normalize whitespace and key order) and not a
+/// second read of the file (which could observe a different installation).
+pub fn load_manifest_with_bytes(paths: &ScheduleStatePaths) -> Result<(ScheduleManifest, Vec<u8>)> {
     let bytes = read_manifest_bytes(paths)?;
 
     let peek: SchemaVersionPeek = serde_json::from_slice(&bytes).map_err(|error| {
@@ -571,7 +597,7 @@ pub fn load_manifest(paths: &ScheduleStatePaths) -> Result<ScheduleManifest> {
                 ))
             })?;
             validate_v1(&manifest)?;
-            Ok(ScheduleManifest::V1(manifest))
+            Ok((ScheduleManifest::V1(manifest), bytes))
         }
         other => Err(CrosstacheError::config(format!(
             "schedule manifest '{}' has schema_version {other}, which this version of xv does not support; reinstall the schedule (xv schedule install) to regenerate it",
@@ -624,6 +650,11 @@ mod tests {
     use super::*;
     use crate::schedule::fixture_abs;
 
+    /// Load and discard the bytes — the shape most of these tests care about.
+    fn load_manifest_once(paths: &ScheduleStatePaths) -> Result<ScheduleManifest> {
+        load_manifest_with_bytes(paths).map(|(manifest, _)| manifest)
+    }
+
     fn fixture_manifest() -> ScheduleManifestV1 {
         ScheduleManifestV1 {
             schema_version: 1,
@@ -654,6 +685,7 @@ mod tests {
                 backend_kind: "aws".to_string(),
                 backend_identity: format!("sha256:{}", "55".repeat(32)),
                 vault: "payments-production".to_string(),
+                vault_selection: VAULT_SELECTION_EXPLICIT.to_string(),
             },
         }
     }
@@ -985,6 +1017,53 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// A pre-`vault_selection` manifest (the PR 2 shape) fails to load.
+    ///
+    /// `deny_unknown_fields` cuts both ways: a *missing* required field is
+    /// just as fatal. Nothing has shipped with the older shape, and the
+    /// runner wraps this error with "reinstall the schedule", which is the
+    /// correct advice — a manifest that cannot say how its vault was chosen
+    /// cannot be drift-validated.
+    #[test]
+    fn a_manifest_without_vault_selection_is_refused() {
+        let mut value = serde_json::to_value(fixture_manifest()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .get_mut("target")
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove("vault_selection");
+        let result: std::result::Result<ScheduleManifestV1, _> = serde_json::from_value(value);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn an_unknown_vault_selection_is_refused() {
+        let mut manifest = fixture_manifest();
+        manifest.target.vault_selection = "whatever".to_string();
+        let error = validate_v1(&manifest)
+            .expect_err("bad selection")
+            .to_string();
+        assert!(error.contains("target.vault_selection"), "{error}");
+    }
+
+    #[test]
+    fn load_manifest_with_bytes_returns_what_it_parsed() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths_in(dir.path());
+        let mut manifest = fixture_manifest();
+        manifest.installed_at = "2026-09-09T15:04:05Z".to_string();
+        let bytes = serialize_manifest(&manifest);
+        write_manifest_atomic(&paths, &bytes).unwrap();
+
+        let (loaded, read_back) = load_manifest_with_bytes(&paths).unwrap();
+        assert_eq!(loaded, ScheduleManifest::V1(manifest));
+        assert_eq!(read_back, bytes);
+        assert_eq!(read_back, std::fs::read(paths.manifest_path()).unwrap());
+    }
+
     #[test]
     fn serialize_manifest_preview_masks_installed_at() {
         let manifest = fixture_manifest();
@@ -1011,7 +1090,7 @@ mod tests {
         )
         .unwrap();
 
-        let error = load_manifest(&paths).unwrap_err();
+        let error = load_manifest_once(&paths).unwrap_err();
         let message = error.to_string();
         assert!(message.contains("99"));
         assert!(message.contains("reinstall"));
@@ -1138,7 +1217,7 @@ mod tests {
         let manifest = fixture_manifest();
 
         write_manifest_atomic(&paths, &serialize_manifest(&manifest)).unwrap();
-        let loaded = load_manifest(&paths).unwrap();
+        let loaded = load_manifest_once(&paths).unwrap();
         assert_eq!(loaded, ScheduleManifest::V1(manifest));
     }
 
@@ -1175,7 +1254,7 @@ mod tests {
         let oversized = vec![b' '; MAX_MANIFEST_BYTES + 1];
         std::fs::write(paths.manifest_path(), oversized).unwrap();
 
-        let error = load_manifest(&paths).unwrap_err();
+        let error = load_manifest_once(&paths).unwrap_err();
         assert!(error.to_string().contains("byte limit"));
     }
 
@@ -1190,7 +1269,7 @@ mod tests {
         std::fs::write(&real_target, serialize_manifest(&fixture_manifest())).unwrap();
         std::os::unix::fs::symlink(&real_target, paths.manifest_path()).unwrap();
 
-        let error = load_manifest(&paths).unwrap_err();
+        let error = load_manifest_once(&paths).unwrap_err();
         assert!(error.to_string().contains("symlink"));
     }
 
@@ -1214,7 +1293,7 @@ mod tests {
             source: StateRootSource::Home,
         };
 
-        let error = load_manifest(&paths).unwrap_err();
+        let error = load_manifest_once(&paths).unwrap_err();
         assert!(error.to_string().contains("symlink"));
     }
 
@@ -1224,7 +1303,7 @@ mod tests {
         let paths = temp_paths(&dir);
         std::fs::create_dir_all(paths.root()).unwrap();
 
-        assert!(load_manifest(&paths).is_err());
+        assert!(load_manifest_once(&paths).is_err());
     }
 
     #[test]

@@ -270,8 +270,8 @@ pub fn selected_backend_identity(
 /// entry it came from, resolved exactly once at install time.
 ///
 /// Everything a scheduled run is allowed to touch is decided here, so the
-/// install preview, the unit that gets written, and (in a later task) the
-/// manifest all describe the same target. Nothing downstream re-resolves.
+/// install preview, the unit that gets written and the manifest all describe
+/// the same target. Nothing downstream re-resolves.
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedScheduleTarget {
     /// The manifest's `target` block, ready to serialize.
@@ -279,9 +279,11 @@ pub(crate) struct ResolvedScheduleTarget {
     /// The workspace entry that produced [`Self::target`] — its `vault` is
     /// the real vault to sweep, on registry backend `backend`, and its
     /// `alias` is the name a person recognizes it by.
-    // Everything the *manifest* records already lives in `target`; these two
-    // survive for the status/drift reporting that reads the resolved entry
-    // back, which lands in a later task of this series.
+    // Nothing downstream reads these two: everything the *manifest* records is
+    // already flattened into `target`, and `drift` recomputes from the manifest
+    // rather than from a resolution it did not perform. They are kept because
+    // this type is the resolver's whole answer, and a caller that needs the
+    // entry itself must not have to resolve a second time to get it.
     #[allow(dead_code)]
     pub(crate) entry: WorkspaceEntry,
     /// Which resolution layer produced the workspace.
@@ -501,6 +503,11 @@ async fn resolve_install_target_from(
         backend_kind: identity.kind,
         backend_identity: identity.digest,
         vault: entry.vault.clone(),
+        vault_selection: if vault.is_some() {
+            crate::schedule::manifest::VAULT_SELECTION_EXPLICIT.to_string()
+        } else {
+            crate::schedule::manifest::VAULT_SELECTION_IMPLICIT.to_string()
+        },
     };
 
     Ok(ResolvedScheduleTarget {
@@ -1387,6 +1394,9 @@ mod resolve_tests {
         .unwrap();
 
         assert_eq!(resolved.target.vault, "stage-vault");
+        // `--vault stage` was given: the name is pinned, so a moving default
+        // is not this target's business.
+        assert_eq!(resolved.target.vault_selection, "explicit");
         assert_eq!(resolved.target.workspace_alias.as_deref(), Some("stage"));
         assert_eq!(resolved.target.workspace_source, "context");
         assert_eq!(resolved.target.backend_name, "local-b");
@@ -1643,6 +1653,9 @@ vaults = [
         assert_eq!(resolved.target.workspace_source, "project");
         assert_eq!(resolved.target.environment.as_deref(), Some("prod"));
         assert_eq!(resolved.target.vault, "prod-vault");
+        // No `--vault`: the vault came out of the resolution chain, so drift
+        // validation has to re-derive it.
+        assert_eq!(resolved.target.vault_selection, "implicit");
         assert_eq!(resolved.target.workspace_alias.as_deref(), Some("prod"));
         assert_eq!(resolved.target.backend_name, "local-a");
         assert!(resolved

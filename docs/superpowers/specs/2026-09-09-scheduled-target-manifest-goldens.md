@@ -1,6 +1,11 @@
 # Scheduled target manifest golden outputs
 
-> **Status:** Normative examples for the
+> **Status:** Shipped — PR #444 (schema/resolver), PR #445
+> (runner/drift/transaction), PR 3 (outcomes/status/native gates).
+> Deviations from this document are recorded in `CHANGELOG.md` and in those
+> pull requests.
+>
+> Normative examples for the
 > [scheduled target manifest design](2026-09-09-scheduled-target-manifest-design.md).
 > Paths, hashes, timestamps and versions below are fixed fixture values. Tests
 > may normalize only those values.
@@ -59,7 +64,8 @@ Normalized systemd output:
     "backend_name": "aws-prod",
     "backend_kind": "aws",
     "backend_identity": "sha256:55db8b6f5e64ef7c0af4c5b1f9b4d40d45994e8dcfb7d1f7b995f55f7cad2213",
-    "vault": "payments-production"
+    "vault": "payments-production",
+    "vault_selection": "explicit"
   }
 }
 

@@ -1,6 +1,9 @@
 # Scheduled rotation target manifest
 
-> **Status:** Proposed for the next P1 delivery block.
+> **Status:** Shipped — PR #444 (schema/resolver), PR #445
+> (runner/drift/transaction), PR 3 (outcomes/status/native gates).
+> Deviations from this document are recorded in `CHANGELOG.md` and in those
+> pull requests.
 > **Tasks:** A03-01 through A03-10, with REL02, REL03, REL04, REL05 and REL07 as delivery gates.
 > **Golden outputs:** [`2026-09-09-scheduled-target-manifest-goldens.md`](2026-09-09-scheduled-target-manifest-goldens.md).
 
@@ -133,7 +136,8 @@ unknown fields. Version 1 is:
     "backend_name": "aws-prod",
     "backend_kind": "aws",
     "backend_identity": "sha256:55db...",
-    "vault": "payments-production"
+    "vault": "payments-production",
+    "vault_selection": "explicit"
   }
 }
 ```
@@ -142,7 +146,11 @@ unknown fields. Version 1 is:
 `context_digest` and `workspace_alias` are null when the corresponding
 resolution layer did not participate. `workspace_source` is `project`,
 `context`, or `degenerate`; a degenerate target may still carry a context
-path/digest when its current vault came from context. Paths must be
+path/digest when its current vault came from context. `vault_selection` is
+`explicit` when install was given `--vault` and `implicit` when the vault came
+out of the resolution chain; only an implicit degenerate target is re-derived
+during drift validation, which is what makes "default changed for an implicit
+install" refuse. Paths must be
 absolute, lexically normalized and valid for the host. Existing paths are also
 canonicalized at installation; the canonical value is stored. `log_path` may
 name a file that does not exist yet, but its nearest existing ancestor must

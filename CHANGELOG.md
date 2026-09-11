@@ -13,6 +13,26 @@
   install would write — with `installed_at` shown as `<set-at-install>` — and
   the manifest-runner unit file(s). It remains strictly read-only: no
   directory, manifest, lock, unit or log is created and no scheduler is called.
+- **Rotation schedules report their last outcome and serialize concurrent
+  runs.** Every scheduled firing writes a bounded, name-free `last-run.json`
+  (state, start/finish times, exit code, and aggregate due/rotated/failed
+  counts, or a sanitized diagnostic on failure) and `xv schedule status` shows
+  it as `Last run:` — including `never`, `running since <time>`, and
+  `interrupted after <time>` for a run that was killed mid-sweep. A `run.lock`
+  keeps two firings from rotating the same vault at once: a second concurrent
+  run logs one line and exits cleanly without touching the active run's
+  outcome. `status` also parses and reports the scheduler's own next-run time
+  where the platform exposes one in a form that names its own time zone; a bare
+  local wall clock (what Task Scheduler prints) reports `unknown` rather than
+  being stamped with the host's current UTC offset, which is the wrong offset
+  across a daylight-saving boundary.
+- **`xv schedule status` fails when a schedule `xv` installed is not
+  registered.** Deregistering a rotation job without removing its files
+  (`systemctl --user disable --now`, `launchctl bootout`) leaves ownership
+  reading `managed` while nothing will ever fire. Status now reports
+  `Scheduler: not registered` for any artifact it found on disk, and a managed
+  one that the scheduler has no record of is an `[error]` exiting `3` with a
+  reinstall hint instead of `[ok]` exiting `0`.
 
 ### Changed
 
@@ -28,23 +48,27 @@
 - **`xv schedule` commands no longer create a local store or age key.** Target
   resolution and the preview are provisioning-free; a store that has never been
   opened is reported rather than silently created.
-- **Installed rotation schedules are target-pinned and refuse drift.**
-  `xv schedule install` now writes a `manifest.json` recording the resolved
-  target — config file and digest, `.xv.toml` path/environment, context file,
-  workspace alias, backend registry entry and identity digest, real vault,
-  working directory, binary path and version, cadence and log path — and the
-  installed unit runs `xv schedule run --manifest <path>` instead of
+- **Installed rotation schedules are target-pinned, account/backend/vault
+  bound, and refuse drift.** `xv schedule install` now writes a
+  `manifest.json` recording the resolved target — config file and digest,
+  `.xv.toml` path/environment, context file, workspace alias and selection
+  mode, backend registry entry and identity digest, real vault, working
+  directory, binary path and version, cadence and log path — and the installed
+  unit runs `xv schedule run --manifest <path>` instead of
   `rotate --due --force`. Before constructing any backend the scheduled run
   recomputes that target from the recorded inputs; any difference refuses the
-  sweep with the ordinary configuration-error exit code. An in-place upgrade of
-  the same binary path is a warning, not a refusal. The unit no longer carries
-  a vault name or `XDG_CONFIG_HOME`; it pins `XV_STATE_HOME`/`XDG_STATE_HOME`
-  only when one of them selected the state root.
-- **Existing schedules are reported as `legacy-unpinned` and are replaced only
-  by an explicit reinstall.** A schedule an older `xv` installed keeps working,
-  but `xv schedule status` labels it, shows the command it actually runs, and
-  states that its target cannot be verified. There is no automatic migration and
-  no code path that writes a manifest without `xv schedule install`.
+  sweep with the ordinary configuration-error exit code (`3`) and is reported
+  by `status` without contacting the provider. An in-place upgrade of the same
+  binary path is a warning, not a refusal. The unit no longer carries a vault
+  name or `XDG_CONFIG_HOME`; it pins `XV_STATE_HOME`/`XDG_STATE_HOME` only
+  when one of them selected the state root.
+- **Existing schedules are reported as `legacy-unpinned` and require an
+  explicit `xv schedule install` to become pinned.** A schedule an older `xv`
+  installed keeps working, but `xv schedule status` labels it, shows the
+  command it actually runs, and states that its target cannot be verified.
+  There is no automatic migration and no code path that writes a manifest
+  without an explicit install; the same reinstall replaces the legacy unit
+  transactionally.
 - **`xv schedule install` is transactional.** Install and reinstall run under an
   exclusive `install.lock`, verify that the scheduler really registered an entry
   pointing at this executable, manifest, cadence and log path, and roll back to
@@ -52,15 +76,17 @@
   rollback that cannot complete saves the prior bytes as owner-private snapshots
   under `recovery/` and reports both failures. A file at an owned path that `xv`
   did not write is refused rather than adopted or overwritten.
-- **`xv schedule status` reports ownership, and `uninstall` removes only what
-  `xv` owns.** Status distinguishes `managed`, `legacy-unpinned`,
-  `orphaned-manifest` and `foreign`, keeps "the scheduler failed" distinct from
-  "nothing is installed", and reports the recorded target and drift verdict
-  without contacting the provider (it no longer prints the config's default
-  vault, which had nothing to do with what a schedule acts on). Uninstall
-  removes the native unit(s)/task and `manifest.json` and retains
-  `last-run.json`, both lock files, `recovery/`, the rotation log, unrelated
-  files and any foreign artifact.
+- **`xv schedule status` reports ownership, drift, last outcome and next run;
+  `uninstall` removes only what `xv` owns.** Status distinguishes `managed`,
+  `legacy-unpinned`, `orphaned-manifest` and `foreign`, keeps "the scheduler
+  failed" distinct from "nothing is installed", and reports the recorded
+  target and drift verdict without contacting the provider (it no longer
+  prints the config's default vault, which had nothing to do with what a
+  schedule acts on). Uninstall removes the native unit(s)/task and
+  `manifest.json` and retains `last-run.json`, both lock files, `recovery/`,
+  the rotation log, unrelated files and any foreign artifact; a retained
+  outcome from a prior installation is labeled `(previous install)` until a
+  new run completes under the current manifest.
 
 ### Fixed
 
@@ -72,14 +98,18 @@
 
 ### Known limitations
 
-- **`xv schedule status` does not yet report the last or next run.** The
-  scheduled run's outcome is not persisted and the scheduler's next-run time is
-  not parsed; status reports ownership, the scheduler's answer, the recorded
-  target and its drift verdict only.
-- **Concurrent firings are not serialized yet.** The scheduled run takes no
-  `run.lock`, so two overlapping runs (a manual `xv schedule run` while the
-  scheduler fires, or a firing that outlives its cadence) can rotate the same
-  vault at the same time. The run lock ships with last-run reporting.
+- **`launchd` rarely reports a next run.** `launchctl print` does not
+  reliably expose a parseable next-fire time, so `xv schedule status` shows
+  `Next run: unknown (scheduler did not report a next run)` on macOS in
+  practice even for a healthy schedule; systemd and Task Scheduler usually do
+  better, and Task Scheduler's next-run value can still render `unknown` under
+  some locales.
+- **Scheduled rotation failures still collapse to one category.** Per-secret
+  failure categories exist and are now persisted in `last-run.json`
+  diagnostics, but the rotation path re-wraps most provider errors before they
+  reach the scheduler, so a denied write, an unreachable backend and a failed
+  generator are all reported as the same `rotate-failed` diagnostic rather than
+  distinguished ones.
 
 ## v0.39.0 — Attachment key lifecycle (2026-09-06)
 

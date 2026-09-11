@@ -1,0 +1,13 @@
+# Managed by crosstache (xv schedule). Edits are overwritten on reinstall.
+[Unit]
+Description=crosstache due-secret rotation sweep
+Documentation=https://github.com/bziobnic/crosstache/blob/main/docs/rotation.md
+
+[Service]
+Type=oneshot
+ExecStart="<HOME>/bin dir/xv" "schedule" "run" "--manifest" "<HOME>/state root/xv/schedules/rotation-default/manifest.json"
+WorkingDirectory=<HOME>/work dir
+Environment="HOME=<HOME>"
+Environment="XV_STATE_HOME=<HOME>/state root"
+StandardOutput=append:<HOME>/log dir/rotate.log
+StandardError=append:<HOME>/log dir/rotate.log

@@ -133,6 +133,7 @@ impl Fixture {
                 backend_kind: identity.kind,
                 backend_identity: identity.digest,
                 vault: "default".to_string(),
+                vault_selection: crate::schedule::manifest::VAULT_SELECTION_IMPLICIT.to_string(),
             },
         };
 
@@ -152,6 +153,17 @@ impl Fixture {
         self.manifest.target.project_path = Some(path.to_string_lossy().into_owned());
         self.manifest.target.project_digest = Some(crate::config::content_digest(body.as_bytes()));
         self.manifest.target.environment = environment.map(str::to_string);
+        // Keep the fixture self-consistent: an install performed in this tree
+        // with no `--vault` would have pinned the vault the project profile
+        // selects, not the config's `default_vault`. Recording the latter
+        // would make every project fixture look like a moved default.
+        if let Some(vault) = body
+            .split_once("vault = \"")
+            .and_then(|(_, rest)| rest.split_once('"'))
+            .map(|(vault, _)| vault.to_string())
+        {
+            self.manifest.target.vault = vault;
+        }
         self
     }
 
@@ -290,7 +302,10 @@ async fn a_missing_project_file_refuses() {
 
     let report = fixture.validate().await;
     assert!(report.is_refused());
-    assert_eq!(report.fields(), vec!["project_path"]);
+    // `vault` joins `project_path`: with the project file gone, the implicit
+    // target's chain falls back to the config's `default_vault`, so the vault
+    // this schedule would sweep really has moved.
+    assert_eq!(report.fields(), vec!["project_path", "vault"]);
 }
 
 #[tokio::test]
@@ -318,7 +333,12 @@ async fn a_removed_environment_refuses() {
 
     let report = fixture.validate().await;
     // The bytes changed too — both reasons are reported, in field order.
-    assert_eq!(report.fields(), vec!["project_digest", "environment"]);
+    // The removed environment takes the implicit vault with it: the chain
+    // falls back to the config's `default_vault`.
+    assert_eq!(
+        report.fields(),
+        vec!["project_digest", "environment", "vault"]
+    );
     assert!(
         report.reasons[1].detail.contains("'production'"),
         "{:?}",
@@ -442,6 +462,131 @@ async fn a_remapped_alias_refuses_on_the_vault() {
 
     let report = fixture.validate().await;
     assert_eq!(report.fields(), vec!["context_digest", "vault"]);
+}
+
+/// The design's "default changed for an implicit install" row.
+///
+/// An install with no `--vault` pinned *the degenerate workspace's default*,
+/// not a name. When that default moves, the recorded name would silently
+/// start pointing at a vault nobody chose, so the run must refuse — and it
+/// must say `vault`, not only that some file's digest moved.
+#[tokio::test]
+async fn a_moved_default_vault_refuses_an_implicit_install() {
+    let fixture = Fixture::new().await;
+    assert_eq!(
+        fixture.manifest.target.vault_selection,
+        crate::schedule::manifest::VAULT_SELECTION_IMPLICIT
+    );
+    let body = std::fs::read_to_string(&fixture.config_path).unwrap();
+    std::fs::write(
+        &fixture.config_path,
+        body.replace(
+            "default_vault = \"default\"",
+            "default_vault = \"somewhere-else\"",
+        ),
+    )
+    .unwrap();
+
+    let report = fixture.validate().await;
+    assert!(report.is_refused());
+    assert!(report.fields().contains(&"vault"), "{:?}", report.reasons);
+    assert!(
+        report
+            .reasons
+            .iter()
+            .any(|r| r.detail == "vault changed; review the workspace default and reinstall"),
+        "{:?}",
+        report.reasons
+    );
+}
+
+/// The same move leaves an explicit install alone: `--vault X` pinned the
+/// name `X`, which the default moving does not touch. (The config edit itself
+/// is still drift — that is `config_digest`'s job, not `vault`'s.)
+#[tokio::test]
+async fn a_moved_default_vault_does_not_add_a_vault_reason_for_an_explicit_install() {
+    let mut fixture = Fixture::new().await;
+    fixture.manifest.target.vault_selection =
+        crate::schedule::manifest::VAULT_SELECTION_EXPLICIT.to_string();
+    let body = std::fs::read_to_string(&fixture.config_path).unwrap();
+    std::fs::write(
+        &fixture.config_path,
+        body.replace(
+            "default_vault = \"default\"",
+            "default_vault = \"somewhere-else\"",
+        ),
+    )
+    .unwrap();
+
+    let report = fixture.validate().await;
+    assert!(report.fields().contains(&"config_digest"));
+    assert!(!report.fields().contains(&"vault"), "{:?}", report.reasons);
+}
+
+/// A workspace that cannot name its own default fails **closed**.
+///
+/// `build_workspace` maintains the "default_alias names an attached entry"
+/// invariant, so this shape can only be handed in — but the branch exists to
+/// catch a default that no longer resolves as it did, and "cannot resolve at
+/// all" is the stronger version of that, not a reason to sweep anyway.
+#[test]
+fn an_unresolvable_workspace_default_refuses_an_implicit_install() {
+    let mut target = ManifestTarget {
+        config_path: "/tmp/xv.conf".to_string(),
+        config_digest: format!("sha256:{}", "0".repeat(64)),
+        project_path: None,
+        project_digest: None,
+        environment: None,
+        context_path: None,
+        context_digest: None,
+        workspace_source: "degenerate".to_string(),
+        workspace_alias: None,
+        backend_name: "local".to_string(),
+        backend_kind: "local".to_string(),
+        backend_identity: format!("sha256:{}", "1".repeat(64)),
+        vault: "recorded-vault".to_string(),
+        vault_selection: crate::schedule::manifest::VAULT_SELECTION_IMPLICIT.to_string(),
+    };
+    let entry = crate::workspace::WorkspaceEntry {
+        alias: "attached".to_string(),
+        backend: "local".to_string(),
+        vault: "recorded-vault".to_string(),
+        default: true,
+    };
+    let broken = crate::workspace::Workspace {
+        entries: vec![entry.clone()],
+        // Names no attached entry: `default_entry()` errors.
+        default_alias: "vanished".to_string(),
+        source: crate::workspace::WorkspaceSource::Degenerate,
+    };
+
+    let reason = super::implicit_default_vault_reason(&broken, &target)
+        .expect("an unresolvable default is drift");
+    assert_eq!(reason.field, "vault");
+    assert_eq!(
+        reason.detail,
+        "the workspace default could not be resolved; review the workspace and reinstall"
+    );
+
+    // The wording carries no vault or backend name.
+    assert!(
+        !reason.detail.contains("recorded-vault"),
+        "{}",
+        reason.detail
+    );
+    assert!(!reason.detail.contains("local"), "{}", reason.detail);
+
+    // A healthy workspace agreeing with the record is silent...
+    let healthy = crate::workspace::Workspace {
+        entries: vec![entry],
+        default_alias: "attached".to_string(),
+        source: crate::workspace::WorkspaceSource::Degenerate,
+    };
+    assert!(super::implicit_default_vault_reason(&healthy, &target).is_none());
+
+    // ...and an explicit install is exempt even when the default is broken.
+    target.vault_selection = crate::schedule::manifest::VAULT_SELECTION_EXPLICIT.to_string();
+    assert!(super::implicit_default_vault_reason(&broken, &target).is_none());
 }
 
 #[tokio::test]

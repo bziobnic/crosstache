@@ -52,8 +52,11 @@ use crate::error::{CrosstacheError, Result};
 pub mod drift;
 pub mod install;
 pub mod manifest;
+pub mod outcome;
 pub mod ownership;
 pub mod preview;
+pub mod status;
+pub mod status_render;
 pub mod target;
 /// Debug-only scheduler stand-in for tests that run the real binary.
 #[cfg(debug_assertions)]
@@ -304,10 +307,9 @@ pub enum ScheduleCommand {
     /// whatever the environment then says, which is exactly what the pinned
     /// manifest replaces, so [`install`] refuses it. It survives as a shape
     /// because `xv schedule status` must still recognize — and label
-    /// `legacy-unpinned` — a job an older `xv` registered.
-    // Constructed only by tests today; `xv schedule status` constructs it to
-    // compare against an installed job's command line in a later task.
-    #[allow(dead_code)]
+    /// `legacy-unpinned` — a job an older `xv` registered: `ownership`'s
+    /// recognizer builds this variant's own arguments rather than a
+    /// hand-written string, so the two cannot drift apart.
     LegacyRotateDue {
         /// Vault to sweep. `None` leaves the scheduled run to resolve the
         /// config default, which is a common source of surprise.
@@ -436,7 +438,7 @@ impl RotationSchedule {
     }
 }
 
-fn quote_if_needed(s: &str) -> String {
+pub(crate) fn quote_if_needed(s: &str) -> String {
     if s.contains(' ') {
         format!("\"{s}\"")
     } else {
@@ -537,15 +539,15 @@ impl UnitPaths {
         Self { dir }
     }
 
-    fn launchd_plist(&self) -> PathBuf {
+    pub(crate) fn launchd_plist(&self) -> PathBuf {
         self.dir.join(format!("{LAUNCHD_LABEL}.plist"))
     }
 
-    fn systemd_service(&self) -> PathBuf {
+    pub(crate) fn systemd_service(&self) -> PathBuf {
         self.dir.join(format!("{SYSTEMD_UNIT}.service"))
     }
 
-    fn systemd_timer(&self) -> PathBuf {
+    pub(crate) fn systemd_timer(&self) -> PathBuf {
         self.dir.join(format!("{SYSTEMD_UNIT}.timer"))
     }
 }
@@ -585,6 +587,25 @@ fn xml_escape(s: &str) -> String {
         .replace('\'', "&apos;")
 }
 
+/// The `StartCalendarInterval` keys a launchd plist carries for an interval,
+/// in the order the renderer emits them.
+///
+/// Shared with [`crate::schedule::status`], which reads the same keys back out
+/// of an installed plist to decide whether the unit still fires when the
+/// manifest says it should. One list, so the reader cannot drift from the
+/// writer.
+pub(crate) fn launchd_calendar_pairs(interval: ScheduleInterval) -> Vec<(&'static str, u32)> {
+    match interval {
+        ScheduleInterval::Hourly { minute } => vec![("Minute", minute)],
+        ScheduleInterval::Daily { hour, minute } => vec![("Hour", hour), ("Minute", minute)],
+        ScheduleInterval::Weekly {
+            weekday,
+            hour,
+            minute,
+        } => vec![("Weekday", weekday), ("Hour", hour), ("Minute", minute)],
+    }
+}
+
 fn render_launchd(schedule: &RotationSchedule) -> String {
     let mut args = String::new();
     args.push_str(&format!(
@@ -604,24 +625,12 @@ fn render_launchd(schedule: &RotationSchedule) -> String {
         ));
     }
 
-    let calendar = match schedule.interval {
-        ScheduleInterval::Hourly { minute } => {
-            format!("        <key>Minute</key>\n        <integer>{minute}</integer>\n")
-        }
-        ScheduleInterval::Daily { hour, minute } => format!(
-            "        <key>Hour</key>\n        <integer>{hour}</integer>\n        \
-             <key>Minute</key>\n        <integer>{minute}</integer>\n"
-        ),
-        ScheduleInterval::Weekly {
-            weekday,
-            hour,
-            minute,
-        } => format!(
-            "        <key>Weekday</key>\n        <integer>{weekday}</integer>\n        \
-             <key>Hour</key>\n        <integer>{hour}</integer>\n        \
-             <key>Minute</key>\n        <integer>{minute}</integer>\n"
-        ),
-    };
+    let calendar = launchd_calendar_pairs(schedule.interval)
+        .into_iter()
+        .map(|(key, value)| {
+            format!("        <key>{key}</key>\n        <integer>{value}</integer>\n")
+        })
+        .collect::<String>();
 
     // Same reason as systemd's WorkingDirectory: a pinned run starts where the
     // manifest says it did. Rendered as an empty string for the legacy
@@ -703,8 +712,13 @@ fn render_systemd_service(schedule: &RotationSchedule) -> String {
     )
 }
 
-fn render_systemd_timer(schedule: &RotationSchedule) -> String {
-    let on_calendar = match schedule.interval {
+/// The `OnCalendar=` expression for an interval.
+///
+/// Shared with [`crate::schedule::status`] for the same reason as
+/// [`launchd_calendar_pairs`]: the check that an installed timer still matches
+/// the manifest must compare against what the renderer would write today.
+pub(crate) fn systemd_on_calendar(interval: ScheduleInterval) -> String {
+    match interval {
         ScheduleInterval::Hourly { minute } => format!("*-*-* *:{minute:02}:00"),
         ScheduleInterval::Daily { hour, minute } => format!("*-*-* {hour:02}:{minute:02}:00"),
         ScheduleInterval::Weekly {
@@ -715,7 +729,11 @@ fn render_systemd_timer(schedule: &RotationSchedule) -> String {
             "{} *-*-* {hour:02}:{minute:02}:00",
             systemd_weekday(weekday)
         ),
-    };
+    }
+}
+
+fn render_systemd_timer(schedule: &RotationSchedule) -> String {
+    let on_calendar = systemd_on_calendar(schedule.interval);
     format!(
         "# Managed by crosstache (xv schedule). Edits are overwritten on reinstall.\n\
          [Unit]\n\
@@ -1870,6 +1888,135 @@ mod tests {
         // user, without access to their credentials or config.
         assert!(launchd_domain().starts_with("gui/"));
         assert!(launchd_domain_target().ends_with("/com.crosstache.xv-rotate"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Whole-artifact snapshots
+    //
+    // The assertions above pin individual lines; these pin the *files*, on
+    // every host, so a stray field, a reordering or a lost escape cannot slip
+    // through unremarked. The expected text lives under
+    // `tests/fixtures/schedule/` and is compared literally after one
+    // normalization: the fixture root is replaced by `<HOME>` and path
+    // separators by `/`, so one fixture serves Unix and Windows. Nothing else
+    // is rewritten — no rendered artifact carries a version or a timestamp.
+    // -----------------------------------------------------------------------
+
+    /// The schedule every snapshot renders: spaces in every path, a pinned
+    /// state root, and a cadence with both an hour and a minute.
+    fn snapshot_schedule() -> RotationSchedule {
+        let home = PathBuf::from(fixture_abs("/home/a user"));
+        RotationSchedule {
+            interval: ScheduleInterval::Daily {
+                hour: 3,
+                minute: 30,
+            },
+            command: ScheduleCommand::ManifestRun {
+                manifest: home.join("state root/xv/schedules/rotation-default/manifest.json"),
+                working_directory: home.join("work dir"),
+            },
+            binary: home.join("bin dir/xv"),
+            log_path: home.join("log dir/rotate.log"),
+            home: home.clone(),
+            state_home: Some(("XV_STATE_HOME", home.join("state root"))),
+        }
+    }
+
+    fn snapshot_paths() -> UnitPaths {
+        UnitPaths {
+            dir: PathBuf::from(fixture_abs("/home/a user/unit dir")),
+        }
+    }
+
+    /// Replace the fixture root with `<HOME>` and Windows separators with `/`.
+    fn normalize_snapshot(rendered: &str) -> String {
+        let home = fixture_abs("/home/a user");
+        rendered.replace(&home, "<HOME>").replace('\\', "/")
+    }
+
+    #[test]
+    #[ignore = "fixture generator; run explicitly to refresh tests/fixtures/schedule"]
+    fn regenerate_snapshots() {
+        let schedule = snapshot_schedule();
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/schedule");
+        let launchd = render(Platform::Launchd, &schedule, &snapshot_paths());
+        std::fs::write(
+            dir.join("launchd.plist"),
+            normalize_snapshot(&launchd[0].contents),
+        )
+        .unwrap();
+        let systemd = render(Platform::Systemd, &schedule, &snapshot_paths());
+        std::fs::write(
+            dir.join("systemd.service"),
+            normalize_snapshot(&systemd[0].contents),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("systemd.timer"),
+            normalize_snapshot(&systemd[1].contents),
+        )
+        .unwrap();
+        let args = schtasks_create_args(&schedule);
+        let rendered = args.iter().map(|a| format!("{a}\n")).collect::<String>();
+        std::fs::write(dir.join("schtasks.args"), normalize_snapshot(&rendered)).unwrap();
+        let at = args.iter().position(|a| a == "/TR").unwrap();
+        std::fs::write(
+            dir.join("schtasks.tr"),
+            format!("{}\n", normalize_snapshot(&args[at + 1])),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn the_launchd_plist_matches_its_snapshot() {
+        let units = render(Platform::Launchd, &snapshot_schedule(), &snapshot_paths());
+        assert_eq!(units.len(), 1);
+        assert_eq!(
+            normalize_snapshot(&units[0].contents),
+            include_str!("../../tests/fixtures/schedule/launchd.plist"),
+        );
+    }
+
+    #[test]
+    fn the_systemd_units_match_their_snapshots() {
+        let units = render(Platform::Systemd, &snapshot_schedule(), &snapshot_paths());
+        assert_eq!(units.len(), 2);
+        assert_eq!(
+            normalize_snapshot(&units[0].contents),
+            include_str!("../../tests/fixtures/schedule/systemd.service"),
+        );
+        assert_eq!(
+            normalize_snapshot(&units[1].contents),
+            include_str!("../../tests/fixtures/schedule/systemd.timer"),
+        );
+    }
+
+    /// The Task Scheduler argument *vector*, one argument per line — the shape
+    /// that makes a lost or merged argument visible. The `/TR` line is the
+    /// whole command Task Scheduler stores, quoting included.
+    #[test]
+    fn the_schtasks_arguments_match_their_snapshot() {
+        let schedule = snapshot_schedule();
+        let args = schtasks_create_args(&schedule);
+        let rendered = args
+            .iter()
+            .map(|arg| format!("{arg}\n"))
+            .collect::<String>();
+        assert_eq!(
+            normalize_snapshot(&rendered),
+            include_str!("../../tests/fixtures/schedule/schtasks.args"),
+        );
+        // The `/TR` string specifically: it is the only place the command line,
+        // the working directory, the state-root pin and the log redirection
+        // appear together, and Task Scheduler stores it verbatim.
+        let run_at = args
+            .iter()
+            .position(|arg| arg == "/TR")
+            .expect("a /TR flag");
+        assert_eq!(
+            normalize_snapshot(&args[run_at + 1]),
+            include_str!("../../tests/fixtures/schedule/schtasks.tr").trim_end_matches('\n'),
+        );
     }
 
     #[test]

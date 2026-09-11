@@ -16,8 +16,10 @@ use crate::schedule::install::{
 use crate::schedule::manifest::{
     self as manifest, ManifestCadence, ManifestExecution, ManifestTarget, ScheduleManifestV1,
 };
-use crate::schedule::ownership::{self, Ownership, SchedulerProbe};
+use crate::schedule::outcome::{self, RunDiagnostic, RunOutcomeV1, RunState, RunSummary};
 use crate::schedule::preview::render_install_preview;
+use crate::schedule::status;
+use crate::schedule::status_render;
 use crate::schedule::target::{
     canonical_path_for_manifest, manifest_path_string, resolve_install_target,
     ResolvedScheduleTarget,
@@ -55,7 +57,8 @@ pub(crate) async fn execute_schedule_command(
 /// `cfg(debug_assertions)`, so a shipped `xv` contains no fake runner and reads
 /// no environment variable to choose one.
 ///
-/// In a debug build `XV_SCHEDULE_RUNNER=fake` swaps in
+/// In a debug build `XV_SCHEDULE_RUNNER=fake` (or one of its scenario
+/// spellings, `fake:installed[,next=<rfc3339>]`) swaps in
 /// [`crate::schedule::testing::RecordingRunner`]. That exists because
 /// `launchctl`, `systemctl --user` and `schtasks` act on the invoking user's
 /// live session under a fixed global job name — `HOME` does not sandbox them —
@@ -64,8 +67,10 @@ pub(crate) async fn execute_schedule_command(
 #[cfg(debug_assertions)]
 fn schedule_runner() -> Box<dyn schedule::CommandRunner> {
     use crate::schedule::testing;
-    match std::env::var(testing::RUNNER_VAR).as_deref() {
-        Ok(testing::FAKE) => Box::new(testing::RecordingRunner::from_env()),
+    match std::env::var(testing::RUNNER_VAR) {
+        Ok(value) if testing::selects_fake(&value) => {
+            Box::new(testing::RecordingRunner::from_env())
+        }
         _ => Box::new(ProcessRunner),
     }
 }
@@ -611,51 +616,118 @@ async fn execute_run(supplied_manifest: &Path) -> Result<()> {
         )));
     }
 
+    // The lock comes before validation, and after the two checks above.
+    //
+    // Before validation, because validation reads the user's config, project
+    // and context files and probes the vault: two runners doing that at once
+    // is the concurrency the lock exists to prevent, and the loser must leave
+    // before it touches anything. After the path checks, because those decide
+    // whether this process is a runner at all — a `--manifest` pointing
+    // somewhere else is a misconfigured unit, and it must fail loudly with
+    // its own error rather than be reported as a skipped run.
+    let Some(_run_guard) = outcome::RunGuard::try_acquire(&state_paths)? else {
+        // One line, exit zero, `last-run.json` untouched: the run that holds
+        // the lock owns the current outcome, and a scheduler that treated a
+        // benign overlap as a failure would alert every night a sweep ran
+        // long.
+        eprintln!("schedule rotation skipped: another run is already_running");
+        return Ok(());
+    };
+
     // Bounded, no-follow, schema-validated. Any failure names reinstall,
     // because a manifest this process cannot trust is not something a
     // scheduled run may work around.
-    let manifest::ScheduleManifest::V1(manifest) =
-        manifest::load_manifest(&state_paths).map_err(|e| {
+    //
+    // A manifest that does not load produces no outcome: there is no
+    // installation to bind a record to, and `manifest_digest` is what makes a
+    // record meaningful. The error is the report in that case.
+    let (manifest::ScheduleManifest::V1(manifest), manifest_bytes) =
+        manifest::load_manifest_with_bytes(&state_paths).map_err(|e| {
             CrosstacheError::config(format!(
                 "{e}. Reinstall the schedule with 'xv schedule install' to regenerate it."
             ))
         })?;
 
+    // Resolved *before* the `running` record, not at its use site below.
+    // `recorded_binary_path` reads `current_exe()`, which can fail (a deleted
+    // or unreadable executable). Every fallible step that cannot produce a
+    // terminal outcome has to happen while there is still no record to leave
+    // dangling — see the region marker below.
+    let binary_path = recorded_binary_path()?;
+
+    // The digest of exactly the bytes just parsed — not a re-serialization,
+    // and not a second read — so status can tell a record written by *this*
+    // installation from one retained across a reinstall.
+    let manifest_digest = crate::config::content_digest(&manifest_bytes);
+    let started_at = outcome::now_rfc3339_utc();
+
+    // Written before anything else can fail. A process killed after this
+    // point leaves `running`, which is precisely the claim that is true: a
+    // run started and did not report back.
+    outcome::write_outcome_atomic(
+        &state_paths,
+        &outcome::RunOutcomeV1::running(&manifest_digest, &started_at),
+    )?;
+
+    // -----------------------------------------------------------------
+    // [[run-outcome-region:begin]]
+    //
+    // NO EARLY RETURNS — from the `running` write above to the terminal
+    // write below.
+    //
+    // Nothing in here may use `?` or `return`. A `running` record that is
+    // never replaced is indistinguishable from a runner that was killed
+    // mid-sweep, so an ordinary error escaping this region would make
+    // `xv schedule status` report a phantom interrupted run forever.
+    // Every step here either yields a `RunOutcomeDraft` (which always has
+    // a terminal state) or, like the outcome write itself, degrades to a
+    // warning. `schedule_run_has_no_early_return_between_the_outcome_writes`
+    // enforces this on the source text.
+    // -----------------------------------------------------------------
+
     // Recompute the recorded target from the recorded inputs. This reads
     // files and nothing else — no backend is constructed until it returns a
     // non-refusing verdict (design invariant 4).
-    let report = drift::validate_recorded_target(
-        &manifest,
-        &recorded_binary_path()?,
-        env!("CARGO_PKG_VERSION"),
-    )
-    .await;
+    let report =
+        drift::validate_recorded_target(&manifest, &binary_path, env!("CARGO_PKG_VERSION")).await;
 
     for warning in &report.warnings {
         output::warn(&warning.detail);
     }
 
-    if report.is_refused() {
-        return refused_drift_outcome(&report).into_cli_result();
-    }
+    let draft = if report.is_refused() {
+        refused_drift_outcome(&report)
+    } else {
+        execute_pinned_run(&manifest).await
+    };
 
-    execute_pinned_run(&manifest).await.into_cli_result()
+    let (record, result) = draft.finish(&manifest_digest, &started_at);
+    if let Err(error) = outcome::write_outcome_atomic(&state_paths, &record) {
+        // The sweep already happened; failing to record it must not rewrite
+        // what the process reports about it. Say so loudly and keep the run's
+        // own verdict — status will show a stale (or absent) record, which is
+        // the honest reading of a state directory this process cannot write.
+        output::warn(&format!(
+            "could not record the run outcome in '{}': {error}",
+            state_paths.last_run_path().display()
+        ));
+    }
+    // [[run-outcome-region:end]]
+    // -----------------------------------------------------------------
+    result
 }
 
 /// What the run did, in the shape `last-run.json` needs.
 ///
-/// **Seam for PR 3 (outcome persistence).** Nothing here is written to disk
-/// yet; the runner returns this draft instead of persisting it so the file
-/// format, its locking and its retention can land as one change. Everything a
-/// result file needs is already in it, and everything in it is safe to
-/// serialize: counts, a fixed state token, and a diagnostic whose code and
+/// The sweep builds this draft and the caller turns it into the persisted
+/// [`RunOutcomeV1`], so the decision about *what happened* is separate from the
+/// decision about *what is written* — the draft also carries the human-facing
+/// error, which the file may not. Everything it contributes to the file is safe
+/// to serialize: counts, a fixed state token, and a diagnostic whose code and
 /// message come from closed sets (`DueRotationFailureCategory::code`,
 /// `DueRotationErrorKind::code`, or the drift fields) — never from a secret
 /// name, a vault value, or a provider error body.
-// The three persisted fields are read by PR 3's outcome writer; the runner
-// itself only needs `error` to decide the exit.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub(crate) struct RunOutcomeDraft {
     pub(crate) state: RunState,
     pub(crate) summary: Option<DueRotationSummary>,
@@ -667,42 +739,42 @@ pub(crate) struct RunOutcomeDraft {
     error: Option<CrosstacheError>,
 }
 
-/// The `state` field of a scheduled run's outcome.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RunState {
-    Success,
-    PartialFailure,
-    Failed,
-    RefusedDrift,
-}
-
-impl RunState {
-    /// The literal written to `last-run.json` (PR 3).
-    #[allow(dead_code)]
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            RunState::Success => "success",
-            RunState::PartialFailure => "partial_failure",
-            RunState::Failed => "failed",
-            RunState::RefusedDrift => "refused_drift",
-        }
-    }
-}
-
-/// A redacted diagnostic: a stable code plus a sanitized message.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RunDiagnostic {
-    pub(crate) code: String,
-    pub(crate) message: String,
-}
-
 impl RunOutcomeDraft {
-    /// Turn the draft into the process's exit behavior.
-    pub(crate) fn into_cli_result(self) -> Result<()> {
-        match self.error {
+    /// Split the draft into the record that goes on disk and the exit
+    /// behavior the process takes.
+    ///
+    /// `exit_code` is the code this very process will exit with, derived from
+    /// the very error the caller returns — so a reader of
+    /// `last-run.json` and a caller watching `$?` can never disagree. Only
+    /// aggregate counts cross into the record; `DueRotationSummary::failures`
+    /// (which names secrets) stays behind.
+    fn finish(self, manifest_digest: &str, started_at: &str) -> (RunOutcomeV1, Result<()>) {
+        let exit_code = self
+            .error
+            .as_ref()
+            .map(CrosstacheError::exit_code)
+            .unwrap_or(0);
+        let outcome = RunOutcomeV1 {
+            schema_version: 1,
+            schedule_id: manifest::SCHEDULE_ID.to_string(),
+            manifest_digest: manifest_digest.to_string(),
+            started_at: started_at.to_string(),
+            finished_at: Some(outcome::now_rfc3339_utc()),
+            state: self.state,
+            exit_code: Some(exit_code),
+            summary: self.summary.as_ref().map(|summary| RunSummary {
+                policy_managed: summary.policy_managed as u64,
+                due: summary.due as u64,
+                rotated: summary.rotated as u64,
+                failed: summary.failed as u64,
+            }),
+            diagnostic: self.diagnostic,
+        };
+        let result = match self.error {
             Some(error) => Err(error),
             None => Ok(()),
-        }
+        };
+        (outcome, result)
     }
 }
 
@@ -730,15 +802,15 @@ fn refused_drift_from_reasons(reasons: &[drift::DriftReason]) -> RunOutcomeDraft
     RunOutcomeDraft {
         state: RunState::RefusedDrift,
         summary: None,
-        diagnostic: Some(RunDiagnostic {
-            code: "target_drift".to_string(),
-            // Field names only — the same closed set the manifest schema
-            // defines, never a path or a file's contents.
-            message: format!(
+        // Field names only — the same closed set the manifest schema defines,
+        // never a path or a file's contents.
+        diagnostic: Some(RunDiagnostic::new(
+            "target_drift",
+            format!(
                 "{} changed; review the recorded target and reinstall",
                 fields.join(" and ")
             ),
-        }),
+        )),
         error: Some(CrosstacheError::config(format!(
             "the recorded rotation target has drifted ({} reason(s) reported above); reinstall \
              the schedule with 'xv schedule install' to accept the new target.",
@@ -900,10 +972,7 @@ async fn run_recorded_sweep(manifest: &ScheduleManifestV1) -> RunOutcomeDraft {
             return RunOutcomeDraft {
                 state: RunState::Failed,
                 summary: None,
-                diagnostic: Some(RunDiagnostic {
-                    code: "backend-unavailable".to_string(),
-                    message: message.to_string(),
-                }),
+                diagnostic: Some(RunDiagnostic::new("backend-unavailable", message)),
                 error: Some(CrosstacheError::config(format!(
                     "cannot construct the recorded backend '{backend_name}'"
                 ))),
@@ -957,10 +1026,10 @@ async fn run_recorded_sweep(manifest: &ScheduleManifestV1) -> RunOutcomeDraft {
             output::error(&error.to_string());
             RunOutcomeDraft {
                 state: RunState::PartialFailure,
-                diagnostic: summary.failures.first().map(|failure| RunDiagnostic {
-                    code: failure.code().to_string(),
-                    message: failure.message().to_string(),
-                }),
+                diagnostic: summary
+                    .failures
+                    .first()
+                    .map(|failure| RunDiagnostic::new(failure.code(), failure.message())),
                 summary: Some(summary),
                 error: Some(error),
             }
@@ -969,10 +1038,7 @@ async fn run_recorded_sweep(manifest: &ScheduleManifestV1) -> RunOutcomeDraft {
             // Whole-run failure: the vault was never read, so there is no
             // honest summary to record. The redacted code/message go to the
             // outcome; the source error is what the process exits with.
-            let diagnostic = RunDiagnostic {
-                code: failure.code().to_string(),
-                message: failure.message().to_string(),
-            };
+            let diagnostic = RunDiagnostic::new(failure.code(), failure.message());
             RunOutcomeDraft {
                 state: RunState::Failed,
                 summary: None,
@@ -985,224 +1051,49 @@ async fn run_recorded_sweep(manifest: &ScheduleManifestV1) -> RunOutcomeDraft {
 
 /// Read-only diagnosis of what is installed.
 ///
-/// Two independent answers, kept apart on purpose: what the scheduler says,
-/// and what is on disk. It contacts no provider — vault verification belongs
-/// to install and to the run itself — and it never claims a target it cannot
-/// read from the manifest. PR 3 replaces this rendering with the design's full
-/// seven-dimension view; what is here is the honest subset.
+/// Collection (`schedule::status::collect_status`) and rendering
+/// (`schedule::status_render::render_status`) are separate: the collector
+/// probes and reads, the renderer is a pure function of what it found, which
+/// is what makes every golden layout testable without a scheduler or a
+/// filesystem.
+///
+/// It contacts no provider — vault verification belongs to install and to the
+/// run itself — writes nothing, and never claims a target it cannot read from
+/// the manifest.
+///
+/// **Channel:** the whole block goes to stderr, like every other `xv`
+/// diagnostic. `status` is human status chrome, not data: the repository's
+/// scripting contract reserves stdout for machine-consumable payloads, and a
+/// `[ok]`/`[hint]`-prefixed block is not one. The exit code is the machine-
+/// readable part (see [`status_render::status_failure`]): `0` for every state
+/// `status` can describe accurately, the configuration-error code `3` for a
+/// schedule that would refuse its next run, a manifest that cannot be read,
+/// and a scheduler that could not be queried at all.
 async fn execute_status() -> Result<()> {
     let platform = Platform::detect()?;
     let home = home_dir()?;
     let unit_paths = UnitPaths::for_platform(platform, &home);
     let state_paths = manifest::resolve_from_process_env()?;
 
-    let report = ownership::inspect_ownership(
+    let report = status::collect_status(
         platform,
         &unit_paths,
         &state_paths,
         schedule_runner().as_ref(),
-    )?;
-
-    // Read the recorded target *before* the headline: a managed schedule whose
-    // target has drifted will refuse tonight, and announcing it as healthy and
-    // then contradicting that four lines later is not a diagnosis.
-    let recorded = match report.state {
-        Ownership::Managed | Ownership::OrphanedManifest => {
-            Some(read_recorded_target(&state_paths).await?)
-        }
-        _ => None,
-    };
-    let refuses = matches!(
-        recorded,
-        Some(RecordedTarget::Read { ref drift, .. }) if drift.is_refused()
-    );
-
-    match &report.state {
-        Ownership::Managed if refuses => output::error(&format!(
-            "The installed {} rotation schedule is unsafe to run.",
-            platform.name()
-        )),
-        Ownership::Managed => output::success(&format!(
-            "A {} rotation schedule is installed.",
-            platform.name()
-        )),
-        Ownership::LegacyUnpinned { .. } => output::warn(&format!(
-            "A legacy {} rotation schedule is installed.",
-            platform.name()
-        )),
-        Ownership::OrphanedManifest => output::warn(&format!(
-            "A rotation manifest exists but no {} is installed.",
-            platform.name()
-        )),
-        Ownership::Foreign { .. } => output::warn(&format!(
-            "Something xv did not write is at a path the {} rotation schedule owns.",
-            platform.name()
-        )),
-        // A scheduler that would not answer is not evidence of absence.
-        Ownership::Absent => match &report.scheduler {
-            SchedulerProbe::Error(_) => output::warn(&format!(
-                "Could not determine whether a {} rotation schedule is installed.",
-                platform.name()
-            )),
-            _ => output::info(&format!(
-                "No {} rotation schedule is installed.",
-                platform.name()
-            )),
-        },
-    }
-
-    if let Some(label) = report.state.label() {
-        output::info(&format!("  Ownership: {label}"));
-    }
-    match &report.scheduler {
-        SchedulerProbe::Error(detail) => output::error(&format!("  Scheduler: error ({detail})")),
-        probe => output::info(&format!("  Scheduler: {}", probe.describe())),
-    }
-
-    match &report.state {
-        Ownership::LegacyUnpinned { command_line } => {
-            output::info(&format!(
-                "  Command:   {}",
-                if command_line.is_empty() {
-                    "unknown (the scheduler did not report one)"
-                } else {
-                    command_line
-                }
-            ));
-            output::info(&format!(
-                "  Target:    {}",
-                ownership::unverified_target_note(command_line)
-            ));
-            output::hint(
-                "Replace it explicitly with 'xv schedule install --vault <alias-or-vault>'.",
-            );
-        }
-        Ownership::Managed | Ownership::OrphanedManifest => {
-            // Echo the name the schedule was installed with, so the hint is a
-            // command the user can paste. Only the placeholder is left when
-            // the manifest could not be read at all.
-            let vault_arg = recorded
-                .as_ref()
-                .and_then(RecordedTarget::install_argument)
-                .unwrap_or("<alias-or-vault>")
-                .to_string();
-            if let Some(recorded) = recorded {
-                recorded.report();
-            }
-            if matches!(report.state, Ownership::OrphanedManifest) {
-                output::hint(&format!(
-                    "Run 'xv schedule install --vault {vault_arg}' to repair the schedule, \
-                     or 'xv schedule uninstall' to remove the manifest.",
-                ));
-            } else if refuses {
-                output::hint(&format!(
-                    "Review the changes, then run 'xv schedule install --vault {vault_arg}' \
-                     to accept the new target.",
-                ));
-            }
-        }
-        Ownership::Foreign { paths } => {
-            for path in paths {
-                output::info(&format!("  Path:      {}", path.display()));
-            }
-            output::hint(
-                "xv will not overwrite or remove a file it did not write. Move it aside, then \
-                 run 'xv schedule install --vault <alias-or-vault>'.",
-            );
-        }
-        Ownership::Absent => {
-            output::hint("Install one with 'xv schedule install --vault <alias-or-vault>'.");
-        }
-    }
-
-    Ok(())
-}
-
-/// What `status` could learn from `manifest.json`.
-enum RecordedTarget {
-    /// The manifest is there but unusable; the message says why.
-    Unreadable(String),
-    /// The recorded target and what recomputing it says today.
-    Read {
-        /// The name the user installed with: the recorded workspace alias, or
-        /// the real vault in the degenerate (no workspace) case. This is what
-        /// a reinstall hint must echo — telling someone to rerun
-        /// `--vault <the real vault>` when they installed `--vault payments`
-        /// would send them at a different target.
-        alias: String,
-        summary: String,
-        drift: drift::DriftReport,
-    },
-}
-
-impl RecordedTarget {
-    /// The `--vault` value a reinstall hint should name, when it is known.
-    fn install_argument(&self) -> Option<&str> {
-        match self {
-            Self::Unreadable(_) => None,
-            Self::Read { alias, .. } => Some(alias.as_str()),
-        }
-    }
-
-    /// Print the `Target:` and `Drift:` lines.
-    fn report(&self) {
-        match self {
-            Self::Unreadable(detail) => {
-                output::error(&format!("  Target:    unreadable ({detail})"));
-                output::hint("Reinstall the schedule with 'xv schedule install' to regenerate it.");
-            }
-            Self::Read { summary, drift, .. } => {
-                output::info(&format!("  Target:    {summary}"));
-                output::info(&format!(
-                    "  Drift:     {}",
-                    match drift.verdict {
-                        drift::DriftVerdict::Valid => "valid",
-                        drift::DriftVerdict::Warning => "warning",
-                        drift::DriftVerdict::Refuse => "refused",
-                    }
-                ));
-                for reason in drift.warnings.iter().chain(drift.reasons.iter()) {
-                    output::info(&format!("  - {}", reason.detail));
-                }
-            }
-        }
-    }
-}
-
-/// Read the recorded target and recompute it.
-///
-/// Reads files only: the same recomputation a scheduled run performs before it
-/// constructs anything, which is what lets `status` say "this would refuse
-/// tonight" without touching the provider.
-async fn read_recorded_target(
-    state_paths: &manifest::ScheduleStatePaths,
-) -> Result<RecordedTarget> {
-    let manifest::ScheduleManifest::V1(recorded) = match manifest::load_manifest(state_paths) {
-        Ok(manifest) => manifest,
-        Err(error) => return Ok(RecordedTarget::Unreadable(error.to_string())),
-    };
-
-    let alias = recorded
-        .target
-        .workspace_alias
-        .clone()
-        .unwrap_or_else(|| recorded.target.vault.clone());
-    let summary = format!(
-        "{alias} -> {}/{}",
-        recorded.target.backend_name, recorded.target.vault
-    );
-
-    let drift = drift::validate_recorded_target(
-        &recorded,
         &recorded_binary_path()?,
         env!("CARGO_PKG_VERSION"),
     )
-    .await;
-    Ok(RecordedTarget::Read {
-        alias,
-        summary,
-        drift,
-    })
+    .await?;
+
+    eprintln!(
+        "{}",
+        status_render::render_status(&report, platform, output::should_use_rich_stderr())
+    );
+
+    match status_render::status_failure(&report, platform) {
+        Some(message) => Err(CrosstacheError::config(message)),
+        None => Ok(()),
+    }
 }
 
 /// Remove the schedule and the manifest, and nothing else.
@@ -1262,6 +1153,18 @@ async fn execute_uninstall() -> Result<()> {
         ));
     }
 
+    // A foreign unit at an owned path stops uninstall from deregistering, so
+    // the job is still registered and will still fire. "Removed the ... rotation
+    // schedule." on its own would be a false reading of that, and the one
+    // person who can move the file aside is reading this line.
+    if let Some(path) = &report.deregistration_blocked_by {
+        output::warn(&format!(
+            "  Retained:  the scheduler registration was left in place because {} is not managed \
+             by xv.",
+            path.display()
+        ));
+    }
+
     remove_schedule_dir_if_empty(&state_paths);
 
     if let Some(detail) = report.scheduler_error.clone() {
@@ -1301,6 +1204,75 @@ fn remove_schedule_dir_if_empty(paths: &manifest::ScheduleStatePaths) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `running` record must always be replaceable.
+    ///
+    /// A `running` outcome that is never replaced is indistinguishable from a
+    /// runner that was killed mid-sweep, so `xv schedule status` would report
+    /// a phantom interrupted run forever. `execute_run` therefore marks the
+    /// span between the two outcome writes as a no-early-return region, and
+    /// this test enforces that on the source text: a `?` or a `return` added
+    /// there later fails here rather than in the field at 3am.
+    ///
+    /// A source-text assertion is blunt, but the alternative — injecting a
+    /// failure into `current_exe()` or `set_current_dir` — needs seams the
+    /// runner deliberately does not have.
+    #[test]
+    fn schedule_run_has_no_early_return_between_the_outcome_writes() {
+        const SOURCE: &str = include_str!("schedule_ops.rs");
+        // Assembled rather than written out, so this test's own source does
+        // not contain the markers it searches for.
+        let start_marker = format!("[[run-outcome-region:{}]]", "begin");
+        let end_marker = format!("[[run-outcome-region:{}]]", "end");
+
+        let start = SOURCE
+            .find(&start_marker)
+            .expect("the region start marker is present in execute_run");
+        let end = SOURCE
+            .find(&end_marker)
+            .expect("the region end marker is present in execute_run");
+        assert!(start < end, "the region markers are out of order");
+        assert_eq!(
+            SOURCE.matches(&start_marker).count(),
+            1,
+            "the region start marker must appear exactly once"
+        );
+        assert_eq!(
+            SOURCE.matches(&end_marker).count(),
+            1,
+            "the region end marker must appear exactly once"
+        );
+        let region = &SOURCE[start..end];
+        // Sanity: the region really is the body between the two writes, not
+        // an empty slice that would make the scan below vacuous.
+        assert!(
+            region.contains("drift::validate_recorded_target"),
+            "the region does not span the validation/sweep body"
+        );
+
+        for (offset, line) in region.lines().enumerate() {
+            let code = line.trim();
+            if code.starts_with("//") || code.starts_with("///") {
+                continue;
+            }
+            assert!(
+                !code.contains('?'),
+                "line {offset} of the no-early-return region uses `?`: {code}"
+            );
+            // `return ` catches a value; the bare forms (`return;`, and a
+            // `return` that is the last token before the closing brace of a
+            // block) return from a `-> ()` helper just as early, so they are
+            // caught too.
+            let bare_return = code == "return"
+                || code.starts_with("return;")
+                || code.starts_with("return }")
+                || code.starts_with("return}");
+            assert!(
+                !code.starts_with("return ") && !bare_return,
+                "line {offset} of the no-early-return region returns early: {code}"
+            );
+        }
+    }
 
     /// A real owned path under a tempdir, so canonicalization has something to
     /// resolve on hosts where the temp root is itself a symlink (macOS).
@@ -1343,6 +1315,7 @@ mod tests {
                 backend_kind: "local".to_string(),
                 backend_identity: format!("sha256:{}", "1".repeat(64)),
                 vault: "default".to_string(),
+                vault_selection: "implicit".to_string(),
             },
         }
     }
@@ -1534,8 +1507,8 @@ mod tests {
         assert_eq!(written, paths.manifest_path());
 
         // The whole point of the write is that the runner can read it back.
-        let crate::schedule::manifest::ScheduleManifest::V1(loaded) =
-            manifest::load_manifest(&paths).expect("loads back");
+        let (crate::schedule::manifest::ScheduleManifest::V1(loaded), _) =
+            manifest::load_manifest_with_bytes(&paths).expect("loads back");
         // Seconds precision, UTC, `Z` — sub-second noise would make two
         // manifests written in the same second compare unequal for no reason.
         assert_eq!(loaded.installed_at, "2026-09-10T15:04:05Z");

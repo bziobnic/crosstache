@@ -1,0 +1,1 @@
+cmd /c set "XV_STATE_HOME=<HOME>/state root" && cd /d "<HOME>/work dir" && "<HOME>/bin dir/xv" schedule run --manifest "<HOME>/state root/xv/schedules/rotation-default/manifest.json" >> "<HOME>/log dir/rotate.log" 2>&1

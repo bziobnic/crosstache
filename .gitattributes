@@ -1,0 +1,6 @@
+# Scheduler unit snapshots are compared byte for byte against renderer output,
+# which always emits `\n` (see the snapshot tests in `src/schedule/mod.rs`, which
+# `include_str!` these files). A checkout that converted them to CRLF — the
+# Windows default with `core.autocrlf=true` — would fail those tests for a
+# reason that has nothing to do with the renderer.
+tests/fixtures/schedule/* text eol=lf

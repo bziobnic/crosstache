@@ -726,7 +726,7 @@ fn verify_registration(
 /// `schtasks /XML` emits UTF-16LE; [`crate::schedule::decode_console_output`]
 /// has already turned that into ordinary text by the time it reaches here, so
 /// this matches on the tags directly.
-fn verify_schtasks_cadence(xml: &str, interval: ScheduleInterval) -> Result<()> {
+pub(crate) fn verify_schtasks_cadence(xml: &str, interval: ScheduleInterval) -> Result<()> {
     let (expected_time, required): (String, Vec<&str>) = match interval {
         // `/SC HOURLY /ST 00:MM` registers a trigger that starts at :MM and
         // repeats every hour, so the repetition interval is what proves the
@@ -1021,6 +1021,10 @@ pub(crate) struct UninstallReport {
     /// A scheduler command that failed for a reason other than "no such job".
     /// Sanitized to the command name and its exit status.
     pub(crate) scheduler_error: Option<String>,
+    /// The foreign *unit* path that stopped this uninstall from asking the
+    /// scheduler to deregister the job. `Some` means the registration is still
+    /// live, which the caller has to say out loud.
+    pub(crate) deregistration_blocked_by: Option<PathBuf>,
 }
 
 impl UninstallReport {
@@ -1044,10 +1048,17 @@ impl UninstallReport {
 /// A foreign or symlinked artifact at an owned path is reported and left
 /// exactly as it is: uninstall removes files `xv` wrote, and it decides that
 /// from the bytes, not from the path. Classification happens *before* any
-/// scheduler command runs, and a single foreign artifact suppresses
-/// deregistration entirely — a registration is state too, and tearing it down
-/// while calling the file it points at "retained" would not be retaining
-/// anything.
+/// scheduler command runs, and a foreign *unit* suppresses deregistration
+/// entirely — a registration is state too, and tearing down a job whose unit
+/// file somebody else wrote, while calling that file "retained", would not be
+/// retaining anything.
+///
+/// A foreign `manifest.json` does **not** suppress it. The guard protects a
+/// unit at a path the *scheduler* reads; `manifest.json` lives in `xv`'s own
+/// private state directory, and the registration it would be shielding is
+/// `xv`'s own, pointing at `xv`'s own units. Refusing to deregister then would
+/// leave a job that fires tonight against units this very call just removed.
+/// The foreign manifest is retained and reported all the same.
 ///
 /// Absence is success — teardown scripts run this against hosts that never had
 /// a schedule — but a *scheduler failure* is not absence and is carried back in
@@ -1064,10 +1075,9 @@ pub(crate) fn uninstall_owned(
     // from here, so "reported and retained" has to mean the registration too:
     // tearing down a job whose unit file somebody else wrote, and then
     // reporting that file as retained, is the opposite of leaving foreign
-    // content alone. So every owned path is read first, and a single foreign
-    // artifact anywhere in the owned set means the scheduler is not touched at
-    // all. (Schtasks has no unit file to classify, so only its manifest can
-    // hold foreign content.)
+    // content alone. So every owned path is read first, and a foreign *unit*
+    // means the scheduler is not touched at all. (Schtasks has no unit file to
+    // classify, so nothing can block its deregistration.)
     let mut unit_states = Vec::new();
     for path in unit_paths_for(platform, unit_paths) {
         let state = store.read_unit(&path)?;
@@ -1075,12 +1085,12 @@ pub(crate) fn uninstall_owned(
     }
     let manifest_state = store.read_manifest()?;
 
-    let any_foreign = unit_states
+    report.deregistration_blocked_by = unit_states
         .iter()
-        .any(|(_, state)| matches!(state, ArtifactState::Foreign(_)))
-        || matches!(manifest_state, ArtifactState::Foreign(_));
+        .find(|(_, state)| matches!(state, ArtifactState::Foreign(_)))
+        .map(|(path, _)| path.clone());
 
-    if !any_foreign {
+    if report.deregistration_blocked_by.is_none() {
         // Deregister before removing files: a unit file removed while the
         // scheduler still holds the job leaves a registration pointing at
         // nothing.
@@ -1717,6 +1727,102 @@ mod tests {
 
             assert!(report.deregistered, "{platform:?}");
             assert!(report.foreign.is_empty(), "{platform:?}");
+        }
+    }
+
+    /// A foreign *manifest* must not save the user's own scheduler entry from
+    /// being torn down, because it is not the user's entry: `manifest.json`
+    /// lives in xv's private state directory, and the thing it would be
+    /// protecting is xv's own registration pointing at xv's own units. The
+    /// guard exists for a unit file at a path the *scheduler* reads, so it is
+    /// narrowed to exactly that. The foreign manifest is still retained and
+    /// still reported.
+    #[test]
+    fn uninstall_deregisters_when_only_the_manifest_is_foreign() {
+        for platform in platforms() {
+            let mut store = FakeStore::with_prior(platform);
+            let alien = b"{\"schedule_id\":\"somebody-elses\"}".to_vec();
+            store.files.insert(manifest_path(), alien.clone());
+            store.foreign.insert(
+                manifest_path(),
+                "is a manifest for schedule 'somebody-elses'".to_string(),
+            );
+            let runner = FakeRunner::with_prior();
+
+            let report = uninstall_owned(platform, &unit_dir(), &mut store, &runner)
+                .unwrap_or_else(|e| panic!("{platform:?}: {e}"));
+
+            assert!(
+                report.deregistered,
+                "{platform:?}: a foreign manifest suppressed a deregistration it does not own"
+            );
+            assert!(report.deregistration_blocked_by.is_none(), "{platform:?}");
+            assert_eq!(
+                report.removed_units,
+                unit_paths_for(platform, &unit_dir()),
+                "{platform:?}: the owned units must still go"
+            );
+            assert!(!report.removed_manifest, "{platform:?}");
+            assert_eq!(report.foreign, vec![manifest_path()], "{platform:?}");
+            assert_eq!(
+                store.get(&manifest_path()),
+                Some(&alien),
+                "{platform:?}: uninstall touched a manifest xv did not write"
+            );
+        }
+    }
+
+    /// The caller has to be able to *say* why the registration is still there,
+    /// so the blocking path travels back in the report rather than being
+    /// inferred from `foreign` (which also carries a retained manifest, and a
+    /// manifest blocks nothing).
+    #[test]
+    fn uninstall_names_the_foreign_unit_that_blocked_deregistration() {
+        for platform in [Platform::Launchd, Platform::Systemd] {
+            let plan = plan(platform);
+            let mut store = FakeStore::with_prior(platform);
+            let victim = plan.units[0].path.clone();
+            store
+                .files
+                .insert(victim.clone(), b"# my own job\n".to_vec());
+            store
+                .foreign
+                .insert(victim.clone(), "not written by xv".to_string());
+            let runner = FakeRunner::with_prior();
+
+            let report = uninstall_owned(platform, &unit_dir(), &mut store, &runner)
+                .unwrap_or_else(|e| panic!("{platform:?}: {e}"));
+
+            assert_eq!(
+                report.deregistration_blocked_by,
+                Some(victim),
+                "{platform:?}: the report does not name the path that blocked it"
+            );
+        }
+    }
+
+    /// Reinstall owns `manifest.json` and the units, and nothing else. The run
+    /// record, both lock inodes, `recovery/` and the log are other processes'
+    /// evidence; a reinstall that quietly reset them would erase the history
+    /// the design promises to preserve across one.
+    #[test]
+    fn a_reinstall_leaves_the_run_record_the_locks_and_the_log_alone() {
+        for platform in platforms() {
+            let plan = plan(platform);
+            let (mut store, retained) = store_with_schedule_and_evidence(platform);
+            let runner = FakeRunner::with_prior();
+
+            let report = install_transactional(&plan, &mut store, &runner, now())
+                .unwrap_or_else(|e| panic!("{platform:?}: {e}"));
+
+            assert!(report.replaced_prior_schedule, "{platform:?}");
+            for (n, path) in retained.iter().enumerate() {
+                assert_eq!(
+                    store.get(path),
+                    Some(&format!("evidence {n}").into_bytes()),
+                    "{platform:?}: reinstall rewrote {path:?}"
+                );
+            }
         }
     }
 
