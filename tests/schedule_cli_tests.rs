@@ -1169,6 +1169,29 @@ fn run_pinned(
         .unwrap()
 }
 
+/// [`run_pinned`] from an environment that carries no `XV_ENV` at all — the
+/// shape the rendered units actually produce, since they pin no selection
+/// variable. The recorded environment therefore has to come from the manifest.
+fn run_pinned_without_ambient_env(
+    elsewhere: &std::path::Path,
+    root: &std::path::Path,
+    state: &std::path::Path,
+    manifest: &std::path::Path,
+) -> std::process::Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_xv"))
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", root)
+        .env("XDG_CONFIG_HOME", root.join(".config"))
+        .env("NO_COLOR", "1")
+        .env("XV_BACKEND", "azure")
+        .env("XV_STATE_HOME", state)
+        .current_dir(elsewhere)
+        .args(["schedule", "run", "--manifest", manifest.to_str().unwrap()])
+        .output()
+        .unwrap()
+}
+
 fn set_secret(store: &std::path::Path, name: &str, value: &str) {
     let out = xv_cmd_for(store)
         .args(["set", name, "--value", value])
@@ -1202,10 +1225,20 @@ fn make_due(store: &std::path::Path, name: &str) {
 }
 
 fn secret_value(store: &std::path::Path, name: &str) -> String {
-    let out = xv_cmd_for(store)
-        .args(["get", name, "--raw"])
-        .output()
-        .unwrap();
+    secret_value_in_env(store, name, None)
+}
+
+/// [`secret_value`] with an explicit `--env`, for fixtures whose `.xv.toml`
+/// defines environments and no `default_env`: every ordinary command in that
+/// directory must name one, which is precisely the fail-closed condition the
+/// runner has to satisfy from the manifest instead.
+fn secret_value_in_env(store: &std::path::Path, name: &str, env: Option<&str>) -> String {
+    let mut cmd = xv_cmd_for(store);
+    cmd.args(["get", name, "--raw"]);
+    if let Some(env) = env {
+        cmd.args(["--env", env]);
+    }
+    let out = cmd.output().unwrap();
     assert!(
         out.status.success(),
         "{}",
@@ -1242,6 +1275,10 @@ impl PinnedRun {
 
     fn run(&self) -> std::process::Output {
         run_pinned(&self.elsewhere, &self.root, &self.state, &self.manifest)
+    }
+
+    fn run_without_ambient_env(&self) -> std::process::Output {
+        run_pinned_without_ambient_env(&self.elsewhere, &self.root, &self.state, &self.manifest)
     }
 }
 
@@ -1379,6 +1416,45 @@ fn a_changed_project_file_refuses_the_run() {
     assert_eq!(out.status.code(), Some(3), "{stderr}");
     assert!(stderr.contains("project_digest changed"), "{stderr}");
     assert_eq!(fixture.value(), before);
+}
+
+/// The recorded environment governs the sweep, not the project file's own
+/// defaults and not the runner's (empty) environment.
+///
+/// The project file defines two environments and **no** `default_env`, so
+/// every project-profile lookup in the rotation path fails closed unless an
+/// environment was selected. Installation selects `production` with `--env`
+/// and records it; the sweep runs from a directory that is not the recorded
+/// one, with no `XV_ENV` — exactly what a rendered unit provides — and must
+/// still rotate.
+#[test]
+fn the_sweep_replays_the_recorded_environment() {
+    let project = "[env.production]\nvault = \"default\"\n\n\
+                   [env.staging]\nvault = \"default\"\n\n\
+                   [[types.deploy-token.fields]]\nname = \"token\"\nkind = \"secret\"\nprimary = true\n";
+    let fixture = pinned_run_fixture(&["--env", "production"], |root| {
+        std::fs::write(root.join(".xv.toml"), project).unwrap();
+    });
+    let value = || secret_value_in_env(&fixture.store, "STALE", Some("production"));
+    let before = value();
+    assert_eq!(before, "pinned-value");
+
+    // The manifest records the environment installation resolved.
+    let recorded = std::fs::read_to_string(&fixture.manifest).unwrap();
+    assert!(
+        recorded.contains("\"environment\": \"production\""),
+        "{recorded}"
+    );
+
+    let out = fixture.run_without_ambient_env();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert!(
+        !stderr.contains("no active environment") && !stderr.contains("not defined"),
+        "the sweep fell back to ambient env resolution: {stderr}"
+    );
+    assert_ne!(value(), before, "the pinned secret must rotate: {stderr}");
+    drop(fixture.tmp);
 }
 
 #[test]

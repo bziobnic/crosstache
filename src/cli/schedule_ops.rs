@@ -14,7 +14,7 @@ use crate::schedule::install::{
     install_transactional, uninstall_owned, InstallPlan, RealOwnedScheduleStore,
 };
 use crate::schedule::manifest::{
-    self as manifest, ManifestCadence, ManifestExecution, ScheduleManifestV1,
+    self as manifest, ManifestCadence, ManifestExecution, ManifestTarget, ScheduleManifestV1,
 };
 use crate::schedule::ownership::{self, Ownership, SchedulerProbe};
 use crate::schedule::preview::render_install_preview;
@@ -778,6 +778,35 @@ async fn execute_pinned_run(manifest: &ScheduleManifestV1) -> RunOutcomeDraft {
     run_recorded_sweep(manifest).await
 }
 
+/// The configuration the pinned sweep runs under: the file read back from the
+/// recorded path, with the recorded `.xv.toml` environment replayed onto it.
+///
+/// Installation resolved `XV_ENV`/`--env` once and wrote the winning name into
+/// `target.environment`; the runner replays that name and consults neither
+/// ambient source (spec: scheduled-target-manifest, invariant 2). Drift
+/// validation already replays it for *its* recomputation, but the sweep itself
+/// ran with `env_flag: None` — so any helper reached from rotation that
+/// resolves a project profile (`Config::resolve_vault_name`,
+/// `resolve_group`, `resolve_record_types`'s project walk) would fall back to
+/// the project file's `default_env`, or fail closed when the file defines
+/// environments and none is selected. Setting `env_flag` is the whole fix:
+/// `project::resolve_env` consults `XV_ENV` first and the flag second, and the
+/// rendered units deliberately carry no `XV_ENV`, so the recorded name wins.
+///
+/// The profile itself is **not** folded into the config here. The sweep's
+/// backend and vault come literally from the manifest (`run_due_rotation`
+/// performs no workspace, context, or vault-name resolution), so folding
+/// `backend`/`vault` would re-resolve a selection the manifest already pinned.
+/// `None` is replayed as `None`: no environment was recorded, so none is
+/// selected.
+fn prepare_recorded_config(mut config: Config, target: &ManifestTarget) -> Config {
+    // A local store that has gone missing is an error, never something this
+    // run invents.
+    config.runtime_open_existing_local = true;
+    config.env_flag = target.environment.clone();
+    config
+}
+
 /// The pinned sweep, from the recorded working directory.
 ///
 /// Split from [`execute_pinned_run`] so every step after the process-global
@@ -786,7 +815,7 @@ async fn execute_pinned_run(manifest: &ScheduleManifestV1) -> RunOutcomeDraft {
 /// directory.
 async fn run_recorded_sweep(manifest: &ScheduleManifestV1) -> RunOutcomeDraft {
     let config_path = Path::new(&manifest.target.config_path);
-    let Ok((mut file_config, _bytes)) =
+    let Ok((file_config, _bytes)) =
         crate::config::settings::load_config_file_at_with_bytes(config_path).await
     else {
         return refused_drift_from_reasons(&[drift::DriftReason::missing_at(
@@ -794,7 +823,7 @@ async fn run_recorded_sweep(manifest: &ScheduleManifestV1) -> RunOutcomeDraft {
             &manifest.target.config_path,
         )]);
     };
-    file_config.runtime_open_existing_local = true;
+    let file_config = prepare_recorded_config(file_config, &manifest.target);
 
     let backend_name = manifest.target.backend_name.as_str();
     let vault = manifest.target.vault.as_str();
@@ -1310,6 +1339,46 @@ mod tests {
         )
         .unwrap();
         path
+    }
+
+    #[test]
+    fn the_sweep_config_replays_the_recorded_environment() {
+        // Installation resolved `XV_ENV`/`--env` once; the sweep replays that
+        // name through `env_flag`, which is what `project::resolve_env` reads
+        // for every project-profile lookup rotation can reach. Without it the
+        // sweep ran unselected and a project file defining environments (with
+        // no `default_env`) failed closed under it.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest = valid_manifest(tmp.path());
+        manifest.target.environment = Some("production".to_string());
+
+        let loaded = Config::default();
+        assert_eq!(loaded.env_flag, None, "a config read off disk selects none");
+
+        let prepared = prepare_recorded_config(loaded, &manifest.target);
+
+        assert_eq!(prepared.env_flag.as_deref(), Some("production"));
+        // The other half of the preparation is unchanged: a vanished local
+        // store is an error, not something this run creates.
+        assert!(prepared.runtime_open_existing_local);
+    }
+
+    #[test]
+    fn no_recorded_environment_selects_none() {
+        // A target with no `.xv.toml` environment must not inherit one: the
+        // replay clears the field rather than leaving whatever was there.
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = valid_manifest(tmp.path());
+        assert_eq!(manifest.target.environment, None, "fixture shape changed");
+
+        let loaded = Config {
+            env_flag: Some("staging".to_string()),
+            ..Config::default()
+        };
+
+        let prepared = prepare_recorded_config(loaded, &manifest.target);
+
+        assert_eq!(prepared.env_flag, None);
     }
 
     #[tokio::test]
