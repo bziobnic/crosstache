@@ -387,6 +387,7 @@ fn a_retained_outcome_from_an_earlier_install_is_labelled() {
 fn a_live_run_and_an_interrupted_one_read_differently() {
     let mut report = healthy();
     report.last_run = LastRunStatus::RunningHeld {
+        previous_install: false,
         started_at: "2026-09-10T03:00:00Z".to_string(),
     };
     assert!(
@@ -396,6 +397,7 @@ fn a_live_run_and_an_interrupted_one_read_differently() {
     );
 
     report.last_run = LastRunStatus::Interrupted {
+        previous_install: false,
         started_at: "2026-09-10T03:00:00Z".to_string(),
     };
     assert!(
