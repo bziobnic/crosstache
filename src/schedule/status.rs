@@ -96,10 +96,27 @@ pub(crate) enum LastRunStatus {
     },
     /// The record says `running` and the run lock is still held: a sweep is
     /// happening right now.
-    RunningHeld { started_at: String },
+    RunningHeld {
+        started_at: String,
+        /// Same meaning as on [`LastRunStatus::Outcome`]: a retained record
+        /// from an earlier installation is history whatever state it is in,
+        /// so the marker is orthogonal to which variant applies.
+        previous_install: bool,
+    },
     /// The record says `running` but nobody holds the lock: the runner died
     /// without recording an ending.
-    Interrupted { started_at: String },
+    Interrupted {
+        started_at: String,
+        previous_install: bool,
+    },
+    /// The record says `running` and the run lock could not be evaluated, so
+    /// whether a sweep is live is unknown. The detail is our own message,
+    /// which names paths and OS errors only.
+    RunningLockUnknown {
+        started_at: String,
+        previous_install: bool,
+        detail: String,
+    },
     /// `last-run.json` exists but could not be read or did not validate. The
     /// string is our own message, which names paths and fields only.
     Unreadable(String),
@@ -324,20 +341,36 @@ fn collect_last_run(
         Err(error) => return Ok(LastRunStatus::Unreadable(error.to_string())),
     };
 
+    // A retained record from an earlier installation is history, not the
+    // current schedule's last run — and that is true of a `running` or
+    // interrupted record too, so the comparison happens before the lock is
+    // consulted and rides along on every variant.
+    let previous_install = manifest_digest != Some(outcome.manifest_digest.as_str());
+
     if outcome.state == RunState::Running {
         // `probe_existing` never creates the lock, so a status on a host with
         // no schedule cannot leave one behind.
-        let held = RunGuard::probe_existing(state)?;
         let started_at = outcome.started_at.clone();
-        return Ok(match held {
-            Some(true) => LastRunStatus::RunningHeld { started_at },
-            _ => LastRunStatus::Interrupted { started_at },
+        return Ok(match RunGuard::probe_existing(state) {
+            Ok(Some(true)) => LastRunStatus::RunningHeld {
+                started_at,
+                previous_install,
+            },
+            Ok(_) => LastRunStatus::Interrupted {
+                started_at,
+                previous_install,
+            },
+            // A lock that cannot be inspected is one unknown dimension, not a
+            // failed command: the same rule the outcome loader already
+            // follows, so the other six dimensions still render.
+            Err(error) => LastRunStatus::RunningLockUnknown {
+                started_at,
+                previous_install,
+                detail: error.to_string(),
+            },
         });
     }
 
-    // A retained record from an earlier installation is history, not the
-    // current schedule's last run.
-    let previous_install = manifest_digest != Some(outcome.manifest_digest.as_str());
     Ok(LastRunStatus::Outcome {
         outcome,
         previous_install,
@@ -998,16 +1031,40 @@ mod tests {
         }
     }
 
+    /// launchd plists and systemd units exist only on Unix, so their bytes are
+    /// always Unix-shaped whatever host is reading them back — the same rule
+    /// `legacy_unix_schedule` follows in `ownership.rs`. A Windows-spelled
+    /// path inside a quoted `ExecStart=` cannot round-trip at all: systemd
+    /// reads `\` as an escape, so `C:\home\alice\bin\xv` parses back as
+    /// `C:homealicebinxv` and every comparison against the manifest reports a
+    /// drift that does not exist.
+    ///
+    /// Fixture locations are therefore plain Unix literals, and the one path a
+    /// test cannot choose — the real temporary directory — is spelled with
+    /// forward slashes. `Path` equality accepts `/` as a separator on Windows
+    /// too, so the recorded-path comparison still holds on both hosts.
+    fn unix_shaped(path: &Path) -> PathBuf {
+        PathBuf::from(path.to_string_lossy().replace('\\', "/"))
+    }
+
+    /// A fixture location that is absolute on *this* host (manifest validation
+    /// insists on that) yet still Unix-shaped, so it survives systemd/launchd
+    /// unit text unchanged: `/home/alice/bin/xv` here, `C:/home/alice/bin/xv`
+    /// on Windows.
+    fn unix_abs(unix_path: &str) -> PathBuf {
+        unix_shaped(Path::new(&fixture_abs(unix_path)))
+    }
+
     fn pinned_schedule(manifest: &Path, interval: ScheduleInterval, log: &str) -> RotationSchedule {
         RotationSchedule {
             interval,
             command: ScheduleCommand::ManifestRun {
-                manifest: manifest.to_path_buf(),
-                working_directory: PathBuf::from(fixture_abs("/home/alice/work")),
+                manifest: unix_shaped(manifest),
+                working_directory: unix_abs("/home/alice/work"),
             },
-            binary: PathBuf::from(fixture_abs("/home/alice/bin/xv")),
-            log_path: PathBuf::from(fixture_abs(log)),
-            home: PathBuf::from(fixture_abs("/home/alice")),
+            binary: unix_abs("/home/alice/bin/xv"),
+            log_path: unix_abs(log),
+            home: unix_abs("/home/alice"),
             state_home: None,
         }
     }
@@ -1317,7 +1374,9 @@ mod tests {
                 "/home/alice/rotate.log",
             );
             let mut manifest = manifest_for(&schedule);
-            manifest.execution.log_path = fixture_abs("/home/alice/rotate.log");
+            manifest.execution.log_path = unix_abs("/home/alice/rotate.log")
+                .to_string_lossy()
+                .to_string();
             seed_units(platform, &schedule, &f.units);
             let report =
                 inspect_unit_drift(platform, &f.units, &f.state, &manifest, &registered()).unwrap();
@@ -1335,7 +1394,7 @@ mod tests {
                 "/home/alice/rotate.log",
             );
             let mut manifest = manifest_for(&schedule);
-            manifest.execution.binary_path = fixture_abs("/opt/other/xv");
+            manifest.execution.binary_path = "/opt/other/xv".to_string();
             seed_units(platform, &schedule, &f.units);
             let report =
                 inspect_unit_drift(platform, &f.units, &f.state, &manifest, &registered()).unwrap();
@@ -1375,7 +1434,9 @@ mod tests {
                 "/home/alice/rotate.log",
             );
             let mut manifest = manifest_for(&schedule);
-            manifest.execution.log_path = fixture_abs("/home/alice/elsewhere.log");
+            manifest.execution.log_path = unix_abs("/home/alice/elsewhere.log")
+                .to_string_lossy()
+                .to_string();
             seed_units(platform, &schedule, &f.units);
             let report =
                 inspect_unit_drift(platform, &f.units, &f.state, &manifest, &registered()).unwrap();
@@ -1425,12 +1486,12 @@ mod tests {
         RotationSchedule {
             interval: ScheduleInterval::Daily { hour: 3, minute: 0 },
             command: ScheduleCommand::ManifestRun {
-                manifest: manifest.to_path_buf(),
-                working_directory: PathBuf::from(fixture_abs("/home/alice/my work")),
+                manifest: unix_shaped(manifest),
+                working_directory: unix_abs("/home/alice/my work"),
             },
-            binary: PathBuf::from(fixture_abs("/home/alice/my bin/xv")),
-            log_path: PathBuf::from(fixture_abs("/home/alice/my logs/rotate & audit.log")),
-            home: PathBuf::from(fixture_abs("/home/alice")),
+            binary: unix_abs("/home/alice/my bin/xv"),
+            log_path: unix_abs("/home/alice/my logs/rotate & audit.log"),
+            home: unix_abs("/home/alice"),
             state_home: None,
         }
     }
@@ -1617,7 +1678,9 @@ mod tests {
                 "/home/alice/elsewhere.log",
             );
             let mut manifest = manifest_for(&schedule);
-            manifest.execution.log_path = fixture_abs("/home/alice/rotate.log");
+            manifest.execution.log_path = unix_abs("/home/alice/rotate.log")
+                .to_string_lossy()
+                .to_string();
             manifest.cadence.hour = 17;
             seed_units(platform, &schedule, &f.units);
             let report =
@@ -1733,7 +1796,7 @@ mod tests {
                 "LoadState=not-found\nActiveState=inactive\nUnitFileState=\n",
                 "",
             ),
-            Path::new(&fixture_abs("/home/alice/bin/xv")),
+            &unix_abs("/home/alice/bin/xv"),
             "0.40.0",
         )
         .await
@@ -1901,7 +1964,7 @@ mod tests {
             &f.units,
             &f.state,
             &registered(),
-            Path::new(&fixture_abs("/home/alice/bin/xv")),
+            &unix_abs("/home/alice/bin/xv"),
             "0.39.0",
         )
         .await
@@ -1909,7 +1972,10 @@ mod tests {
         assert_eq!(
             report.last_run,
             LastRunStatus::Interrupted {
-                started_at: "2026-09-10T03:00:00Z".to_string()
+                started_at: "2026-09-10T03:00:00Z".to_string(),
+                // This fixture seeds no manifest, so the record is bound to an
+                // installation that is not the current one.
+                previous_install: true,
             }
         );
 
@@ -1922,7 +1988,7 @@ mod tests {
             &f.units,
             &f.state,
             &registered(),
-            Path::new(&fixture_abs("/home/alice/bin/xv")),
+            &unix_abs("/home/alice/bin/xv"),
             "0.39.0",
         )
         .await
@@ -1930,10 +1996,126 @@ mod tests {
         assert_eq!(
             report.last_run,
             LastRunStatus::RunningHeld {
-                started_at: "2026-09-10T03:00:00Z".to_string()
+                started_at: "2026-09-10T03:00:00Z".to_string(),
+                previous_install: true,
             }
         );
         drop(held);
+    }
+
+    /// `(previous install)` is a property of the *record*, not of the state it
+    /// is in: a retained `running` record survives an uninstall/reinstall just
+    /// like a finished one, and presenting it as the current schedule's run is
+    /// the same lie in both cases.
+    #[test]
+    fn a_retained_running_record_is_labelled_previous_install() {
+        let f = fixture();
+        write_outcome_atomic(&f.state, &outcome_at(&digest(), RunState::Running)).unwrap();
+        let other = format!("sha256:{}", "1".repeat(64));
+
+        // Nobody holds the lock: interrupted, and from an earlier install.
+        let status = collect_last_run(&f.state, Some(other.as_str())).unwrap();
+        assert_eq!(
+            status,
+            LastRunStatus::Interrupted {
+                started_at: "2026-09-10T03:00:00Z".to_string(),
+                previous_install: true,
+            }
+        );
+        assert_eq!(
+            crate::schedule::status_render::describe_last_run(&status),
+            "interrupted after 2026-09-10T03:00:00Z (no runner holds the lock) (previous install)"
+        );
+
+        // The same record with the lock held: live, and still history.
+        let held = RunGuard::try_acquire(&f.state)
+            .unwrap()
+            .expect("the lock is free in this test");
+        let status = collect_last_run(&f.state, Some(other.as_str())).unwrap();
+        assert_eq!(
+            status,
+            LastRunStatus::RunningHeld {
+                started_at: "2026-09-10T03:00:00Z".to_string(),
+                previous_install: true,
+            }
+        );
+        assert_eq!(
+            crate::schedule::status_render::describe_last_run(&status),
+            "running since 2026-09-10T03:00:00Z (previous install)"
+        );
+
+        // Bound to the installation on disk now: no marker.
+        let status = collect_last_run(&f.state, Some(digest().as_str())).unwrap();
+        assert_eq!(
+            crate::schedule::status_render::describe_last_run(&status),
+            "running since 2026-09-10T03:00:00Z"
+        );
+        drop(held);
+    }
+
+    /// A `run.lock` that cannot be evaluated is one unknown dimension, not a
+    /// failed `xv schedule status`: the other six still render.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_lock_probe_failure_does_not_abort_status() {
+        let f = fixture();
+        let schedule = pinned_schedule(
+            &f.state.manifest_path(),
+            ScheduleInterval::Daily { hour: 3, minute: 0 },
+            "/home/alice/rotate.log",
+        );
+        let manifest = manifest_for(&schedule);
+        seed_manifest(&f.state, &manifest);
+        seed_units(Platform::Systemd, &schedule, &f.units);
+        write_outcome_atomic(&f.state, &outcome_at(&digest(), RunState::Running)).unwrap();
+
+        // A symlinked lock is refused by the probe — the stand-in for the
+        // permission/open failures a real host produces.
+        std::os::unix::fs::symlink(f.state.root().join("elsewhere"), f.state.run_lock_path())
+            .unwrap();
+
+        let status = collect_last_run(&f.state, Some(digest().as_str())).unwrap();
+        match &status {
+            LastRunStatus::RunningLockUnknown {
+                started_at,
+                previous_install,
+                detail,
+            } => {
+                assert_eq!(started_at, "2026-09-10T03:00:00Z");
+                assert!(!previous_install);
+                assert!(!detail.is_empty());
+            }
+            other => panic!("expected an unknown lock state, got {other:?}"),
+        }
+        let rendered = crate::schedule::status_render::describe_last_run(&status);
+        assert!(
+            rendered.starts_with("running since 2026-09-10T03:00:00Z (lock state unknown: "),
+            "{rendered}"
+        );
+
+        // And the whole command still succeeds, with its other dimensions.
+        let report = collect_status(
+            Platform::Systemd,
+            &f.units,
+            &f.state,
+            &registered(),
+            Path::new(&manifest.execution.binary_path),
+            "0.39.0",
+        )
+        .await
+        .expect("a lock that cannot be probed must not fail status");
+        assert!(matches!(
+            report.last_run,
+            LastRunStatus::RunningLockUnknown { .. }
+        ));
+        let rendered =
+            crate::schedule::status_render::render_status(&report, Platform::Systemd, false);
+        assert!(rendered.contains("  Ownership: managed"), "{rendered}");
+        assert!(rendered.contains("  Schedule:"), "{rendered}");
+        assert!(
+            rendered.contains("  Last run:  running since"),
+            "{rendered}"
+        );
     }
 
     #[tokio::test]
@@ -1946,7 +2128,7 @@ mod tests {
             &f.units,
             &f.state,
             &registered(),
-            Path::new(&fixture_abs("/home/alice/bin/xv")),
+            &unix_abs("/home/alice/bin/xv"),
             "0.39.0",
         )
         .await
@@ -1964,7 +2146,7 @@ mod tests {
             &f.units,
             &f.state,
             &registered(),
-            Path::new(&fixture_abs("/home/alice/bin/xv")),
+            &unix_abs("/home/alice/bin/xv"),
             "0.39.0",
         )
         .await
@@ -2018,7 +2200,7 @@ mod tests {
             &f.units,
             &f.state,
             &registered(),
-            Path::new(&fixture_abs("/home/alice/bin/xv")),
+            &unix_abs("/home/alice/bin/xv"),
             "0.39.0",
         )
         .await

@@ -551,27 +551,41 @@ fn render_next_run(lines: &mut Vec<String>, next_run: &NextRun) {
 ///
 /// Shape: `<state>; <when>[; <counts>][; exit <n>][; <code>]`, with the
 /// trailing `(previous install)` marker when the record was written by an
-/// earlier installation than the one on disk now. A successful run carries no
+/// earlier installation than the one on disk now — which a retained `running`
+/// or interrupted record can be just as much as a finished one. A successful run carries no
 /// exit code or diagnostic — its counts are the whole story.
 pub(crate) fn describe_last_run(last_run: &LastRunStatus) -> String {
-    match last_run {
-        LastRunStatus::Never => "never".to_string(),
-        LastRunStatus::RunningHeld { started_at } => format!("running since {started_at}"),
-        LastRunStatus::Interrupted { started_at } => {
-            format!("interrupted after {started_at} (no runner holds the lock)")
-        }
-        LastRunStatus::Unreadable(detail) => format!("unreadable ({detail})"),
+    let (mut rendered, previous_install) = match last_run {
+        LastRunStatus::Never => return "never".to_string(),
+        LastRunStatus::Unreadable(detail) => return format!("unreadable ({detail})"),
+        LastRunStatus::RunningHeld {
+            started_at,
+            previous_install,
+        } => (format!("running since {started_at}"), *previous_install),
+        LastRunStatus::Interrupted {
+            started_at,
+            previous_install,
+        } => (
+            format!("interrupted after {started_at} (no runner holds the lock)"),
+            *previous_install,
+        ),
+        LastRunStatus::RunningLockUnknown {
+            started_at,
+            previous_install,
+            detail,
+        } => (
+            format!("running since {started_at} (lock state unknown: {detail})"),
+            *previous_install,
+        ),
         LastRunStatus::Outcome {
             outcome,
             previous_install,
-        } => {
-            let mut rendered = describe_outcome(outcome);
-            if *previous_install {
-                rendered.push_str(" (previous install)");
-            }
-            rendered
-        }
+        } => (describe_outcome(outcome), *previous_install),
+    };
+    if previous_install {
+        rendered.push_str(" (previous install)");
     }
+    rendered
 }
 
 fn describe_outcome(outcome: &RunOutcomeV1) -> String {

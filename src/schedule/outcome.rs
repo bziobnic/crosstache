@@ -34,7 +34,6 @@
 
 use std::path::Path;
 
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{CrosstacheError, Result};
@@ -389,6 +388,67 @@ pub fn write_outcome_atomic(paths: &ScheduleStatePaths, outcome: &RunOutcomeV1) 
 // run.lock
 // ---------------------------------------------------------------------------
 
+/// How many times the runner re-attempts a *contended* exclusive acquire
+/// before concluding another runner owns the sweep.
+///
+/// `xv schedule status` takes the lock for an instant to tell a live run from
+/// an interrupted one. Without a retry, a health check that happens to run on
+/// the same cadence as the job could make the firing skip until the next
+/// interval. [`RUN_LOCK_ATTEMPTS`] × [`RUN_LOCK_RETRY_DELAY`] ≈ 2s, which is
+/// far longer than any probe holds it and far shorter than any cadence.
+const RUN_LOCK_ATTEMPTS: u32 = 10;
+const RUN_LOCK_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// What a non-blocking lock attempt meant.
+#[derive(Debug)]
+pub(crate) enum LockAttempt {
+    Acquired,
+    /// Somebody else holds it. Not an error.
+    Contended,
+    /// The lock could not be evaluated at all — `ENOLCK`, `EIO`, a Windows
+    /// quota or permission failure. A run that cannot take the lock has not
+    /// been excluded by anything; it has failed.
+    Failed(std::io::Error),
+}
+
+/// Whether a failed non-blocking lock attempt means "another process holds
+/// it".
+///
+/// Unix reports contention as `EWOULDBLOCK`/`EAGAIN`; Windows reports
+/// `ERROR_LOCK_VIOLATION`, which does not map to `WouldBlock`. `fs2` exposes
+/// the platform's own contention error, so the portable test compares raw OS
+/// codes against it.
+pub(crate) fn is_lock_contention(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        return true;
+    }
+    match (
+        error.raw_os_error(),
+        fs2::lock_contended_error().raw_os_error(),
+    ) {
+        (Some(actual), Some(contended)) => actual == contended,
+        _ => false,
+    }
+}
+
+/// Map a raw `try_lock_*` result onto the three outcomes the callers act on.
+pub(crate) fn classify_lock(result: std::io::Result<()>) -> LockAttempt {
+    match result {
+        Ok(()) => LockAttempt::Acquired,
+        Err(error) if is_lock_contention(&error) => LockAttempt::Contended,
+        Err(error) => LockAttempt::Failed(error),
+    }
+}
+
+/// The error a lock failure reports: it names `run.lock` and the OS error, so
+/// the run that failed is diagnosable from the scheduler's own log.
+fn lock_failure(path: &Path, error: &std::io::Error) -> CrosstacheError {
+    CrosstacheError::config(format!(
+        "Failed to take the schedule run lock '{}': {error}",
+        path.display()
+    ))
+}
+
 /// An exclusive hold on `run.lock` for the lifetime of the value.
 ///
 /// The lock is advisory and process-scoped (`flock`/`LockFileEx`), released
@@ -403,9 +463,16 @@ pub struct RunGuard {
 impl RunGuard {
     /// Take the exclusive run lock without blocking.
     ///
-    /// `Ok(None)` means another runner holds it. That is not an error: a
-    /// scheduled job that fires while the previous firing is still sweeping
-    /// must log and leave, not queue up a second sweep of the same vault.
+    /// `Ok(None)` means another runner holds it — after
+    /// [`RUN_LOCK_ATTEMPTS`] contended attempts, so a momentary shared probe
+    /// from `xv schedule status` cannot make a firing skip. That is not an
+    /// error: a scheduled job that fires while the previous firing is still
+    /// sweeping must log and leave, not queue up a second sweep of the same
+    /// vault.
+    ///
+    /// `Err` means the lock could not be evaluated at all. That is a failed
+    /// run, not a skipped one: nothing excluded this process, so reporting
+    /// success would hide a rotation that never happened.
     pub fn try_acquire(paths: &ScheduleStatePaths) -> Result<Option<Self>> {
         let path = paths.run_lock_path();
         reject_if_symlink(paths.root())?;
@@ -416,10 +483,18 @@ impl RunGuard {
             ))
         })?;
         let lock = open_private_lock_file_no_follow(&path)?;
-        match lock.try_lock_exclusive() {
-            Ok(()) => Ok(Some(Self { _lock: lock })),
-            Err(_) => Ok(None),
+        for attempt in 0..RUN_LOCK_ATTEMPTS {
+            match classify_lock(fs2::FileExt::try_lock_exclusive(&lock)) {
+                LockAttempt::Acquired => return Ok(Some(Self { _lock: lock })),
+                LockAttempt::Failed(error) => return Err(lock_failure(&path, &error)),
+                LockAttempt::Contended => {
+                    if attempt + 1 < RUN_LOCK_ATTEMPTS {
+                        std::thread::sleep(RUN_LOCK_RETRY_DELAY);
+                    }
+                }
+            }
         }
+        Ok(None)
     }
 
     /// Whether some process currently holds the run lock, **without creating
@@ -447,10 +522,18 @@ impl RunGuard {
         }
         reject_if_symlink(&path)?;
         let lock = open_private_lock_file_no_follow(&path)?;
-        match lock.try_lock_exclusive() {
-            // Taking it proves nobody else holds it; the handle drops here.
-            Ok(()) => Ok(Some(false)),
-            Err(_) => Ok(Some(true)),
+        // *Shared*, not exclusive: a probe must be able to observe the lock
+        // without competing for it. A shared attempt still contends with an
+        // exclusive holder — which is the question being asked — but two
+        // concurrent probes, and a probe that overlaps a runner's retry
+        // window, no longer take anything the runner needs.
+        match classify_lock(fs2::FileExt::try_lock_shared(&lock)) {
+            // Taking it proves no exclusive holder; the handle drops here.
+            LockAttempt::Acquired => Ok(Some(false)),
+            LockAttempt::Contended => Ok(Some(true)),
+            // Not "someone holds it" — we do not know. Same distinction the
+            // runner makes, for the same reason.
+            LockAttempt::Failed(error) => Err(lock_failure(&path, &error)),
         }
     }
 }
@@ -822,6 +905,114 @@ mod tests {
         );
         // The probe released what it took: a real runner can still start.
         assert!(RunGuard::try_acquire(&paths).expect("acquire").is_some());
+    }
+
+    /// Only contention means "another runner holds it". Every other lock
+    /// failure is a failed run, and must not be laundered into a skip.
+    #[test]
+    fn only_contention_counts_as_another_holder() {
+        assert!(is_lock_contention(&std::io::Error::from(
+            std::io::ErrorKind::WouldBlock
+        )));
+        assert!(is_lock_contention(&fs2::lock_contended_error()));
+
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::Interrupted,
+            std::io::ErrorKind::Other,
+        ] {
+            assert!(
+                !is_lock_contention(&std::io::Error::from(kind)),
+                "{kind:?} is a failed run, not a busy one"
+            );
+        }
+        // ENOLCK: a synthetic OS error that is not the contention error.
+        assert!(!is_lock_contention(&std::io::Error::from_raw_os_error(77)));
+    }
+
+    /// The seam finding 1 asks for: the mapping from a raw lock result to the
+    /// runner's three outcomes, unit-testable on a synthetic `io::Error`.
+    #[test]
+    fn a_non_contention_lock_error_is_a_failure_not_a_skip() {
+        assert!(matches!(classify_lock(Ok(())), LockAttempt::Acquired));
+        assert!(matches!(
+            classify_lock(Err(std::io::Error::from(std::io::ErrorKind::WouldBlock))),
+            LockAttempt::Contended
+        ));
+        match classify_lock(Err(std::io::Error::from_raw_os_error(77))) {
+            LockAttempt::Failed(error) => {
+                assert_eq!(error.raw_os_error(), Some(77));
+            }
+            other => panic!("expected a failure, got {other:?}"),
+        }
+    }
+
+    /// The error a failed lock reports has to be diagnosable from a log
+    /// nobody was watching: it names the file and the OS error.
+    #[test]
+    fn a_lock_failure_names_the_lock_file_and_the_os_error() {
+        let dir = tempdir();
+        let paths = test_paths_in(dir.path());
+        let message = lock_failure(
+            &paths.run_lock_path(),
+            &std::io::Error::from_raw_os_error(77),
+        )
+        .to_string();
+        assert!(message.contains("run.lock"), "{message}");
+        assert!(
+            message.contains(&std::io::Error::from_raw_os_error(77).to_string()),
+            "{message}"
+        );
+    }
+
+    /// A `status` probe holds `run.lock` *shared* for an instant. The runner
+    /// retries, so an overlapping probe delays the sweep — it never skips it.
+    #[test]
+    fn a_briefly_held_shared_lock_delays_the_runner_but_does_not_skip_it() {
+        let dir = tempdir();
+        let paths = test_paths_in(dir.path());
+        // Materialize the lock inode so the probing thread opens the same one.
+        drop(
+            RunGuard::try_acquire(&paths)
+                .expect("acquire")
+                .expect("free"),
+        );
+
+        let lock_path = paths.run_lock_path();
+        // Handshake: the runner must not attempt the lock until the probe
+        // holds it, or the test would race its own fixture.
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let held = std::thread::spawn(move || {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+                .expect("open");
+            fs2::FileExt::try_lock_shared(&file).expect("shared");
+            held_tx.send(()).expect("signal");
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            fs2::FileExt::unlock(&file).expect("unlock");
+        });
+        held_rx.recv().expect("the probe took the shared lock");
+
+        let guard = RunGuard::try_acquire(&paths).expect("acquire");
+        assert!(
+            guard.is_some(),
+            "a shared probe released inside the retry window must not make the runner skip"
+        );
+        held.join().expect("join");
+    }
+
+    /// A shared probe must not evict a live runner's exclusive hold.
+    #[test]
+    fn probing_reports_a_live_runner_and_does_not_take_its_lock() {
+        let dir = tempdir();
+        let paths = test_paths_in(dir.path());
+        let _guard = RunGuard::try_acquire(&paths)
+            .expect("acquire")
+            .expect("free");
+        assert_eq!(RunGuard::probe_existing(&paths).expect("probe"), Some(true));
+        assert_eq!(RunGuard::probe_existing(&paths).expect("probe"), Some(true));
     }
 
     #[cfg(unix)]

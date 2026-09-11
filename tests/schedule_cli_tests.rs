@@ -1989,6 +1989,41 @@ fn recorded(manifest: &std::path::Path, pointer: &str) -> String {
         .to_string()
 }
 
+/// A path as xv spells it back in its own output.
+///
+/// The fixtures canonicalize their tempdir so the recorded target matches what
+/// xv records, and on Windows `std::fs::canonicalize` returns a *verbatim*
+/// path (`\\?\C:\...`, or `\\?\UNC\server\share\...`). xv strips that
+/// prefix from every path it records or prints, so an expectation built from
+/// the fixture's own spelling compares two different renderings of the same
+/// file and fails on Windows only. The crate's `strip_verbatim_prefix` is
+/// `pub(crate)`, so integration tests need their own copy of the rule.
+#[cfg(windows)]
+fn display_path(path: &std::path::Path) -> String {
+    let text = path.display().to_string();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    match text.strip_prefix(r"\\?\") {
+        // Only a plain drive path survives without the prefix, matching
+        // `crate::utils::helpers::strip_verbatim_prefix`.
+        Some(rest)
+            if rest.len() >= 2
+                && rest.as_bytes()[0].is_ascii_alphabetic()
+                && rest.as_bytes()[1] == b':' =>
+        {
+            rest.to_string()
+        }
+        _ => text,
+    }
+}
+
+/// No other platform has verbatim prefixes; this is the identity.
+#[cfg(not(windows))]
+fn display_path(path: &std::path::Path) -> String {
+    path.display().to_string()
+}
+
 /// A path as it appears inside the JSON/TOML fixtures (Windows separators are
 /// escaped in both).
 fn json_path(path: &std::path::Path) -> String {
@@ -2504,9 +2539,23 @@ fn last_run_path(state: &std::path::Path) -> std::path::PathBuf {
         .join("last-run.json")
 }
 
-fn read_outcome(state: &std::path::Path) -> serde_json::Value {
-    let body = std::fs::read_to_string(last_run_path(state))
-        .unwrap_or_else(|e| panic!("last-run.json must exist: {e}"));
+/// `last-run.json`, with the run that should have written it.
+///
+/// The child's exit code and stderr are part of the panic deliberately: a
+/// missing record means the runner exited before (or instead of) writing one,
+/// and *why* it exited is the only thing that distinguishes a bug in the
+/// runner from a fixture that never got the run it thought it did. Without
+/// them this reads as a bare `os error 2` from a path the test only half
+/// controls.
+fn read_outcome(state: &std::path::Path, out: &std::process::Output) -> serde_json::Value {
+    let body = std::fs::read_to_string(last_run_path(state)).unwrap_or_else(|e| {
+        panic!(
+            "last-run.json must exist: {e}\nthe run exited {:?}\nstdout:\n{}\nstderr:\n{}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        )
+    });
     for canary in REDACTION_CANARIES {
         assert!(!body.contains(canary), "canary '{canary}' leaked: {body}");
     }
@@ -2538,7 +2587,7 @@ fn a_successful_pinned_run_records_a_success_outcome() {
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
     assert_eq!(out.status.code(), Some(0), "{stderr}");
 
-    let outcome = read_outcome(&fixture.state);
+    let outcome = read_outcome(&fixture.state, &out);
     assert_eq!(outcome["schema_version"], 1);
     assert_eq!(outcome["schedule_id"], "rotation-default");
     assert_eq!(outcome["state"], "success");
@@ -2568,7 +2617,7 @@ fn a_drift_refusal_records_the_golden_refusal_outcome() {
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
     assert_eq!(out.status.code(), Some(3), "{stderr}");
 
-    let outcome = read_outcome(&fixture.state);
+    let outcome = read_outcome(&fixture.state, &out);
     assert_eq!(outcome["state"], "refused_drift");
     assert_eq!(outcome["exit_code"], 3);
     assert!(outcome["summary"].is_null(), "{outcome}");
@@ -2656,7 +2705,7 @@ fn a_refusal_found_during_the_sweep_still_ends_terminal() {
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
     assert_eq!(out.status.code(), Some(3), "{stderr}");
 
-    let outcome = read_outcome(&fixture.state);
+    let outcome = read_outcome(&fixture.state, &out);
     assert_ne!(
         outcome["state"], "running",
         "the running record was never replaced: {outcome}"
@@ -2994,7 +3043,7 @@ fn status_run_from_another_binary_reports_no_current_version_and_no_drift() {
             "  Binary:    {} (installed {}, current unknown (status run from {}))",
             env!("CARGO_BIN_EXE_xv"),
             env!("CARGO_PKG_VERSION"),
-            other.display()
+            display_path(&other)
         )),
         "{combined}"
     );
@@ -3345,7 +3394,7 @@ fn uninstall_keeps_the_last_run_visible_as_history() {
         "{}",
         String::from_utf8_lossy(&run.stderr)
     );
-    assert_eq!(read_outcome(&fixture.state)["state"], "success");
+    assert_eq!(read_outcome(&fixture.state, &run)["state"], "success");
 
     let (code, out) = schedule_uninstall(&fixture.root, &fixture.state);
     assert_eq!(code, Some(0), "{out}");
@@ -3383,7 +3432,7 @@ fn a_reinstall_keeps_the_outcome_as_history_until_a_new_run_completes() {
     );
     let first_digest = manifest_digest_of(&fixture.manifest);
     assert_eq!(
-        read_outcome(&fixture.state)["manifest_digest"]
+        read_outcome(&fixture.state, &first)["manifest_digest"]
             .as_str()
             .unwrap(),
         first_digest
@@ -3424,7 +3473,7 @@ fn a_reinstall_keeps_the_outcome_as_history_until_a_new_run_completes() {
         "{}",
         String::from_utf8_lossy(&second.stderr)
     );
-    let outcome = read_outcome(&fixture.state);
+    let outcome = read_outcome(&fixture.state, &second);
     assert_eq!(outcome["state"], "success");
     assert_eq!(
         outcome["manifest_digest"].as_str().unwrap(),
@@ -3442,7 +3491,11 @@ fn a_reinstall_keeps_the_outcome_as_history_until_a_new_run_completes() {
     drop(fixture.tmp);
 }
 
-/// Rewrite one top-level string field of the published manifest.
+/// Rewrite one `execution` string field of the published manifest.
+///
+/// `value` is the literal string to store. Do **not** pass [`json_path`]: that
+/// escapes backslashes for substitution into JSON source text, and `serde_json`
+/// escapes them again on the way out.
 fn patch_manifest(manifest: &std::path::Path, field: &str, value: &str) {
     let body = std::fs::read_to_string(manifest).unwrap();
     let mut json: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -3489,7 +3542,7 @@ fn an_in_place_upgrade_is_allowed_with_a_warning_and_status_recommends_a_reinsta
         )),
         "the allowed run said nothing about the version change: {stderr}"
     );
-    let outcome = read_outcome(&fixture.state);
+    let outcome = read_outcome(&fixture.state, &out);
     assert_eq!(outcome["state"], "success");
     assert_eq!(outcome["summary"]["rotated"], 1, "{stderr}");
     assert_ne!(
@@ -3538,8 +3591,19 @@ fn a_recorded_binary_that_moved_or_vanished_is_still_a_refusal() {
         return;
     };
     let fixture = pinned_run_fixture(&[], |_| {});
-    let gone = fixture.root.join("no-such-xv");
-    patch_manifest(&fixture.manifest, "binary_path", &json_path(&gone));
+    // Built from the manifest's *own* spelling of the working directory, and
+    // written as a plain string. Two Windows-only traps meet here: the fixture
+    // holds a canonicalized (verbatim `\\?\C:\...`) root that xv never
+    // records, and `json_path` escapes backslashes for substitution into JSON
+    // *source text* — handing its output to `serde_json` doubles every
+    // separator again. The result, `\\\\?\\C:\\...`, parses as neither a
+    // verbatim nor a UNC path, so `Path::is_absolute()` is false and the
+    // manifest is rejected by schema validation before the runner ever writes
+    // `last-run.json`. The test still saw exit 3 and `binary_path` on stderr
+    // and looked like it was exercising the drift refusal it names.
+    let gone = std::path::Path::new(&recorded(&fixture.manifest, "/execution/working_directory"))
+        .join("no-such-xv");
+    patch_manifest(&fixture.manifest, "binary_path", &gone.to_string_lossy());
     // Rendered from the patched manifest, so the unit and the manifest still
     // agree: the finding under test is the missing executable, not unit drift.
     if platform != Platform::Schtasks {
@@ -3550,7 +3614,7 @@ fn a_recorded_binary_that_moved_or_vanished_is_still_a_refusal() {
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
     assert_eq!(out.status.code(), Some(3), "{stderr}");
     assert!(stderr.contains("binary_path"), "{stderr}");
-    assert_eq!(read_outcome(&fixture.state)["state"], "refused_drift");
+    assert_eq!(read_outcome(&fixture.state, &out)["state"], "refused_drift");
     assert_eq!(fixture.value(), "pinned-value", "the refused run rotated");
 
     if platform == Platform::Schtasks {
@@ -4182,9 +4246,9 @@ fn install_status_reinstall_uninstall_round_trip() {
         "  Schedule:  daily at 03:00".to_string(),
         "  Target:    default -> local/default".to_string(),
         "  Backend:   local (local)".to_string(),
-        format!("  Config:    {}", conf.display()),
+        format!("  Config:    {}", display_path(&conf)),
         "  Project:   none".to_string(),
-        format!("  Cwd:       {}", root.display()),
+        format!("  Cwd:       {}", display_path(&root)),
         "  Drift:     valid".to_string(),
         format!(
             "  Binary:    {} (installed {}, current {})",
@@ -4193,7 +4257,7 @@ fn install_status_reinstall_uninstall_round_trip() {
             env!("CARGO_PKG_VERSION")
         ),
         "  Last run:  never".to_string(),
-        format!("  Log:       {} (not yet written)", log_file.display()),
+        format!("  Log:       {} (not yet written)", display_path(&log_file)),
     ] {
         assert!(status.contains(&line), "missing {line:?} in:\n{status}");
     }
@@ -4223,7 +4287,7 @@ fn install_status_reinstall_uninstall_round_trip() {
     assert!(
         drifted.contains(&format!(
             "  - config_digest changed; review {} and reinstall",
-            conf.display()
+            display_path(&conf)
         )),
         "{drifted}"
     );
