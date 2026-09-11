@@ -979,6 +979,9 @@ mod tests {
         );
 
         let lock_path = paths.run_lock_path();
+        // Handshake: the runner must not attempt the lock until the probe
+        // holds it, or the test would race its own fixture.
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
         let held = std::thread::spawn(move || {
             let file = std::fs::OpenOptions::new()
                 .read(true)
@@ -986,9 +989,11 @@ mod tests {
                 .open(&lock_path)
                 .expect("open");
             fs2::FileExt::try_lock_shared(&file).expect("shared");
+            held_tx.send(()).expect("signal");
             std::thread::sleep(std::time::Duration::from_millis(300));
             fs2::FileExt::unlock(&file).expect("unlock");
         });
+        held_rx.recv().expect("the probe took the shared lock");
 
         let guard = RunGuard::try_acquire(&paths).expect("acquire");
         assert!(
