@@ -2736,9 +2736,11 @@ fn a_healthy_schedule_renders_every_golden_dimension_and_exits_zero() {
     );
 
     assert_eq!(code, Some(0), "a healthy schedule exits zero: {out}");
+    // The default log shares the manifest's state root (`XV_STATE_HOME` here).
     let log = fixture
-        .root
-        .join(".local/state/xv/rotate.log")
+        .state
+        .join("xv")
+        .join("rotate.log")
         .display()
         .to_string();
     for line in [
@@ -3187,7 +3189,7 @@ fn uninstall_removes_the_pinned_units_and_retains_every_record() {
     let dir = fixture.manifest.parent().unwrap().to_path_buf();
     let units = seed_units_for_manifest(platform, &fixture.root, &fixture.manifest);
     let retained = seed_retained_evidence(&dir);
-    let log_path = fixture.root.join(".local/state/xv/rotate.log");
+    let log_path = fixture.state.join("xv").join("rotate.log");
     std::fs::create_dir_all(log_path.parent().unwrap()).unwrap();
     std::fs::write(&log_path, "a rotation happened\n").unwrap();
 
@@ -3802,7 +3804,7 @@ fn a_second_project_profile_cannot_redirect_the_sweep() {
 
     // The scheduled process carries `XV_ENV=staging` — the other profile, with
     // the other vault.
-    let out = run_pinned_with_ambient_env(&fixture, "staging");
+    let out = run_pinned_fixture_with_ambient_env(&fixture, "staging");
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
     assert_eq!(out.status.code(), Some(0), "{stderr}");
 
@@ -3821,7 +3823,7 @@ fn a_second_project_profile_cannot_redirect_the_sweep() {
 }
 
 /// [`run_pinned`] with a specific `XV_ENV` in the scheduled process.
-fn run_pinned_with_ambient_env(fixture: &PinnedRun, env: &str) -> std::process::Output {
+fn run_pinned_fixture_with_ambient_env(fixture: &PinnedRun, env: &str) -> std::process::Output {
     std::process::Command::new(env!("CARGO_BIN_EXE_xv"))
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
@@ -4103,13 +4105,9 @@ fn round_trip_xv(
     let out = scheduler_output(
         xv_cmd_in(root)
             .env("XV_BACKEND", "local")
+            // One state root for the manifest *and* the default log, so every
+            // recorded path stays inside the fixture on all three platforms.
             .env("XV_STATE_HOME", state)
-            // Windows derives the home directory from the user profile rather
-            // than `HOME`, so the *log* path would otherwise land in the real
-            // one; pinning the state home keeps every recorded path inside the
-            // fixture on all three platforms. `XV_STATE_HOME` still wins for the
-            // manifest root, so the pinned unit is unchanged.
-            .env("XDG_STATE_HOME", root.join(".local/state"))
             .env("XV_SCHEDULE_RUNNER", REGISTERING_SCHEDULER)
             .env("XV_SCHEDULE_RUNNER_LOG", log)
             .args(args),
@@ -4142,7 +4140,7 @@ fn install_status_reinstall_uninstall_round_trip() {
         .join("manifest.json");
     let units = unit_paths_for(platform, &UnitPaths::for_platform(platform, &root));
     let conf = root.join(".config").join("xv").join("xv.conf");
-    let log_file = root.join(".local/state/xv/rotate.log");
+    let log_file = state.join("xv").join("rotate.log");
 
     // ---- install --------------------------------------------------------
     let (code, out) = round_trip_xv(
