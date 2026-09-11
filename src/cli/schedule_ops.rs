@@ -1067,8 +1067,8 @@ async fn run_recorded_sweep(manifest: &ScheduleManifestV1) -> RunOutcomeDraft {
 /// `[ok]`/`[hint]`-prefixed block is not one. The exit code is the machine-
 /// readable part (see [`status_render::status_failure`]): `0` for every state
 /// `status` can describe accurately, the configuration-error code `3` for a
-/// managed schedule that would refuse its next run, a managed manifest that
-/// cannot be read, and a scheduler that could not be queried at all.
+/// schedule that would refuse its next run, a manifest that cannot be read,
+/// and a scheduler that could not be queried at all.
 async fn execute_status() -> Result<()> {
     let platform = Platform::detect()?;
     let home = home_dir()?;
@@ -1090,7 +1090,7 @@ async fn execute_status() -> Result<()> {
         status_render::render_status(&report, platform, output::should_use_rich_stderr())
     );
 
-    match status_render::status_failure(&report) {
+    match status_render::status_failure(&report, platform) {
         Some(message) => Err(CrosstacheError::config(message)),
         None => Ok(()),
     }

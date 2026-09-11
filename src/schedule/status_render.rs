@@ -17,7 +17,7 @@
 //! did all of that, which is what makes every case below testable as a fixed
 //! value.
 
-use crate::schedule::drift::{DriftReport, DriftVerdict};
+use crate::schedule::drift::{field_rank, DriftReason, DriftReport, DriftVerdict};
 use crate::schedule::manifest::ScheduleManifestV1;
 use crate::schedule::outcome::{RunOutcomeV1, RunState};
 use crate::schedule::ownership::{unverified_target_note, Ownership};
@@ -56,31 +56,163 @@ pub(crate) fn status_refuses(report: &ScheduleStatusReport) -> bool {
     target || unit
 }
 
-/// The message `xv schedule status` should fail with, when it should fail.
+/// The headline, its severity, and whether the command fails — decided once.
 ///
-/// Exit code policy, decided from the goldens: a `[warn]` or `[info]` state is
-/// a successful diagnosis and exits `0` — an orphaned manifest, a legacy unit,
-/// a foreign file and "nothing is installed" are all things `status` reports
-/// accurately. An `[error]` state exits with the configuration-error code
-/// (`3`), the same code the scheduled run itself uses when it refuses: a
-/// managed schedule that would refuse tonight, a managed manifest that cannot
-/// be read, and a scheduler that could not be queried at all. That makes
-/// `xv schedule status` usable as a health check in a wrapper script without
-/// parsing its text.
-pub(crate) fn status_failure(report: &ScheduleStatusReport) -> Option<String> {
-    let managed = matches!(report.ownership, Ownership::Managed);
-    if managed && report.manifest_error.is_some() {
-        return Some(
-            "the recorded target of the installed rotation schedule could not be read".into(),
+/// One classification, so the prefix and the exit code cannot disagree. The
+/// invariant is `failure.is_some() == (level == Level::Error)`, asserted by
+/// `an_error_headline_always_fails_and_nothing_else_does`: every `[error]`
+/// exits with the configuration-error code `3`, and every `[ok]`, `[warn]` and
+/// `[info]` exits `0`.
+struct Classification {
+    level: Level,
+    headline: String,
+    /// The message `xv schedule status` fails with. `Some` iff `level` is
+    /// [`Level::Error`].
+    failure: Option<String>,
+}
+
+impl Classification {
+    fn ok(headline: String) -> Self {
+        Self {
+            level: Level::Success,
+            headline,
+            failure: None,
+        }
+    }
+
+    fn info(headline: String) -> Self {
+        Self {
+            level: Level::Info,
+            headline,
+            failure: None,
+        }
+    }
+
+    fn warn(headline: String) -> Self {
+        Self {
+            level: Level::Warn,
+            headline,
+            failure: None,
+        }
+    }
+
+    fn error(headline: String, failure: impl Into<String>) -> Self {
+        Self {
+            level: Level::Error,
+            headline,
+            failure: Some(failure.into()),
+        }
+    }
+}
+
+/// Decide the headline and the exit behavior from the whole report.
+///
+/// Exit-code policy, decided from the goldens: a `[warn]` or `[info]` state is a
+/// successful diagnosis and exits `0` — an orphaned manifest, a legacy unit, a
+/// foreign file and "nothing is installed" are all things `status` reports
+/// accurately. An `[error]` state exits with the configuration-error code `3`,
+/// the same code the scheduled run itself uses when it refuses: a schedule that
+/// would refuse tonight, a manifest that cannot be read, and a scheduler that
+/// could not be queried at all. That makes `xv schedule status` usable as a
+/// health check in a wrapper script without parsing its text.
+///
+/// The order of the arms is precedence, not taxonomy. A manifest that cannot be
+/// read and a refusing target are more specific than "the scheduler would not
+/// answer", and all three are fatal, so which one gets to name the headline
+/// never changes the exit code.
+fn classify(report: &ScheduleStatusReport, scheduler: &str) -> Classification {
+    let scheduler_failure = match &report.scheduler {
+        SchedulerState::Error(detail) => {
+            Some(format!("the scheduler could not be queried: {detail}"))
+        }
+        _ => None,
+    };
+
+    // Nothing of ours on disk and a scheduler that would not answer: presence
+    // is genuinely unknown, and that is the whole finding.
+    if matches!(report.ownership, Ownership::Absent) {
+        return match (&scheduler_failure, &report.scheduler) {
+            (Some(failure), _) => Classification::error(
+                format!(
+                    "Could not determine whether a {scheduler} rotation schedule is installed."
+                ),
+                failure.clone(),
+            ),
+            (None, SchedulerState::Unknown) => Classification::warn(format!(
+                "Could not confirm whether a {scheduler} rotation schedule is installed."
+            )),
+            _ => Classification::info(format!("No {scheduler} rotation schedule is installed.")),
+        };
+    }
+
+    // A manifest that cannot be read is not a healthy schedule: the run it is
+    // pinned to will refuse tonight, and status may not open with the healthy
+    // headline and contradict itself three lines later. An *orphaned* unreadable
+    // manifest is equally unusable — `install` cannot repair what it cannot
+    // read — so it fails too.
+    if report.manifest_error.is_some() {
+        return match report.ownership {
+            Ownership::OrphanedManifest => Classification::error(
+                format!(
+                    "A rotation manifest exists but could not be read, and no {scheduler} is \
+                     installed."
+                ),
+                "the orphaned rotation manifest could not be read",
+            ),
+            _ => Classification::error(
+                format!(
+                    "The recorded target of the {scheduler} rotation schedule could not be read."
+                ),
+                "the recorded target of the installed rotation schedule could not be read",
+            ),
+        };
+    }
+
+    if matches!(report.ownership, Ownership::Managed) && status_refuses(report) {
+        return Classification::error(
+            format!("The installed {scheduler} rotation schedule is unsafe to run."),
+            "the installed rotation schedule would refuse its next run",
         );
     }
-    if managed && status_refuses(report) {
-        return Some("the installed rotation schedule would refuse its next run".into());
+
+    // Ownership came from the bytes on disk, which the scheduler probe does not
+    // participate in — so a managed (or legacy, or foreign) artifact can sit
+    // next to a `launchctl`/`systemctl`/`schtasks` that refused to answer. That
+    // is not a healthy schedule: whether the job is actually registered is
+    // unknown, and the `Scheduler:` line below says which command failed.
+    if let Some(failure) = scheduler_failure {
+        return Classification::error(
+            format!("The {scheduler} rotation schedule could not be confirmed."),
+            failure,
+        );
     }
-    if let SchedulerState::Error(detail) = &report.scheduler {
-        return Some(format!("the scheduler could not be queried: {detail}"));
+
+    match &report.ownership {
+        Ownership::Managed => {
+            Classification::ok(format!("A {scheduler} rotation schedule is installed."))
+        }
+        Ownership::LegacyUnpinned { .. } => Classification::warn(format!(
+            "A legacy {scheduler} rotation schedule is installed."
+        )),
+        Ownership::OrphanedManifest => Classification::warn(format!(
+            "A rotation manifest exists but no {scheduler} is installed."
+        )),
+        Ownership::Foreign { .. } => Classification::warn(format!(
+            "Something xv did not write is at a path the {scheduler} rotation schedule owns."
+        )),
+        // Handled above, before any other arm could claim it.
+        Ownership::Absent => {
+            Classification::info(format!("No {scheduler} rotation schedule is installed."))
+        }
     }
-    None
+}
+
+/// The message `xv schedule status` should fail with, when it should fail.
+///
+/// Reads the same classification the headline does, so the `[error]` prefix and
+/// the non-zero exit are the same decision.
+pub(crate) fn status_failure(report: &ScheduleStatusReport, platform: Platform) -> Option<String> {
+    classify(report, platform.name()).failure
 }
 
 /// Render the whole status block.
@@ -96,59 +228,14 @@ pub(crate) fn render_status(
 ) -> String {
     let scheduler = platform.name();
     let mut lines: Vec<String> = Vec::new();
-    let mut head = |level: Level, message: String| lines.push(format_line(level, &message, rich));
 
     let refuses = status_refuses(report);
-    let unreadable_manifest = report.manifest_error.is_some();
-
-    match &report.ownership {
-        // A manifest that cannot be read is not a healthy schedule: the run it
-        // is pinned to will refuse tonight, and status may not open with the
-        // healthy headline and contradict itself three lines later.
-        Ownership::Managed if unreadable_manifest => head(
-            Level::Error,
-            format!("The recorded target of the {scheduler} rotation schedule could not be read."),
-        ),
-        Ownership::Managed if refuses => head(
-            Level::Error,
-            format!("The installed {scheduler} rotation schedule is unsafe to run."),
-        ),
-        Ownership::Managed => head(
-            Level::Success,
-            format!("A {scheduler} rotation schedule is installed."),
-        ),
-        Ownership::LegacyUnpinned { .. } => head(
-            Level::Warn,
-            format!("A legacy {scheduler} rotation schedule is installed."),
-        ),
-        Ownership::OrphanedManifest if unreadable_manifest => head(
-            Level::Error,
-            format!("A rotation manifest exists but could not be read, and no {scheduler} is installed."),
-        ),
-        Ownership::OrphanedManifest => head(
-            Level::Warn,
-            format!("A rotation manifest exists but no {scheduler} is installed."),
-        ),
-        Ownership::Foreign { .. } => head(
-            Level::Warn,
-            format!("Something xv did not write is at a path the {scheduler} rotation schedule owns."),
-        ),
-        // A scheduler that would not answer is not evidence of absence.
-        Ownership::Absent => match &report.scheduler {
-            SchedulerState::Error(_) => head(
-                Level::Error,
-                format!("Could not determine whether a {scheduler} rotation schedule is installed."),
-            ),
-            SchedulerState::Unknown => head(
-                Level::Warn,
-                format!("Could not confirm whether a {scheduler} rotation schedule is installed."),
-            ),
-            _ => head(
-                Level::Info,
-                format!("No {scheduler} rotation schedule is installed."),
-            ),
-        },
-    }
+    let classification = classify(report, scheduler);
+    lines.push(format_line(
+        classification.level,
+        &classification.headline,
+        rich,
+    ));
 
     if let Some(label) = report.ownership.label() {
         lines.push(dimension("Ownership:", label));
@@ -323,15 +410,26 @@ fn render_manifest_dimensions(
 /// The drift verdict and every reason behind it, target drift first.
 ///
 /// Unit drift is a refusal too, so a report with unit reasons reads `refused`
-/// even when the recorded target itself still recomputes. Reason `detail`
-/// strings are printed verbatim: one of them is not the "differs" sentence
-/// (an unreadable unit says so in its own words), and rebuilding a sentence
-/// from `field` would lose that.
+/// even when the recorded target itself still recomputes.
+///
+/// **Ordering** (goldens line 133, "every difference in manifest-field order"):
+/// the refusals and the warnings are *merged* and sorted by manifest-field rank,
+/// not printed as two blocks. `DriftReport` keeps them in separate vectors
+/// because they mean different things to the runner, but to a reader they are
+/// one list of differences, and a warning about `installed_version` belongs
+/// after a refusal about `config_digest` rather than before it. Unit-drift
+/// reasons follow, in their own fixed `unit_command, unit_cadence,
+/// unit_log_path` order — they are differences from the *unit*, not from the
+/// manifest's fields, so they have no rank in that list.
+///
+/// `detail` strings are printed verbatim: one of them is not the "differs"
+/// sentence (an unreadable unit says so in its own words), and rebuilding a
+/// sentence from `field` would lose that.
 fn render_drift(lines: &mut Vec<String>, report: &ScheduleStatusReport) {
     let Some(drift) = &report.drift else {
         return;
     };
-    let unit_reasons: &[crate::schedule::drift::DriftReason] = report
+    let unit_reasons: &[DriftReason] = report
         .unit_drift
         .as_ref()
         .map_or(&[], |unit| unit.reasons.as_slice());
@@ -345,12 +443,12 @@ fn render_drift(lines: &mut Vec<String>, report: &ScheduleStatusReport) {
         }
     };
     lines.push(dimension("Drift:", verdict));
-    for reason in drift
-        .warnings
-        .iter()
-        .chain(drift.reasons.iter())
-        .chain(unit_reasons.iter())
-    {
+
+    let mut target: Vec<&DriftReason> = drift.reasons.iter().chain(drift.warnings.iter()).collect();
+    // Stable, so two reasons on the same field keep the refusal-before-warning
+    // order the report arrived in.
+    target.sort_by_key(|reason| field_rank(reason.field));
+    for reason in target.into_iter().chain(unit_reasons.iter()) {
         lines.push(format!("  - {}", reason.detail));
     }
 }

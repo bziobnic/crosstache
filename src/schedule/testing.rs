@@ -26,6 +26,9 @@
 //!   what lets a CLI test reach the healthy `status` goldens — which need a
 //!   scheduler that says "installed" and a next run — without registering
 //!   anything anywhere.
+//! - `XV_SCHEDULE_RUNNER=fake:error` answers every command with a failure that
+//!   is not the platform's "no such job" shape, so a caller's
+//!   `SchedulerState::Error` path is exercised instead of its absence path.
 //! - `XV_SCHEDULE_RUNNER_LOG=<path>` appends one `program arg arg…` line per
 //!   invocation, so a test can still prove the right commands were issued with
 //!   the right arguments.
@@ -68,6 +71,10 @@ pub struct RecordingRunner {
     /// The next fire time to report, as an RFC 3339 UTC instant. Only
     /// meaningful together with `installed`.
     next: Option<DateTime<Utc>>,
+    /// Answer every query with a failure that is *not* the platform's "no such
+    /// job" shape, so the caller's `SchedulerState::Error` path is exercised
+    /// rather than its absence path.
+    failing: bool,
 }
 
 impl RecordingRunner {
@@ -82,7 +89,8 @@ impl RecordingRunner {
         runner
     }
 
-    /// Parse `fake`, `fake:installed`, `fake:installed,next=<rfc3339>`.
+    /// Parse `fake`, `fake:installed`, `fake:installed,next=<rfc3339>`,
+    /// `fake:error`.
     ///
     /// Unknown words are ignored rather than rejected: this is a test switch a
     /// release build never reads, and a typo that silently falls back to the
@@ -101,6 +109,7 @@ impl RecordingRunner {
                         .map(|parsed| parsed.with_timezone(&Utc));
                 }
                 _ if option == "installed" => runner.installed = true,
+                _ if option == "error" => runner.failing = true,
                 _ => {}
             }
         }
@@ -123,6 +132,21 @@ impl RecordingRunner {
             || "n/a".to_string(),
             |next| next.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
         )
+    }
+
+    /// A command failure the absence detector must not read as absence.
+    ///
+    /// Deliberately free of every phrase in `ownership::says_absent`: the point
+    /// of the scenario is that a scheduler which *would not answer* is not a
+    /// scheduler that said "no".
+    fn failing_answer(&self, program: &str) -> Option<(i32, String, String)> {
+        self.failing.then(|| {
+            (
+                5,
+                String::new(),
+                format!("{program}: operation not permitted"),
+            )
+        })
     }
 
     /// The registered answers, when the scenario says our job exists.
@@ -194,7 +218,10 @@ impl CommandRunner for RecordingRunner {
         let joined = args.join(" ");
         self.record(&format!("{program} {joined}"));
 
-        if let Some((status, stdout, stderr)) = self.installed_answer(program, &joined) {
+        if let Some((status, stdout, stderr)) = self
+            .failing_answer(program)
+            .or_else(|| self.installed_answer(program, &joined))
+        {
             return Ok(CommandOutput {
                 status,
                 stdout,

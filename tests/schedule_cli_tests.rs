@@ -2899,3 +2899,69 @@ fn no_canary_reaches_the_status_block_the_outcome_or_the_manifest() {
     );
     drop(fixture.tmp);
 }
+
+#[test]
+fn a_managed_schedule_whose_scheduler_fails_is_an_error_and_exits_three() {
+    // Ownership is decided from the unit bytes on disk; the scheduler probe is
+    // independent and can fail on its own. A block that opened `[ok]` and then
+    // exited 3 was the disagreement this closes.
+    let Some(platform) = host_platform() else {
+        return;
+    };
+    if platform == Platform::Schtasks {
+        // Task Scheduler's registration *is* the artifact, so a failed probe
+        // leaves ownership unproven rather than managed; there is nothing to
+        // seed and nothing to assert.
+        return;
+    }
+    let fixture = pinned_run_fixture(&[], |_| {});
+    seed_units_for_manifest(platform, &fixture.root, &fixture.manifest);
+
+    let (healthy, _) = schedule_status_with(&fixture.root, &fixture.state, "fake:installed");
+    assert_eq!(healthy, Some(0), "the fixture did not start healthy");
+
+    let (code, out) = schedule_status_with(&fixture.root, &fixture.state, "fake:error");
+    assert_eq!(
+        code,
+        Some(3),
+        "a scheduler that would not answer must fail the command: {out}"
+    );
+    assert!(
+        out.contains(&format!(
+            "[error] The {} rotation schedule could not be confirmed.",
+            platform.name()
+        )),
+        "{out}"
+    );
+    assert!(out.contains("  Ownership: managed"), "{out}");
+    assert!(out.contains("  Scheduler: error ("), "{out}");
+    assert!(
+        !out.contains("[ok]"),
+        "an `[ok]` headline may never accompany a non-zero exit: {out}"
+    );
+    drop(fixture.tmp);
+}
+
+#[test]
+fn an_unreadable_orphaned_manifest_exits_three() {
+    if host_platform().is_none() {
+        return;
+    }
+    let fixture = pinned_run_fixture(&[], |_| {});
+    // A manifest that parses as JSON but is not a manifest: `install` cannot
+    // repair what it cannot read, so this is an error, not a warning.
+    std::fs::write(&fixture.manifest, "{\"schema_version\": 99}\n").unwrap();
+
+    let (code, out) = schedule_status_with(&fixture.root, &fixture.state, "fake");
+    assert_eq!(code, Some(3), "{out}");
+    assert!(
+        out.contains("[error] A rotation manifest exists but could not be read"),
+        "{out}"
+    );
+    assert!(out.contains("  Target:    unreadable ("), "{out}");
+    assert!(
+        out.contains("[hint] Reinstall the schedule with 'xv schedule install'"),
+        "{out}"
+    );
+    drop(fixture.tmp);
+}

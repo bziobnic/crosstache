@@ -275,7 +275,7 @@ fn a_drift_refusal_renders_every_difference_and_the_accept_hint() {
         ],
     );
     assert_eq!(
-        status_failure(&report).as_deref(),
+        status_failure(&report, Platform::Systemd).as_deref(),
         Some("the installed rotation schedule would refuse its next run"),
         "a refusing schedule must fail the command"
     );
@@ -301,7 +301,7 @@ fn an_orphaned_manifest_matches_the_golden() {
         ],
     );
     assert!(
-        status_failure(&report).is_none(),
+        status_failure(&report, Platform::Systemd).is_none(),
         "an orphaned manifest is an accurate diagnosis, not a failure"
     );
 }
@@ -451,7 +451,7 @@ fn a_scheduler_that_gave_no_readable_answer_is_not_absence() {
         "an unreadable answer may not be reported as absence: {rendered}"
     );
     assert!(
-        status_failure(&report).is_none(),
+        status_failure(&report, Platform::Systemd).is_none(),
         "an unproven answer is a warning, not a failure"
     );
 }
@@ -481,7 +481,7 @@ fn a_scheduler_command_failure_is_an_error_with_a_sanitized_detail() {
         ],
     );
     assert_eq!(
-        status_failure(&report).as_deref(),
+        status_failure(&report, Platform::Systemd).as_deref(),
         Some("the scheduler could not be queried: systemctl --user show exited 1")
     );
 }
@@ -514,7 +514,7 @@ fn an_unreadable_manifest_gets_an_error_headline_not_the_healthy_one() {
         !rendered.contains("[ok]"),
         "a manifest that cannot be read is not a healthy schedule: {rendered}"
     );
-    assert!(status_failure(&report).is_some());
+    assert!(status_failure(&report, Platform::Systemd).is_some());
 }
 
 #[test]
@@ -589,19 +589,97 @@ fn a_warning_verdict_still_prints_its_reason() {
              reinstall the schedule ('xv schedule install') to refresh the rendered unit",
         ],
     );
-    assert!(status_failure(&report).is_none());
+    assert!(status_failure(&report, Platform::Systemd).is_none());
 }
 
 // ---------------------------------------------------------------------------
 // Redaction
 // ---------------------------------------------------------------------------
 
-/// The goldens' canaries, as a pure-rendering check: nothing the renderer adds
-/// can introduce them, and nothing it is handed may be dropped into the block
-/// verbatim from a place a secret could reach.
+/// The renderer must print only the fields it is allowed to print.
+///
+/// Every field the block *does* show legitimately carries user text — paths, a
+/// backend name, an alias, a drift sentence — so "no canary anywhere" would be
+/// unprovable. This tests **field selection** instead: a distinct canary is
+/// planted in every manifest / outcome / diagnostic field the renderer is *not*
+/// allowed to print, and the block must contain none of them, while the fields
+/// it *is* allowed to print must still appear (so the test cannot pass by
+/// rendering nothing).
+///
+/// The excluded set is the interesting one. `config_digest`, `project_digest`,
+/// `backend_identity` and `context_digest` are hashes of the user's files and
+/// account — nothing a diagnosis needs. `diagnostic.message` is the only
+/// free-form string in an outcome; its `code` comes from a closed set, so the
+/// code is printed and the message is not. `manifest_digest` and `installed_at`
+/// are binding metadata, not a dimension.
 #[test]
-fn the_rendered_block_carries_no_canary_it_was_not_given() {
-    let rendered = render(&healthy());
+fn the_block_prints_the_permitted_fields_and_no_others() {
+    const LEAK: &str = "CANARY-MUST-NOT-APPEAR";
+    let mut manifest = manifest();
+    // Fields the renderer must never print.
+    manifest.installed_at = format!("2026-09-09T15:04:05Z{LEAK}-installed-at");
+    manifest.schedule_id = format!("rotation-default{LEAK}-schedule-id");
+    manifest.target.config_digest = format!("{CONFIG_DIGEST}{LEAK}-config-digest");
+    manifest.target.project_digest = Some(format!("{PROJECT_DIGEST}{LEAK}-project-digest"));
+    manifest.target.backend_identity = format!("{BACKEND_IDENTITY}{LEAK}-backend-identity");
+    manifest.target.context_path = Some(format!("/home/alice/.xv/context{LEAK}-context-path"));
+    manifest.target.context_digest = Some(format!("sha256:aa{LEAK}-context-digest"));
+    manifest.target.workspace_source = format!("project{LEAK}-workspace-source");
+    manifest.target.vault_selection = format!("explicit{LEAK}-vault-selection");
+
+    let mut report = healthy();
+    report.manifest = Some((manifest, format!("{MANIFEST_DIGEST}{LEAK}-manifest-digest")));
+    report.last_run = LastRunStatus::Outcome {
+        outcome: RunOutcomeV1 {
+            manifest_digest: format!("{MANIFEST_DIGEST}{LEAK}-outcome-digest"),
+            schedule_id: format!("rotation-default{LEAK}-outcome-schedule-id"),
+            state: RunState::Failed,
+            exit_code: Some(3),
+            summary: None,
+            diagnostic: Some(RunDiagnostic::new(
+                "backend-unavailable",
+                // The one free-form string an outcome carries. A provider error
+                // body would land here, so it may never be rendered.
+                format!("the provider said: {LEAK}-diagnostic-message"),
+            )),
+            ..outcome(RunState::Failed)
+        },
+        previous_install: false,
+    };
+
+    let rendered = render(&report);
+    assert!(
+        !rendered.contains(LEAK),
+        "the renderer printed a field outside its permitted set:\n{rendered}"
+    );
+
+    // …and it really did render the dimensions, so the assertion above is not
+    // vacuous. These are the fields the block is allowed to show.
+    for permitted in [
+        "daily at 03:00",                           // cadence.kind/hour/minute
+        "payments -> aws-prod/payments-production", // alias, backend_name, vault
+        "aws-prod (aws)",                           // backend_name, backend_kind
+        CONFIG_PATH,                                // target.config_path
+        PROJECT_PATH,                               // target.project_path
+        "(environment production)",                 // target.environment
+        CWD,                                        // execution.working_directory
+        BINARY,                                     // execution.binary_path
+        "installed 0.39.0",                         // execution.installed_version
+        LOG,                                        // execution.log_path
+        "failed",                                   // outcome.state
+        "2026-09-10T03:00:00Z",                     // outcome.started_at
+        "2026-09-10T03:00:02Z",                     // outcome.finished_at
+        "exit 3",                                   // outcome.exit_code
+        "backend-unavailable",                      // outcome.diagnostic.code
+    ] {
+        assert!(
+            rendered.contains(permitted),
+            "the block no longer renders {permitted:?}, so the leak check above proves nothing:\n{rendered}"
+        );
+    }
+
+    // The goldens' own canaries, for good measure: nothing the renderer adds
+    // can introduce them.
     for canary in [
         "AKIAIOSFODNN7EXAMPLE",
         "aws-session-token-canary",
@@ -611,4 +689,253 @@ fn the_rendered_block_carries_no_canary_it_was_not_given() {
     ] {
         assert!(!rendered.contains(canary), "{canary} leaked:\n{rendered}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// The one classification behind the prefix and the exit code
+// ---------------------------------------------------------------------------
+
+/// Every report the renderer can be handed, as a matrix: the `[error]` prefix
+/// and the non-zero exit must be the same decision, always.
+#[test]
+fn an_error_headline_always_fails_and_nothing_else_does() {
+    let mut cases: Vec<(&str, ScheduleStatusReport)> = Vec::new();
+
+    cases.push(("healthy", healthy()));
+
+    let mut refused = healthy();
+    refused.drift = Some(DriftReport {
+        verdict: DriftVerdict::Refuse,
+        reasons: vec![DriftReason::new("config_digest", "config_digest changed")],
+        warnings: Vec::new(),
+    });
+    cases.push(("managed + refused target", refused));
+
+    let mut unit = healthy();
+    unit.unit_drift = Some(UnitDriftReport {
+        reasons: vec![DriftReason::new(UNIT_COMMAND, "unit_command differs")],
+    });
+    cases.push(("managed + unit drift", unit));
+
+    let mut warned = healthy();
+    warned.drift = Some(DriftReport {
+        verdict: DriftVerdict::Warning,
+        reasons: Vec::new(),
+        warnings: vec![DriftReason::new(
+            "installed_version",
+            "installed_version changed",
+        )],
+    });
+    cases.push(("managed + warning", warned));
+
+    let mut unreadable = healthy();
+    unreadable.manifest = None;
+    unreadable.manifest_error = Some("not valid JSON".to_string());
+    unreadable.drift = None;
+    unreadable.unit_drift = None;
+    unreadable.executable = None;
+    cases.push(("managed + unreadable manifest", unreadable));
+
+    let mut orphan_unreadable = healthy();
+    orphan_unreadable.ownership = Ownership::OrphanedManifest;
+    orphan_unreadable.scheduler = SchedulerState::Absent;
+    orphan_unreadable.manifest = None;
+    orphan_unreadable.manifest_error = Some("not valid JSON".to_string());
+    orphan_unreadable.drift = None;
+    orphan_unreadable.unit_drift = None;
+    orphan_unreadable.executable = None;
+    cases.push(("orphaned + unreadable manifest", orphan_unreadable));
+
+    let mut orphan = healthy();
+    orphan.ownership = Ownership::OrphanedManifest;
+    orphan.scheduler = SchedulerState::Absent;
+    cases.push(("orphaned", orphan));
+
+    for (label, scheduler) in [
+        ("managed", SchedulerState::Installed),
+        ("managed + scheduler unknown", SchedulerState::Unknown),
+        (
+            "managed + scheduler error",
+            SchedulerState::Error("systemctl --user show exited 1".to_string()),
+        ),
+    ] {
+        let mut report = healthy();
+        report.scheduler = scheduler;
+        cases.push((label, report));
+    }
+
+    for (label, ownership) in [
+        (
+            "legacy",
+            Ownership::LegacyUnpinned {
+                command_line: "/bin/xv rotate --due --force".to_string(),
+            },
+        ),
+        (
+            "foreign",
+            Ownership::Foreign {
+                paths: vec![std::path::PathBuf::from("/tmp/theirs.plist")],
+            },
+        ),
+    ] {
+        for (suffix, scheduler) in [
+            ("", SchedulerState::Installed),
+            (
+                " + scheduler error",
+                SchedulerState::Error("launchctl print exited 5".to_string()),
+            ),
+        ] {
+            let mut report = healthy();
+            report.ownership = ownership.clone();
+            report.scheduler = scheduler;
+            report.manifest = None;
+            report.manifest_error = None;
+            report.drift = None;
+            report.unit_drift = None;
+            report.executable = None;
+            cases.push((
+                Box::leak(format!("{label}{suffix}").into_boxed_str()),
+                report,
+            ));
+        }
+    }
+
+    for (label, scheduler) in [
+        ("absent", SchedulerState::Absent),
+        ("absent + scheduler unknown", SchedulerState::Unknown),
+        (
+            "absent + scheduler error",
+            SchedulerState::Error("schtasks /Query exited 1".to_string()),
+        ),
+    ] {
+        cases.push((
+            label,
+            ScheduleStatusReport {
+                scheduler,
+                next_run: NextRun::Unknown,
+                ownership: Ownership::Absent,
+                manifest: None,
+                manifest_error: None,
+                drift: None,
+                unit_drift: None,
+                executable: None,
+                last_run: LastRunStatus::Never,
+                log: LogStatus::Unknown,
+            },
+        ));
+    }
+
+    for (label, report) in &cases {
+        let rendered = render(report);
+        let headline = rendered.lines().next().expect("a headline");
+        let fails = status_failure(report, Platform::Systemd).is_some();
+        assert_eq!(
+            headline.starts_with("[error]"),
+            fails,
+            "{label}: an `[error]` headline must fail and nothing else may \
+             (headline {headline:?}, fails {fails})"
+        );
+    }
+}
+
+#[test]
+fn a_managed_schedule_whose_scheduler_would_not_answer_is_not_healthy() {
+    let mut report = healthy();
+    report.scheduler = SchedulerState::Error("systemctl --user show exited 1".to_string());
+
+    let rendered = render(&report);
+    assert_in_order(
+        &rendered,
+        &[
+            "[error] The systemd user timer rotation schedule could not be confirmed.",
+            "  Ownership: managed",
+            "  Scheduler: error (systemctl --user show exited 1)",
+            "  Drift:     valid",
+        ],
+    );
+    assert!(
+        !rendered.contains("[ok]"),
+        "whether the job is registered is unknown; that is not `[ok]`: {rendered}"
+    );
+    assert_eq!(
+        status_failure(&report, Platform::Systemd).as_deref(),
+        Some("the scheduler could not be queried: systemctl --user show exited 1")
+    );
+}
+
+#[test]
+fn an_unreadable_orphaned_manifest_is_an_error_and_fails() {
+    let mut report = healthy();
+    report.ownership = Ownership::OrphanedManifest;
+    report.scheduler = SchedulerState::Absent;
+    report.manifest = None;
+    report.manifest_error = Some("manifest.json does not match schema version 1".to_string());
+    report.drift = None;
+    report.unit_drift = None;
+    report.executable = None;
+
+    let rendered = render(&report);
+    assert_in_order(
+        &rendered,
+        &[
+            "[error] A rotation manifest exists but could not be read, and no systemd user timer \
+             is installed.",
+            "  Ownership: orphaned-manifest",
+            "  Target:    unreadable (manifest.json does not match schema version 1)",
+            "[hint] Reinstall the schedule with 'xv schedule install' to regenerate it.",
+        ],
+    );
+    assert_eq!(
+        status_failure(&report, Platform::Systemd).as_deref(),
+        Some("the orphaned rotation manifest could not be read"),
+        "`install` cannot repair a manifest it cannot read"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Drift reason ordering
+// ---------------------------------------------------------------------------
+
+/// Goldens line 133: "every difference in manifest-field order". Refusals and
+/// warnings are one merged list ranked by manifest field, not two blocks —
+/// otherwise an `installed_version` warning would print before a `config_path`
+/// refusal.
+#[test]
+fn refusals_and_warnings_interleave_in_manifest_field_order() {
+    let mut report = healthy();
+    report.drift = Some(DriftReport {
+        verdict: DriftVerdict::Refuse,
+        // Deliberately out of order within each vector, to prove the renderer
+        // ranks rather than trusting the arrival order.
+        reasons: vec![
+            DriftReason::new("vault", "vault changed"),
+            DriftReason::new("config_path", "config_path changed"),
+        ],
+        warnings: vec![
+            DriftReason::new("installed_version", "installed_version changed"),
+            DriftReason::new("project_path", "project_path changed"),
+        ],
+    });
+    report.unit_drift = Some(UnitDriftReport {
+        reasons: vec![DriftReason::new(UNIT_COMMAND, "unit_command differs")],
+    });
+
+    let rendered = render(&report);
+    let reasons: Vec<&str> = rendered
+        .lines()
+        .filter(|line| line.starts_with("  - "))
+        .map(|line| line.trim_start_matches("  - "))
+        .collect();
+    assert_eq!(
+        reasons,
+        vec![
+            "config_path changed",
+            "project_path changed",
+            "vault changed",
+            "installed_version changed",
+            // Unit drift is a difference from the unit, not from a manifest
+            // field, so it has no rank in that list and comes last.
+            "unit_command differs",
+        ]
+    );
 }

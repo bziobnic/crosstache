@@ -150,7 +150,7 @@ const FIELD_ORDER: [&str; 16] = [
     "installed_version",
 ];
 
-fn field_rank(field: &str) -> usize {
+pub(crate) fn field_rank(field: &str) -> usize {
     FIELD_ORDER
         .iter()
         .position(|candidate| *candidate == field)
