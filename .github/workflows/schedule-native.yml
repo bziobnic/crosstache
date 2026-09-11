@@ -22,6 +22,7 @@ on:
   pull_request:
     paths:
       - 'src/schedule/**'
+      - 'src/cli/schedule_ops.rs'
       - 'tests/fixtures/schedule/**'
       - '.github/workflows/schedule-native.yml'
 

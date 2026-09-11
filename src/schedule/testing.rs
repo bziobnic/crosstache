@@ -39,6 +39,19 @@
 //!   registration is remembered beside `XV_SCHEDULE_RUNNER_LOG` when one is
 //!   set, so a later `xv schedule status` in the same test sees the same job,
 //!   and a deregistration forgets it again.
+//!
+//!   **How much that proves differs by platform.** On launchd and systemd the
+//!   answers are read back out of the *unit files on disk*, which the install
+//!   transaction wrote — so a unit whose `ExecStart`/`ProgramArguments` do not
+//!   name this schedule's executable and manifest really does fail stage 6.
+//!   Task Scheduler keeps no artifact of ours: the registration *is* the
+//!   `/Create` arguments, so the fake can only echo them back. A Windows
+//!   stage-6 pass therefore proves the transaction's ordering and the shapes of
+//!   the queries it issues, but it cannot prove that Task Scheduler would have
+//!   accepted or stored those arguments. That is what
+//!   `.github/workflows/schedule-native.yml` exists for — it creates a real
+//!   (harmless, far-future) task and checks the XML and LIST shapes our parsers
+//!   read.
 //! - `XV_SCHEDULE_RUNNER=fake:error` answers every command with a failure that
 //!   is not the platform's "no such job" shape, so a caller's
 //!   `SchedulerState::Error` path is exercised instead of its absence path.
@@ -495,7 +508,20 @@ fn is_deregistration(joined: &str) -> bool {
     joined.starts_with("bootout") || joined.contains("disable --now") || joined.contains("/Delete")
 }
 
-/// Whether these arguments ask a scheduler to *register* something.
+/// Whether these arguments are the command that actually *creates* the
+/// registration.
+///
+/// Narrower than [`is_registration`] on purpose: `systemctl --user
+/// daemon-reload` is part of registering, but uninstall also runs it *after*
+/// `disable --now`, so capturing a registration there would resurrect a job
+/// that had just been removed — and make a lifecycle test pass for the wrong
+/// reason.
+fn establishes_registration(joined: &str) -> bool {
+    joined.starts_with("bootstrap") || joined.contains("enable --now") || joined.contains("/Create")
+}
+
+/// Whether these arguments ask a scheduler to *register* something, in the wide
+/// sense of "a step of registering, which must answer success".
 fn is_registration(joined: &str) -> bool {
     joined.contains("bootstrap")
         || joined.contains("enable --now")
@@ -521,7 +547,7 @@ impl CommandRunner for RecordingRunner {
                 });
             }
         }
-        if is_registration(&joined) {
+        if establishes_registration(&joined) {
             self.capture(program, args);
         }
 
@@ -728,8 +754,29 @@ mod tests {
         }
 
         let runner = registering_runner(None);
+        // `daemon-reload` is a step of registering, but it is not the step that
+        // creates the job — and uninstall runs it after `disable --now`, so a
+        // fake that captured here would resurrect what was just removed.
         assert!(runner
             .run("systemctl", &["--user", "daemon-reload"])
+            .unwrap()
+            .ok());
+        let premature = runner
+            .run(
+                "systemctl",
+                &["--user", "show", "xv-rotate.timer", "--property=LoadState"],
+            )
+            .unwrap();
+        assert!(
+            premature.stdout.contains("LoadState=not-found"),
+            "daemon-reload alone must not register anything: {premature:?}"
+        );
+
+        assert!(runner
+            .run(
+                "systemctl",
+                &["--user", "enable", "--now", "xv-rotate.timer"]
+            )
             .unwrap()
             .ok());
 
@@ -805,12 +852,63 @@ mod tests {
             )
             .unwrap()
             .ok());
-        let after = registering_runner(Some(log));
+        let after = registering_runner(Some(log.clone()));
         let out = after
             .run("launchctl", &["print", "gui/501/com.crosstache.xv-rotate"])
             .unwrap();
         assert!(!out.ok(), "{out:?}");
         assert!(says_absent(&out), "{out:?}");
+
+        // The systemd shape of the same thing: uninstall disables the timer and
+        // *then* reloads the daemon. The reload must not bring the job back.
+        let systemd = registering_runner(Some(log));
+        assert!(systemd
+            .run(
+                "systemctl",
+                &["--user", "enable", "--now", "xv-rotate.timer"]
+            )
+            .unwrap()
+            .ok());
+        assert!(systemd
+            .run(
+                "systemctl",
+                &["--user", "disable", "--now", "xv-rotate.timer"]
+            )
+            .unwrap()
+            .ok());
+        assert!(systemd
+            .run("systemctl", &["--user", "daemon-reload"])
+            .unwrap()
+            .ok());
+        let out = systemd
+            .run(
+                "systemctl",
+                &["--user", "show", "xv-rotate.timer", "--property=LoadState"],
+            )
+            .unwrap();
+        assert!(
+            out.stdout.contains("LoadState=not-found"),
+            "the reload after a disable resurrected the registration: {out:?}"
+        );
+    }
+
+    /// The invariant the CLI tests' release guard rests on: this module — and
+    /// therefore the `XV_SCHEDULE_RUNNER` switch that selects it — exists only
+    /// in a build with debug assertions. A release `xv` contains no fake
+    /// scheduler at all, which is why `tests/schedule_cli_tests.rs` skips every
+    /// scheduler-touching test rather than running it against one.
+    #[test]
+    fn the_fake_scheduler_exists_only_in_builds_with_debug_assertions() {
+        // A compile-time assertion on purpose: the claim is about how this file
+        // is compiled, not about anything that happens at run time.
+        const {
+            assert!(
+                cfg!(debug_assertions),
+                "src/schedule/testing.rs is behind cfg(debug_assertions); if this ever \
+                 compiles without them, a release xv would honor XV_SCHEDULE_RUNNER and the \
+                 CLI tests' release guard would be both unnecessary and wrong"
+            )
+        };
     }
 
     #[test]

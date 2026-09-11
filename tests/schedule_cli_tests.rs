@@ -15,6 +15,68 @@ mod common;
 
 use common::xv_isolated_local_with_opts;
 
+// ---------------------------------------------------------------------------
+// Release-binary guard
+//
+// `xv` honors `XV_SCHEDULE_RUNNER` only under `cfg(debug_assertions)`
+// (`src/schedule/testing.rs`, and `schedule_runner()` in
+// `src/cli/schedule_ops.rs`). In a **release** test binary the fake scheduler is
+// therefore compiled out, and `xv schedule install`/`uninstall`/`status` would
+// reach the developer's own launchd, systemd or Task Scheduler — under a fixed
+// global job name that `HOME` does not sandbox — and deregister or overwrite a
+// rotation schedule they actually rely on. `cargo test --release` must not be
+// able to do that.
+//
+// The test crate is built with the same profile as the binary it spawns, so
+// `cfg!(debug_assertions)` here answers for that binary too. Every test that
+// issues a scheduler-touching subcommand begins with `skip_if_release!()`, and
+// every spawn of one goes through [`scheduler_output`], which refuses to spawn
+// at all when the switch is not compiled in — so forgetting the macro is a loud
+// test failure rather than a silent visit to the real scheduler.
+// ---------------------------------------------------------------------------
+
+/// Whether the `xv` binary these tests spawn honors `XV_SCHEDULE_RUNNER`.
+///
+/// A function rather than a bare `cfg!()` at each call site so the two guards
+/// state the same fact once — and so the assertion in [`scheduler_output`] stays
+/// a *runtime* check: a compile-time one would stop the test crate from building
+/// under `--release` instead of skipping.
+#[inline]
+fn fake_scheduler_is_compiled_in() -> bool {
+    cfg!(debug_assertions)
+}
+
+/// Return early (with a line on stderr) when the binary under test would not
+/// honor the fake scheduler.
+macro_rules! skip_if_release {
+    () => {
+        if !fake_scheduler_is_compiled_in() {
+            eprintln!(
+                "skipping the scheduler-touching test at {}:{}: XV_SCHEDULE_RUNNER is \
+                 compiled out of a release binary, and this test would reach the real \
+                 scheduler",
+                file!(),
+                line!()
+            );
+            return;
+        }
+    };
+}
+
+/// Spawn a command that will reach the platform scheduler.
+///
+/// Refuses to spawn when the fake switch is not compiled in: a release binary
+/// would act on the developer's live session. See the module comment above.
+fn scheduler_output(cmd: &mut std::process::Command) -> std::process::Output {
+    assert!(
+        fake_scheduler_is_compiled_in(),
+        "BUG: a scheduler-touching xv invocation was about to run against a release \
+         binary, where XV_SCHEDULE_RUNNER is compiled out. The test must begin with \
+         skip_if_release!()."
+    );
+    cmd.output().unwrap()
+}
+
 fn xv_cmd_for(store: &std::path::Path) -> std::process::Command {
     let root = store.parent().expect("store has a parent");
     let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_xv"));
@@ -261,12 +323,12 @@ fn print_output_contains_a_loadable_unit_for_this_platform() {
 
 #[test]
 fn invalid_times_are_rejected_before_touching_the_scheduler() {
+    skip_if_release!();
     let (_cmd, _tmp, store) = xv_isolated_local_with_opts(false, false);
     for bad in ["3:0", "24:00", "03:60", "0300", "morning"] {
-        let out = xv_cmd_for(&store)
-            .args(["schedule", "install", "--at", bad, "--force"])
-            .output()
-            .unwrap();
+        let out = scheduler_output(
+            xv_cmd_for(&store).args(["schedule", "install", "--at", bad, "--force"]),
+        );
         assert!(
             !out.status.success(),
             "time {bad:?} should be rejected: {}",
@@ -282,17 +344,15 @@ fn invalid_times_are_rejected_before_touching_the_scheduler() {
 
 #[test]
 fn invalid_interval_is_rejected_by_clap() {
+    skip_if_release!();
     let (_cmd, _tmp, store) = xv_isolated_local_with_opts(false, false);
-    let out = xv_cmd_for(&store)
-        .args([
-            "schedule",
-            "install",
-            "--interval",
-            "fortnightly",
-            "--force",
-        ])
-        .output()
-        .unwrap();
+    let out = scheduler_output(xv_cmd_for(&store).args([
+        "schedule",
+        "install",
+        "--interval",
+        "fortnightly",
+        "--force",
+    ]));
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -509,11 +569,9 @@ fn no_unit_contains_secret_material() {
 
 #[test]
 fn status_reports_absence_without_installing() {
+    skip_if_release!();
     let (_cmd, _tmp, store) = xv_isolated_local_with_opts(false, false);
-    let out = xv_cmd_for(&store)
-        .args(["schedule", "status"])
-        .output()
-        .unwrap();
+    let out = scheduler_output(xv_cmd_for(&store).args(["schedule", "status"]));
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -543,14 +601,12 @@ fn status_reports_absence_without_installing() {
 
 #[test]
 fn uninstall_is_safe_when_nothing_is_installed() {
+    skip_if_release!();
     // Must converge on "absent" rather than erroring, so it is safe in teardown
     // scripts. This does invoke the platform scheduler's delete/bootout, which
     // is a no-op against a job that was never created.
     let (_cmd, _tmp, store) = xv_isolated_local_with_opts(false, false);
-    let out = xv_cmd_for(&store)
-        .args(["schedule", "uninstall"])
-        .output()
-        .unwrap();
+    let out = scheduler_output(xv_cmd_for(&store).args(["schedule", "uninstall"]));
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -838,6 +894,7 @@ fn xv_cmd_in(root: &std::path::Path) -> std::process::Command {
 
 #[test]
 fn schedule_never_creates_a_local_store_or_age_key() {
+    skip_if_release!();
     // Scheduling rotation must describe a target that already exists. Neither
     // the preview nor `status` may bring a store, an identity, or a vault into
     // being — an unattended job pointed at a store xv just invented would
@@ -865,10 +922,7 @@ fn schedule_never_creates_a_local_store_or_age_key() {
     assert!(!print.status.success(), "{combined}");
     assert!(!combined.contains("# --- manifest.json"), "{combined}");
 
-    let status = xv_cmd_in(tmp.path())
-        .args(["schedule", "status"])
-        .output()
-        .unwrap();
+    let status = scheduler_output(xv_cmd_in(tmp.path()).args(["schedule", "status"]));
     let _ = status;
     assert!(
         !store.exists() && !key.exists(),
@@ -2067,6 +2121,7 @@ fn seed_units_for_manifest(
 /// a different target than `--vault pinned`.
 #[test]
 fn a_reinstall_hint_names_the_alias_the_schedule_was_installed_with() {
+    skip_if_release!();
     let context = r#"{
   "current": null,
   "recent": [],
@@ -2106,12 +2161,12 @@ fn a_reinstall_hint_names_the_alias_the_schedule_was_installed_with() {
 }
 
 fn schedule_status(root: &std::path::Path, state: &std::path::Path) -> String {
-    let out = xv_cmd_in(root)
-        .env("XV_BACKEND", "local")
-        .env("XV_STATE_HOME", state)
-        .args(["schedule", "status"])
-        .output()
-        .unwrap();
+    let out = scheduler_output(
+        xv_cmd_in(root)
+            .env("XV_BACKEND", "local")
+            .env("XV_STATE_HOME", state)
+            .args(["schedule", "status"]),
+    );
     format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -2121,6 +2176,7 @@ fn schedule_status(root: &std::path::Path, state: &std::path::Path) -> String {
 
 #[test]
 fn status_labels_a_legacy_unit_and_refuses_to_vouch_for_its_target() {
+    skip_if_release!();
     let Some(platform) = host_platform() else {
         return;
     };
@@ -2153,6 +2209,7 @@ fn status_labels_a_legacy_unit_and_refuses_to_vouch_for_its_target() {
 
 #[test]
 fn status_labels_a_manifest_with_no_unit_as_orphaned() {
+    skip_if_release!();
     if host_platform().is_none() {
         return;
     }
@@ -2171,6 +2228,7 @@ fn status_labels_a_manifest_with_no_unit_as_orphaned() {
 
 #[test]
 fn status_reports_a_managed_schedule_and_the_drift_it_would_refuse_on() {
+    skip_if_release!();
     let Some(platform) = host_platform() else {
         return;
     };
@@ -2202,6 +2260,7 @@ fn status_reports_a_managed_schedule_and_the_drift_it_would_refuse_on() {
 
 #[test]
 fn status_reports_a_foreign_file_at_an_owned_path_without_touching_it() {
+    skip_if_release!();
     let Some(platform) = host_platform() else {
         return;
     };
@@ -2228,6 +2287,7 @@ fn status_reports_a_foreign_file_at_an_owned_path_without_touching_it() {
 
 #[test]
 fn uninstall_removes_the_manifest_and_keeps_every_other_file() {
+    skip_if_release!();
     let Some(platform) = host_platform() else {
         return;
     };
@@ -2263,12 +2323,11 @@ fn uninstall_removes_the_manifest_and_keeps_every_other_file() {
     let log = fixture.root.join("scheduler-calls.log");
     let mut cmd = xv_cmd_in(&fixture.root);
     fake_scheduler(&mut cmd, &log);
-    let out = cmd
-        .env("XV_BACKEND", "local")
-        .env("XV_STATE_HOME", &fixture.state)
-        .args(["schedule", "uninstall"])
-        .output()
-        .unwrap();
+    let out = scheduler_output(
+        cmd.env("XV_BACKEND", "local")
+            .env("XV_STATE_HOME", &fixture.state)
+            .args(["schedule", "uninstall"]),
+    );
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -2329,6 +2388,7 @@ fn uninstall_removes_the_manifest_and_keeps_every_other_file() {
 
 #[test]
 fn uninstall_removes_a_legacy_unit() {
+    skip_if_release!();
     let Some(platform) = host_platform() else {
         return;
     };
@@ -2343,12 +2403,11 @@ fn uninstall_removes_a_legacy_unit() {
     let log = root.join("scheduler-calls.log");
     let mut cmd = xv_cmd_in(&root);
     fake_scheduler(&mut cmd, &log);
-    let out = cmd
-        .env("XV_BACKEND", "local")
-        .env("XV_STATE_HOME", &state)
-        .args(["schedule", "uninstall"])
-        .output()
-        .unwrap();
+    let out = scheduler_output(
+        cmd.env("XV_BACKEND", "local")
+            .env("XV_STATE_HOME", &state)
+            .args(["schedule", "uninstall"]),
+    );
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -2369,6 +2428,7 @@ fn uninstall_removes_a_legacy_unit() {
 
 #[test]
 fn status_names_the_missing_manifest_of_a_pinned_unit() {
+    skip_if_release!();
     // A pinned unit whose manifest is gone is `legacy-unpinned` — its target
     // cannot be proven — but it is *not* the pre-manifest command, so status
     // may not say the unit recorded no target. It recorded one, at a path it
@@ -2607,13 +2667,13 @@ fn schedule_status_with(
     state: &std::path::Path,
     runner: &str,
 ) -> (Option<i32>, String) {
-    let out = xv_cmd_in(root)
-        .env("XV_BACKEND", "local")
-        .env("XV_STATE_HOME", state)
-        .env("XV_SCHEDULE_RUNNER", runner)
-        .args(["schedule", "status"])
-        .output()
-        .unwrap();
+    let out = scheduler_output(
+        xv_cmd_in(root)
+            .env("XV_BACKEND", "local")
+            .env("XV_STATE_HOME", state)
+            .env("XV_SCHEDULE_RUNNER", runner)
+            .args(["schedule", "status"]),
+    );
     (
         out.status.code(),
         format!(
@@ -2638,6 +2698,7 @@ fn seed_last_run(state: &std::path::Path, body: &str) {
 
 #[test]
 fn a_healthy_schedule_renders_every_golden_dimension_and_exits_zero() {
+    skip_if_release!();
     let Some(platform) = host_platform() else {
         return;
     };
@@ -2692,6 +2753,7 @@ fn a_healthy_schedule_renders_every_golden_dimension_and_exits_zero() {
 
 #[test]
 fn a_drifted_schedule_exits_with_the_configuration_error_code() {
+    skip_if_release!();
     let Some(platform) = host_platform() else {
         return;
     };
@@ -2741,6 +2803,7 @@ fn a_drifted_schedule_exits_with_the_configuration_error_code() {
 
 #[test]
 fn a_running_record_with_no_lock_held_reads_as_interrupted() {
+    skip_if_release!();
     if host_platform().is_none() {
         return;
     }
@@ -2774,6 +2837,7 @@ fn a_running_record_with_no_lock_held_reads_as_interrupted() {
 
 #[test]
 fn an_outcome_from_an_earlier_install_is_labelled_previous_install() {
+    skip_if_release!();
     if host_platform().is_none() {
         return;
     }
@@ -2818,6 +2882,7 @@ fn an_outcome_from_an_earlier_install_is_labelled_previous_install() {
 
 #[test]
 fn status_run_from_another_binary_reports_no_current_version_and_no_drift() {
+    skip_if_release!();
     if host_platform().is_none() {
         return;
     }
@@ -2836,20 +2901,20 @@ fn status_run_from_another_binary_reports_no_current_version_and_no_drift() {
         std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
-    let out = std::process::Command::new(&other)
-        .env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .env("HOME", &fixture.root)
-        .env("XDG_CONFIG_HOME", fixture.root.join(".config"))
-        .env("XV_NO_PARENT_CONFIG", "1")
-        .env("NO_COLOR", "1")
-        .env("XV_SCHEDULE_RUNNER", "fake")
-        .env("XV_BACKEND", "local")
-        .env("XV_STATE_HOME", &fixture.state)
-        .current_dir(&fixture.root)
-        .args(["schedule", "status"])
-        .output()
-        .unwrap();
+    let out = scheduler_output(
+        std::process::Command::new(&other)
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("HOME", &fixture.root)
+            .env("XDG_CONFIG_HOME", fixture.root.join(".config"))
+            .env("XV_NO_PARENT_CONFIG", "1")
+            .env("NO_COLOR", "1")
+            .env("XV_SCHEDULE_RUNNER", "fake")
+            .env("XV_BACKEND", "local")
+            .env("XV_STATE_HOME", &fixture.state)
+            .current_dir(&fixture.root)
+            .args(["schedule", "status"]),
+    );
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -2875,6 +2940,7 @@ fn status_run_from_another_binary_reports_no_current_version_and_no_drift() {
 
 #[test]
 fn no_canary_reaches_the_status_block_the_outcome_or_the_manifest() {
+    skip_if_release!();
     if host_platform().is_none() {
         return;
     }
@@ -2930,6 +2996,7 @@ fn no_canary_reaches_the_status_block_the_outcome_or_the_manifest() {
 
 #[test]
 fn a_managed_schedule_whose_scheduler_fails_is_an_error_and_exits_three() {
+    skip_if_release!();
     // Ownership is decided from the unit bytes on disk; the scheduler probe is
     // independent and can fail on its own. A block that opened `[ok]` and then
     // exited 3 was the disagreement this closes.
@@ -2972,6 +3039,7 @@ fn a_managed_schedule_whose_scheduler_fails_is_an_error_and_exits_three() {
 
 #[test]
 fn an_unreadable_orphaned_manifest_exits_three() {
+    skip_if_release!();
     if host_platform().is_none() {
         return;
     }
@@ -3003,12 +3071,11 @@ fn schedule_uninstall(root: &std::path::Path, state: &std::path::Path) -> (Optio
     let log = root.join("uninstall-calls.log");
     let mut cmd = xv_cmd_in(root);
     fake_scheduler(&mut cmd, &log);
-    let out = cmd
-        .env("XV_BACKEND", "local")
-        .env("XV_STATE_HOME", state)
-        .args(["schedule", "uninstall"])
-        .output()
-        .unwrap();
+    let out = scheduler_output(
+        cmd.env("XV_BACKEND", "local")
+            .env("XV_STATE_HOME", state)
+            .args(["schedule", "uninstall"]),
+    );
     (
         out.status.code(),
         format!(
@@ -3042,6 +3109,7 @@ fn seed_retained_evidence(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
 /// parent `schedules/` directory is never a candidate for removal.
 #[test]
 fn uninstall_removes_the_pinned_units_and_retains_every_record() {
+    skip_if_release!();
     let Some(platform) = host_platform() else {
         return;
     };
@@ -3104,6 +3172,7 @@ fn uninstall_removes_the_pinned_units_and_retains_every_record() {
 /// only the foreign manifest stays.
 #[test]
 fn uninstall_deregisters_when_only_the_manifest_is_foreign() {
+    skip_if_release!();
     let Some(platform) = host_platform() else {
         return;
     };
@@ -3118,12 +3187,11 @@ fn uninstall_deregisters_when_only_the_manifest_is_foreign() {
     let log = fixture.root.join("uninstall-calls.log");
     let mut cmd = xv_cmd_in(&fixture.root);
     fake_scheduler(&mut cmd, &log);
-    let out = cmd
-        .env("XV_BACKEND", "local")
-        .env("XV_STATE_HOME", &fixture.state)
-        .args(["schedule", "uninstall"])
-        .output()
-        .unwrap();
+    let out = scheduler_output(
+        cmd.env("XV_BACKEND", "local")
+            .env("XV_STATE_HOME", &fixture.state)
+            .args(["schedule", "uninstall"]),
+    );
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -3162,6 +3230,7 @@ fn uninstall_deregisters_when_only_the_manifest_is_foreign() {
 /// and will fire tonight is the one reading the user must not be left with.
 #[test]
 fn uninstall_says_why_it_left_the_registration_in_place() {
+    skip_if_release!();
     let Some(platform) = host_platform() else {
         return;
     };
@@ -3196,6 +3265,7 @@ fn uninstall_says_why_it_left_the_registration_in_place() {
 /// install)`, because the installation that produced it is gone.
 #[test]
 fn uninstall_keeps_the_last_run_visible_as_history() {
+    skip_if_release!();
     if host_platform().is_none() {
         return;
     }
@@ -3231,6 +3301,7 @@ fn uninstall_keeps_the_last_run_visible_as_history() {
 /// it, and the label goes away only when a new run completes.
 #[test]
 fn a_reinstall_keeps_the_outcome_as_history_until_a_new_run_completes() {
+    skip_if_release!();
     if host_platform().is_none() {
         return;
     }
@@ -3326,6 +3397,7 @@ fn patch_manifest(manifest: &std::path::Path, field: &str, value: &str) {
 /// comparison an upgrade changes.
 #[test]
 fn an_in_place_upgrade_is_allowed_with_a_warning_and_status_recommends_a_reinstall() {
+    skip_if_release!();
     let Some(platform) = host_platform() else {
         return;
     };
@@ -3393,6 +3465,7 @@ fn an_in_place_upgrade_is_allowed_with_a_warning_and_status_recommends_a_reinsta
 /// softened into the in-place-upgrade warning.
 #[test]
 fn a_recorded_binary_that_moved_or_vanished_is_still_a_refusal() {
+    skip_if_release!();
     let Some(platform) = host_platform() else {
         return;
     };
@@ -3802,11 +3875,13 @@ fn no_ambient_selection_input_can_redirect_the_sweep() {
 fn a_missing_config_file_refuses_the_run() {
     let fixture = pinned_run_fixture(&[], |_| {});
     let before = fixture.value();
+    let decoy_before = fixture.decoy_snapshot();
     let body = std::fs::read_to_string(fixture.config_path()).unwrap();
     std::fs::remove_file(fixture.config_path()).unwrap();
 
     let out = fixture.run();
     let stderr = assert_refused(&out, "config_path is missing or unreadable");
+    assert_eq!(fixture.decoy_snapshot(), decoy_before);
 
     // Put it back so the pinned store is readable again.
     std::fs::write(fixture.config_path(), &body).unwrap();
@@ -3824,11 +3899,13 @@ fn a_missing_project_file_refuses_the_run() {
         std::fs::write(root.join(".xv.toml"), project).unwrap();
     });
     let before = fixture.value();
+    let decoy_before = fixture.decoy_snapshot();
     std::fs::remove_file(fixture.root.join(".xv.toml")).unwrap();
 
     let out = fixture.run();
     assert_refused(&out, "project_path is missing or unreadable");
     assert_eq!(fixture.value(), before);
+    assert_eq!(fixture.decoy_snapshot(), decoy_before);
 }
 
 #[test]
@@ -3848,11 +3925,13 @@ fn a_missing_context_file_refuses_the_run() {
         std::fs::write(root.join(".xv").join("context"), context).unwrap();
     });
     let before = fixture.value();
+    let decoy_before = fixture.decoy_snapshot();
     std::fs::remove_file(fixture.root.join(".xv").join("context")).unwrap();
 
     let out = fixture.run();
     assert_refused(&out, "context_path is missing or unreadable");
     assert_eq!(fixture.value(), before);
+    assert_eq!(fixture.decoy_snapshot(), decoy_before);
 }
 
 /// A schedule pinned to a *named* backend refuses once that backend is no
@@ -3923,6 +4002,15 @@ fn a_removed_backend_entry_refuses_the_run() {
 // answers the verification queries out of what it was actually asked to
 // register, and remembers that across the test's several processes, so nothing
 // is registered on the machine running the test.
+//
+// What that proves is not the same on every platform. On launchd and systemd the
+// fake's answers are read back out of the *unit files the transaction wrote*, so
+// a unit that did not name this schedule's executable and manifest would fail
+// stage 6 here. Task Scheduler has no artifact of ours — the registration *is*
+// the `/Create` arguments — so there the fake can only echo them back: this test
+// proves the ordering and the query shapes, not that Task Scheduler would accept
+// or store them. `.github/workflows/schedule-native.yml` covers that gap with a
+// real (harmless, far-future) task on a Windows runner.
 // ---------------------------------------------------------------------------
 
 /// The scenario every step of the round trip uses: a scheduler that answers for
@@ -3946,14 +4034,20 @@ fn round_trip_xv(
     log: &std::path::Path,
     args: &[&str],
 ) -> (Option<i32>, String) {
-    let out = xv_cmd_in(root)
-        .env("XV_BACKEND", "local")
-        .env("XV_STATE_HOME", state)
-        .env("XV_SCHEDULE_RUNNER", REGISTERING_SCHEDULER)
-        .env("XV_SCHEDULE_RUNNER_LOG", log)
-        .args(args)
-        .output()
-        .unwrap();
+    let out = scheduler_output(
+        xv_cmd_in(root)
+            .env("XV_BACKEND", "local")
+            .env("XV_STATE_HOME", state)
+            // Windows derives the home directory from the user profile rather
+            // than `HOME`, so the *log* path would otherwise land in the real
+            // one; pinning the state home keeps every recorded path inside the
+            // fixture on all three platforms. `XV_STATE_HOME` still wins for the
+            // manifest root, so the pinned unit is unchanged.
+            .env("XDG_STATE_HOME", root.join(".local/state"))
+            .env("XV_SCHEDULE_RUNNER", REGISTERING_SCHEDULER)
+            .env("XV_SCHEDULE_RUNNER_LOG", log)
+            .args(args),
+    );
     (
         out.status.code(),
         format!(
@@ -3966,6 +4060,7 @@ fn round_trip_xv(
 
 #[test]
 fn install_status_reinstall_uninstall_round_trip() {
+    skip_if_release!();
     let Some(platform) = host_platform() else {
         return;
     };
