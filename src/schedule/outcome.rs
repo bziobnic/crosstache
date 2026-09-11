@@ -48,8 +48,6 @@ use crate::utils::helpers::{
 
 /// Outcome files are capped at this size before they are ever parsed, matching
 /// the manifest's cap.
-// Consumed by `xv schedule status` (PR 3, task 3), which reads `last-run.json`.
-#[allow(dead_code)]
 const MAX_OUTCOME_BYTES: usize = 64 * 1024;
 
 /// A diagnostic message is limited to this many Unicode **scalar values** —
@@ -80,9 +78,6 @@ pub enum RunState {
 
 impl RunState {
     /// The literal written to `last-run.json`.
-    // Consumed by `xv schedule status` (PR 3, task 3) when it renders the
-    // state token; serde owns the persisted spelling.
-    #[allow(dead_code)]
     pub fn as_str(self) -> &'static str {
         match self {
             RunState::Running => "running",
@@ -157,8 +152,6 @@ pub struct RunOutcomeV1 {
 
 /// A loaded, version-dispatched outcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
-// Consumed by `xv schedule status` (PR 3, task 3), which reads `last-run.json`.
-#[allow(dead_code)]
 pub enum RunOutcome {
     V1(RunOutcomeV1),
 }
@@ -166,8 +159,6 @@ pub enum RunOutcome {
 /// Minimal shape used only to peek `schema_version` before committing to a
 /// concrete version's strict (`deny_unknown_fields`) deserialization.
 #[derive(Debug, Deserialize)]
-// Consumed by `xv schedule status` (PR 3, task 3), which reads `last-run.json`.
-#[allow(dead_code)]
 struct SchemaVersionPeek {
     schema_version: u32,
 }
@@ -297,16 +288,12 @@ pub fn serialize_outcome(outcome: &RunOutcomeV1) -> Vec<u8> {
 // Storage
 // ---------------------------------------------------------------------------
 
-// Consumed by `xv schedule status` (PR 3, task 3), which reads `last-run.json`.
-#[allow(dead_code)]
 fn reject_symlink_components(paths: &ScheduleStatePaths) -> Result<()> {
     reject_if_symlink(paths.root())?;
     reject_if_symlink(&paths.last_run_path())?;
     Ok(())
 }
 
-// Consumed by `xv schedule status` (PR 3, task 3), which reads `last-run.json`.
-#[allow(dead_code)]
 fn read_outcome_bytes(path: &Path, paths: &ScheduleStatePaths) -> Result<Vec<u8>> {
     reject_symlink_components(paths)?;
 
@@ -340,8 +327,6 @@ fn read_outcome_bytes(path: &Path, paths: &ScheduleStatePaths) -> Result<Vec<u8>
 /// `Ok(None)` means no run has been recorded (or the record was removed);
 /// that is a normal state, not an error. An unknown `schema_version` produces
 /// a targeted error rather than a generic deserialization failure.
-// Consumed by `xv schedule status` (PR 3, task 3), which reads `last-run.json`.
-#[allow(dead_code)]
 pub fn load_outcome(paths: &ScheduleStatePaths) -> Result<Option<RunOutcome>> {
     let path = paths.last_run_path();
     // Distinguish absent from unreadable *before* the symlink/size checks, so
@@ -448,9 +433,6 @@ impl RunGuard {
     /// read-only: a diagnosis that materialized the state directory and a lock
     /// inode would change the very thing it was asked to describe — and would
     /// leave `run.lock` behind on a machine that has no schedule installed.
-    // Consumed by `xv schedule status` (PR 3, task 3): the `running` vs
-    // `interrupted` distinction.
-    #[allow(dead_code)]
     pub fn probe_existing(paths: &ScheduleStatePaths) -> Result<Option<bool>> {
         let path = paths.run_lock_path();
         match std::fs::symlink_metadata(&path) {

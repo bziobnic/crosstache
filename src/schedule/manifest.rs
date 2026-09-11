@@ -10,7 +10,7 @@
 //! This module owns three things: locating the per-platform state directory
 //! ([`ScheduleStatePaths`]), the versioned on-disk schema
 //! ([`ScheduleManifestV1`] / [`ScheduleManifest`]), and the bounded,
-//! symlink-safe storage primitives ([`load_manifest`], [`write_manifest_atomic`],
+//! symlink-safe storage primitives ([`load_manifest_with_bytes`], [`write_manifest_atomic`],
 //! [`remove_owned_manifest`]) built on top of the shared helpers in
 //! `crate::utils::helpers`.
 //!
@@ -572,15 +572,11 @@ fn read_manifest_bytes(paths: &ScheduleStatePaths) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// Load and validate `manifest.json`, dispatching on its `schema_version`.
+/// Load and validate `manifest.json`, dispatching on its `schema_version`,
+/// and return the exact bytes that were parsed.
 ///
 /// An unknown `schema_version` produces a targeted error naming reinstall,
 /// rather than a generic deserialization failure.
-pub fn load_manifest(paths: &ScheduleStatePaths) -> Result<ScheduleManifest> {
-    load_manifest_with_bytes(paths).map(|(manifest, _)| manifest)
-}
-
-/// [`load_manifest`], also returning the exact bytes that were parsed.
 ///
 /// The scheduled runner binds its outcome to `sha256(<these bytes>)`, so it
 /// must hash what it actually read — not a re-serialization of the parsed
@@ -657,6 +653,11 @@ pub fn remove_owned_manifest(paths: &ScheduleStatePaths) -> Result<()> {
 mod tests {
     use super::*;
     use crate::schedule::fixture_abs;
+
+    /// Load and discard the bytes — the shape most of these tests care about.
+    fn load_manifest_once(paths: &ScheduleStatePaths) -> Result<ScheduleManifest> {
+        load_manifest_with_bytes(paths).map(|(manifest, _)| manifest)
+    }
 
     fn fixture_manifest() -> ScheduleManifestV1 {
         ScheduleManifestV1 {
@@ -1093,7 +1094,7 @@ mod tests {
         )
         .unwrap();
 
-        let error = load_manifest(&paths).unwrap_err();
+        let error = load_manifest_once(&paths).unwrap_err();
         let message = error.to_string();
         assert!(message.contains("99"));
         assert!(message.contains("reinstall"));
@@ -1220,7 +1221,7 @@ mod tests {
         let manifest = fixture_manifest();
 
         write_manifest_atomic(&paths, &serialize_manifest(&manifest)).unwrap();
-        let loaded = load_manifest(&paths).unwrap();
+        let loaded = load_manifest_once(&paths).unwrap();
         assert_eq!(loaded, ScheduleManifest::V1(manifest));
     }
 
@@ -1257,7 +1258,7 @@ mod tests {
         let oversized = vec![b' '; MAX_MANIFEST_BYTES + 1];
         std::fs::write(paths.manifest_path(), oversized).unwrap();
 
-        let error = load_manifest(&paths).unwrap_err();
+        let error = load_manifest_once(&paths).unwrap_err();
         assert!(error.to_string().contains("byte limit"));
     }
 
@@ -1272,7 +1273,7 @@ mod tests {
         std::fs::write(&real_target, serialize_manifest(&fixture_manifest())).unwrap();
         std::os::unix::fs::symlink(&real_target, paths.manifest_path()).unwrap();
 
-        let error = load_manifest(&paths).unwrap_err();
+        let error = load_manifest_once(&paths).unwrap_err();
         assert!(error.to_string().contains("symlink"));
     }
 
@@ -1296,7 +1297,7 @@ mod tests {
             source: StateRootSource::Home,
         };
 
-        let error = load_manifest(&paths).unwrap_err();
+        let error = load_manifest_once(&paths).unwrap_err();
         assert!(error.to_string().contains("symlink"));
     }
 
@@ -1306,7 +1307,7 @@ mod tests {
         let paths = temp_paths(&dir);
         std::fs::create_dir_all(paths.root()).unwrap();
 
-        assert!(load_manifest(&paths).is_err());
+        assert!(load_manifest_once(&paths).is_err());
     }
 
     #[test]

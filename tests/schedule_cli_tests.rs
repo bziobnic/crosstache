@@ -1981,6 +1981,58 @@ fn seed_pinned_units(
         .collect()
 }
 
+/// Write the units a current `xv` installs *for this exact manifest*.
+///
+/// `seed_pinned_units` renders a schedule of its own invention; that is fine
+/// when the manifest is missing, but a seeded unit whose executable, cadence
+/// or log path disagrees with a manifest that *is* there is unit drift — which
+/// `status` now reports, correctly, as a refusal. A fixture that wants a
+/// healthy managed schedule has to render the unit the installer would have
+/// rendered, so every field is read back out of the published manifest.
+fn seed_units_for_manifest(
+    platform: Platform,
+    home: &std::path::Path,
+    manifest: &std::path::Path,
+) -> Vec<std::path::PathBuf> {
+    let body: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(manifest).unwrap()).unwrap();
+    let number = |value: &serde_json::Value| u32::try_from(value.as_u64().unwrap()).unwrap();
+    let cadence = &body["cadence"];
+    let (hour, minute) = (number(&cadence["hour"]), number(&cadence["minute"]));
+    let interval = match cadence["kind"].as_str().unwrap() {
+        "hourly" => ScheduleInterval::Hourly { minute },
+        "daily" => ScheduleInterval::Daily { hour, minute },
+        "weekly" => ScheduleInterval::Weekly {
+            weekday: 0,
+            hour,
+            minute,
+        },
+        other => panic!("unexpected cadence kind {other}"),
+    };
+    let path_of = |value: &serde_json::Value| std::path::PathBuf::from(value.as_str().unwrap());
+
+    let paths = UnitPaths::for_platform(platform, home);
+    std::fs::create_dir_all(&paths.dir).unwrap();
+    let schedule = RotationSchedule {
+        interval,
+        command: ScheduleCommand::ManifestRun {
+            manifest: manifest.to_path_buf(),
+            working_directory: path_of(&body["execution"]["working_directory"]),
+        },
+        binary: path_of(&body["execution"]["binary_path"]),
+        log_path: path_of(&body["execution"]["log_path"]),
+        home: home.to_path_buf(),
+        state_home: None,
+    };
+    render(platform, &schedule, &paths)
+        .into_iter()
+        .map(|unit| {
+            std::fs::write(&unit.path, &unit.contents).unwrap();
+            unit.path
+        })
+        .collect()
+}
+
 /// The reinstall hint has to be a command the user can paste, which means the
 /// name they installed with — the recorded workspace alias — not a placeholder
 /// and not the real vault behind it. `--vault default` here would send them at
@@ -2098,7 +2150,7 @@ fn status_reports_a_managed_schedule_and_the_drift_it_would_refuse_on() {
         return;
     }
     let fixture = pinned_run_fixture(&[], |_| {});
-    seed_pinned_units(platform, &fixture.root, &fixture.manifest);
+    seed_units_for_manifest(platform, &fixture.root, &fixture.manifest);
 
     let clean = schedule_status(&fixture.root, &fixture.state);
     assert!(clean.contains("Ownership: managed"), "{clean}");
@@ -2508,5 +2560,342 @@ fn a_refusal_found_during_the_sweep_still_ends_terminal() {
     assert_eq!(outcome["exit_code"], 3);
     assert!(outcome["finished_at"].is_string(), "{outcome}");
     assert_eq!(outcome["diagnostic"]["code"], "target_drift");
+    drop(fixture.tmp);
+}
+
+// ---------------------------------------------------------------------------
+// `xv schedule status`: the seven-dimension block
+//
+// The layout itself is pinned by the golden unit tests in
+// `src/schedule/status_render.rs`, which render fixed reports. These tests
+// prove the wiring: that a real `xv schedule status` process collects the
+// dimensions it renders, and exits with the code the state deserves.
+// ---------------------------------------------------------------------------
+
+/// `xv schedule status` with an explicit fake-scheduler scenario. Returns the
+/// exit code and the combined output.
+fn schedule_status_with(
+    root: &std::path::Path,
+    state: &std::path::Path,
+    runner: &str,
+) -> (Option<i32>, String) {
+    let out = xv_cmd_in(root)
+        .env("XV_BACKEND", "local")
+        .env("XV_STATE_HOME", state)
+        .env("XV_SCHEDULE_RUNNER", runner)
+        .args(["schedule", "status"])
+        .output()
+        .unwrap();
+    (
+        out.status.code(),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ),
+    )
+}
+
+/// Overwrite `last-run.json` with a fixed record.
+fn seed_last_run(state: &std::path::Path, body: &str) {
+    let path = last_run_path(state);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, body).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
+#[test]
+fn a_healthy_schedule_renders_every_golden_dimension_and_exits_zero() {
+    let Some(platform) = host_platform() else {
+        return;
+    };
+    if platform == Platform::Schtasks {
+        // No unit file to seed, and this test may not register a real task.
+        return;
+    }
+    let fixture = pinned_run_fixture(&[], |_| {});
+    seed_units_for_manifest(platform, &fixture.root, &fixture.manifest);
+
+    // The scheduler answers "registered" and reports a next fire time, which
+    // is what the golden's healthy block needs. Nothing is registered: the
+    // answer is canned (`src/schedule/testing.rs`).
+    let (code, out) = schedule_status_with(
+        &fixture.root,
+        &fixture.state,
+        "fake:installed,next=2026-09-10T03:00:00Z",
+    );
+
+    assert_eq!(code, Some(0), "a healthy schedule exits zero: {out}");
+    let log = fixture
+        .root
+        .join(".local/state/xv/rotate.log")
+        .display()
+        .to_string();
+    for line in [
+        format!("[ok] A {} rotation schedule is installed.", platform.name()),
+        "  Ownership: managed".to_string(),
+        "  Schedule:  daily at 03:00".to_string(),
+        "  Target:    default -> local/default".to_string(),
+        "  Backend:   local (local)".to_string(),
+        format!("  Config:    {}", fixture.config_path().display()),
+        "  Project:   none".to_string(),
+        format!("  Cwd:       {}", fixture.root.display()),
+        "  Drift:     valid".to_string(),
+        format!(
+            "  Binary:    {} (installed {}, current {})",
+            env!("CARGO_BIN_EXE_xv"),
+            env!("CARGO_PKG_VERSION"),
+            env!("CARGO_PKG_VERSION")
+        ),
+        "  Last run:  never".to_string(),
+        "  Next run:  2026-09-10T03:00:00Z".to_string(),
+        format!("  Log:       {log} (not yet written)"),
+    ] {
+        assert!(out.contains(&line), "missing {line:?} in:\n{out}");
+    }
+    // A healthy schedule has nothing to hint about.
+    assert!(!out.contains("[hint]"), "{out}");
+    drop(fixture.tmp);
+}
+
+#[test]
+fn a_drifted_schedule_exits_with_the_configuration_error_code() {
+    let Some(platform) = host_platform() else {
+        return;
+    };
+    if platform == Platform::Schtasks {
+        return;
+    }
+    let fixture = pinned_run_fixture(&[], |_| {});
+    seed_units_for_manifest(platform, &fixture.root, &fixture.manifest);
+
+    let (clean, _) = schedule_status_with(&fixture.root, &fixture.state, "fake:installed");
+    assert_eq!(clean, Some(0), "the fixture did not start healthy");
+
+    let conf = fixture.config_path();
+    let body = std::fs::read_to_string(&conf).unwrap();
+    std::fs::write(&conf, format!("{body}\n# a later edit\n")).unwrap();
+
+    let (code, out) = schedule_status_with(&fixture.root, &fixture.state, "fake:installed");
+    assert_eq!(
+        code,
+        Some(3),
+        "a schedule that would refuse tonight must fail the command: {out}"
+    );
+    assert!(
+        out.contains(&format!(
+            "[error] The installed {} rotation schedule is unsafe to run.",
+            platform.name()
+        )),
+        "{out}"
+    );
+    assert!(out.contains("  Drift:     refused"), "{out}");
+    assert!(
+        out.contains(&format!(
+            "  - config_digest changed; review {} and reinstall",
+            conf.display()
+        )),
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            "[hint] Review the changes, then run 'xv schedule install --vault default' to accept \
+             the new target."
+        ),
+        "{out}"
+    );
+    drop(fixture.tmp);
+}
+
+#[test]
+fn a_running_record_with_no_lock_held_reads_as_interrupted() {
+    if host_platform().is_none() {
+        return;
+    }
+    let fixture = pinned_run_fixture(&[], |_| {});
+    seed_last_run(
+        &fixture.state,
+        &format!(
+            r#"{{"schema_version":1,"schedule_id":"rotation-default",
+"manifest_digest":"{}","started_at":"2026-09-10T03:00:00Z","finished_at":null,
+"state":"running","exit_code":null,"summary":null,"diagnostic":null}}"#,
+            manifest_digest_of(&fixture.manifest)
+        ),
+    );
+
+    let (code, out) = schedule_status_with(&fixture.root, &fixture.state, "fake");
+    assert_eq!(code, Some(0), "{out}");
+    assert!(
+        out.contains(
+            "  Last run:  interrupted after 2026-09-10T03:00:00Z (no runner holds the lock)"
+        ),
+        "{out}"
+    );
+    // Probing the lock may not take it, and status may not rewrite the record.
+    let body = std::fs::read_to_string(last_run_path(&fixture.state)).unwrap();
+    assert!(
+        body.contains("\"running\""),
+        "status rewrote the record: {body}"
+    );
+    drop(fixture.tmp);
+}
+
+#[test]
+fn an_outcome_from_an_earlier_install_is_labelled_previous_install() {
+    if host_platform().is_none() {
+        return;
+    }
+    let fixture = pinned_run_fixture(&[], |_| {});
+    // A completed run bound to a manifest that is no longer the installed one.
+    seed_last_run(
+        &fixture.state,
+        r#"{"schema_version":1,"schedule_id":"rotation-default",
+"manifest_digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000",
+"started_at":"2026-09-10T03:00:00Z","finished_at":"2026-09-10T03:00:02Z",
+"state":"success","exit_code":0,
+"summary":{"policy_managed":4,"due":2,"rotated":2,"failed":0},"diagnostic":null}"#,
+    );
+
+    let (code, out) = schedule_status_with(&fixture.root, &fixture.state, "fake");
+    assert_eq!(code, Some(0), "{out}");
+    assert!(
+        out.contains(
+            "  Last run:  success; 2026-09-10T03:00:00Z to 2026-09-10T03:00:02Z; 2 due, \
+             2 rotated, 0 failed (previous install)"
+        ),
+        "{out}"
+    );
+
+    // Rebind the same record to the manifest that is actually installed: the
+    // label must disappear, which is what proves it is the digest talking and
+    // not a constant.
+    let body = std::fs::read_to_string(last_run_path(&fixture.state))
+        .unwrap()
+        .replace(
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            &manifest_digest_of(&fixture.manifest),
+        );
+    seed_last_run(&fixture.state, &body);
+    let (_, current) = schedule_status_with(&fixture.root, &fixture.state, "fake");
+    assert!(
+        !current.contains("(previous install)"),
+        "the current install's own outcome was labelled as history: {current}"
+    );
+    drop(fixture.tmp);
+}
+
+#[test]
+fn status_run_from_another_binary_reports_no_current_version_and_no_drift() {
+    if host_platform().is_none() {
+        return;
+    }
+    let fixture = pinned_run_fixture(&[], |_| {});
+
+    // A second copy of this same `xv`, at a path the manifest does not record.
+    // Before the fix this reported `binary_path` drift and refused a schedule
+    // whose own binary was perfectly fine.
+    let elsewhere = fixture.root.join("copies");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let other = elsewhere.join("xv");
+    std::fs::copy(env!("CARGO_BIN_EXE_xv"), &other).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let out = std::process::Command::new(&other)
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", &fixture.root)
+        .env("XDG_CONFIG_HOME", fixture.root.join(".config"))
+        .env("XV_NO_PARENT_CONFIG", "1")
+        .env("NO_COLOR", "1")
+        .env("XV_SCHEDULE_RUNNER", "fake")
+        .env("XV_BACKEND", "local")
+        .env("XV_STATE_HOME", &fixture.state)
+        .current_dir(&fixture.root)
+        .args(["schedule", "status"])
+        .output()
+        .unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(
+        combined.contains(&format!(
+            "  Binary:    {} (installed {}, current unknown (status run from {}))",
+            env!("CARGO_BIN_EXE_xv"),
+            env!("CARGO_PKG_VERSION"),
+            other.display()
+        )),
+        "{combined}"
+    );
+    assert!(
+        !combined.contains("binary_path changed"),
+        "the binary the scheduler runs is fine; only the asking binary differs: {combined}"
+    );
+    assert!(combined.contains("  Drift:     valid"), "{combined}");
+    drop(fixture.tmp);
+}
+
+#[test]
+fn no_canary_reaches_the_status_block_the_outcome_or_the_manifest() {
+    if host_platform().is_none() {
+        return;
+    }
+    let fixture = pinned_run_fixture(&[], |_| {});
+    // A canary as a secret *value*, and another as a secret *name*.
+    set_secret(&fixture.store, "STALE", "super-secret-value-canary");
+    make_due(&fixture.store, "STALE");
+    set_secret(
+        &fixture.store,
+        "AKIAIOSFODNN7EXAMPLE",
+        "azure-client-secret-canary",
+    );
+    make_due(&fixture.store, "AKIAIOSFODNN7EXAMPLE");
+
+    // A completed run, then a failing one: the second removes the pinned store
+    // so the sweep's own read-only vault probe fails, which is the backend
+    // error path whose body must never reach an artifact.
+    let first = fixture.run();
+    assert!(
+        first.status.code() == Some(0) || first.status.code() == Some(3),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    let (_, healthy) = schedule_status_with(&fixture.root, &fixture.state, "fake");
+    std::fs::remove_dir_all(&fixture.store).unwrap();
+    let failed = fixture.run();
+    assert_eq!(failed.status.code(), Some(3));
+    let (_, broken) = schedule_status_with(&fixture.root, &fixture.state, "fake");
+
+    let manifest = std::fs::read_to_string(&fixture.manifest).unwrap();
+    let outcome = std::fs::read_to_string(last_run_path(&fixture.state)).unwrap();
+    for canary in REDACTION_CANARIES {
+        for (what, body) in [
+            ("the healthy status block", &healthy),
+            ("the failing status block", &broken),
+            ("manifest.json", &manifest),
+            ("last-run.json", &outcome),
+        ] {
+            assert!(
+                !body.contains(canary),
+                "canary '{canary}' leaked into {what}:\n{body}"
+            );
+        }
+    }
+    // The canary secret *name* is also a name, and names never appear either.
+    assert!(
+        !outcome.contains("STALE"),
+        "a secret name leaked: {outcome}"
+    );
     drop(fixture.tmp);
 }

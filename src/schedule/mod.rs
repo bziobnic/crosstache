@@ -56,6 +56,7 @@ pub mod outcome;
 pub mod ownership;
 pub mod preview;
 pub mod status;
+pub mod status_render;
 pub mod target;
 /// Debug-only scheduler stand-in for tests that run the real binary.
 #[cfg(debug_assertions)]
@@ -438,7 +439,7 @@ impl RotationSchedule {
     }
 }
 
-fn quote_if_needed(s: &str) -> String {
+pub(crate) fn quote_if_needed(s: &str) -> String {
     if s.contains(' ') {
         format!("\"{s}\"")
     } else {

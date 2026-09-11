@@ -19,6 +19,13 @@
 //! ## Contract
 //!
 //! - `XV_SCHEDULE_RUNNER=fake` swaps this in for [`ProcessRunner`].
+//! - `XV_SCHEDULE_RUNNER=fake:installed` answers every *query* the way a
+//!   scheduler with our job registered would, and
+//!   `fake:installed,next=2026-09-10T03:00:00Z` additionally reports that
+//!   instant as the next fire time, in the platform's own rendering. That is
+//!   what lets a CLI test reach the healthy `status` goldens — which need a
+//!   scheduler that says "installed" and a next run — without registering
+//!   anything anywhere.
 //! - `XV_SCHEDULE_RUNNER_LOG=<path>` appends one `program arg arg…` line per
 //!   invocation, so a test can still prove the right commands were issued with
 //!   the right arguments.
@@ -34,6 +41,8 @@
 use std::io::Write;
 use std::path::PathBuf;
 
+use chrono::{DateTime, Utc};
+
 use crate::error::Result;
 use crate::schedule::{CommandOutput, CommandRunner};
 
@@ -41,24 +50,118 @@ use crate::schedule::{CommandOutput, CommandRunner};
 pub const RUNNER_VAR: &str = "XV_SCHEDULE_RUNNER";
 /// The variable naming the file invocations are appended to.
 pub const RUNNER_LOG_VAR: &str = "XV_SCHEDULE_RUNNER_LOG";
-/// The only accepted value of [`RUNNER_VAR`].
+/// The bare value of [`RUNNER_VAR`]; also the prefix of every scenario
+/// spelling (`fake:installed`, `fake:installed,next=<rfc3339>`).
 pub const FAKE: &str = "fake";
 
-/// Records what it was asked to run and answers "nothing is registered".
+/// Whether `value` selects this runner at all.
+pub fn selects_fake(value: &str) -> bool {
+    value == FAKE || value.starts_with("fake:")
+}
+
+/// Records what it was asked to run and answers from a canned scenario.
 #[derive(Debug, Default)]
 pub struct RecordingRunner {
     log: Option<PathBuf>,
+    /// Answer queries as "our job is registered" instead of "no such job".
+    installed: bool,
+    /// The next fire time to report, as an RFC 3339 UTC instant. Only
+    /// meaningful together with `installed`.
+    next: Option<DateTime<Utc>>,
 }
 
 impl RecordingRunner {
-    /// Read the log destination from the environment. A missing or empty
-    /// value means "answer, but record nothing".
+    /// Read the scenario and the log destination from the environment. A
+    /// missing or empty log value means "answer, but record nothing".
     pub fn from_env() -> Self {
-        Self {
-            log: std::env::var(RUNNER_LOG_VAR)
-                .ok()
-                .filter(|value| !value.is_empty())
-                .map(PathBuf::from),
+        let mut runner = Self::from_spec(&std::env::var(RUNNER_VAR).unwrap_or_default());
+        runner.log = std::env::var(RUNNER_LOG_VAR)
+            .ok()
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+        runner
+    }
+
+    /// Parse `fake`, `fake:installed`, `fake:installed,next=<rfc3339>`.
+    ///
+    /// Unknown words are ignored rather than rejected: this is a test switch a
+    /// release build never reads, and a typo that silently falls back to the
+    /// "nothing is registered" answer fails the test that set it, loudly, at
+    /// the assertion rather than in a panic here.
+    fn from_spec(spec: &str) -> Self {
+        let mut runner = Self::default();
+        let Some((_, options)) = spec.split_once(':') else {
+            return runner;
+        };
+        for option in options.split(',') {
+            match option.split_once('=') {
+                Some(("next", value)) => {
+                    runner.next = DateTime::parse_from_rfc3339(value)
+                        .ok()
+                        .map(|parsed| parsed.with_timezone(&Utc));
+                }
+                _ if option == "installed" => runner.installed = true,
+                _ => {}
+            }
+        }
+        runner
+    }
+
+    /// The next fire time in launchd's spelling, when one was configured.
+    fn launchd_next(&self) -> String {
+        self.next.map_or_else(String::new, |next| {
+            format!(
+                "\n\tnext fire date = {}",
+                next.format("%Y-%m-%d %H:%M:%S +0000")
+            )
+        })
+    }
+
+    /// The next fire time in systemd's `--timestamp=utc` spelling.
+    fn systemd_next(&self) -> String {
+        self.next.map_or_else(
+            || "n/a".to_string(),
+            |next| next.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+        )
+    }
+
+    /// The registered answers, when the scenario says our job exists.
+    fn installed_answer(&self, program: &str, joined: &str) -> Option<(i32, String, String)> {
+        if !self.installed {
+            return None;
+        }
+        match program {
+            "launchctl" if joined.starts_with("print") => Some((
+                0,
+                format!(
+                    "com.crosstache.xv-rotate = {{\n\tstate = waiting{}\n}}",
+                    self.launchd_next()
+                ),
+                String::new(),
+            )),
+            "systemctl" if joined.contains("show") => {
+                // One `show` asks for the registration properties and another
+                // for the next elapse; answer whichever was asked for.
+                let mut stdout = String::new();
+                if joined.contains("LoadState") {
+                    stdout
+                        .push_str("LoadState=loaded\nActiveState=active\nUnitFileState=enabled\n");
+                }
+                if joined.contains("NextElapseUSecRealtime") {
+                    stdout.push_str(&format!("NextElapseUSecRealtime={}\n", self.systemd_next()));
+                }
+                Some((0, stdout, String::new()))
+            }
+            // Task Scheduler's registration *is* the artifact, so a query that
+            // succeeds is the whole answer. The detailed `/V /FO LIST` form
+            // deliberately reports no next run and no `Task To Run`: this fake
+            // renders no task, so claiming one would be an invention.
+            "schtasks" if joined.contains("/Query") => Some((
+                0,
+                "TaskName: \\crosstache-xv-rotate\nNext Run Time: N/A\n".to_string(),
+                String::new(),
+            )),
+            _ => None,
         }
     }
 
@@ -90,6 +193,14 @@ impl CommandRunner for RecordingRunner {
     fn run(&self, program: &str, args: &[&str]) -> Result<CommandOutput> {
         let joined = args.join(" ");
         self.record(&format!("{program} {joined}"));
+
+        if let Some((status, stdout, stderr)) = self.installed_answer(program, &joined) {
+            return Ok(CommandOutput {
+                status,
+                stdout,
+                stderr,
+            });
+        }
 
         if is_registration(&joined) {
             return Ok(CommandOutput {
@@ -188,6 +299,7 @@ mod tests {
         let log = tmp.path().join("calls.log");
         let runner = RecordingRunner {
             log: Some(log.clone()),
+            ..RecordingRunner::default()
         };
         assert!(runner
             .run("systemctl", &["--user", "daemon-reload"])
@@ -212,7 +324,10 @@ mod tests {
     #[test]
     fn recording_is_optional() {
         // No log configured: still answers, writes nothing.
-        let runner = RecordingRunner { log: None };
+        let runner = RecordingRunner {
+            log: None,
+            ..RecordingRunner::default()
+        };
         assert!(!runner.run("schtasks", &["/Query"]).unwrap().ok());
     }
 }

@@ -17,8 +17,9 @@ use crate::schedule::manifest::{
     self as manifest, ManifestCadence, ManifestExecution, ManifestTarget, ScheduleManifestV1,
 };
 use crate::schedule::outcome::{self, RunDiagnostic, RunOutcomeV1, RunState, RunSummary};
-use crate::schedule::ownership::{self, Ownership, SchedulerState};
 use crate::schedule::preview::render_install_preview;
+use crate::schedule::status;
+use crate::schedule::status_render;
 use crate::schedule::target::{
     canonical_path_for_manifest, manifest_path_string, resolve_install_target,
     ResolvedScheduleTarget,
@@ -56,7 +57,8 @@ pub(crate) async fn execute_schedule_command(
 /// `cfg(debug_assertions)`, so a shipped `xv` contains no fake runner and reads
 /// no environment variable to choose one.
 ///
-/// In a debug build `XV_SCHEDULE_RUNNER=fake` swaps in
+/// In a debug build `XV_SCHEDULE_RUNNER=fake` (or one of its scenario
+/// spellings, `fake:installed[,next=<rfc3339>]`) swaps in
 /// [`crate::schedule::testing::RecordingRunner`]. That exists because
 /// `launchctl`, `systemctl --user` and `schtasks` act on the invoking user's
 /// live session under a fixed global job name — `HOME` does not sandbox them —
@@ -65,8 +67,10 @@ pub(crate) async fn execute_schedule_command(
 #[cfg(debug_assertions)]
 fn schedule_runner() -> Box<dyn schedule::CommandRunner> {
     use crate::schedule::testing;
-    match std::env::var(testing::RUNNER_VAR).as_deref() {
-        Ok(testing::FAKE) => Box::new(testing::RecordingRunner::from_env()),
+    match std::env::var(testing::RUNNER_VAR) {
+        Ok(value) if testing::selects_fake(&value) => {
+            Box::new(testing::RecordingRunner::from_env())
+        }
         _ => Box::new(ProcessRunner),
     }
 }
@@ -1047,224 +1051,49 @@ async fn run_recorded_sweep(manifest: &ScheduleManifestV1) -> RunOutcomeDraft {
 
 /// Read-only diagnosis of what is installed.
 ///
-/// Two independent answers, kept apart on purpose: what the scheduler says,
-/// and what is on disk. It contacts no provider — vault verification belongs
-/// to install and to the run itself — and it never claims a target it cannot
-/// read from the manifest. PR 3 replaces this rendering with the design's full
-/// seven-dimension view; what is here is the honest subset.
+/// Collection (`schedule::status::collect_status`) and rendering
+/// (`schedule::status_render::render_status`) are separate: the collector
+/// probes and reads, the renderer is a pure function of what it found, which
+/// is what makes every golden layout testable without a scheduler or a
+/// filesystem.
+///
+/// It contacts no provider — vault verification belongs to install and to the
+/// run itself — writes nothing, and never claims a target it cannot read from
+/// the manifest.
+///
+/// **Channel:** the whole block goes to stderr, like every other `xv`
+/// diagnostic. `status` is human status chrome, not data: the repository's
+/// scripting contract reserves stdout for machine-consumable payloads, and a
+/// `[ok]`/`[hint]`-prefixed block is not one. The exit code is the machine-
+/// readable part (see [`status_render::status_failure`]): `0` for every state
+/// `status` can describe accurately, the configuration-error code `3` for a
+/// managed schedule that would refuse its next run, a managed manifest that
+/// cannot be read, and a scheduler that could not be queried at all.
 async fn execute_status() -> Result<()> {
     let platform = Platform::detect()?;
     let home = home_dir()?;
     let unit_paths = UnitPaths::for_platform(platform, &home);
     let state_paths = manifest::resolve_from_process_env()?;
 
-    let report = ownership::inspect_ownership(
+    let report = status::collect_status(
         platform,
         &unit_paths,
         &state_paths,
         schedule_runner().as_ref(),
-    )?;
-
-    // Read the recorded target *before* the headline: a managed schedule whose
-    // target has drifted will refuse tonight, and announcing it as healthy and
-    // then contradicting that four lines later is not a diagnosis.
-    let recorded = match report.state {
-        Ownership::Managed | Ownership::OrphanedManifest => {
-            Some(read_recorded_target(&state_paths).await?)
-        }
-        _ => None,
-    };
-    let refuses = matches!(
-        recorded,
-        Some(RecordedTarget::Read { ref drift, .. }) if drift.is_refused()
-    );
-
-    match &report.state {
-        Ownership::Managed if refuses => output::error(&format!(
-            "The installed {} rotation schedule is unsafe to run.",
-            platform.name()
-        )),
-        Ownership::Managed => output::success(&format!(
-            "A {} rotation schedule is installed.",
-            platform.name()
-        )),
-        Ownership::LegacyUnpinned { .. } => output::warn(&format!(
-            "A legacy {} rotation schedule is installed.",
-            platform.name()
-        )),
-        Ownership::OrphanedManifest => output::warn(&format!(
-            "A rotation manifest exists but no {} is installed.",
-            platform.name()
-        )),
-        Ownership::Foreign { .. } => output::warn(&format!(
-            "Something xv did not write is at a path the {} rotation schedule owns.",
-            platform.name()
-        )),
-        // A scheduler that would not answer is not evidence of absence.
-        Ownership::Absent => match &report.scheduler {
-            SchedulerState::Error(_) => output::warn(&format!(
-                "Could not determine whether a {} rotation schedule is installed.",
-                platform.name()
-            )),
-            _ => output::info(&format!(
-                "No {} rotation schedule is installed.",
-                platform.name()
-            )),
-        },
-    }
-
-    if let Some(label) = report.state.label() {
-        output::info(&format!("  Ownership: {label}"));
-    }
-    match &report.scheduler {
-        SchedulerState::Error(detail) => output::error(&format!("  Scheduler: error ({detail})")),
-        probe => output::info(&format!("  Scheduler: {}", probe.describe())),
-    }
-
-    match &report.state {
-        Ownership::LegacyUnpinned { command_line } => {
-            output::info(&format!(
-                "  Command:   {}",
-                if command_line.is_empty() {
-                    "unknown (the scheduler did not report one)"
-                } else {
-                    command_line
-                }
-            ));
-            output::info(&format!(
-                "  Target:    {}",
-                ownership::unverified_target_note(command_line)
-            ));
-            output::hint(
-                "Replace it explicitly with 'xv schedule install --vault <alias-or-vault>'.",
-            );
-        }
-        Ownership::Managed | Ownership::OrphanedManifest => {
-            // Echo the name the schedule was installed with, so the hint is a
-            // command the user can paste. Only the placeholder is left when
-            // the manifest could not be read at all.
-            let vault_arg = recorded
-                .as_ref()
-                .and_then(RecordedTarget::install_argument)
-                .unwrap_or("<alias-or-vault>")
-                .to_string();
-            if let Some(recorded) = recorded {
-                recorded.report();
-            }
-            if matches!(report.state, Ownership::OrphanedManifest) {
-                output::hint(&format!(
-                    "Run 'xv schedule install --vault {vault_arg}' to repair the schedule, \
-                     or 'xv schedule uninstall' to remove the manifest.",
-                ));
-            } else if refuses {
-                output::hint(&format!(
-                    "Review the changes, then run 'xv schedule install --vault {vault_arg}' \
-                     to accept the new target.",
-                ));
-            }
-        }
-        Ownership::Foreign { paths } => {
-            for path in paths {
-                output::info(&format!("  Path:      {}", path.display()));
-            }
-            output::hint(
-                "xv will not overwrite or remove a file it did not write. Move it aside, then \
-                 run 'xv schedule install --vault <alias-or-vault>'.",
-            );
-        }
-        Ownership::Absent => {
-            output::hint("Install one with 'xv schedule install --vault <alias-or-vault>'.");
-        }
-    }
-
-    Ok(())
-}
-
-/// What `status` could learn from `manifest.json`.
-enum RecordedTarget {
-    /// The manifest is there but unusable; the message says why.
-    Unreadable(String),
-    /// The recorded target and what recomputing it says today.
-    Read {
-        /// The name the user installed with: the recorded workspace alias, or
-        /// the real vault in the degenerate (no workspace) case. This is what
-        /// a reinstall hint must echo — telling someone to rerun
-        /// `--vault <the real vault>` when they installed `--vault payments`
-        /// would send them at a different target.
-        alias: String,
-        summary: String,
-        drift: drift::DriftReport,
-    },
-}
-
-impl RecordedTarget {
-    /// The `--vault` value a reinstall hint should name, when it is known.
-    fn install_argument(&self) -> Option<&str> {
-        match self {
-            Self::Unreadable(_) => None,
-            Self::Read { alias, .. } => Some(alias.as_str()),
-        }
-    }
-
-    /// Print the `Target:` and `Drift:` lines.
-    fn report(&self) {
-        match self {
-            Self::Unreadable(detail) => {
-                output::error(&format!("  Target:    unreadable ({detail})"));
-                output::hint("Reinstall the schedule with 'xv schedule install' to regenerate it.");
-            }
-            Self::Read { summary, drift, .. } => {
-                output::info(&format!("  Target:    {summary}"));
-                output::info(&format!(
-                    "  Drift:     {}",
-                    match drift.verdict {
-                        drift::DriftVerdict::Valid => "valid",
-                        drift::DriftVerdict::Warning => "warning",
-                        drift::DriftVerdict::Refuse => "refused",
-                    }
-                ));
-                for reason in drift.warnings.iter().chain(drift.reasons.iter()) {
-                    output::info(&format!("  - {}", reason.detail));
-                }
-            }
-        }
-    }
-}
-
-/// Read the recorded target and recompute it.
-///
-/// Reads files only: the same recomputation a scheduled run performs before it
-/// constructs anything, which is what lets `status` say "this would refuse
-/// tonight" without touching the provider.
-async fn read_recorded_target(
-    state_paths: &manifest::ScheduleStatePaths,
-) -> Result<RecordedTarget> {
-    let manifest::ScheduleManifest::V1(recorded) = match manifest::load_manifest(state_paths) {
-        Ok(manifest) => manifest,
-        Err(error) => return Ok(RecordedTarget::Unreadable(error.to_string())),
-    };
-
-    let alias = recorded
-        .target
-        .workspace_alias
-        .clone()
-        .unwrap_or_else(|| recorded.target.vault.clone());
-    let summary = format!(
-        "{alias} -> {}/{}",
-        recorded.target.backend_name, recorded.target.vault
-    );
-
-    let drift = drift::validate_recorded_target(
-        &recorded,
         &recorded_binary_path()?,
         env!("CARGO_PKG_VERSION"),
     )
-    .await;
-    Ok(RecordedTarget::Read {
-        alias,
-        summary,
-        drift,
-    })
+    .await?;
+
+    eprintln!(
+        "{}",
+        status_render::render_status(&report, platform, output::should_use_rich_stderr())
+    );
+
+    match status_render::status_failure(&report) {
+        Some(message) => Err(CrosstacheError::config(message)),
+        None => Ok(()),
+    }
 }
 
 /// Remove the schedule and the manifest, and nothing else.
@@ -1418,8 +1247,16 @@ mod tests {
                 !code.contains('?'),
                 "line {offset} of the no-early-return region uses `?`: {code}"
             );
+            // `return ` catches a value; the bare forms (`return;`, and a
+            // `return` that is the last token before the closing brace of a
+            // block) return from a `-> ()` helper just as early, so they are
+            // caught too.
+            let bare_return = code == "return"
+                || code.starts_with("return;")
+                || code.starts_with("return }")
+                || code.starts_with("return}");
             assert!(
-                !code.starts_with("return "),
+                !code.starts_with("return ") && !bare_return,
                 "line {offset} of the no-early-return region returns early: {code}"
             );
         }
@@ -1658,8 +1495,8 @@ mod tests {
         assert_eq!(written, paths.manifest_path());
 
         // The whole point of the write is that the runner can read it back.
-        let crate::schedule::manifest::ScheduleManifest::V1(loaded) =
-            manifest::load_manifest(&paths).expect("loads back");
+        let (crate::schedule::manifest::ScheduleManifest::V1(loaded), _) =
+            manifest::load_manifest_with_bytes(&paths).expect("loads back");
         // Seconds precision, UTC, `Z` — sub-second noise would make two
         // manifests written in the same second compare unequal for no reason.
         assert_eq!(loaded.installed_at, "2026-09-10T15:04:05Z");

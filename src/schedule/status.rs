@@ -29,13 +29,7 @@
 //! machine's display language and `launchctl` will happily quote another
 //! user's job.
 
-// Every item below is consumed by `xv schedule status` (PR 3, task 3), which
-// renders this report. The typed model, the platform parsers and their fixtures
-// land first, so the rendering has something tested to read; until that lands
-// the collector has no caller inside the library.
-#![allow(dead_code)]
-
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chrono::{FixedOffset, NaiveDateTime, TimeZone, Utc};
 
@@ -111,7 +105,14 @@ pub(crate) struct ExecutableStatus {
     pub(crate) installed_version: String,
     pub(crate) current_version: String,
     /// Whether the `xv` asking is the `xv` the unit will run.
+    ///
+    /// `false` means `current_version` describes *this* process, not the
+    /// binary the scheduler invokes, so it may not be reported as the
+    /// installed binary's version.
     pub(crate) current_matches_path: bool,
+    /// The path of the `xv` that ran `status`, for the "current unknown"
+    /// rendering when it is not the recorded one.
+    pub(crate) invoking_path: String,
 }
 
 /// How the last recorded run ended, if there was one.
@@ -269,7 +270,27 @@ pub(crate) async fn collect_status(
     let mut executable = None;
     let mut log = LogStatus::Unknown;
     if let Some((manifest, _)) = &manifest {
-        drift = Some(drift::validate_recorded_target(manifest, now_binary, now_version).await);
+        // Validate the executable the *scheduler* will run, not the one that
+        // happens to be asking. `status` may be invoked from any `xv` on
+        // PATH — a build tree, another version, a copy — and feeding that
+        // path into `validate_execution` made every such run report
+        // `binary_path` drift for a schedule that would have run perfectly.
+        // So the recorded path is compared with itself (which leaves the
+        // existence / regular-file / executable-bit checks doing the real
+        // work), and the version comparison is only meaningful when this
+        // process *is* the recorded binary; otherwise the recorded version is
+        // passed back in so the in-place-upgrade warning cannot fire on
+        // evidence we do not have.
+        let recorded_binary = PathBuf::from(&manifest.execution.binary_path);
+        let current_matches_path = now_binary == recorded_binary.as_path();
+        let version_for_drift = if current_matches_path {
+            now_version
+        } else {
+            manifest.execution.installed_version.as_str()
+        };
+        drift = Some(
+            drift::validate_recorded_target(manifest, &recorded_binary, version_for_drift).await,
+        );
         unit_drift = Some(inspect_unit_drift(
             platform, unit_paths, state, manifest, runner,
         )?);
@@ -277,7 +298,8 @@ pub(crate) async fn collect_status(
             recorded_path: manifest.execution.binary_path.clone(),
             installed_version: manifest.execution.installed_version.clone(),
             current_version: now_version.to_string(),
-            current_matches_path: now_binary == Path::new(&manifest.execution.binary_path),
+            current_matches_path,
+            invoking_path: now_binary.display().to_string(),
         });
         log = inspect_log(Path::new(&manifest.execution.log_path));
     }
@@ -822,7 +844,7 @@ fn windows_path_key(path: &str) -> String {
 /// The recorded cadence as an interval, when its `kind` is one this build
 /// renders. An unrecognized kind is a manifest problem, not a unit problem, so
 /// the cadence comparison is skipped rather than reported here.
-fn manifest_interval(cadence: &ManifestCadence) -> Option<ScheduleInterval> {
+pub(crate) fn manifest_interval(cadence: &ManifestCadence) -> Option<ScheduleInterval> {
     let hour = u32::from(cadence.hour);
     let minute = u32::from(cadence.minute);
     match cadence.kind.as_str() {
