@@ -1047,16 +1047,24 @@ mod tests {
         PathBuf::from(path.to_string_lossy().replace('\\', "/"))
     }
 
+    /// A fixture location that is absolute on *this* host (manifest validation
+    /// insists on that) yet still Unix-shaped, so it survives systemd/launchd
+    /// unit text unchanged: `/home/alice/bin/xv` here, `C:/home/alice/bin/xv`
+    /// on Windows.
+    fn unix_abs(unix_path: &str) -> PathBuf {
+        unix_shaped(Path::new(&fixture_abs(unix_path)))
+    }
+
     fn pinned_schedule(manifest: &Path, interval: ScheduleInterval, log: &str) -> RotationSchedule {
         RotationSchedule {
             interval,
             command: ScheduleCommand::ManifestRun {
                 manifest: unix_shaped(manifest),
-                working_directory: PathBuf::from("/home/alice/work"),
+                working_directory: unix_abs("/home/alice/work"),
             },
-            binary: PathBuf::from("/home/alice/bin/xv"),
-            log_path: PathBuf::from(log),
-            home: PathBuf::from("/home/alice"),
+            binary: unix_abs("/home/alice/bin/xv"),
+            log_path: unix_abs(log),
+            home: unix_abs("/home/alice"),
             state_home: None,
         }
     }
@@ -1366,7 +1374,9 @@ mod tests {
                 "/home/alice/rotate.log",
             );
             let mut manifest = manifest_for(&schedule);
-            manifest.execution.log_path = "/home/alice/rotate.log".to_string();
+            manifest.execution.log_path = unix_abs("/home/alice/rotate.log")
+                .to_string_lossy()
+                .to_string();
             seed_units(platform, &schedule, &f.units);
             let report =
                 inspect_unit_drift(platform, &f.units, &f.state, &manifest, &registered()).unwrap();
@@ -1424,7 +1434,9 @@ mod tests {
                 "/home/alice/rotate.log",
             );
             let mut manifest = manifest_for(&schedule);
-            manifest.execution.log_path = "/home/alice/elsewhere.log".to_string();
+            manifest.execution.log_path = unix_abs("/home/alice/elsewhere.log")
+                .to_string_lossy()
+                .to_string();
             seed_units(platform, &schedule, &f.units);
             let report =
                 inspect_unit_drift(platform, &f.units, &f.state, &manifest, &registered()).unwrap();
@@ -1475,11 +1487,11 @@ mod tests {
             interval: ScheduleInterval::Daily { hour: 3, minute: 0 },
             command: ScheduleCommand::ManifestRun {
                 manifest: unix_shaped(manifest),
-                working_directory: PathBuf::from("/home/alice/my work"),
+                working_directory: unix_abs("/home/alice/my work"),
             },
-            binary: PathBuf::from("/home/alice/my bin/xv"),
-            log_path: PathBuf::from("/home/alice/my logs/rotate & audit.log"),
-            home: PathBuf::from("/home/alice"),
+            binary: unix_abs("/home/alice/my bin/xv"),
+            log_path: unix_abs("/home/alice/my logs/rotate & audit.log"),
+            home: unix_abs("/home/alice"),
             state_home: None,
         }
     }
@@ -1666,7 +1678,9 @@ mod tests {
                 "/home/alice/elsewhere.log",
             );
             let mut manifest = manifest_for(&schedule);
-            manifest.execution.log_path = "/home/alice/rotate.log".to_string();
+            manifest.execution.log_path = unix_abs("/home/alice/rotate.log")
+                .to_string_lossy()
+                .to_string();
             manifest.cadence.hour = 17;
             seed_units(platform, &schedule, &f.units);
             let report =
@@ -1782,7 +1796,7 @@ mod tests {
                 "LoadState=not-found\nActiveState=inactive\nUnitFileState=\n",
                 "",
             ),
-            Path::new("/home/alice/bin/xv"),
+            &unix_abs("/home/alice/bin/xv"),
             "0.40.0",
         )
         .await
@@ -1950,7 +1964,7 @@ mod tests {
             &f.units,
             &f.state,
             &registered(),
-            Path::new("/home/alice/bin/xv"),
+            &unix_abs("/home/alice/bin/xv"),
             "0.39.0",
         )
         .await
@@ -1974,7 +1988,7 @@ mod tests {
             &f.units,
             &f.state,
             &registered(),
-            Path::new("/home/alice/bin/xv"),
+            &unix_abs("/home/alice/bin/xv"),
             "0.39.0",
         )
         .await
@@ -2114,7 +2128,7 @@ mod tests {
             &f.units,
             &f.state,
             &registered(),
-            Path::new("/home/alice/bin/xv"),
+            &unix_abs("/home/alice/bin/xv"),
             "0.39.0",
         )
         .await
@@ -2132,7 +2146,7 @@ mod tests {
             &f.units,
             &f.state,
             &registered(),
-            Path::new("/home/alice/bin/xv"),
+            &unix_abs("/home/alice/bin/xv"),
             "0.39.0",
         )
         .await
@@ -2186,7 +2200,7 @@ mod tests {
             &f.units,
             &f.state,
             &registered(),
-            Path::new("/home/alice/bin/xv"),
+            &unix_abs("/home/alice/bin/xv"),
             "0.39.0",
         )
         .await
