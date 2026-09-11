@@ -1159,8 +1159,10 @@ pub enum Commands {
     ///
     /// Installs a per-user job in the platform's own scheduler (launchd on
     /// macOS, a systemd user timer on Linux, Task Scheduler on Windows) that
-    /// runs `xv rotate --due --force` on a cadence. No daemon, and nothing
-    /// system-wide.
+    /// runs `xv schedule run --manifest <path>` on a cadence. The target is
+    /// pinned at install time into that manifest, so the scheduled run sweeps
+    /// the vault you installed it for rather than whatever the environment
+    /// resolves to at 3am. No daemon, and nothing system-wide.
     Schedule {
         #[command(subcommand)]
         command: ScheduleCommands,
@@ -1601,9 +1603,11 @@ pub enum BackendCommands {
 pub enum ScheduleCommands {
     /// Install (or reinstall) the automatic rotation schedule.
     ///
-    /// The scheduled job runs `xv rotate --due --force`, so only secrets that
-    /// already carry a rotation policy and are already past it are touched.
-    /// Reinstalling replaces the existing job.
+    /// Records the resolved target in a manifest and registers a job that runs
+    /// `xv schedule run --manifest <path>`. Only secrets that already carry a
+    /// rotation policy and are already past it are touched, and the run refuses
+    /// if the recorded target no longer resolves to the same place.
+    /// Reinstalling replaces the existing job and repins the target.
     Install {
         /// How often the sweep runs.
         #[arg(long, default_value = "daily", value_parser = ["hourly", "daily", "weekly"])]

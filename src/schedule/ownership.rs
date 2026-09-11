@@ -32,7 +32,38 @@ use crate::schedule::{
     ScheduleCommand, UnitPaths, SCHTASKS_NAME, SYSTEMD_UNIT,
 };
 
-pub use crate::schedule::status::SchedulerState;
+/// What the platform scheduler answered when asked about our entry.
+///
+/// Four states, because collapsing any two of them lies to somebody: a
+/// `launchctl` that will not run is not an absent schedule, and a `systemctl`
+/// whose output we could not read is not a registered one either.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SchedulerState {
+    /// The scheduler reports our entry is registered.
+    Installed,
+    /// The scheduler ran and said it has no such entry.
+    Absent,
+    /// The scheduler ran, exited successfully, and said something we could not
+    /// interpret. Presence is unproven either way.
+    Unknown,
+    /// The scheduler could not be run, or failed for some reason other than
+    /// "no such entry". The string is sanitized: the command name and its exit
+    /// status, never the raw output, which on Windows is locale-dependent and
+    /// on Unix may quote paths from another user's job.
+    Error(String),
+}
+
+impl SchedulerState {
+    /// Display form for the `Scheduler:` status line.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Installed => "installed".to_string(),
+            Self::Absent => "not registered".to_string(),
+            Self::Unknown => "unknown (the scheduler gave no readable answer)".to_string(),
+            Self::Error(detail) => format!("error ({detail})"),
+        }
+    }
+}
 
 /// Who owns what is installed.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -128,11 +128,12 @@ fn render(report: &ScheduleStatusReport) -> String {
 }
 
 /// Assert that every golden line appears, in the golden's order.
-fn assert_in_order(rendered: &str, expected: &[&str]) {
+fn assert_in_order<S: AsRef<str>>(rendered: &str, expected: &[S]) {
     let mut lines = rendered.lines();
     for wanted in expected {
+        let wanted = wanted.as_ref();
         assert!(
-            lines.any(|line| line == *wanted),
+            lines.any(|line| line == wanted),
             "missing (or out of order) golden line {wanted:?} in:\n{rendered}"
         );
     }
@@ -753,6 +754,7 @@ fn an_error_headline_always_fails_and_nothing_else_does() {
 
     for (label, scheduler) in [
         ("managed", SchedulerState::Installed),
+        ("managed + scheduler absent", SchedulerState::Absent),
         ("managed + scheduler unknown", SchedulerState::Unknown),
         (
             "managed + scheduler error",
@@ -780,23 +782,29 @@ fn an_error_headline_always_fails_and_nothing_else_does() {
     ] {
         for (suffix, scheduler) in [
             ("", SchedulerState::Installed),
+            (" + scheduler absent", SchedulerState::Absent),
             (
                 " + scheduler error",
                 SchedulerState::Error("launchctl print exited 5".to_string()),
             ),
         ] {
-            let mut report = healthy();
-            report.ownership = ownership.clone();
-            report.scheduler = scheduler;
-            report.manifest = None;
-            report.manifest_error = None;
-            report.drift = None;
-            report.unit_drift = None;
-            report.executable = None;
-            cases.push((
-                Box::leak(format!("{label}{suffix}").into_boxed_str()),
-                report,
-            ));
+            for (manifest_suffix, manifest_error) in [
+                ("", None),
+                (" + unreadable manifest", Some("not valid JSON".to_string())),
+            ] {
+                let mut report = healthy();
+                report.ownership = ownership.clone();
+                report.scheduler = scheduler.clone();
+                report.manifest = None;
+                report.manifest_error = manifest_error;
+                report.drift = None;
+                report.unit_drift = None;
+                report.executable = None;
+                cases.push((
+                    Box::leak(format!("{label}{suffix}{manifest_suffix}").into_boxed_str()),
+                    report,
+                ));
+            }
         }
     }
 
@@ -860,6 +868,139 @@ fn a_managed_schedule_whose_scheduler_would_not_answer_is_not_healthy() {
     assert_eq!(
         status_failure(&report, Platform::Systemd).as_deref(),
         Some("the scheduler could not be queried: systemctl --user show exited 1")
+    );
+}
+
+/// A unit `xv` wrote, still on disk, that the scheduler has no record of.
+///
+/// `systemctl --user disable --now xv-rotate.timer` and `launchctl bootout`
+/// both leave the files behind, so ownership still reads `managed` from the
+/// bytes — and nothing fires. Status must say so on every platform, in the
+/// `Scheduler:` dimension *and* in the headline, and it must fail.
+#[test]
+fn a_managed_schedule_the_scheduler_never_registered_is_an_error() {
+    for platform in [Platform::Launchd, Platform::Systemd, Platform::Schtasks] {
+        let mut report = healthy();
+        report.scheduler = SchedulerState::Absent;
+        report.next_run = NextRun::Unknown;
+
+        let rendered = render_status(&report, platform, false);
+        assert_in_order(
+            &rendered,
+            &[
+                format!(
+                    "[error] The {} rotation schedule is not registered.",
+                    platform.name()
+                ),
+                "  Ownership: managed".to_string(),
+                "  Scheduler: not registered".to_string(),
+                "  Drift:     valid".to_string(),
+                "[hint] Run 'xv schedule install --vault payments' to register it again."
+                    .to_string(),
+            ],
+        );
+        assert!(
+            !rendered.contains("[ok]"),
+            "{platform:?}: a job the scheduler does not have cannot be `[ok]`:\n{rendered}"
+        );
+        assert_eq!(
+            status_failure(&report, platform).as_deref(),
+            Some("the installed rotation schedule is not registered with the scheduler"),
+            "{platform:?}"
+        );
+    }
+}
+
+/// The registration is the missing piece, not the target — so the block still
+/// renders every dimension a managed schedule has.
+#[test]
+fn an_unregistered_managed_schedule_still_reports_its_recorded_target() {
+    let mut report = healthy();
+    report.scheduler = SchedulerState::Absent;
+    let rendered = render_status(&report, Platform::Systemd, false);
+    assert_in_order(
+        &rendered,
+        &[
+            "  Ownership: managed",
+            "  Scheduler: not registered",
+            "  Schedule:  daily at 03:00",
+            "  Target:    payments -> aws-prod/payments-production",
+            "  Backend:   aws-prod (aws)",
+            "  Log:       /home/alice/.local/state/xv/rotate.log (not yet written)",
+        ],
+    );
+}
+
+/// A legacy unit next to a manifest that cannot be parsed. The manifest error
+/// is the fatal one — `status` cannot read the recorded target — and the
+/// legacy dimensions still say what the installed command actually is.
+#[test]
+fn a_legacy_unit_with_an_unreadable_manifest_is_an_error_and_fails() {
+    let command = "/home/alice/bin/xv rotate --due --force --vault payments-production";
+    let mut report = healthy();
+    report.ownership = Ownership::LegacyUnpinned {
+        command_line: command.to_string(),
+    };
+    report.manifest = None;
+    report.manifest_error = Some("not valid JSON".to_string());
+    report.drift = None;
+    report.unit_drift = None;
+    report.executable = None;
+
+    let rendered = render_status(&report, Platform::Systemd, false);
+    assert_in_order(
+        &rendered,
+        &[
+            "[error] The recorded target of the systemd user timer rotation schedule could not \
+             be read."
+                .to_string(),
+            "  Ownership: legacy-unpinned".to_string(),
+            format!("  Command:   {command}"),
+            "  Target:    unverified (the legacy unit does not record backend or account \
+             identity)"
+                .to_string(),
+            "[hint] Replace it explicitly with 'xv schedule install --vault <alias-or-vault>'."
+                .to_string(),
+        ],
+    );
+    assert_eq!(
+        status_failure(&report, Platform::Systemd).as_deref(),
+        Some("the recorded target of the installed rotation schedule could not be read")
+    );
+}
+
+/// A foreign artifact next to a manifest that cannot be parsed. Neither
+/// dimension may be dropped: the paths are what the reader has to act on, and
+/// the unreadable manifest is still why the command fails.
+#[test]
+fn a_foreign_artifact_with_an_unreadable_manifest_is_an_error_and_fails() {
+    let mut report = healthy();
+    report.ownership = Ownership::Foreign {
+        paths: vec![std::path::PathBuf::from(
+            "/home/alice/.config/systemd/user/xv-rotate.service",
+        )],
+    };
+    report.manifest = None;
+    report.manifest_error = Some("not valid JSON".to_string());
+    report.drift = None;
+    report.unit_drift = None;
+    report.executable = None;
+
+    let rendered = render_status(&report, Platform::Systemd, false);
+    assert_in_order(
+        &rendered,
+        &[
+            "[error] The recorded target of the systemd user timer rotation schedule could not be \
+             read.",
+            "  Ownership: foreign",
+            "  Path:      /home/alice/.config/systemd/user/xv-rotate.service",
+            "[hint] xv will not overwrite or remove a file it did not write. Move it aside, then \
+             run 'xv schedule install --vault <alias-or-vault>'.",
+        ],
+    );
+    assert_eq!(
+        status_failure(&report, Platform::Systemd).as_deref(),
+        Some("the recorded target of the installed rotation schedule could not be read")
     );
 }
 

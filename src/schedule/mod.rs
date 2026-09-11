@@ -307,10 +307,9 @@ pub enum ScheduleCommand {
     /// whatever the environment then says, which is exactly what the pinned
     /// manifest replaces, so [`install`] refuses it. It survives as a shape
     /// because `xv schedule status` must still recognize — and label
-    /// `legacy-unpinned` — a job an older `xv` registered.
-    // Constructed only by tests today; `xv schedule status` constructs it to
-    // compare against an installed job's command line in a later task.
-    #[allow(dead_code)]
+    /// `legacy-unpinned` — a job an older `xv` registered: `ownership`'s
+    /// recognizer builds this variant's own arguments rather than a
+    /// hand-written string, so the two cannot drift apart.
     LegacyRotateDue {
         /// Vault to sweep. `None` leaves the scheduled run to resolve the
         /// config default, which is a common source of surprise.

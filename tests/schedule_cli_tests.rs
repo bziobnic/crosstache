@@ -641,6 +641,23 @@ fn schedule_help_explains_it_is_not_a_daemon() {
         stdout.contains("No daemon"),
         "help should say what it does not do: {stdout}"
     );
+    // What the registered job actually runs. Help that still promised the
+    // pre-manifest sweep would send a reader looking for a `--vault` in a unit
+    // that has none, and would describe a target resolved at 3am rather than
+    // one pinned at install.
+    assert!(
+        stdout.contains("xv schedule run --manifest"),
+        "help should name the pinned manifest runner: {stdout}"
+    );
+    assert!(
+        stdout.contains("pinned"),
+        "help should say the target is pinned at install: {stdout}"
+    );
+    assert!(
+        !stdout.contains("rotate --due --force"),
+        "the scheduled job has not run the unpinned sweep since the manifest \
+         landed: {stdout}"
+    );
 }
 
 /// Attach a two-vault workspace to the context store the isolated command
@@ -2748,6 +2765,55 @@ fn a_healthy_schedule_renders_every_golden_dimension_and_exits_zero() {
     }
     // A healthy schedule has nothing to hint about.
     assert!(!out.contains("[hint]"), "{out}");
+    drop(fixture.tmp);
+}
+
+/// The same healthy fixture, with a scheduler that says it has never heard of
+/// our job. `systemctl --user disable --now` and `launchctl bootout` both leave
+/// the unit files exactly where install wrote them, so ownership still reads
+/// `managed` — and nothing fires. The bare `fake` runner answers every query in
+/// the platform's own "no such job" shape, which is exactly that state.
+#[test]
+fn a_managed_schedule_the_scheduler_deregistered_fails_instead_of_reporting_ok() {
+    skip_if_release!();
+    let Some(platform) = host_platform() else {
+        return;
+    };
+    if platform == Platform::Schtasks {
+        // Task Scheduler keeps no artifact of ours: with no registration there
+        // is no `managed` ownership to contradict, and this test may not
+        // register a real task.
+        return;
+    }
+    let fixture = pinned_run_fixture(&[], |_| {});
+    seed_units_for_manifest(platform, &fixture.root, &fixture.manifest);
+
+    let (clean, _) = schedule_status_with(&fixture.root, &fixture.state, "fake:installed");
+    assert_eq!(clean, Some(0), "the fixture did not start healthy");
+
+    let (code, out) = schedule_status_with(&fixture.root, &fixture.state, "fake");
+    assert_eq!(
+        code,
+        Some(3),
+        "a job the scheduler does not have will never fire: {out}"
+    );
+    assert!(
+        out.contains(&format!(
+            "[error] The {} rotation schedule is not registered.",
+            platform.name()
+        )),
+        "{out}"
+    );
+    assert!(out.contains("  Ownership: managed"), "{out}");
+    assert!(out.contains("  Scheduler: not registered"), "{out}");
+    assert!(
+        out.contains("[hint] Run 'xv schedule install --vault default' to register it again."),
+        "{out}"
+    );
+    assert!(
+        !out.contains("[ok]"),
+        "status may never say a deregistered schedule is installed: {out}"
+    );
     drop(fixture.tmp);
 }
 

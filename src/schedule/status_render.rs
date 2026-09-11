@@ -20,10 +20,10 @@
 use crate::schedule::drift::{field_rank, DriftReason, DriftReport, DriftVerdict};
 use crate::schedule::manifest::ScheduleManifestV1;
 use crate::schedule::outcome::{RunOutcomeV1, RunState};
-use crate::schedule::ownership::{unverified_target_note, Ownership};
+use crate::schedule::ownership::{unverified_target_note, Ownership, SchedulerState};
 use crate::schedule::status::manifest_interval;
 use crate::schedule::status::{
-    ExecutableStatus, LastRunStatus, LogStatus, NextRun, ScheduleStatusReport, SchedulerState,
+    ExecutableStatus, LastRunStatus, LogStatus, NextRun, ScheduleStatusReport,
 };
 use crate::schedule::{quote_if_needed, Platform};
 use crate::utils::output::{format_line, Level};
@@ -112,14 +112,16 @@ impl Classification {
 /// foreign file and "nothing is installed" are all things `status` reports
 /// accurately. An `[error]` state exits with the configuration-error code `3`,
 /// the same code the scheduled run itself uses when it refuses: a schedule that
-/// would refuse tonight, a manifest that cannot be read, and a scheduler that
-/// could not be queried at all. That makes `xv schedule status` usable as a
+/// would refuse tonight, a manifest that cannot be read, a managed unit the
+/// scheduler says it has never heard of, and a scheduler that could not be
+/// queried at all. That makes `xv schedule status` usable as a
 /// health check in a wrapper script without parsing its text.
 ///
 /// The order of the arms is precedence, not taxonomy. A manifest that cannot be
-/// read and a refusing target are more specific than "the scheduler would not
-/// answer", and all three are fatal, so which one gets to name the headline
-/// never changes the exit code.
+/// read and a refusing target are more specific than the two scheduler-dimension
+/// findings ("it has no such job" and "it would not answer"), and all of them
+/// are fatal, so which one gets to name the headline never changes the exit
+/// code.
 fn classify(report: &ScheduleStatusReport, scheduler: &str) -> Classification {
     let scheduler_failure = match &report.scheduler {
         SchedulerState::Error(detail) => {
@@ -180,6 +182,20 @@ fn classify(report: &ScheduleStatusReport, scheduler: &str) -> Classification {
     // next to a `launchctl`/`systemctl`/`schtasks` that refused to answer. That
     // is not a healthy schedule: whether the job is actually registered is
     // unknown, and the `Scheduler:` line below says which command failed.
+    // Ownership is read from the bytes on disk; registration is a separate
+    // question, and a managed unit the scheduler does not know about will not
+    // fire at all. `systemctl --user disable --now` and `launchctl bootout`
+    // both leave the files exactly where install wrote them, so this is the one
+    // state where `[ok] ... is installed.` would be a lie with a working-looking
+    // block under it.
+    if matches!(report.ownership, Ownership::Managed) && report.scheduler == SchedulerState::Absent
+    {
+        return Classification::error(
+            format!("The {scheduler} rotation schedule is not registered."),
+            "the installed rotation schedule is not registered with the scheduler",
+        );
+    }
+
     if let Some(failure) = scheduler_failure {
         return Classification::error(
             format!("The {scheduler} rotation schedule could not be confirmed."),
@@ -230,6 +246,8 @@ pub(crate) fn render_status(
     let mut lines: Vec<String> = Vec::new();
 
     let refuses = status_refuses(report);
+    let unregistered = matches!(report.ownership, Ownership::Managed)
+        && report.scheduler == SchedulerState::Absent;
     let classification = classify(report, scheduler);
     lines.push(format_line(
         classification.level,
@@ -240,14 +258,19 @@ pub(crate) fn render_status(
     if let Some(label) = report.ownership.label() {
         lines.push(dimension("Ownership:", label));
     }
-    // The scheduler dimension earns a line only when it says something the
-    // headline does not: `installed` is what "A ... schedule is installed."
-    // already means, and `not registered` is what every non-managed headline
-    // already says.
+    // The scheduler dimension earns a line whenever it says something the
+    // headline does not. `installed` is what "A ... schedule is installed."
+    // already means, so it stays silent; everything else is printed. `not
+    // registered` in particular must be visible for *any* ownership we found on
+    // disk — an artifact exists, and the scheduler does not know about it — and
+    // is suppressed only when there is no artifact either, where the headline
+    // has already said nothing is installed.
     if matches!(
         report.scheduler,
         SchedulerState::Unknown | SchedulerState::Error(_)
-    ) {
+    ) || (report.scheduler == SchedulerState::Absent
+        && !matches!(report.ownership, Ownership::Absent))
+    {
         lines.push(dimension("Scheduler:", report.scheduler.describe()));
     }
 
@@ -291,6 +314,16 @@ pub(crate) fn render_status(
                         hints.push(format!(
                             "Review the changes, then run 'xv schedule install --vault {alias}' \
                              to accept the new target."
+                        ));
+                    } else if unregistered {
+                        // The files are ours and intact; what is missing is the
+                        // registration. Reinstall is the only command that
+                        // re-registers it, and it must be aimed at the name the
+                        // schedule was installed with. Ordered after the drift
+                        // hint deliberately, so the hint always answers the
+                        // headline `classify` chose.
+                        hints.push(format!(
+                            "Run 'xv schedule install --vault {alias}' to register it again."
                         ));
                     } else if has_warnings(report) {
                         // The design's drift table: a same-path binary at a new

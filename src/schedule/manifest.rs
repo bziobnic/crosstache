@@ -162,18 +162,14 @@ impl ScheduleStatePaths {
         self.root.join("manifest.json")
     }
 
-    /// `last-run.json` — owned by the scheduled runner.
-    // The scheduled runner and the install transaction consume these; the
-    // renderer/runner scaffolding does not.
-    #[allow(dead_code)]
+    /// `last-run.json` — owned by the scheduled runner, read by `status`, and
+    /// deliberately retained by `uninstall`.
     pub fn last_run_path(&self) -> PathBuf {
         self.root.join("last-run.json")
     }
 
-    /// `run.lock` — persistent lock inode owned by the scheduled runner.
-    // The scheduled runner and the install transaction consume these; the
-    // renderer/runner scaffolding does not.
-    #[allow(dead_code)]
+    /// `run.lock` — persistent lock inode owned by the scheduled runner, and
+    /// probed by `status` to tell a live run from an interrupted one.
     pub fn run_lock_path(&self) -> PathBuf {
         self.root.join("run.lock")
     }

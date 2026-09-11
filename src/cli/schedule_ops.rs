@@ -719,11 +719,11 @@ async fn execute_run(supplied_manifest: &Path) -> Result<()> {
 
 /// What the run did, in the shape `last-run.json` needs.
 ///
-/// **Seam for PR 3 (outcome persistence).** Nothing here is written to disk
-/// yet; the runner returns this draft instead of persisting it so the file
-/// format, its locking and its retention can land as one change. Everything a
-/// result file needs is already in it, and everything in it is safe to
-/// serialize: counts, a fixed state token, and a diagnostic whose code and
+/// The sweep builds this draft and the caller turns it into the persisted
+/// [`RunOutcomeV1`], so the decision about *what happened* is separate from the
+/// decision about *what is written* — the draft also carries the human-facing
+/// error, which the file may not. Everything it contributes to the file is safe
+/// to serialize: counts, a fixed state token, and a diagnostic whose code and
 /// message come from closed sets (`DueRotationFailureCategory::code`,
 /// `DueRotationErrorKind::code`, or the drift fields) — never from a secret
 /// name, a vault value, or a provider error body.

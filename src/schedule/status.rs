@@ -31,7 +31,7 @@
 
 use std::path::{Path, PathBuf};
 
-use chrono::{FixedOffset, NaiveDateTime, TimeZone, Utc};
+use chrono::{NaiveDateTime, TimeZone, Utc};
 
 use crate::error::Result;
 use crate::schedule::drift::{self, DriftReason, DriftReport};
@@ -42,7 +42,7 @@ use crate::schedule::manifest::{
 use crate::schedule::outcome::{load_outcome, RunGuard, RunOutcome, RunOutcomeV1, RunState};
 use crate::schedule::ownership::{
     inspect_ownership, plist_program_arguments, schtasks_task_to_run, systemd_exec_start,
-    xml_unescape, Ownership,
+    xml_unescape, Ownership, SchedulerState,
 };
 use crate::schedule::{
     launchd_calendar_pairs, launchd_domain_target, systemd_on_calendar, CommandRunner, Platform,
@@ -52,39 +52,6 @@ use crate::schedule::{
 // ---------------------------------------------------------------------------
 // Dimensions
 // ---------------------------------------------------------------------------
-
-/// What the platform scheduler answered when asked about our entry.
-///
-/// Four states, because collapsing any two of them lies to somebody: a
-/// `launchctl` that will not run is not an absent schedule, and a `systemctl`
-/// whose output we could not read is not a registered one either.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SchedulerState {
-    /// The scheduler reports our entry is registered.
-    Installed,
-    /// The scheduler ran and said it has no such entry.
-    Absent,
-    /// The scheduler ran, exited successfully, and said something we could not
-    /// interpret. Presence is unproven either way.
-    Unknown,
-    /// The scheduler could not be run, or failed for some reason other than
-    /// "no such entry". The string is sanitized: the command name and its exit
-    /// status, never the raw output, which on Windows is locale-dependent and
-    /// on Unix may quote paths from another user's job.
-    Error(String),
-}
-
-impl SchedulerState {
-    /// Display form for the `Scheduler:` status line.
-    pub fn describe(&self) -> String {
-        match self {
-            Self::Installed => "installed".to_string(),
-            Self::Absent => "not registered".to_string(),
-            Self::Unknown => "unknown (the scheduler gave no readable answer)".to_string(),
-            Self::Error(detail) => format!("error ({detail})"),
-        }
-    }
-}
 
 /// When the scheduler says the job fires next.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -419,16 +386,10 @@ pub(crate) fn probe_next_run(platform: Platform, runner: &dyn CommandRunner) -> 
             "schtasks",
             &["/Query", "/TN", SCHTASKS_NAME, "/V", "/FO", "LIST"],
         ) {
-            Ok(out) if out.ok() => parse_schtasks_next_run(&out.stdout, local_offset()),
+            Ok(out) if out.ok() => parse_schtasks_next_run(&out.stdout),
             _ => NextRun::Unknown,
         },
     }
-}
-
-/// The host's current UTC offset, for the one scheduler that reports local
-/// wall-clock time with no zone at all.
-fn local_offset() -> FixedOffset {
-    *chrono::Local::now().offset()
 }
 
 /// `launchctl print` output → the next fire date, when it prints one.
@@ -495,14 +456,23 @@ pub(crate) fn parse_systemd_next_run(output: &str) -> NextRun {
 
 /// `schtasks /Query /TN <name> /V /FO LIST` → `Next Run Time:`.
 ///
-/// The value is rendered in the machine's display language and short-date
-/// format, and `3/9/2026` means two different days depending on where the
-/// host was set up. Rather than guess, only an unambiguous ISO-like
-/// `YYYY-MM-DD HH:MM:SS` is accepted; `N/A`, `Disabled` and every locale
-/// short-date form yield [`NextRun::Unknown`]. Windows prints no zone, so the
-/// caller supplies the host offset that turns a local wall clock into an
-/// instant.
-pub(crate) fn parse_schtasks_next_run(output: &str, offset: FixedOffset) -> NextRun {
+/// Two independent ways this value can mean more than one instant, and both
+/// end in [`NextRun::Unknown`] rather than a guess:
+///
+/// 1. **The date is locale-formatted.** `schtasks` renders in the machine's
+///    display language and short-date format, and `3/9/2026` is two different
+///    days depending on where the host was set up.
+/// 2. **The time carries no zone.** The usual `Next Run Time` is a bare local
+///    wall clock. Attributing the host's *current* UTC offset to a time in the
+///    future is wrong across a DST boundary — `03:00` the night the clocks move
+///    is an hour away from where that arithmetic lands it — and status would
+///    print a confident instant that the scheduler never said.
+///
+/// So only a value that names its own offset is accepted: RFC 3339
+/// (`2026-09-10T03:00:00Z`, `2026-09-10T03:00:00+02:00`) or the same date and
+/// time with a numeric `±hhmm`. `N/A`, `Disabled`, every locale short-date form
+/// and every zoneless time yield [`NextRun::Unknown`].
+pub(crate) fn parse_schtasks_next_run(output: &str) -> NextRun {
     let Some(value) = field_value(output, "next run time") else {
         return NextRun::Unknown;
     };
@@ -513,11 +483,12 @@ pub(crate) fn parse_schtasks_next_run(output: &str, offset: FixedOffset) -> Next
     {
         return NextRun::Unknown;
     }
-    for format in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"] {
-        if let Ok(naive) = NaiveDateTime::parse_from_str(value, format) {
-            if let chrono::LocalResult::Single(parsed) = offset.from_local_datetime(&naive) {
-                return NextRun::At(rfc3339_utc(parsed.with_timezone(&Utc)));
-            }
+    if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(value) {
+        return NextRun::At(rfc3339_utc(parsed.with_timezone(&Utc)));
+    }
+    for format in ["%Y-%m-%d %H:%M:%S %z", "%Y-%m-%dT%H:%M:%S %z"] {
+        if let Ok(parsed) = chrono::DateTime::parse_from_str(value, format) {
+            return NextRun::At(rfc3339_utc(parsed.with_timezone(&Utc)));
         }
     }
     NextRun::Unknown
@@ -1234,36 +1205,50 @@ mod tests {
 
     #[test]
     fn schtasks_never_guesses_a_locale_formatted_next_run() {
-        let utc = FixedOffset::east_opt(0).unwrap();
+        // A value that names its own offset is unambiguous, in either form.
         assert_eq!(
-            parse_schtasks_next_run("Next Run Time: 2026-09-10 03:00:00\r\n", utc),
+            parse_schtasks_next_run("Next Run Time: 2026-09-10T03:00:00Z\r\n"),
             NextRun::At("2026-09-10T03:00:00Z".to_string())
         );
-        // Local wall clock is converted with the offset the caller supplies.
-        let minus_seven = FixedOffset::east_opt(-7 * 3600).unwrap();
         assert_eq!(
-            parse_schtasks_next_run("Next Run Time: 2026-09-10 03:00:00\r\n", minus_seven),
+            parse_schtasks_next_run("Next Run Time: 2026-09-10T03:00:00-07:00\r\n"),
             NextRun::At("2026-09-10T10:00:00Z".to_string())
+        );
+        assert_eq!(
+            parse_schtasks_next_run("Next Run Time: 2026-09-10 03:00:00 -0700\r\n"),
+            NextRun::At("2026-09-10T10:00:00Z".to_string())
+        );
+        // The shape `schtasks` actually prints: a bare local wall clock. The
+        // host's *current* UTC offset is not the offset that will be in force
+        // on the far side of a DST boundary, so this is refused rather than
+        // guessed.
+        assert_eq!(
+            parse_schtasks_next_run("Next Run Time: 2026-09-10 03:00:00\r\n"),
+            NextRun::Unknown
+        );
+        assert_eq!(
+            parse_schtasks_next_run("Next Run Time: 2026-09-10T03:00:00\r\n"),
+            NextRun::Unknown
         );
         // `3/9/2026` is two different days depending on the host's locale.
         assert_eq!(
-            parse_schtasks_next_run("Next Run Time: 3/9/2026 3:00:00 AM\r\n", utc),
+            parse_schtasks_next_run("Next Run Time: 3/9/2026 3:00:00 AM\r\n"),
             NextRun::Unknown
         );
         assert_eq!(
-            parse_schtasks_next_run("Next Run Time: 10.09.2026 03:00:00\r\n", utc),
+            parse_schtasks_next_run("Next Run Time: 10.09.2026 03:00:00\r\n"),
             NextRun::Unknown
         );
         assert_eq!(
-            parse_schtasks_next_run("Next Run Time: N/A\r\n", utc),
+            parse_schtasks_next_run("Next Run Time: N/A\r\n"),
             NextRun::Unknown
         );
         assert_eq!(
-            parse_schtasks_next_run("Next Run Time: Disabled\r\n", utc),
+            parse_schtasks_next_run("Next Run Time: Disabled\r\n"),
             NextRun::Unknown
         );
         assert_eq!(
-            parse_schtasks_next_run("Status: Ready\r\n", utc),
+            parse_schtasks_next_run("Status: Ready\r\n"),
             NextRun::Unknown
         );
     }
@@ -1808,6 +1793,67 @@ mod tests {
             } => assert!(!previous_install),
             other => panic!("expected a completed outcome, got {other:?}"),
         }
+    }
+
+    /// `systemctl --user disable --now` leaves our files exactly where install
+    /// wrote them, so ownership still reads `managed` from the bytes while the
+    /// scheduler has no record of the timer. `collect_status` must keep the two
+    /// dimensions apart and report the second honestly — the rendered block
+    /// turns that into an `[error]`, and nothing here may launder it into
+    /// "installed".
+    #[tokio::test]
+    async fn a_managed_unit_the_scheduler_deregistered_is_managed_and_not_registered() {
+        let f = fixture();
+        let schedule = pinned_schedule(
+            &f.state.manifest_path(),
+            ScheduleInterval::Daily { hour: 3, minute: 0 },
+            "/home/alice/rotate.log",
+        );
+        let manifest = manifest_for(&schedule);
+        seed_manifest(&f.state, &manifest);
+        seed_units(Platform::Systemd, &schedule, &f.units);
+
+        // The timer file is gone from the user manager's view; the unit files
+        // on disk are untouched.
+        let deregistered = FakeRunner::new()
+            .answering(
+                "systemctl --user show",
+                0,
+                "LoadState=not-found\nActiveState=inactive\nUnitFileState=\n",
+                "",
+            )
+            .otherwise(0, "", "");
+
+        let report = collect_status(
+            Platform::Systemd,
+            &f.units,
+            &f.state,
+            &deregistered,
+            Path::new(&manifest.execution.binary_path),
+            "0.39.0",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.ownership, Ownership::Managed);
+        assert_eq!(report.scheduler, SchedulerState::Absent);
+        // The recorded target names files this fixture does not have, so drift
+        // refuses too and owns the headline; the deregistration is still
+        // visible as its own dimension, and the command still fails.
+        let rendered =
+            crate::schedule::status_render::render_status(&report, Platform::Systemd, false);
+        assert!(rendered.contains("  Ownership: managed"), "{rendered}");
+        assert!(
+            rendered.contains("  Scheduler: not registered"),
+            "a job the scheduler has never heard of must say so:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("[ok]"),
+            "a schedule that cannot fire is not a healthy one:\n{rendered}"
+        );
+        assert!(
+            crate::schedule::status_render::status_failure(&report, Platform::Systemd).is_some()
+        );
     }
 
     #[tokio::test]

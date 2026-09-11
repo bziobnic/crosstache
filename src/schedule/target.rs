@@ -270,8 +270,8 @@ pub fn selected_backend_identity(
 /// entry it came from, resolved exactly once at install time.
 ///
 /// Everything a scheduled run is allowed to touch is decided here, so the
-/// install preview, the unit that gets written, and (in a later task) the
-/// manifest all describe the same target. Nothing downstream re-resolves.
+/// install preview, the unit that gets written and the manifest all describe
+/// the same target. Nothing downstream re-resolves.
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedScheduleTarget {
     /// The manifest's `target` block, ready to serialize.
@@ -279,9 +279,11 @@ pub(crate) struct ResolvedScheduleTarget {
     /// The workspace entry that produced [`Self::target`] — its `vault` is
     /// the real vault to sweep, on registry backend `backend`, and its
     /// `alias` is the name a person recognizes it by.
-    // Everything the *manifest* records already lives in `target`; these two
-    // survive for the status/drift reporting that reads the resolved entry
-    // back, which lands in a later task of this series.
+    // Nothing downstream reads these two: everything the *manifest* records is
+    // already flattened into `target`, and `drift` recomputes from the manifest
+    // rather than from a resolution it did not perform. They are kept because
+    // this type is the resolver's whole answer, and a caller that needs the
+    // entry itself must not have to resolve a second time to get it.
     #[allow(dead_code)]
     pub(crate) entry: WorkspaceEntry,
     /// Which resolution layer produced the workspace.
