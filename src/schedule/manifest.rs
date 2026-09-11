@@ -199,6 +199,22 @@ fn non_empty(value: Option<String>) -> Option<String> {
     value.filter(|v| !v.is_empty())
 }
 
+/// Normalize an environment-supplied state root to the one spelling xv ever
+/// records or prints.
+///
+/// `XV_STATE_HOME` / `XDG_STATE_HOME` can carry a Windows verbatim path
+/// (`\\?\C:\…`) whenever whoever set them piped a `std::fs::canonicalize`
+/// result through — which is exactly what the integration fixtures do. That
+/// prefix must not reach the manifest, the rendered scheduler unit, the
+/// `XV_STATE_HOME=` value pinned into that unit, or status output, because
+/// every recorded config/project path already gets this same normalization
+/// and the two spellings would otherwise disagree. No-op off Windows.
+fn normalize_state_root(value: String) -> String {
+    crate::utils::helpers::strip_verbatim_prefix(PathBuf::from(value))
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// Resolve state paths from real process environment. Not pure — this is the
 /// thin wrapper production callers use; tests should call [`resolve`] with an
 /// explicit [`ScheduleEnv`] instead.
@@ -224,7 +240,9 @@ pub fn resolve(env: &ScheduleEnv) -> Result<ScheduleStatePaths> {
 }
 
 fn resolve_for(env: &ScheduleEnv, platform: HostPlatform) -> Result<ScheduleStatePaths> {
-    let (state_root, source) = if let Some(overridden) = non_empty(env.xv_state_home.clone()) {
+    let (state_root, source) = if let Some(overridden) =
+        non_empty(env.xv_state_home.clone()).map(normalize_state_root)
+    {
         (
             PathBuf::from(&overridden),
             StateRootSource::XvStateHome(overridden),
@@ -232,7 +250,7 @@ fn resolve_for(env: &ScheduleEnv, platform: HostPlatform) -> Result<ScheduleStat
     } else {
         match platform {
             HostPlatform::Unix => {
-                if let Some(xdg) = non_empty(env.xdg_state_home.clone()) {
+                if let Some(xdg) = non_empty(env.xdg_state_home.clone()).map(normalize_state_root) {
                     (PathBuf::from(&xdg), StateRootSource::XdgStateHome(xdg))
                 } else if let Some(home) = non_empty(env.home.clone()) {
                     (
@@ -746,6 +764,50 @@ mod tests {
         assert_eq!(
             paths.root(),
             Path::new("/home/alice/.local/state/xv/schedules/rotation-default")
+        );
+    }
+
+    /// An environment-supplied state root gets the same verbatim-prefix
+    /// normalization every recorded config path already receives, so `\\?\`
+    /// never reaches the manifest, the rendered unit, the pinned
+    /// `XV_STATE_HOME=` value, or status output. The *source* value has to be
+    /// stripped too, since that is what gets pinned into the unit.
+    #[test]
+    fn an_env_supplied_state_root_is_stripped_of_its_verbatim_prefix() {
+        let verbatim = ScheduleEnv {
+            xv_state_home: Some(r"\\?\C:\x".to_string()),
+            ..Default::default()
+        };
+        let paths = resolve_for(&verbatim, HostPlatform::Windows).unwrap();
+        let expected_root = if cfg!(windows) { r"C:\x" } else { r"\\?\C:\x" };
+        assert_eq!(
+            paths.default_log_path(),
+            Path::new(expected_root).join("xv").join("rotate.log")
+        );
+        assert!(paths.root().starts_with(expected_root));
+        assert_eq!(
+            paths.source(),
+            &StateRootSource::XvStateHome(expected_root.to_string())
+        );
+        assert_eq!(
+            paths.pinned_state_home(),
+            Some(("XV_STATE_HOME", PathBuf::from(expected_root)))
+        );
+
+        // Off Windows the helper is the identity, so an ordinary Unix path
+        // survives untouched on every host.
+        let unix = ScheduleEnv {
+            xdg_state_home: Some("/xdg/state".to_string()),
+            ..Default::default()
+        };
+        let paths = resolve_for(&unix, HostPlatform::Unix).unwrap();
+        assert_eq!(
+            paths.default_log_path(),
+            Path::new("/xdg/state").join("xv").join("rotate.log")
+        );
+        assert_eq!(
+            paths.source(),
+            &StateRootSource::XdgStateHome("/xdg/state".to_string())
         );
     }
 
