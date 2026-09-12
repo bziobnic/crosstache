@@ -2725,6 +2725,26 @@ mod tests {
         }
     }
 
+    /// `flock` locks belong to the open file description, not the process, so
+    /// a `fork` on a sibling thread between `drop(first)` and the re-open
+    /// below can leave a child holding the fd (inherited until it `exec`s)
+    /// just long enough to make an immediate re-acquire see `EAGAIN`. The
+    /// test binary runs hundreds of tests concurrently, some of which spawn
+    /// child processes, so poll briefly instead of assuming the lock is free
+    /// on the very next instruction.
+    fn open_when_released(paths: &ScheduleStatePaths) -> RealOwnedScheduleStore {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            match RealOwnedScheduleStore::open(paths) {
+                Ok(store) => return store,
+                Err(error) if std::time::Instant::now() >= deadline => {
+                    panic!("the lock is released on drop: {error}");
+                }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+            }
+        }
+    }
+
     #[test]
     fn a_second_installer_cannot_take_the_install_lock() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2736,7 +2756,7 @@ mod tests {
         // The lock inode itself is persistent, and releasing it lets the next
         // installer in.
         assert!(paths.install_lock_path().exists());
-        RealOwnedScheduleStore::open(&paths).expect("the lock is released on drop");
+        open_when_released(&paths);
     }
 
     #[test]
