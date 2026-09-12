@@ -90,9 +90,11 @@ The `hint` line is TTY-only.
 A run is in **machine mode** when `--format` is given explicitly and resolves
 to `json`, `yaml`, or `csv`. In machine mode **stdout never holds more than one
 document**: commands that produce a result document emit exactly one, and
-commands that produce none — single `set`/`update`/`delete`, single `file
-upload`, `vault create`, `audit --verify`, `schedule run`, group `delete`,
-`rotate NAME`, `inject`, `vault export --output` — leave stdout empty. See
+commands that produce none — including, for example, single
+`set`/`update`/`delete`, single `file upload`, single `file download`,
+`attach`, `detach`, `vault create`, `audit --verify`, `schedule run`, group
+`delete`, `rotate NAME`, `inject`, `vault export --output` — leave stdout
+empty. See
 [ROADMAP.md](../ROADMAP.md) for that zero-document class and the other known
 gaps. Nothing else is ever written to stdout:
 
@@ -142,13 +144,13 @@ CSV cannot carry an error object, so in `--format csv`:
 
 A document that is not row-shaped has no CSV form, so it degrades to a
 single-column fallback: a `report` header and one cell holding the document's
-JSON text. `version`, `copy`, `move`, and `file sync` all take this path —
-their documents are single objects, not lists of records:
+JSON text, quoted per RFC 4180. `version`, `copy`, `move`, and `file sync` all
+take this path — their documents are single objects, not lists of records:
 
 ```console
-$ xv version --format csv
+$ xv file sync --dry-run --format csv
 report
-"{""name"":""xv"",""version"":""0.39.0""}"
+"{""uploaded"":0,""downloaded"":0,""deleted"":0,""skipped"":3,""dry_run"":true}"
 ```
 
 An `ItemReport` renders as `name,status,detail,error` rows, and a flat array of
