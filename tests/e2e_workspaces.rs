@@ -4313,3 +4313,51 @@ fn vault_delete_twice_is_clean() {
     );
     assert!(!a_secrets.exists());
 }
+
+/// A04-01: removing a backend from the config drops every listing cached
+/// under its registry name and the vault list, leaving named backends alone.
+#[test]
+fn backend_rm_drops_that_backends_listing_cache() {
+    let env = WorkspaceEnv::with_cache_enabled(300);
+    env.ok(&["set", "DEFAULT_SECRET", "--value", "v"]);
+    env.ok(&["ls"]);
+    env.ok(&["cache", "refresh", "--key", "vaults"]);
+    env.ok_with_backend("local-a", &["set", "A_SECRET", "--value", "va"]);
+    env.ok_with_backend("local-a", &["ls"]);
+
+    let local_secrets = env.cache_entry("local", "default", "secrets-list-v5.json");
+    let a_secrets = env.cache_entry("local-a", "default", "secrets-list-v5.json");
+    let vault_list = local_secrets
+        .parent()
+        .unwrap() // <fp>/local/default
+        .parent()
+        .unwrap() // <fp>/local
+        .parent()
+        .unwrap() // <fp>
+        .join("vaults-list.json");
+    assert!(local_secrets.exists());
+    assert!(a_secrets.exists());
+    assert!(vault_list.exists());
+
+    let out = env.run(&["backend", "rm", "local", "--yes"]);
+    assert!(
+        out.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(
+        !local_secrets.exists(),
+        "removed backend's listings must be dropped"
+    );
+    assert!(
+        !local_secrets.parent().unwrap().parent().unwrap().exists(),
+        "backend dir must be gone"
+    );
+    assert!(!vault_list.exists(), "vault list must be dropped");
+    assert!(
+        a_secrets.exists(),
+        "named backend local-a must keep its cache"
+    );
+}

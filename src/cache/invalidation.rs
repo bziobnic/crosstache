@@ -75,7 +75,6 @@ pub fn on_vault_removed(config: &Config, backend: &str, vault: &str) {
 /// vault list. Must be called with the PRE-removal config: the identity
 /// fingerprint includes the local store path, so once the block is gone the
 /// manager would look under a different fingerprint.
-#[allow(dead_code)] // wired in vault_ops/backend_ops
 pub fn on_backend_removed(config: &Config, backend: &str) {
     let manager = CacheManager::from_config(config);
     remove_backend_entries(&manager, backend);
