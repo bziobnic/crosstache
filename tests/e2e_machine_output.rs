@@ -847,6 +847,9 @@ fn file_upload_batch_partial_failure_json_is_one_envelope_with_report() {
     );
     let doc = one_json_document(&stdout);
     assert!(doc["error"]["message"].is_string(), "{doc}");
+    // The envelope's declared exit code is the process's actual exit code.
+    let declared = doc["error"]["exit_code"].as_i64().expect("exit_code");
+    assert_eq!(out.status.code(), Some(declared as i32), "{doc}");
     let report = &doc["report"];
     assert_eq!(report["summary"]["total"], 2, "{doc}");
     assert_eq!(report["summary"]["succeeded"], 1, "{doc}");
@@ -985,4 +988,34 @@ fn transfer_preview_yaml_is_yaml_not_json() {
     assert_eq!(doc["attachment_count"], 1, "{doc}");
     assert_eq!(doc["intent"]["destination_name"], "certificate", "{doc}");
     assert!(!stdout.contains("proof-content"), "stdout:\n{stdout}");
+}
+
+/// `--format auto` is not machine mode. Piped (as every test is), auto resolves
+/// to JSON, and `file sync` keeps printing its summary on stdout exactly as it
+/// did before the machine-output contract.
+#[test]
+fn file_sync_piped_auto_keeps_the_json_summary_on_stdout() {
+    let env = MachineEnv::new();
+    write_home_file(&env, "data/a.txt", b"alpha");
+    write_home_file(&env, "data/b.txt", b"beta");
+
+    let out = env
+        .xv()
+        .args(["file", "sync", "data", "--direction", "up", "--dry-run"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let doc = one_json_document(&stdout);
+    assert_eq!(doc["dry_run"], true, "{doc}");
+    assert_eq!(doc["uploaded"], 2, "{doc}");
+    assert_eq!(doc["downloaded"], 0, "{doc}");
+    assert_eq!(doc["deleted"], 0, "{doc}");
+    assert_eq!(doc["skipped"], 0, "{doc}");
 }

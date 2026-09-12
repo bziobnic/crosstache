@@ -1194,6 +1194,8 @@ async fn execute_file_upload_recursive(
 
     if all_files.is_empty() {
         output::info("No files found to upload");
+        // Machine mode still owes stdout one document: an empty report.
+        crate::utils::machine::report(config, &crate::utils::machine::ItemReport::new());
         return Ok(());
     }
 
@@ -1227,6 +1229,8 @@ async fn execute_file_upload_recursive(
                 failure_count += 1;
                 continue;
             } else {
+                item_report.failed(&file_info.blob_name, &error_msg);
+                crate::utils::machine::report(config, &item_report);
                 return Err(CrosstacheError::invalid_argument(error_msg));
             }
         }
@@ -1566,6 +1570,8 @@ async fn execute_file_download_recursive(
 
     if all_files_to_download.is_empty() {
         output::info("No files found to download");
+        // Machine mode still owes stdout one document: an empty report.
+        crate::utils::machine::report(config, &crate::utils::machine::ItemReport::new());
         return Ok(());
     }
 
@@ -2500,6 +2506,13 @@ async fn execute_file_sync(
         // The summary IS the run's single stdout document; `main` renders it
         // in the resolved format (json/yaml, or CSV rows).
         crate::utils::machine::report(config, &summary);
+    } else if config.output_json {
+        // `--format auto` resolved to JSON (stdout is not a terminal) is NOT
+        // machine mode, and keeps printing the summary here exactly as before.
+        let json_output = serde_json::to_string_pretty(&summary).map_err(|e| {
+            CrosstacheError::serialization(format!("Failed to serialize sync summary: {e}"))
+        })?;
+        println!("{json_output}");
     } else {
         output::info("Sync summary:");
         output::info(&format!("Uploaded: {}", summary.uploaded));
