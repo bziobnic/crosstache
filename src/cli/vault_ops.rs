@@ -900,9 +900,7 @@ async fn execute_vault_export(
                         Ok(secret_props) => {
                             secret_data.insert(
                                 "value".to_string(),
-                                serde_json::Value::String(
-                                    secret_props.value.expose_secret().to_string(),
-                                ),
+                                serde_json::Value::String(secret_props.disclose().value),
                             );
                         }
                         Err(e) => {
@@ -940,14 +938,14 @@ async fn execute_vault_export(
                         .await
                     {
                         Ok(secret_props) => {
-                            let value = secret_props.value;
+                            let disclosed = secret_props.disclose();
                             let env_name = secret
                                 .original_name
                                 .to_uppercase()
                                 .replace("-", "_")
                                 .replace(".", "_");
                             if is_valid_env_key(&env_name) {
-                                env_lines.push(format_env_line(&env_name, value.expose_secret()));
+                                env_lines.push(format_env_line(&env_name, &disclosed.value));
                             } else {
                                 eprintln!(
                                         "Warning: Skipping secret '{}' — derived env name '{}' is not a valid shell identifier",
@@ -992,8 +990,7 @@ async fn execute_vault_export(
                         .await
                     {
                         Ok(secret_props) => {
-                            txt_lines
-                                .push(format!("  Value: {}", secret_props.value.expose_secret()));
+                            txt_lines.push(format!("  Value: {}", secret_props.disclose().value));
                         }
                         Err(e) => {
                             eprintln!(
@@ -1028,13 +1025,13 @@ async fn execute_vault_export(
                     .await
                 {
                     Ok(props) => {
-                        let (props, value) = props.into_parts();
+                        let disclosed = props.disclose();
                         let record = crate::records::keeper::build_keeper_record(
                             &crate::records::keeper::ExportedSecret {
                                 name: &secret.original_name,
-                                value: value.expose_secret(),
-                                content_type: &props.content_type,
-                                tags: &props.tags,
+                                value: &disclosed.value,
+                                content_type: &disclosed.content_type,
+                                tags: &disclosed.tags,
                             },
                             &types,
                         )?;

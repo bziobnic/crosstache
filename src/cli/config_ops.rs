@@ -6,6 +6,7 @@ use crate::cli::commands::{
 use crate::cli::helpers::format_cache_size;
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
+use crate::secret::domain::DisclosedSecret;
 use crate::utils::output;
 
 // ── Config ───────────────────────────────────────────────────────────────────
@@ -2431,15 +2432,22 @@ async fn execute_env_pull(
         }
     }
 
+    // `xv export` writes plaintext in every format below, so disclose once
+    // here: this loop is the disclosure boundary, not the four formatters.
+    // The listing name (`original_name`) is what every format has always
+    // keyed on, so it rides alongside the disclosure.
+    let all_secrets: Vec<(String, DisclosedSecret)> = all_secrets
+        .into_iter()
+        .map(|s| (s.original_name.clone(), s.disclose()))
+        .collect();
+
     // Format the secrets based on the requested output format
     let content = match format.resolve_for_stdout() {
         OutputFormat::Json => {
             // Build a simple JSON array of {name, value} objects
             let entries: Vec<serde_json::Value> = all_secrets
                 .iter()
-                .map(|s| {
-                    serde_json::json!({ "name": s.original_name, "value": s.value.expose_secret() })
-                })
+                .map(|(name, s)| serde_json::json!({ "name": name, "value": s.value }))
                 .collect();
             serde_json::to_string_pretty(&entries).map_err(|e| {
                 CrosstacheError::serialization(format!("JSON serialization failed: {e}"))
@@ -2448,9 +2456,7 @@ async fn execute_env_pull(
         OutputFormat::Yaml => {
             let entries: Vec<serde_json::Value> = all_secrets
                 .iter()
-                .map(|s| {
-                    serde_json::json!({ "name": s.original_name, "value": s.value.expose_secret() })
-                })
+                .map(|(name, s)| serde_json::json!({ "name": name, "value": s.value }))
                 .collect();
             serde_yaml::to_string(&entries).map_err(|e| {
                 CrosstacheError::serialization(format!("YAML serialization failed: {e}"))
@@ -2461,12 +2467,12 @@ async fn execute_env_pull(
             writer.write_record(["name", "value"]).map_err(|e| {
                 CrosstacheError::serialization(format!("CSV serialization failed: {e}"))
             })?;
-            for s in &all_secrets {
+            for (name, s) in &all_secrets {
                 {
                     writer
                         .write_record([
-                            neutralize_spreadsheet_formula(&s.original_name),
-                            neutralize_spreadsheet_formula(s.value.expose_secret()),
+                            neutralize_spreadsheet_formula(name),
+                            neutralize_spreadsheet_formula(&s.value),
                         ])
                         .map_err(|e| {
                             CrosstacheError::serialization(format!("CSV serialization failed: {e}"))
@@ -2483,10 +2489,9 @@ async fn execute_env_pull(
         // Plain / Auto / Table / Template / Raw: use dotenv format
         _ => {
             let mut dotenv_content = String::new();
-            for secret in &all_secrets {
+            for (key, secret) in &all_secrets {
                 {
                     let value = &secret.value;
-                    let key = &secret.original_name;
                     if !is_posix_assignment_name(key) {
                         return Err(CrosstacheError::invalid_argument(format!(
                             "secret name '{key}' is not a valid POSIX environment variable name"
@@ -2495,7 +2500,7 @@ async fn execute_env_pull(
                     dotenv_content.push_str(&format!(
                         "{}={}\n",
                         key,
-                        quote_posix_shell_value(value.expose_secret())
+                        quote_posix_shell_value(value)
                     ));
                 }
             }

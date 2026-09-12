@@ -4,6 +4,18 @@
 
 ### Added
 
+- **`DisclosedSecret` and the disclosure boundary table.** `Secret::disclose`
+  is now the only way a secret's value becomes serializable, producing a
+  `DisclosedSecret { name, value, content_type, tags }` at each of the export
+  routes that legitimately return plaintext (`xv vault export
+  --include-values`, `xv env pull`, `xv diff --show-values`, the web reveal
+  endpoint). `docs/security.md` documents every disclosure boundary, its
+  mechanism (`Secret::disclose` vs. `SecretValue::expose_secret`), and the
+  test that pins it, alongside a negative canary suite
+  (`tests/e2e_disclosure.rs`, `src/web/disclosure_tests.rs`) proving no other
+  surface — listings in any format, history, find, deleted list, non-raw
+  `get`, export without values, scan, cache files, the local audit log, error
+  text, and trace logs — discloses a value.
 - **`xv schedule install --print` previews the pinned rotation target.** The
   preview resolves the schedule's target exactly once and renders, in a new
   fixed format, a header block (scheduler, cadence, the resolved
@@ -36,6 +48,10 @@
 
 ### Changed
 
+- **No wire changes from the disclosure boundary work.** Routing every
+  serializing disclosure through `Secret::disclose` is an internal
+  refactor; the web reveal endpoint's response body is byte-identical
+  (`{"value": ..}`).
 - **`xv schedule install` resolves and verifies its target before installing.**
   Installation now requires a saved global `xv.conf` (a scheduled run replays a
   saved configuration, not the environment you typed in), materializes only the

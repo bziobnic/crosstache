@@ -80,24 +80,6 @@ now shipped):
   change should get its own `schema_version` rather than repeating that
   pattern.
 
-### P1 — Split secret-domain types from provider/legacy manager types
-
-The module split has shipped: request/property/summary/metadata models now
-live in `secret::domain`, separate from the Azure-era `secret::manager`
-implementation. Plaintext is wrapped in a dedicated `SecretValue` type with no
-serde impls, a redacted `Debug`, and read access only through
-`expose_secret()`; web metadata responses return a value-free `SecretMetadata`
-body. The backend traits have also shipped their split: `SecretBackend`/
-`SecretOperations` lost their single boolean disclosure flag in favor of
-separate metadata-only and value-returning getters (`get_secret_metadata`/
-`get_secret_version_metadata` return `SecretMetadata`; `get_secret`/
-`get_secret_version` return `Secret`; `get_secret_snapshot` takes
-`SnapshotValue::{Omit, Include}`), and the old combined value/metadata struct
-is gone. What remains (PR 3): introduce explicit disclosure DTOs
-(`DisclosedSecret`) for the handful of export routes that legitimately return
-plaintext, with a both-direction canary suite across CLI, web, cache, and
-errors proving every other route stays value-free.
-
 ### P3 — Vault-list cache is Azure-only on the read side
 
 `xv vault list` on the trait path (local, AWS, and named backends) neither

@@ -1,9 +1,31 @@
 //! Types that carry plaintext on purpose. Everything here is a reviewed disclosure boundary.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use tabled::Tabled;
 
 use crate::utils::helpers::parse_connection_string;
+
+/// A secret whose plaintext has been deliberately released as a plain
+/// `String` for serialization at a reviewed boundary.
+///
+/// Constructed only by [`crate::secret::domain::Secret::disclose`], so
+/// `grep -rn "\.disclose(" src` is the complete list of boundaries that
+/// serialize a *whole secret value*. The one field-level exception is
+/// `xv get --record --format json|yaml`, which serializes decoded envelope
+/// fields via `expose_secret` rather than `disclose`; both are listed in
+/// `docs/security.md`. `Debug` and `Serialize` are derived on purpose:
+/// unlike [`crate::secret::domain::SecretValue`], this type exists to be
+/// shown. `value` is deliberately a plain `String`, not zeroized: its only
+/// consumers (the `serde_json`/`serde_yaml`/`csv` writers) copy it into
+/// unzeroized buffers anyway, so zeroizing here would not add protection.
+#[derive(Debug, Clone, Serialize)]
+pub struct DisclosedSecret {
+    pub name: String,
+    pub value: String,
+    pub content_type: String,
+    pub tags: HashMap<String, String>,
+}
 
 /// Connection string component
 #[derive(Debug, Clone, Serialize, Deserialize, Tabled)]

@@ -120,3 +120,102 @@ fn tui_help_works_when_feature_enabled() {
         "tui --help should mention tui: {stdout}"
     );
 }
+
+// ─── disclosure boundary: the reveal keystroke ─────────────────────────────
+
+/// Plaintext planted in the TUI's fetched-value cache.
+const TUI_CANARY: &str = "disclosure-canary-7f3e";
+
+/// An app with one vault and one untyped secret selected, whose value has
+/// already been fetched (the state `Space` puts the TUI into after
+/// `Message::ValueLoaded`), but which has not been revealed yet.
+fn app_with_fetched_value() -> App {
+    use crosstache::secret::domain::SecretSummary;
+    use crosstache::vault::models::VaultSummary;
+
+    let mut app = empty_app();
+    app.vaults = vec![VaultSummary {
+        name: "default".to_string(),
+        location: "local".to_string(),
+        resource_group: String::new(),
+        status: "Active".to_string(),
+        created_at: String::new(),
+    }];
+    app.vault_state.select(Some(0));
+    app.secrets_by_vault.insert(
+        "default".to_string(),
+        vec![SecretSummary {
+            name: "LEAKY".to_string(),
+            original_name: "LEAKY".to_string(),
+            note: None,
+            folder: None,
+            groups: None,
+            updated_on: String::new(),
+            enabled: true,
+            expires_on: None,
+            content_type: String::new(),
+            tags: std::collections::HashMap::new(),
+        }],
+    );
+    app.secret_state.select(Some(0));
+    app.values.insert(
+        ("default".to_string(), "LEAKY".to_string()),
+        zeroize::Zeroizing::new(TUI_CANARY.to_string()),
+    );
+    app
+}
+
+fn render(app: &App) -> String {
+    let backend = TestBackend::new(80, 20);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|f| view(app, f)).unwrap();
+    terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|c| c.symbol())
+        .collect::<String>()
+}
+
+/// Boundary: the TUI reveal keystroke (`Space`). Masked before, plaintext
+/// after — and nothing else in the frame ever carries the value.
+#[test]
+fn boundary_tui_reveal_renders_value() {
+    let mut app = app_with_fetched_value();
+
+    // Before: the value is fetched and sitting in `app.values`, but the
+    // frame shows only the mask.
+    let masked = render(&app);
+    assert!(
+        !masked.contains(TUI_CANARY),
+        "the TUI rendered a fetched value before the reveal keystroke:\n{masked}"
+    );
+    assert!(
+        masked.contains("value: ●●●●●●●●"),
+        "the detail pane must show the mask before reveal:\n{masked}"
+    );
+
+    // The reveal keystroke itself, through the real update loop.
+    let _ = crosstache::tui::update::update(
+        &mut app,
+        crosstache::tui::message::Message::KeyPress(key(crossterm::event::KeyCode::Char(' '))),
+    );
+    assert!(app.value_revealed, "Space must toggle the reveal flag");
+    let revealed = render(&app);
+    assert!(
+        revealed.contains(&format!("value: {TUI_CANARY}")),
+        "the reveal keystroke must render the value:\n{revealed}"
+    );
+
+    // ...and toggling back re-masks it.
+    let _ = crosstache::tui::update::update(
+        &mut app,
+        crosstache::tui::message::Message::KeyPress(key(crossterm::event::KeyCode::Char(' '))),
+    );
+    let remasked = render(&app);
+    assert!(
+        !remasked.contains(TUI_CANARY),
+        "a second Space must re-mask the value:\n{remasked}"
+    );
+}

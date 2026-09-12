@@ -95,6 +95,56 @@ mod tests {
         assert!(parse_envelope(r#"{"a":1}"#).is_err());
     }
 
+    /// Disclosure canary through a REAL production failure path.
+    ///
+    /// `parse_envelope`/`parse_sensitive_envelope` are the functions that
+    /// turn a decrypted record value into fields, so they are the first
+    /// place a plaintext meets an error constructor: every malformed
+    /// envelope they reject was built out of a secret value. `serde_json`'s
+    /// own `Display` is happy to quote the input it choked on, so this pins
+    /// that neither the wrapper message nor the underlying parser error
+    /// echoes the envelope's contents.
+    #[test]
+    fn parse_errors_never_echo_the_envelope_contents() {
+        const CANARY: &str = "disclosure-canary-7f3e";
+        // Every shape these parsers reject, each carrying the canary.
+        let malformed = [
+            // Truncated object.
+            format!(r#"{{"password":"{CANARY}""#),
+            // Not an object.
+            format!(r#"["{CANARY}"]"#),
+            format!(r#""{CANARY}""#),
+            // Object with a non-string value alongside a canary field.
+            format!(r#"{{"password":"{CANARY}","port":5432}}"#),
+            // Trailing garbage after a valid object.
+            format!(r#"{{"password":"{CANARY}"}} trailing"#),
+            // Not JSON at all.
+            format!("password = {CANARY}"),
+        ];
+        for value in malformed {
+            for rendered in [
+                parse_envelope(&value)
+                    .map(|_| ())
+                    .map_err(|e| (format!("{e}"), format!("{e:?}"), e.code().to_string())),
+                parse_sensitive_envelope(&value)
+                    .map(|_| ())
+                    .map_err(|e| (format!("{e}"), format!("{e:?}"), e.code().to_string())),
+            ] {
+                let (display, debug, code) =
+                    rendered.expect_err(&format!("must be rejected: {value}"));
+                assert!(
+                    !display.contains(CANARY),
+                    "parse error Display echoed the envelope: {display}"
+                );
+                assert!(
+                    !debug.contains(CANARY),
+                    "parse error Debug echoed the envelope: {debug}"
+                );
+                assert!(!code.contains(CANARY), "error code echoed the envelope");
+            }
+        }
+    }
+
     #[test]
     fn is_record_matches_exactly() {
         assert!(is_record("application/vnd.xv.record"));
