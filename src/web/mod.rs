@@ -21,6 +21,8 @@ pub(crate) mod api;
 mod archive;
 pub(crate) mod auth;
 mod context;
+#[cfg(test)]
+mod disclosure_tests;
 pub(crate) mod errors;
 #[cfg(feature = "file-ops")]
 mod files;

@@ -111,6 +111,31 @@ pub(crate) fn test_state_with_preferences(path: PathBuf, clipboard_timeout: u64)
     test_state_with_token_and_preferences("test-token", path, clipboard_timeout)
 }
 
+/// State whose backend is a caller-supplied stub, so a test can seed
+/// secrets (or deleted secrets) directly through the returned handle before
+/// driving the router.
+pub(crate) fn test_state_with_backend(backend: Arc<stub::StubBackend>) -> Arc<WebState> {
+    let path = std::env::temp_dir()
+        .join(format!("xv-web-test-{}", uuid::Uuid::new_v4()))
+        .join("ui.json");
+    let backend_trait: Arc<dyn crate::backend::Backend> = backend;
+    let context = test_context(backend_trait.as_ref(), "default", 30);
+    let registry = Arc::new(crate::backend::BackendRegistry::new(backend_trait.clone()));
+    Arc::new(
+        WebState::new(
+            backend_trait,
+            context,
+            "test-token".to_string(),
+            crate::records::builtin_types(),
+            super::preferences::PreferenceStore::new(path, 30),
+            registry,
+        )
+        .with_archive_jobs(Arc::new(tokio::sync::Semaphore::new(
+            super::archive::MAX_CONCURRENT_ARCHIVES,
+        ))),
+    )
+}
+
 pub(crate) fn test_state() -> Arc<WebState> {
     test_state_with_token("test-token")
 }

@@ -1669,4 +1669,99 @@ mod tests {
             "message must say 'leak' or 'finding'"
         );
     }
+    // --- Disclosure canary: errors built while handling a value-bearing
+    // request must never carry the plaintext (spec §Disclosure boundaries).
+
+    /// Plaintext of the request under test.
+    const DISCLOSURE_CANARY: &str = "disclosure-canary-7f3e";
+
+    fn canary_request() -> crate::secret::domain::SecretRequest {
+        crate::secret::domain::SecretRequest {
+            name: "LEAKY".to_string(),
+            value: crate::secret::domain::SecretValue::new(DISCLOSURE_CANARY.to_string()),
+            content_type: None,
+            enabled: Some(true),
+            expires_on: None,
+            not_before: None,
+            tags: None,
+            groups: None,
+            note: None,
+            folder: None,
+        }
+    }
+
+    /// The request's own `Debug` is what an error context interpolates, so
+    /// it is the first thing that has to be value-free.
+    #[test]
+    fn request_debug_is_redacted() {
+        let rendered = format!("{:?}", canary_request());
+        assert!(rendered.contains("[REDACTED]"), "{rendered}");
+        assert!(!rendered.contains(DISCLOSURE_CANARY), "{rendered}");
+    }
+
+    /// Every realistic way a failing write turns a request into an error:
+    /// the name, the request's `Debug`, and a formatted context string. None
+    /// of them may reach the plaintext, under `Display` or `Debug`.
+    #[test]
+    fn error_display_and_debug_never_carry_a_request_value() {
+        let req = canary_request();
+        let backend_errors = vec![
+            crate::backend::error::BackendError::NotFound {
+                name: req.name.clone(),
+                suggestion: None,
+            },
+            crate::backend::error::BackendError::Conflict(format!(
+                "secret '{}' already exists",
+                req.name
+            )),
+            crate::backend::error::BackendError::InvalidArgument(format!(
+                "rejected request {req:?}"
+            )),
+            crate::backend::error::BackendError::Internal(format!("write failed for {req:?}")),
+        ];
+        for err in backend_errors {
+            assert!(
+                !format!("{err}").contains(DISCLOSURE_CANARY),
+                "BackendError Display leaked the value: {err}"
+            );
+            assert!(
+                !format!("{err:?}").contains(DISCLOSURE_CANARY),
+                "BackendError Debug leaked the value: {err:?}"
+            );
+            // ...and after the conversion into the CLI-facing error type.
+            let converted: CrosstacheError = err.into();
+            assert!(
+                !format!("{converted}").contains(DISCLOSURE_CANARY),
+                "CrosstacheError Display leaked the value: {converted}"
+            );
+            assert!(
+                !format!("{converted:?}").contains(DISCLOSURE_CANARY),
+                "CrosstacheError Debug leaked the value: {converted:?}"
+            );
+        }
+
+        let crosstache_errors = vec![
+            CrosstacheError::SecretNotFound {
+                name: req.name.clone(),
+                suggestion: None,
+            },
+            CrosstacheError::invalid_argument(format!("failed to store {req:?}")),
+            CrosstacheError::serialization(format!("could not encode {req:?}")),
+            CrosstacheError::config(format!("bad request shape: {req:?}")),
+        ];
+        for err in crosstache_errors {
+            assert!(
+                !format!("{err}").contains(DISCLOSURE_CANARY),
+                "CrosstacheError Display leaked the value: {err}"
+            );
+            assert!(
+                !format!("{err:?}").contains(DISCLOSURE_CANARY),
+                "CrosstacheError Debug leaked the value: {err:?}"
+            );
+            assert!(
+                !err.code().contains(DISCLOSURE_CANARY),
+                "error code leaked the value"
+            );
+        }
+    }
 }
