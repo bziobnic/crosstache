@@ -910,7 +910,7 @@ mod tests {
         AuditBackend, AuditEvent, Backend, BackendCapabilities, BackendError, BackendKind,
         BackendRegistry, NameCharset, SecretBackend,
     };
-    use crate::secret::manager::{
+    use crate::secret::domain::{
         SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest,
     };
 

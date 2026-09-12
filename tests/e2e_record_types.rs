@@ -806,7 +806,7 @@ fn get_corrupt_envelope_fails_loud() {
     rt.block_on(async {
         use crosstache::backend::local::LocalBackend;
         use crosstache::backend::Backend;
-        use crosstache::secret::manager::SecretRequest;
+        use crosstache::secret::domain::SecretRequest;
 
         let backend = LocalBackend::new(Some(&local_config)).expect("open local backend");
         let existing = backend
@@ -890,7 +890,7 @@ fn get_unknown_type_degrades() {
     rt.block_on(async {
         use crosstache::backend::local::LocalBackend;
         use crosstache::backend::Backend;
-        use crosstache::secret::manager::SecretRequest;
+        use crosstache::secret::domain::SecretRequest;
 
         let backend = LocalBackend::new(Some(&local_config)).expect("open local backend");
         let existing = backend
@@ -2807,7 +2807,7 @@ fn update_positional_value_on_corrupt_envelope_fails_loud_without_writing() {
     rt.block_on(async {
         use crosstache::backend::local::LocalBackend;
         use crosstache::backend::Backend;
-        use crosstache::secret::manager::SecretRequest;
+        use crosstache::secret::domain::SecretRequest;
 
         let backend = LocalBackend::new(Some(&local_config)).expect("open local backend");
         let existing = backend
@@ -2896,7 +2896,7 @@ fn update_positional_value_on_unknown_type_record_errors_without_writing() {
     rt.block_on(async {
         use crosstache::backend::local::LocalBackend;
         use crosstache::backend::Backend;
-        use crosstache::secret::manager::SecretRequest;
+        use crosstache::secret::domain::SecretRequest;
 
         let backend = LocalBackend::new(Some(&local_config)).expect("open local backend");
         let existing = backend

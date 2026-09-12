@@ -445,7 +445,7 @@ mod tests {
     }
     #[tokio::test]
     async fn azure_custody_commit_reaches_versioned_set_and_preserves_auth_failure() {
-        use crate::secret::manager::SecretRequest;
+        use crate::secret::domain::SecretRequest;
         let auth = Arc::new(StubAzureAuthProvider::default());
         let backend = AzureBackend::new(&Config::default(), auth.clone()).unwrap();
         let request = SecretRequest {

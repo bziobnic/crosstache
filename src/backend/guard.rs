@@ -31,12 +31,13 @@ use std::sync::Arc;
 use crate::secret::attachment_key::{
     generic_mutation_blocked_canonical, hidden_from_generic_listing_canonical,
 };
-use crate::secret::manager::{
-    DeletedSecretSummary, SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest,
+use crate::secret::domain::{
+    DeletedSecretSummary, SecretProperties, SecretRequest, SecretSnapshot, SecretSummary,
+    SecretUpdateRequest,
 };
 
 use super::error::BackendError;
-use super::secret::{SecretBackend, SecretSnapshot};
+use super::secret::SecretBackend;
 
 /// A generic-facade wrapper around a raw [`SecretBackend`] that enforces the
 /// reserved attachment-key custody boundary structurally.

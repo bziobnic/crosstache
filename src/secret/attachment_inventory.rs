@@ -193,7 +193,7 @@ mod tests {
 
     use crate::backend::file::FileDownloadSnapshot;
     use crate::blob::models::{FileInfo, FileUploadRequest};
-    use crate::secret::manager::{SecretProperties, SecretRequest};
+    use crate::secret::domain::{SecretProperties, SecretRequest};
     use crate::utils::progress::ProgressReporter;
 
     fn secret(name: &str, value: Option<String>, version: &str) -> SecretProperties {

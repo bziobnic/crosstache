@@ -14,7 +14,7 @@ use std::collections::HashMap;
 
 use crate::backend::local::LocalBackend;
 use crate::config::settings::LocalConfig;
-use crate::secret::manager::SecretRequest;
+use crate::secret::domain::SecretRequest;
 use crate::secret::rotation::{TAG_ROTATED_AT, TAG_ROTATE_EVERY};
 use zeroize::Zeroizing;
 

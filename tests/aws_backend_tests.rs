@@ -90,7 +90,7 @@ async fn smoke_health_check_with_empty_list() {
 async fn set_secret_create_writes_to_aws() {
     use aws_sdk_secretsmanager::operation::create_secret::CreateSecretOutput;
     use crosstache::backend::SecretBackend;
-    use crosstache::secret::manager::SecretRequest;
+    use crosstache::secret::domain::SecretRequest;
     use zeroize::Zeroizing;
 
     let rule = mock!(Client::create_secret)
@@ -131,7 +131,7 @@ async fn set_secret_create_writes_to_aws() {
 async fn set_secret_preserves_migration_idempotency_tags() {
     use aws_sdk_secretsmanager::operation::create_secret::CreateSecretOutput;
     use crosstache::backend::SecretBackend;
-    use crosstache::secret::manager::SecretRequest;
+    use crosstache::secret::domain::SecretRequest;
     use std::collections::HashMap;
     use zeroize::Zeroizing;
 
@@ -441,7 +441,7 @@ async fn set_secret_update_path_when_already_exists() {
     use aws_sdk_secretsmanager::operation::tag_resource::TagResourceOutput;
     use aws_sdk_secretsmanager::operation::update_secret::UpdateSecretOutput;
     use crosstache::backend::SecretBackend;
-    use crosstache::secret::manager::SecretRequest;
+    use crosstache::secret::domain::SecretRequest;
     use zeroize::Zeroizing;
 
     // create_secret returns ResourceExistsException — triggers update path.
@@ -500,7 +500,7 @@ async fn set_secret_update_path_when_already_exists() {
 async fn update_secret_enabled_flag_is_unsupported() {
     use aws_sdk_secretsmanager::operation::list_secrets::ListSecretsOutput;
     use crosstache::backend::{BackendError, SecretBackend};
-    use crosstache::secret::manager::{FieldUpdate, SecretUpdateRequest};
+    use crosstache::secret::domain::{FieldUpdate, SecretUpdateRequest};
 
     // AWS has no enable/disable concept; the flag must fail loudly before
     // any API call is made (no mock rules are consumed).
@@ -552,7 +552,7 @@ async fn update_secret_with_value_writes_value_and_content_type_tag() {
     use aws_sdk_secretsmanager::operation::untag_resource::UntagResourceOutput;
     use aws_sdk_secretsmanager::types::Tag;
     use crosstache::backend::SecretBackend;
-    use crosstache::secret::manager::{FieldUpdate, SecretUpdateRequest};
+    use crosstache::secret::domain::{FieldUpdate, SecretUpdateRequest};
     use std::collections::HashMap;
     use zeroize::Zeroizing;
 
@@ -657,7 +657,7 @@ async fn update_secret_untype_replace_tags_removes_dropped_keys() {
     use aws_sdk_secretsmanager::operation::untag_resource::UntagResourceOutput;
     use aws_sdk_secretsmanager::types::Tag;
     use crosstache::backend::SecretBackend;
-    use crosstache::secret::manager::{FieldUpdate, SecretUpdateRequest};
+    use crosstache::secret::domain::{FieldUpdate, SecretUpdateRequest};
     use std::collections::HashMap;
 
     // Untyping drops xv-type and every f.* tag entirely — the caller sends

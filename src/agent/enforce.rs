@@ -16,7 +16,7 @@ use crate::backend::{
     AuditBackend, Backend, BackendCapabilities, BackendError, BackendKind, SecretBackend,
     VaultBackend,
 };
-use crate::secret::manager::{
+use crate::secret::domain::{
     DeletedSecretSummary, SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest,
 };
 
@@ -597,7 +597,7 @@ impl SecretBackend for PolicyEnforcedBackend {
         vault: &str,
         name: &str,
         include_value: bool,
-    ) -> Result<crate::backend::secret::SecretSnapshot, BackendError> {
+    ) -> Result<crate::secret::domain::SecretSnapshot, BackendError> {
         self.checked(
             vault,
             name,
@@ -615,7 +615,7 @@ impl SecretBackend for PolicyEnforcedBackend {
         vault: &str,
         name: &str,
         include_value: bool,
-    ) -> Result<crate::backend::secret::SecretSnapshot, BackendError> {
+    ) -> Result<crate::secret::domain::SecretSnapshot, BackendError> {
         self.checked(
             vault,
             name,
@@ -1139,7 +1139,7 @@ mod tests {
         raw.secrets()
             .set_secret(
                 "default",
-                crate::secret::manager::SecretRequest {
+                crate::secret::domain::SecretRequest {
                     name: "db".into(),
                     value: zeroize::Zeroizing::new("database password".into()),
                     content_type: None,

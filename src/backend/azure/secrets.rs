@@ -12,10 +12,11 @@ use std::collections::HashMap;
 
 use crate::backend::error::BackendError;
 use crate::backend::secret::SecretBackend;
-use crate::secret::manager::{
-    DeletedSecretSummary, FieldUpdate, SecretAttributesUpdate, SecretOperations, SecretProperties,
-    SecretRequest, SecretSummary, SecretUpdateRequest,
+use crate::secret::domain::{
+    DeletedSecretSummary, FieldUpdate, SecretAttributesUpdate, SecretProperties, SecretRequest,
+    SecretSummary, SecretUpdateRequest,
 };
+use crate::secret::manager::SecretOperations;
 
 use super::map_error;
 
@@ -227,7 +228,7 @@ impl SecretBackend for AzureSecretBackend {
         vault: &str,
         name: &str,
         include_value: bool,
-    ) -> Result<crate::backend::secret::SecretSnapshot, BackendError> {
+    ) -> Result<crate::secret::domain::SecretSnapshot, BackendError> {
         let properties = self.get_secret(vault, name, include_value).await?;
         if properties.version.is_empty() {
             return Err(BackendError::Unsupported(
@@ -241,7 +242,7 @@ impl SecretBackend for AzureSecretBackend {
                 "Azure secret metadata/version changed during transfer read".into(),
             ));
         }
-        Ok(crate::backend::secret::SecretSnapshot {
+        Ok(crate::secret::domain::SecretSnapshot {
             properties,
             revision,
         })
@@ -514,7 +515,7 @@ impl SecretBackend for AzureSecretBackend {
 #[cfg(test)]
 mod build_patched_tags_tests {
     use super::*;
-    use crate::secret::manager::FieldUpdate;
+    use crate::secret::domain::FieldUpdate;
 
     fn base_request(name: &str) -> SecretUpdateRequest {
         SecretUpdateRequest {

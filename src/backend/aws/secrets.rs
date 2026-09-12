@@ -2,7 +2,7 @@
 
 use crate::backend::error::BackendError;
 use crate::backend::SecretBackend;
-use crate::secret::manager::{
+use crate::secret::domain::{
     DeletedSecretSummary, FieldUpdate, SecretProperties, SecretRequest, SecretSummary,
     SecretUpdateRequest,
 };
@@ -619,7 +619,7 @@ impl SecretBackend for AwsSecretBackend {
         vault: &str,
         name: &str,
         include_value: bool,
-    ) -> Result<crate::backend::secret::SecretSnapshot, BackendError> {
+    ) -> Result<crate::secret::domain::SecretSnapshot, BackendError> {
         let full_name = super::encoding::aws_name(vault, name);
         let before = self
             .client
@@ -683,7 +683,7 @@ impl SecretBackend for AwsSecretBackend {
                 "AWS secret metadata/version changed during transfer read".into(),
             ));
         }
-        Ok(crate::backend::secret::SecretSnapshot {
+        Ok(crate::secret::domain::SecretSnapshot {
             properties,
             revision,
         })

@@ -6,7 +6,7 @@ use super::attachment_key::{self as key, AttachmentKeyId, DownloadPlan, KeySlot,
 use crate::backend::{attachment_keys::AttachmentKeyStore, file::FileBackend, local::crypto};
 use crate::blob::models::FileListRequest;
 use crate::error::{AttachmentError, CrosstacheError, Result};
-use crate::secret::manager::SecretProperties;
+use crate::secret::domain::SecretProperties;
 use age::secrecy::ExposeSecret;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};

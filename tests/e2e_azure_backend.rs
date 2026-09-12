@@ -28,7 +28,7 @@ use crosstache::auth::provider::DefaultAzureCredentialProvider;
 use crosstache::backend::azure::AzureBackend;
 use crosstache::backend::{Backend, BackendError};
 use crosstache::config::settings::Config;
-use crosstache::secret::manager::{FieldUpdate, SecretRequest, SecretUpdateRequest};
+use crosstache::secret::domain::{FieldUpdate, SecretRequest, SecretUpdateRequest};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use zeroize::Zeroizing;

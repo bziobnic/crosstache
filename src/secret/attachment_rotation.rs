@@ -7,7 +7,7 @@ use crate::error::{AttachmentError, CrosstacheError, Result};
 use crate::secret::attachment_key::{
     self as key, AttachmentKeyId, AttachmentKeyRef, KeySlot, PointerKind, SecretVersion,
 };
-use crate::secret::manager::{SecretProperties, SecretRequest};
+use crate::secret::domain::{SecretProperties, SecretRequest};
 use age::secrecy::ExposeSecret;
 use serde::Serialize;
 use zeroize::Zeroizing;

@@ -310,7 +310,7 @@ impl std::str::FromStr for CharsetType {
 ///
 /// Flattened into both commands with `#[command(flatten)]` so they expose an
 /// identical metadata surface and can never drift apart. Both build a single
-/// [`crate::secret::manager::SecretRequest`] from these fields through the same
+/// [`crate::secret::domain::SecretRequest`] from these fields through the same
 /// backend trait path.
 #[derive(Debug, Clone, Default, clap::Args)]
 pub struct SecretWriteArgs {
@@ -356,7 +356,7 @@ impl SecretWriteArgs {
         }
     }
 
-    /// Build a [`crate::secret::manager::SecretRequest`] for a single secret
+    /// Build a [`crate::secret::domain::SecretRequest`] for a single secret
     /// from these write-time flags, parsing the `--expires` / `--not-before`
     /// date strings. Shared by `set` (single-secret path) and `gen --save`
     /// so both produce byte-identical requests from the same flags.
@@ -364,7 +364,7 @@ impl SecretWriteArgs {
         &self,
         name: &str,
         value: zeroize::Zeroizing<String>,
-    ) -> Result<crate::secret::manager::SecretRequest> {
+    ) -> Result<crate::secret::domain::SecretRequest> {
         use crate::utils::datetime::parse_datetime_or_duration;
 
         let expires_on = match self.expires.as_deref() {
@@ -387,7 +387,7 @@ impl SecretWriteArgs {
             )
         };
 
-        Ok(crate::secret::manager::SecretRequest {
+        Ok(crate::secret::domain::SecretRequest {
             name: name.to_string(),
             value,
             content_type: None,

@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use crosstache::backend::error::BackendError;
 use crosstache::backend::Backend;
 use crosstache::config::settings::LocalConfig;
-use crosstache::secret::manager::SecretRequest;
+use crosstache::secret::domain::SecretRequest;
 use crosstache::vault::models::VaultCreateRequest;
 use tempfile::TempDir;
 use zeroize::Zeroizing;

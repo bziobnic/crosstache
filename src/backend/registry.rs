@@ -792,7 +792,7 @@ mod tests {
             .secrets()
             .set_secret(
                 "default",
-                crate::secret::manager::SecretRequest {
+                crate::secret::domain::SecretRequest {
                     name: "db".into(),
                     value: zeroize::Zeroizing::new("database password".into()),
                     content_type: None,

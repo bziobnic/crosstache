@@ -7,7 +7,7 @@ use crate::records::{
     predicted_reserved_tag_count_for_shape, FieldKind, RecordType, FIELD_TAG_PREFIX,
     RECORD_CONTENT_TYPE, TYPE_TAG,
 };
-use crate::secret::manager::{FieldUpdate, SecretProperties, SecretUpdateRequest};
+use crate::secret::domain::{FieldUpdate, SecretProperties, SecretUpdateRequest};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use zeroize::Zeroizing;
@@ -759,7 +759,7 @@ mod tests {
     use crate::records::{
         builtin_types, FieldDef, RecordType, TypeSource, RECORD_CONTENT_TYPE, TYPE_TAG,
     };
-    use crate::secret::manager::{
+    use crate::secret::domain::{
         SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest,
     };
     use async_trait::async_trait;
@@ -1552,11 +1552,11 @@ mod tests {
         assert!(!request.tags.as_ref().unwrap().contains_key("groups"));
         assert_eq!(
             request.note,
-            crate::secret::manager::FieldUpdate::Set("kept note".into())
+            crate::secret::domain::FieldUpdate::Set("kept note".into())
         );
         assert_eq!(
             request.folder,
-            crate::secret::manager::FieldUpdate::Set("apps/prod".into())
+            crate::secret::domain::FieldUpdate::Set("apps/prod".into())
         );
         assert!(request.replace_tags);
         assert!(request.replace_groups);

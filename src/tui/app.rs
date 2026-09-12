@@ -1,6 +1,6 @@
 use crate::backend::Backend;
 use crate::config::Config;
-use crate::secret::manager::{SecretProperties, SecretSummary};
+use crate::secret::domain::{SecretProperties, SecretSummary};
 use crate::vault::models::VaultSummary;
 use ratatui::widgets::ListState;
 use std::collections::HashMap;
@@ -275,7 +275,7 @@ mod tests {
     use super::*;
     use crate::backend::error::BackendError;
     use crate::backend::{BackendCapabilities, BackendKind, SecretBackend};
-    use crate::secret::manager::{SecretProperties, SecretRequest, SecretUpdateRequest};
+    use crate::secret::domain::{SecretProperties, SecretRequest, SecretUpdateRequest};
 
     /// Minimal fake `Backend` distinguishable by its `name()` — enough to
     /// prove `workspace_target_for` returns the RIGHT entry's backend, not

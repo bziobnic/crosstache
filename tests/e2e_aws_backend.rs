@@ -28,7 +28,7 @@
 use crosstache::backend::aws::AwsBackend;
 use crosstache::backend::Backend;
 use crosstache::config::settings::AwsConfig;
-use crosstache::secret::manager::{FieldUpdate, SecretRequest, SecretUpdateRequest};
+use crosstache::secret::domain::{FieldUpdate, SecretRequest, SecretUpdateRequest};
 use crosstache::vault::models::VaultCreateRequest;
 use std::time::{SystemTime, UNIX_EPOCH};
 use zeroize::Zeroizing;

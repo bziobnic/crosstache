@@ -1003,7 +1003,7 @@ mod tests {
         let backend = LocalBackend::new(Some(&raw)).unwrap();
 
         // Create secret
-        let request = crate::secret::manager::SecretRequest {
+        let request = crate::secret::domain::SecretRequest {
             name: "e2e-test".into(),
             value: zeroize::Zeroizing::new("my-secret-value".into()),
             content_type: None,
@@ -1067,7 +1067,7 @@ mod tests {
             .secrets()
             .set_secret(
                 "default",
-                crate::secret::manager::SecretRequest {
+                crate::secret::domain::SecretRequest {
                     name: "source".into(),
                     value: zeroize::Zeroizing::new("value".into()),
                     content_type: None,

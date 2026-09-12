@@ -24,9 +24,10 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::backend::error::BackendError;
-use crate::backend::secret::{SecretBackend, SecretSnapshot};
-use crate::secret::manager::{
-    DeletedSecretSummary, SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest,
+use crate::backend::secret::SecretBackend;
+use crate::secret::domain::{
+    DeletedSecretSummary, SecretProperties, SecretRequest, SecretSnapshot, SecretSummary,
+    SecretUpdateRequest,
 };
 
 use super::audit::{AuditOp, LocalAuditLog, RESOURCE_VAULT_WIDE};
@@ -3680,7 +3681,7 @@ mod tests {
     use super::*;
     use crate::backend::local::crypto::generate_keypair;
     use crate::records::{RECORD_CONTENT_TYPE, TYPE_TAG};
-    use crate::secret::manager::FieldUpdate;
+    use crate::secret::domain::FieldUpdate;
     use std::collections::BTreeMap;
     use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
     use std::time::Duration;
@@ -4700,12 +4701,12 @@ mod tests {
                 value: Some(Zeroizing::new("new-value".into())),
                 content_type: Some(RECORD_CONTENT_TYPE.into()),
                 enabled: Some(false),
-                expires_on: crate::secret::manager::FieldUpdate::Unchanged,
-                not_before: crate::secret::manager::FieldUpdate::Unchanged,
+                expires_on: crate::secret::domain::FieldUpdate::Unchanged,
+                not_before: crate::secret::domain::FieldUpdate::Unchanged,
                 tags: Some(HashMap::from([(TYPE_TAG.into(), "api-key".into())])),
                 groups: Some(vec!["new-group".into()]),
-                note: crate::secret::manager::FieldUpdate::Set("new-note".into()),
-                folder: crate::secret::manager::FieldUpdate::Set("new/folder".into()),
+                note: crate::secret::domain::FieldUpdate::Set("new-note".into()),
+                folder: crate::secret::domain::FieldUpdate::Set("new/folder".into()),
                 replace_tags: true,
                 replace_groups: true,
             };
@@ -4741,12 +4742,12 @@ mod tests {
             value: Some(Zeroizing::new("new-value".into())),
             content_type: Some(RECORD_CONTENT_TYPE.into()),
             enabled: Some(false),
-            expires_on: crate::secret::manager::FieldUpdate::Unchanged,
-            not_before: crate::secret::manager::FieldUpdate::Unchanged,
+            expires_on: crate::secret::domain::FieldUpdate::Unchanged,
+            not_before: crate::secret::domain::FieldUpdate::Unchanged,
             tags: Some(HashMap::from([(TYPE_TAG.into(), "api-key".into())])),
             groups: Some(vec!["new-group".into()]),
-            note: crate::secret::manager::FieldUpdate::Set("new-note".into()),
-            folder: crate::secret::manager::FieldUpdate::Set("new/folder".into()),
+            note: crate::secret::domain::FieldUpdate::Set("new-note".into()),
+            folder: crate::secret::domain::FieldUpdate::Set("new/folder".into()),
             replace_tags: true,
             replace_groups: true,
         }

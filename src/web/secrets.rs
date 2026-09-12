@@ -14,7 +14,7 @@ use crate::records::{
     apply_conversion, preview_conversion, validate_conditional_conversion_backend,
     ConversionPreview, ConversionRequest,
 };
-use crate::secret::manager::{DeletedSecretSummary, SecretProperties};
+use crate::secret::domain::{DeletedSecretSummary, SecretProperties};
 #[cfg(feature = "file-ops")]
 use crate::secret::{
     attachment_transfer::{TransferEndpoint, TransferIntent, TransferOperation},

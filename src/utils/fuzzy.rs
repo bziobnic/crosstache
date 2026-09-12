@@ -103,7 +103,7 @@ impl CandidateItem {
     /// `original_name` over the sanitized `name` since users search
     /// against what they typed, not against post-sanitization forms.
     /// Empty `original_name` falls back to `name`.
-    pub fn from_secret_summary(s: &crate::secret::manager::SecretSummary) -> Self {
+    pub fn from_secret_summary(s: &crate::secret::domain::SecretSummary) -> Self {
         let name = if s.original_name.is_empty() {
             s.name.clone()
         } else {
@@ -210,7 +210,7 @@ mod tests {
 
     #[test]
     fn from_secret_summary_extracts_all_fields() {
-        use crate::secret::manager::SecretSummary;
+        use crate::secret::domain::SecretSummary;
         let summary = SecretSummary {
             name: "DB_PASSWORD".to_string(),
             original_name: "DB_PASSWORD".to_string(),

@@ -3,7 +3,7 @@
 //! Folders are a client-side view derived from each secret's hierarchical
 //! `folder` tag (e.g. `prod/db`). Nothing here talks to a backend.
 
-use crate::secret::manager::{DeletedSecretSummary, SecretSummary};
+use crate::secret::domain::{DeletedSecretSummary, SecretSummary};
 use crate::utils::format::sanitize_control_chars;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 

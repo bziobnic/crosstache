@@ -319,7 +319,7 @@ mod stale_entry_tests {
 mod tests {
     use super::*;
     use crate::config::settings::{Config, LocalConfig, NamedBackendEntry};
-    use crate::secret::manager::SecretRequest;
+    use crate::secret::domain::SecretRequest;
     use crate::workspace::WorkspaceSource;
     use std::collections::HashMap;
     use zeroize::Zeroizing;

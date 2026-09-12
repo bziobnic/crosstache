@@ -25,10 +25,10 @@ use zeroize::Zeroizing;
 #[derive(Clone, PartialEq, Eq)]
 pub struct SecretValue(Zeroizing<String>);
 
-// Not yet wired into `manager.rs`/`backend/secret.rs` (that lands in Task 2 of
-// this split), so the `xv` binary's own module tree has no caller yet and
-// clippy's dead_code lint fires on the bin target. Remove this allow once
-// Task 2 wires the domain types into real call sites.
+// Not yet wired into any call site (that lands in Task 3 of this split), so the
+// `xv` binary's own module tree has no caller yet and clippy's dead_code lint
+// fires on the bin target. Remove this allow once Task 3 wires the value type
+// into real call sites.
 #[allow(dead_code)]
 impl SecretValue {
     pub fn new(value: impl Into<String>) -> Self {

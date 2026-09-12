@@ -7,7 +7,7 @@ use super::{BackendError, SecretBackend};
 use crate::secret::attachment_key::{
     self as key, classify_reserved_name, AttachmentKeyRef, ReservedClass,
 };
-use crate::secret::manager::{SecretProperties, SecretRequest};
+use crate::secret::domain::{SecretProperties, SecretRequest};
 use async_trait::async_trait;
 use serde::Serialize;
 
@@ -204,7 +204,7 @@ impl AttachmentKeyStore for RawAttachmentKeyStore<'_> {
         vault: &str,
         reference: &AttachmentKeyRef,
     ) -> Result<SecretProperties, BackendError> {
-        use crate::secret::manager::{FieldUpdate, SecretUpdateRequest};
+        use crate::secret::domain::{FieldUpdate, SecretUpdateRequest};
         validate_retirement_ref(reference)?;
         let name = key::retained_record_name(&reference.key_id);
         let before = self.secrets.get_secret(vault, &name, true).await?;
@@ -454,7 +454,7 @@ mod tests {
             &self,
             _: &str,
             _: Option<&str>,
-        ) -> Result<Vec<crate::secret::manager::SecretSummary>, BackendError> {
+        ) -> Result<Vec<crate::secret::domain::SecretSummary>, BackendError> {
             Err(BackendError::AuthenticationFailed(
                 "provider list failed".into(),
             ))
@@ -466,7 +466,7 @@ mod tests {
             &self,
             _: &str,
             _: &str,
-            _: crate::secret::manager::SecretUpdateRequest,
+            _: crate::secret::domain::SecretUpdateRequest,
         ) -> Result<SecretProperties, BackendError> {
             unimplemented!()
         }

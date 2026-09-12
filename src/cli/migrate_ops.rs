@@ -6,7 +6,7 @@
 use crate::backend::{Backend, BackendError, BackendRef, BackendRegistry};
 use crate::config::settings::Config;
 use crate::error::{CrosstacheError, Result};
-use crate::secret::manager::SecretRequest;
+use crate::secret::domain::SecretRequest;
 use crate::utils::output;
 use futures::stream::{self, StreamExt};
 use std::sync::Arc;
@@ -132,7 +132,7 @@ fn print_diff_summary(
 }
 
 fn build_request_from_props(
-    props: &crate::secret::manager::SecretProperties,
+    props: &crate::secret::domain::SecretProperties,
     source_name: &str,
     vault: &str,
 ) -> SecretRequest {
@@ -833,7 +833,7 @@ mod tests {
         tags.insert("folder".to_string(), "infra/database".to_string());
         tags.insert("owner".to_string(), "platform".to_string());
 
-        let props = crate::secret::manager::SecretProperties {
+        let props = crate::secret::domain::SecretProperties {
             name: "db-password".to_string(),
             original_name: "db-password".to_string(),
             value: Some(Zeroizing::new("secret-value".to_string())),

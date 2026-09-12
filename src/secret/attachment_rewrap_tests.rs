@@ -1,7 +1,7 @@
 use super::*;
 use crate::backend::{local::LocalBackend, Backend};
 use crate::config::settings::LocalConfig;
-use crate::secret::manager::SecretRequest;
+use crate::secret::domain::SecretRequest;
 use crate::secret::{attachment_lifecycle, attachment_rotation, attachments};
 use age::secrecy::ExposeSecret;
 use std::collections::HashMap;

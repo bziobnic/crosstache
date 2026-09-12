@@ -7,7 +7,7 @@ use crate::error::{AttachmentError, CrosstacheError, Result};
 use crate::secret::attachment_key::{
     self as key, AttachmentKeyId, AttachmentKeyMaterial, KeySlot, PointerKind, SecretVersion,
 };
-use crate::secret::manager::{SecretProperties, SecretRequest};
+use crate::secret::domain::{SecretProperties, SecretRequest};
 use serde::Serialize;
 use zeroize::Zeroizing;
 
@@ -455,7 +455,7 @@ mod tests {
     use crate::backend::{local::LocalBackend, Backend};
     use crate::blob::models::FileUploadRequest;
     use crate::config::settings::LocalConfig;
-    use crate::secret::manager::SecretRequest;
+    use crate::secret::domain::SecretRequest;
     use crate::secret::{attachment_key as key, attachments};
     use age::secrecy::ExposeSecret;
     use std::collections::HashMap;

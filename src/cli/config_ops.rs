@@ -2531,7 +2531,7 @@ async fn execute_env_push(
     config: &Config,
     registry: Option<&crate::backend::BackendRegistry>,
 ) -> Result<()> {
-    use crate::secret::manager::SecretRequest;
+    use crate::secret::domain::SecretRequest;
     use std::collections::HashMap;
     use std::io::Read;
 

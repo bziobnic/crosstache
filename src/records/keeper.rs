@@ -59,7 +59,7 @@ use crate::records::{
     check_tag_budget, encode_envelope, find_type, parse_envelope, predicted_reserved_tag_count,
     RecordType, FIELD_TAG_PREFIX, RECORD_CONTENT_TYPE, TYPE_TAG,
 };
-use crate::secret::manager::SecretRequest;
+use crate::secret::domain::SecretRequest;
 use zeroize::Zeroizing;
 
 /// Keeper nests folder paths with a backslash (`Customer1\Folder2`); xv uses

@@ -50,7 +50,7 @@ fn overwrite_record_envelope(temp: &Path, name: &str, envelope: &str) {
     runtime.block_on(async {
         use crosstache::backend::local::LocalBackend;
         use crosstache::backend::Backend;
-        use crosstache::secret::manager::SecretRequest;
+        use crosstache::secret::domain::SecretRequest;
 
         let backend = LocalBackend::new(Some(&local_config)).expect("open local backend");
         let existing = backend

@@ -1089,7 +1089,7 @@ async fn execute_vault_import(
     dry_run: bool,
     config: &Config,
 ) -> Result<()> {
-    use crate::secret::manager::SecretRequest;
+    use crate::secret::domain::SecretRequest;
     use std::fs;
     use std::io::{self, Read};
 

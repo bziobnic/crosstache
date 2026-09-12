@@ -263,7 +263,7 @@ async fn build_record_set_request(
     config: &Config,
     caps: BackendCapabilities,
     backend_kind: crate::backend::BackendKind,
-) -> Result<crate::secret::manager::SecretRequest> {
+) -> Result<crate::secret::domain::SecretRequest> {
     let types = config.resolve_record_types().await?;
     let Some(record_type) = find_type(&types, type_name) else {
         let mut known: Vec<&str> = types.iter().map(|t| t.name.as_str()).collect();
@@ -428,7 +428,7 @@ async fn build_record_set_request(
         None => None,
     };
 
-    Ok(crate::secret::manager::SecretRequest {
+    Ok(crate::secret::domain::SecretRequest {
         name: name.to_string(),
         value: Zeroizing::new(envelope_value),
         content_type: Some(RECORD_CONTENT_TYPE.to_string()),
@@ -772,7 +772,7 @@ fn field_clipboard_outcome(
 /// commands.
 fn record_field_value(
     name: &str,
-    secret: &crate::secret::manager::SecretProperties,
+    secret: &crate::secret::domain::SecretProperties,
     field: Option<&str>,
     types: &[RecordType],
 ) -> Result<Zeroizing<String>> {
@@ -1041,7 +1041,7 @@ pub(crate) async fn execute_secret_get_direct(
 }
 
 fn secret_summary_matches_group(
-    secret: &crate::secret::manager::SecretSummary,
+    secret: &crate::secret::domain::SecretSummary,
     group: &str,
 ) -> bool {
     secret
@@ -1114,10 +1114,10 @@ pub(crate) fn confirm_reserved_key_write(
 }
 
 fn filter_secret_summaries_for_display(
-    mut secrets: Vec<crate::secret::manager::SecretSummary>,
+    mut secrets: Vec<crate::secret::domain::SecretSummary>,
     group: Option<&str>,
     all: bool,
-) -> Vec<crate::secret::manager::SecretSummary> {
+) -> Vec<crate::secret::domain::SecretSummary> {
     // Hide the active pointer and marked key-custody records; an unmarked
     // strict-format user collision stays visible (design §E).
     secrets.retain(|s| {
@@ -1138,7 +1138,7 @@ fn filter_secret_summaries_for_display(
 /// Fold summaries into (group → member count), tokenizing the comma-separated
 /// `groups` tag exactly like `secret_summary_matches_group`. A group repeated
 /// within one secret counts that secret once.
-fn derive_group_rows(secrets: &[crate::secret::manager::SecretSummary]) -> Vec<GroupListRow> {
+fn derive_group_rows(secrets: &[crate::secret::domain::SecretSummary]) -> Vec<GroupListRow> {
     let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     for s in secrets {
         let Some(groups) = s.groups.as_deref() else {
@@ -1195,7 +1195,7 @@ async fn execute_group_list(
     let cache_key = trait_secret_cache_key(config.effective_backend_name(), &vault_name);
     let use_cache = cache_manager.is_enabled() && !no_cache;
     let cached = if use_cache {
-        cache_manager.get::<Vec<crate::secret::manager::SecretSummary>>(&cache_key)
+        cache_manager.get::<Vec<crate::secret::domain::SecretSummary>>(&cache_key)
     } else {
         None
     };
@@ -1272,13 +1272,13 @@ const WORKSPACE_VAULT_TAG: &str = "__xv_workspace_vault";
 
 /// Read back a [`WORKSPACE_ALIAS_TAG`] value stashed by the union `ls` path.
 /// `None` for ordinary (non-workspace or single-vault) listings.
-fn workspace_alias_of(s: &crate::secret::manager::SecretSummary) -> Option<&str> {
+fn workspace_alias_of(s: &crate::secret::domain::SecretSummary) -> Option<&str> {
     s.tags.get(WORKSPACE_ALIAS_TAG).map(String::as_str)
 }
 
 /// Read back the [`WORKSPACE_VAULT_TAG`] value (the entry's real vault name).
 /// `None` for ordinary (non-workspace or single-vault) listings.
-fn workspace_vault_of(s: &crate::secret::manager::SecretSummary) -> Option<&str> {
+fn workspace_vault_of(s: &crate::secret::domain::SecretSummary) -> Option<&str> {
     s.tags.get(WORKSPACE_VAULT_TAG).map(String::as_str)
 }
 
@@ -1327,7 +1327,7 @@ struct SecretListDisplayRowTyped {
 }
 
 fn format_secret_list_rows_for_human(
-    secrets: &[crate::secret::manager::SecretSummary],
+    secrets: &[crate::secret::domain::SecretSummary],
 ) -> Vec<SecretListDisplayRow> {
     secrets
         .iter()
@@ -1346,7 +1346,7 @@ fn format_secret_list_rows_for_human(
 }
 
 fn format_secret_list_rows_for_human_typed(
-    secrets: &[crate::secret::manager::SecretSummary],
+    secrets: &[crate::secret::domain::SecretSummary],
 ) -> Vec<SecretListDisplayRowTyped> {
     secrets
         .iter()
@@ -1409,7 +1409,7 @@ struct SecretListDisplayRowVaultTyped {
 }
 
 fn format_secret_list_rows_for_human_vault(
-    secrets: &[crate::secret::manager::SecretSummary],
+    secrets: &[crate::secret::domain::SecretSummary],
 ) -> Vec<SecretListDisplayRowVault> {
     secrets
         .iter()
@@ -1429,7 +1429,7 @@ fn format_secret_list_rows_for_human_vault(
 }
 
 fn format_secret_list_rows_for_human_vault_typed(
-    secrets: &[crate::secret::manager::SecretSummary],
+    secrets: &[crate::secret::domain::SecretSummary],
 ) -> Vec<SecretListDisplayRowVaultTyped> {
     secrets
         .iter()
@@ -1451,16 +1451,16 @@ fn format_secret_list_rows_for_human_vault_typed(
 
 /// True when any secret in `secrets` carries the reserved `xv-type` tag —
 /// decides whether the table view gains a `Type` column.
-fn any_secret_typed(secrets: &[crate::secret::manager::SecretSummary]) -> bool {
+fn any_secret_typed(secrets: &[crate::secret::domain::SecretSummary]) -> bool {
     secrets.iter().any(|s| s.tags.contains_key(TYPE_TAG))
 }
 
 /// Filters `secrets` down to those whose `xv-type` tag matches `type_name`
 /// (record-types plan Task 10's `ls --type` filter).
 fn filter_secrets_by_type(
-    mut secrets: Vec<crate::secret::manager::SecretSummary>,
+    mut secrets: Vec<crate::secret::domain::SecretSummary>,
     type_name: Option<&str>,
-) -> Vec<crate::secret::manager::SecretSummary> {
+) -> Vec<crate::secret::domain::SecretSummary> {
     if let Some(t) = type_name {
         secrets.retain(|s| s.tags.get(TYPE_TAG).map(String::as_str) == Some(t));
     }
@@ -1474,9 +1474,9 @@ fn filter_secrets_by_type(
 /// [`crate::utils::helpers::compile_name_glob`] before any backend call;
 /// this recompiles the (now-known-valid) pattern to apply it.
 fn filter_secrets_by_glob(
-    mut secrets: Vec<crate::secret::manager::SecretSummary>,
+    mut secrets: Vec<crate::secret::domain::SecretSummary>,
     filter: Option<&str>,
-) -> Result<Vec<crate::secret::manager::SecretSummary>> {
+) -> Result<Vec<crate::secret::domain::SecretSummary>> {
     if let Some(pattern) = filter {
         let matcher = crate::utils::helpers::compile_name_glob(pattern)?;
         secrets.retain(|s| {
@@ -1488,9 +1488,9 @@ fn filter_secrets_by_glob(
 
 /// Same as [`filter_secrets_by_glob`] but for `xv ls --deleted` summaries.
 fn filter_deleted_secrets_by_glob(
-    mut items: Vec<crate::secret::manager::DeletedSecretSummary>,
+    mut items: Vec<crate::secret::domain::DeletedSecretSummary>,
     filter: Option<&str>,
-) -> Result<Vec<crate::secret::manager::DeletedSecretSummary>> {
+) -> Result<Vec<crate::secret::domain::DeletedSecretSummary>> {
     if let Some(pattern) = filter {
         let matcher = crate::utils::helpers::compile_name_glob(pattern)?;
         items.retain(|s| {
@@ -1506,7 +1506,7 @@ fn filter_deleted_secrets_by_glob(
 /// exactly (same field names, no `tags` key) so untyped-secret JSON output
 /// is unaffected beyond the two new keys.
 fn secret_summary_to_json_with_fields(
-    s: &crate::secret::manager::SecretSummary,
+    s: &crate::secret::domain::SecretSummary,
 ) -> serde_json::Value {
     let mut fields = serde_json::Map::new();
     for (k, v) in &s.tags {
@@ -1598,7 +1598,7 @@ fn push_wrapped_word(word: &str, width: usize, current: &mut String, lines: &mut
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn display_cached_secret_list(
-    secrets: Vec<crate::secret::manager::SecretSummary>,
+    secrets: Vec<crate::secret::domain::SecretSummary>,
     group: Option<String>,
     all: bool,
     path: &str,
@@ -1638,8 +1638,7 @@ pub(crate) fn display_cached_secret_list(
         // (Rust's slice sort is stable, so ties within the same alias keep
         // their existing name order).
         let by_alias_then_name =
-            |a: &crate::secret::manager::SecretSummary,
-             b: &crate::secret::manager::SecretSummary| {
+            |a: &crate::secret::domain::SecretSummary, b: &crate::secret::domain::SecretSummary| {
                 workspace_alias_of(a)
                     .unwrap_or("")
                     .cmp(workspace_alias_of(b).unwrap_or(""))
@@ -1944,7 +1943,7 @@ struct DeletedSecretListRow {
     purge_scheduled: String,
 }
 
-fn deleted_display_name(s: &crate::secret::manager::DeletedSecretSummary) -> &str {
+fn deleted_display_name(s: &crate::secret::domain::DeletedSecretSummary) -> &str {
     if s.original_name.is_empty() {
         &s.name
     } else {
@@ -1953,7 +1952,7 @@ fn deleted_display_name(s: &crate::secret::manager::DeletedSecretSummary) -> &st
 }
 
 fn deleted_list_rows(
-    items: &[crate::secret::manager::DeletedSecretSummary],
+    items: &[crate::secret::domain::DeletedSecretSummary],
     human: bool,
 ) -> Vec<DeletedSecretListRow> {
     items
@@ -2081,7 +2080,7 @@ pub(crate) async fn execute_deleted_secret_list(
 /// they came from.
 #[allow(clippy::too_many_arguments)]
 fn display_deleted_secret_list(
-    items: Vec<crate::secret::manager::DeletedSecretSummary>,
+    items: Vec<crate::secret::domain::DeletedSecretSummary>,
     pagination: Pagination,
     pager: bool,
     names_only: bool,
@@ -2264,7 +2263,7 @@ async fn execute_deleted_secret_list_workspace(
         .map_err(|e| CrosstacheError::config(e.to_string()))?;
 
     let show_vault = ws.entries.len() >= 2;
-    let mut items: Vec<crate::secret::manager::DeletedSecretSummary> = Vec::new();
+    let mut items: Vec<crate::secret::domain::DeletedSecretSummary> = Vec::new();
     for entry in &ws.entries {
         let backend = ws_registry
             .materialize(&entry.backend)
@@ -2384,7 +2383,7 @@ async fn execute_secret_list_workspace(
     let cache_manager = CacheManager::from_config(&config);
     let use_cache = cache_manager.is_enabled() && !no_cache && expiring.is_none() && !expired;
 
-    let mut merged: Vec<crate::secret::manager::SecretSummary> = Vec::new();
+    let mut merged: Vec<crate::secret::domain::SecretSummary> = Vec::new();
     for entry in &ws.entries {
         let backend = ws_registry
             .materialize(&entry.backend)
@@ -2396,7 +2395,7 @@ async fn execute_secret_list_workspace(
         };
 
         let cached = if use_cache {
-            cache_manager.get::<Vec<crate::secret::manager::SecretSummary>>(&cache_key)
+            cache_manager.get::<Vec<crate::secret::domain::SecretSummary>>(&cache_key)
         } else {
             None
         };
@@ -2581,7 +2580,7 @@ pub(crate) async fn execute_secret_list_direct(
         // Try cache (skip for expiry filters — they need per-secret API calls)
         if use_cache && expiring.is_none() && !expired {
             if let Some(cached) =
-                cache_manager.get::<Vec<crate::secret::manager::SecretSummary>>(&cache_key)
+                cache_manager.get::<Vec<crate::secret::domain::SecretSummary>>(&cache_key)
             {
                 return display_cached_secret_list(
                     cached,
@@ -2932,7 +2931,7 @@ pub(crate) async fn execute_secret_history_direct(
                 fmt,
                 OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw
             ) {
-                formatter.validate_columns::<crate::secret::manager::SecretProperties>()?;
+                formatter.validate_columns::<crate::secret::domain::SecretProperties>()?;
                 output::info(&format!("No version history for '{name}'"));
             } else {
                 // Valid-empty machine output on stdout (e.g. `[]` for JSON).
@@ -3172,7 +3171,7 @@ pub(crate) async fn execute_rotation_policy_update(
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
-    use crate::secret::manager::{FieldUpdate, SecretUpdateRequest};
+    use crate::secret::domain::{FieldUpdate, SecretUpdateRequest};
     use crate::secret::rotation::{
         format_interval, parse_interval, TAG_ROTATED_AT, TAG_ROTATE_EVERY,
     };
@@ -3950,7 +3949,7 @@ async fn execute_record_field_update(
 #[allow(clippy::too_many_arguments)]
 async fn apply_record_field_changes(
     name: &str,
-    secret: &crate::secret::manager::SecretProperties,
+    secret: &crate::secret::domain::SecretProperties,
     metadata_updates: &BTreeMap<String, String>,
     secret_updates: &BTreeMap<String, String>,
     enabled_override: Option<bool>,
@@ -3958,7 +3957,7 @@ async fn apply_record_field_changes(
     config: &Config,
     backend: &dyn crate::backend::Backend,
     backend_name: &str,
-) -> Result<crate::secret::manager::SecretProperties> {
+) -> Result<crate::secret::domain::SecretProperties> {
     let mut new_value: Option<Zeroizing<String>> = None;
     if !secret_updates.is_empty() {
         let raw = secret.value.as_deref().map(|s| s.as_str()).unwrap_or("");
@@ -3987,11 +3986,11 @@ async fn apply_record_field_changes(
                 Some(RECORD_CONTENT_TYPE.to_string()),
                 true,
                 groups,
-                note.map(crate::secret::manager::FieldUpdate::Set)
-                    .unwrap_or(crate::secret::manager::FieldUpdate::Unchanged),
+                note.map(crate::secret::domain::FieldUpdate::Set)
+                    .unwrap_or(crate::secret::domain::FieldUpdate::Unchanged),
                 folder
-                    .map(crate::secret::manager::FieldUpdate::Set)
-                    .unwrap_or(crate::secret::manager::FieldUpdate::Unchanged),
+                    .map(crate::secret::domain::FieldUpdate::Set)
+                    .unwrap_or(crate::secret::domain::FieldUpdate::Unchanged),
                 true,
             )
         } else if !metadata_updates.is_empty() {
@@ -4004,8 +4003,8 @@ async fn apply_record_field_changes(
                 None,
                 false,
                 None,
-                crate::secret::manager::FieldUpdate::Unchanged,
-                crate::secret::manager::FieldUpdate::Unchanged,
+                crate::secret::domain::FieldUpdate::Unchanged,
+                crate::secret::domain::FieldUpdate::Unchanged,
                 false,
             )
         } else {
@@ -4014,8 +4013,8 @@ async fn apply_record_field_changes(
                 None,
                 false,
                 None,
-                crate::secret::manager::FieldUpdate::Unchanged,
-                crate::secret::manager::FieldUpdate::Unchanged,
+                crate::secret::domain::FieldUpdate::Unchanged,
+                crate::secret::domain::FieldUpdate::Unchanged,
                 false,
             )
         };
@@ -4051,14 +4050,14 @@ async fn apply_record_field_changes(
         &user_tags,
     )?;
 
-    let request = crate::secret::manager::SecretUpdateRequest {
+    let request = crate::secret::domain::SecretUpdateRequest {
         name: name.to_string(),
         expected_revision: None,
         value: new_value,
         content_type,
         enabled: enabled_override,
-        expires_on: crate::secret::manager::FieldUpdate::Unchanged,
-        not_before: crate::secret::manager::FieldUpdate::Unchanged,
+        expires_on: crate::secret::domain::FieldUpdate::Unchanged,
+        not_before: crate::secret::domain::FieldUpdate::Unchanged,
         tags: new_tags,
         groups,
         note,
@@ -4080,7 +4079,7 @@ async fn apply_record_field_changes(
 /// plan; fixes #330).
 fn resolve_primary_field<'a>(
     name: &str,
-    secret: &crate::secret::manager::SecretProperties,
+    secret: &crate::secret::domain::SecretProperties,
     types: &'a [RecordType],
 ) -> Result<&'a RecordType> {
     let type_name = secret.tags.get(TYPE_TAG).cloned().unwrap_or_default();
@@ -4106,13 +4105,13 @@ fn resolve_primary_field<'a>(
 async fn execute_record_primary_update(
     name: &str,
     new_primary_value: &str,
-    secret: &crate::secret::manager::SecretProperties,
+    secret: &crate::secret::domain::SecretProperties,
     enabled_override: Option<bool>,
     vault_name: &str,
     config: &Config,
     reg: &BackendRegistry,
     backend_name: &str,
-) -> Result<crate::secret::manager::SecretProperties> {
+) -> Result<crate::secret::domain::SecretProperties> {
     let types = config.resolve_record_types().await?;
     let record_type = resolve_primary_field(name, secret, &types)?;
     let primary_name = record_type.primary().name.clone();
@@ -4371,7 +4370,7 @@ pub(crate) async fn execute_secret_update_direct(
 ) -> Result<()> {
     // ── Trait-based path (non-Azure backends) ──────────────────────────
     if use_trait_path(registry) {
-        use crate::secret::manager::FieldUpdate;
+        use crate::secret::domain::FieldUpdate;
         use crate::utils::datetime::parse_datetime_or_duration;
 
         // Workspace-aware resolution (unqualified → default vault, never
@@ -4623,7 +4622,7 @@ pub(crate) async fn execute_secret_update_direct(
         // `--rename` alone skips the no-op update round-trip, and a bare
         // `xv update NAME` keeps its historical all-unchanged update call.
         if has_other_updates || !renaming {
-            let request = crate::secret::manager::SecretUpdateRequest {
+            let request = crate::secret::domain::SecretUpdateRequest {
                 name: name.to_string(),
                 expected_revision: None,
                 value: resolved_value,
@@ -5753,8 +5752,7 @@ pub(crate) async fn execute_complete_secrets(config: Config) -> Result<()> {
         backend: entry.backend.clone(),
         vault_name: entry.vault.clone(),
     };
-    if let Some(cached) =
-        cache_manager.get::<Vec<crate::secret::manager::SecretSummary>>(&cache_key)
+    if let Some(cached) = cache_manager.get::<Vec<crate::secret::domain::SecretSummary>>(&cache_key)
     {
         for s in &cached {
             let display = if s.original_name.is_empty() {
@@ -5770,7 +5768,7 @@ pub(crate) async fn execute_complete_secrets(config: Config) -> Result<()> {
 
 /// Distinct folder paths (including ancestor prefixes, so `prod/db` also
 /// offers `prod`), sorted — the completion feed for FOLDER-taking args.
-fn folder_completion_paths(secrets: &[crate::secret::manager::SecretSummary]) -> Vec<String> {
+fn folder_completion_paths(secrets: &[crate::secret::domain::SecretSummary]) -> Vec<String> {
     let mut folders = std::collections::BTreeSet::new();
     for s in secrets {
         let Some(folder) = s.folder.as_deref().filter(|f| !f.is_empty()) else {
@@ -5815,8 +5813,7 @@ pub(crate) async fn execute_complete_folders(config: Config) -> Result<()> {
         backend: entry.backend.clone(),
         vault_name: entry.vault.clone(),
     };
-    if let Some(cached) =
-        cache_manager.get::<Vec<crate::secret::manager::SecretSummary>>(&cache_key)
+    if let Some(cached) = cache_manager.get::<Vec<crate::secret::domain::SecretSummary>>(&cache_key)
     {
         for f in folder_completion_paths(&cached) {
             println!("{}", crate::utils::format::sanitize_control_chars(&f));
@@ -5845,7 +5842,7 @@ pub(crate) async fn execute_secret_rotate(
     track_context_usage: bool,
 ) -> Result<()> {
     use crate::config::ContextManager;
-    use crate::secret::manager::SecretRequest;
+    use crate::secret::domain::SecretRequest;
     use crate::utils::interactive::InteractivePrompt;
 
     // Two callers, and both resolve the vault before calling:
@@ -5995,17 +5992,17 @@ pub(crate) async fn execute_secret_rotate(
     // metadata-only update (merge semantics — no `replace_tags`). Metadata-only
     // updates do not create a further version on any backend.
     if is_record {
-        let stamp_request = crate::secret::manager::SecretUpdateRequest {
+        let stamp_request = crate::secret::domain::SecretUpdateRequest {
             name: name.to_string(),
             value: None,
             content_type: None,
             enabled: None,
-            expires_on: crate::secret::manager::FieldUpdate::Unchanged,
-            not_before: crate::secret::manager::FieldUpdate::Unchanged,
+            expires_on: crate::secret::domain::FieldUpdate::Unchanged,
+            not_before: crate::secret::domain::FieldUpdate::Unchanged,
             tags: Some(stamp.into_iter().collect()),
             groups: None,
-            note: crate::secret::manager::FieldUpdate::Unchanged,
-            folder: crate::secret::manager::FieldUpdate::Unchanged,
+            note: crate::secret::domain::FieldUpdate::Unchanged,
+            folder: crate::secret::domain::FieldUpdate::Unchanged,
             replace_tags: false,
             replace_groups: false,
             expected_revision: None,
@@ -6043,7 +6040,7 @@ pub(crate) async fn execute_secret_rotate(
 /// (Phase C Task 12).
 pub(crate) fn check_dest_tag_budget(
     dest: &dyn crate::backend::Backend,
-    request: &crate::secret::manager::SecretRequest,
+    request: &crate::secret::domain::SecretRequest,
 ) -> Result<()> {
     crate::backend::secret::validate_transfer_request(dest, request)
 }
@@ -6152,7 +6149,7 @@ async fn resolve_uri_secret_workspace_aware(
     cross_backends: &mut std::collections::HashMap<BackendKind, Arc<dyn crate::backend::Backend>>,
     ws: Option<&crate::workspace::Workspace>,
     ws_registry: Option<&BackendRegistry>,
-) -> Result<crate::secret::manager::SecretProperties> {
+) -> Result<crate::secret::domain::SecretProperties> {
     if backend_ref.backend.is_none() {
         if let (Some(ws), Some(ws_registry)) = (ws, ws_registry) {
             if let Some(entry) = ws.entry(&backend_ref.vault) {
@@ -6191,7 +6188,7 @@ async fn resolve_uri_secret(
     config: &Config,
     active_kind: BackendKind,
     cross_backends: &mut std::collections::HashMap<BackendKind, Arc<dyn crate::backend::Backend>>,
-) -> Result<crate::secret::manager::SecretProperties> {
+) -> Result<crate::secret::domain::SecretProperties> {
     if let Some(backend_kind) = backend_ref.backend {
         if backend_kind != active_kind {
             // Cross-backend: reuse or create a cached backend instance
@@ -6371,7 +6368,7 @@ async fn execute_secret_run(
     // and what the flag help documents) OR the backend name, so a name copied
     // from list output always resolves — `original_name` falls back to `name`
     // when unset, mirroring the list display logic.
-    let name_matches = |secret: &crate::secret::manager::SecretSummary, n: &str| -> bool {
+    let name_matches = |secret: &crate::secret::domain::SecretSummary, n: &str| -> bool {
         n == secret.name || (!secret.original_name.is_empty() && n == secret.original_name)
     };
 
@@ -7597,7 +7594,7 @@ async fn execute_secret_parse(
     format: &str,
     config: &Config,
 ) -> Result<()> {
-    let components = crate::secret::manager::parse_connection_components(connection_string);
+    let components = crate::secret::domain::parse_connection_components(connection_string);
 
     match format.to_lowercase().as_str() {
         "json" => {
@@ -7902,8 +7899,8 @@ mod tests {
         async fn set_secret(
             &self,
             _vault: &str,
-            _request: crate::secret::manager::SecretRequest,
-        ) -> std::result::Result<crate::secret::manager::SecretProperties, BackendError> {
+            _request: crate::secret::domain::SecretRequest,
+        ) -> std::result::Result<crate::secret::domain::SecretProperties, BackendError> {
             Err(BackendError::Unsupported("test backend".into()))
         }
 
@@ -7912,7 +7909,7 @@ mod tests {
             _vault: &str,
             _name: &str,
             _include_value: bool,
-        ) -> std::result::Result<crate::secret::manager::SecretProperties, BackendError> {
+        ) -> std::result::Result<crate::secret::domain::SecretProperties, BackendError> {
             Err(BackendError::Unsupported("test backend".into()))
         }
 
@@ -7922,7 +7919,7 @@ mod tests {
             _name: &str,
             _version: &str,
             _include_value: bool,
-        ) -> std::result::Result<crate::secret::manager::SecretProperties, BackendError> {
+        ) -> std::result::Result<crate::secret::domain::SecretProperties, BackendError> {
             Err(BackendError::Unsupported("test backend".into()))
         }
 
@@ -7930,7 +7927,7 @@ mod tests {
             &self,
             _vault: &str,
             _group_filter: Option<&str>,
-        ) -> std::result::Result<Vec<crate::secret::manager::SecretSummary>, BackendError> {
+        ) -> std::result::Result<Vec<crate::secret::domain::SecretSummary>, BackendError> {
             Ok(Vec::new())
         }
 
@@ -7946,8 +7943,8 @@ mod tests {
             &self,
             _vault: &str,
             _name: &str,
-            _request: crate::secret::manager::SecretUpdateRequest,
-        ) -> std::result::Result<crate::secret::manager::SecretProperties, BackendError> {
+            _request: crate::secret::domain::SecretUpdateRequest,
+        ) -> std::result::Result<crate::secret::domain::SecretProperties, BackendError> {
             Err(BackendError::Unsupported("test backend".into()))
         }
 
@@ -8108,7 +8105,7 @@ mod tests {
         status.code().unwrap_or(1)
     }
 
-    fn summary_with_groups(groups: Option<&str>) -> crate::secret::manager::SecretSummary {
+    fn summary_with_groups(groups: Option<&str>) -> crate::secret::domain::SecretSummary {
         summary_named("secret", groups, true)
     }
 
@@ -8116,8 +8113,8 @@ mod tests {
         name: &str,
         groups: Option<&str>,
         enabled: bool,
-    ) -> crate::secret::manager::SecretSummary {
-        crate::secret::manager::SecretSummary {
+    ) -> crate::secret::domain::SecretSummary {
+        crate::secret::domain::SecretSummary {
             name: name.to_string(),
             original_name: name.to_string(),
             note: None,
@@ -8457,8 +8454,8 @@ mod tests {
 
     #[test]
     fn group_rows_derive_from_comma_separated_tags() {
-        fn s(name: &str, groups: Option<&str>) -> crate::secret::manager::SecretSummary {
-            crate::secret::manager::SecretSummary {
+        fn s(name: &str, groups: Option<&str>) -> crate::secret::domain::SecretSummary {
+            crate::secret::domain::SecretSummary {
                 name: name.to_string(),
                 original_name: name.to_string(),
                 note: None,
@@ -8727,8 +8724,8 @@ mod tests {
 
     #[test]
     fn folder_completion_includes_ancestor_prefixes_sorted() {
-        fn s(folder: Option<&str>) -> crate::secret::manager::SecretSummary {
-            crate::secret::manager::SecretSummary {
+        fn s(folder: Option<&str>) -> crate::secret::domain::SecretSummary {
+            crate::secret::domain::SecretSummary {
                 name: "x".to_string(),
                 original_name: "x".to_string(),
                 note: None,
@@ -8759,8 +8756,8 @@ mod tests {
         );
     }
 
-    fn fake_secret_properties(name: &str) -> crate::secret::manager::SecretProperties {
-        crate::secret::manager::SecretProperties {
+    fn fake_secret_properties(name: &str) -> crate::secret::domain::SecretProperties {
+        crate::secret::domain::SecretProperties {
             name: name.to_string(),
             original_name: name.to_string(),
             value: None,
@@ -8838,7 +8835,7 @@ mod tests {
                 .secrets()
                 .set_secret(
                     &vault_name,
-                    crate::secret::manager::SecretRequest {
+                    crate::secret::domain::SecretRequest {
                         name: name.to_string(),
                         value: zeroize::Zeroizing::new("seed".to_string()),
                         content_type: None,
@@ -8859,12 +8856,12 @@ mod tests {
         let cache_key = trait_secret_cache_key("local", &vault_name);
 
         // Seed a stale cache entry, as a prior `xv ls` would have left behind.
-        let stale: Vec<crate::secret::manager::SecretSummary> =
+        let stale: Vec<crate::secret::domain::SecretSummary> =
             vec![summary_named("src", None, true)];
         cache_manager.set(&cache_key, &stale);
         assert!(
             cache_manager
-                .get::<Vec<crate::secret::manager::SecretSummary>>(&cache_key)
+                .get::<Vec<crate::secret::domain::SecretSummary>>(&cache_key)
                 .is_some(),
             "precondition: stale cache entry must be readable before the update runs"
         );
@@ -8906,7 +8903,7 @@ mod tests {
         // mutex), restoring `XV_CACHE_DIR` before the lock is released even
         // if an assertion below panics.
         let cache_still_present = cache_manager
-            .get::<Vec<crate::secret::manager::SecretSummary>>(&cache_key)
+            .get::<Vec<crate::secret::domain::SecretSummary>>(&cache_key)
             .is_some();
 
         let err = match result {
@@ -9118,8 +9115,8 @@ mod tests {
 
     // ── Multi-vault workspaces plan (Phase B) union `ls`/`ls --deleted` ──
 
-    fn workspace_secret(name: &str, alias: &str) -> crate::secret::manager::SecretSummary {
-        let mut s = crate::secret::manager::SecretSummary {
+    fn workspace_secret(name: &str, alias: &str) -> crate::secret::domain::SecretSummary {
+        let mut s = crate::secret::domain::SecretSummary {
             name: name.to_string(),
             original_name: name.to_string(),
             note: None,
@@ -9144,7 +9141,7 @@ mod tests {
 
     #[test]
     fn workspace_alias_of_none_for_ordinary_secret() {
-        let s = crate::secret::manager::SecretSummary {
+        let s = crate::secret::domain::SecretSummary {
             name: "SECRET".to_string(),
             original_name: "SECRET".to_string(),
             note: None,
@@ -9196,7 +9193,7 @@ mod tests {
     /// glob-matchable. This test constructs that divergence directly.
     #[test]
     fn deleted_union_filter_must_run_on_bare_names_before_alias_prefix() {
-        use crate::secret::manager::DeletedSecretSummary;
+        use crate::secret::domain::DeletedSecretSummary;
 
         let make = || DeletedSecretSummary {
             name: "prod-alpha-a1b2c3".to_string(), // sanitized: doesn't match "PROD_*"
@@ -9238,8 +9235,8 @@ mod tests {
 
     #[test]
     fn reserved_attachment_key_is_hidden_from_listings() {
-        fn summary(name: &str, content_type: &str) -> crate::secret::manager::SecretSummary {
-            crate::secret::manager::SecretSummary {
+        fn summary(name: &str, content_type: &str) -> crate::secret::domain::SecretSummary {
+            crate::secret::domain::SecretSummary {
                 name: name.to_string(),
                 original_name: name.to_string(),
                 note: None,

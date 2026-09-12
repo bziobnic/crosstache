@@ -874,7 +874,7 @@ fn attachment_integrity_failure_has_structured_cli_error_and_no_plaintext_output
 fn attachment_upload_failure_keeps_cli_json_free_of_progress_text() {
     use crosstache::backend::{local::LocalBackend, Backend};
     use crosstache::config::settings::LocalConfig;
-    use crosstache::secret::manager::SecretRequest;
+    use crosstache::secret::domain::SecretRequest;
     let env = FileEnv::new();
     std::fs::write(env.path().join("payload.bin"), b"PRIVATE-UPLOAD-CONTENT").unwrap();
     let backend = LocalBackend::new(Some(&LocalConfig {
@@ -1045,7 +1045,7 @@ fn attachment_key_inventory_uses_workspace_default_entry() {
 fn attachment_key_status_reports_broken_pointer_without_exposing_or_replacing_it() {
     use crosstache::backend::{local::LocalBackend, Backend};
     use crosstache::config::settings::LocalConfig;
-    use crosstache::secret::manager::SecretRequest;
+    use crosstache::secret::domain::SecretRequest;
     let env = FileEnv::new();
     let backend = LocalBackend::new(Some(&LocalConfig {
         store_path: Some(env.path().join("store").display().to_string()),
@@ -1102,7 +1102,8 @@ fn attachment_key_lifecycle_cli_previews_applies_and_recovers_without_losing_fil
     use age::secrecy::ExposeSecret;
     use crosstache::backend::{local::LocalBackend, Backend};
     use crosstache::config::settings::LocalConfig;
-    use crosstache::secret::{attachment_key as key, manager::SecretRequest};
+    use crosstache::secret::attachment_key as key;
+    use crosstache::secret::domain::SecretRequest;
     let env = FileEnv::new();
     let backend = LocalBackend::new(Some(&LocalConfig {
         store_path: Some(env.path().join("store").display().to_string()),

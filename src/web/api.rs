@@ -15,7 +15,7 @@ use zeroize::Zeroizing;
 use crate::backend::error::BackendError;
 use crate::backend::secret::SecretBackend;
 use crate::error::CrosstacheError;
-use crate::secret::manager::{
+use crate::secret::domain::{
     FieldUpdate, SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest,
 };
 
@@ -535,7 +535,7 @@ pub(crate) mod tests {
     use tower::ServiceExt;
     use zeroize::Zeroizing;
 
-    use crate::secret::manager::SecretRequest;
+    use crate::secret::domain::SecretRequest;
     use crate::web::testutil;
 
     pub(crate) async fn get_json(

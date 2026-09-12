@@ -1,4 +1,4 @@
-use crate::secret::manager::{SecretProperties, SecretSummary};
+use crate::secret::domain::{SecretProperties, SecretSummary};
 use crate::vault::models::VaultSummary;
 
 #[derive(Debug)]

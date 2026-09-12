@@ -24,7 +24,7 @@ use crate::secret::attachment_key::{
     SecretVersion,
 };
 #[cfg(any(test, feature = "file-ops"))]
-use crate::secret::manager::SecretRequest;
+use crate::secret::domain::SecretRequest;
 
 /// Reserved per-vault secret holding the age identity for attachments.
 pub const ATTACHMENT_KEY_SECRET: &str = "xv-attachment-key";
@@ -518,7 +518,7 @@ mod tests {
     use crate::backend::file::FileBackend;
     #[cfg(feature = "file-ops")]
     use crate::blob::models::{FileInfo, FileListRequest, FileUploadRequest};
-    use crate::secret::manager::{
+    use crate::secret::domain::{
         SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest,
     };
     #[cfg(feature = "file-ops")]

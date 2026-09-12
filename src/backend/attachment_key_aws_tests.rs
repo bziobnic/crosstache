@@ -5,7 +5,7 @@ use crate::backend::aws::secrets::AwsSecretBackend;
 use crate::secret::attachment_key::{
     retained_record_name, AttachmentKeyId, KEY_RECORD_CONTENT_TYPE,
 };
-use crate::secret::manager::SecretRequest;
+use crate::secret::domain::SecretRequest;
 use age::secrecy::ExposeSecret;
 use aws_sdk_secretsmanager::{config::Region, Client, Config};
 use aws_smithy_runtime_api::client::http::{

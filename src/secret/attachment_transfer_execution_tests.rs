@@ -1,7 +1,7 @@
 use super::*;
 use crate::backend::local::LocalBackend;
 use crate::config::settings::LocalConfig;
-use crate::secret::manager::SecretRequest;
+use crate::secret::domain::SecretRequest;
 use std::collections::HashMap;
 fn intent() -> TransferIntent {
     use transfer::TransferEndpoint;
@@ -1020,7 +1020,7 @@ impl SecretBackend for CapabilityBackend<'_> {
         vault: &str,
         name: &str,
         value: bool,
-    ) -> std::result::Result<crate::backend::secret::SecretSnapshot, BackendError> {
+    ) -> std::result::Result<crate::secret::domain::SecretSnapshot, BackendError> {
         if self.deny_transfer_read && value && name == "db-new" {
             return Err(BackendError::PermissionDenied(
                 "raw destination read denied".into(),
@@ -1091,7 +1091,7 @@ impl SecretBackend for CapabilityBackend<'_> {
         &self,
         vault: &str,
         group: Option<&str>,
-    ) -> std::result::Result<Vec<crate::secret::manager::SecretSummary>, BackendError> {
+    ) -> std::result::Result<Vec<crate::secret::domain::SecretSummary>, BackendError> {
         self.inner.secrets().list_secrets(vault, group).await
     }
     async fn delete_secret(
@@ -1105,7 +1105,7 @@ impl SecretBackend for CapabilityBackend<'_> {
         &self,
         vault: &str,
         name: &str,
-        request: crate::secret::manager::SecretUpdateRequest,
+        request: crate::secret::domain::SecretUpdateRequest,
     ) -> std::result::Result<SecretProperties, BackendError> {
         self.inner
             .secrets()

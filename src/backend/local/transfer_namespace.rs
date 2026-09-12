@@ -224,7 +224,7 @@ mod tests {
     #[tokio::test]
     async fn same_leaf_different_parents_refuses_self_target_without_secret_writes() {
         use crate::config::settings::LocalConfig;
-        use crate::secret::manager::SecretRequest;
+        use crate::secret::domain::SecretRequest;
         use zeroize::Zeroizing;
         let temp = tempfile::tempdir().unwrap();
         let inner = super::super::LocalBackend::new(Some(&LocalConfig {

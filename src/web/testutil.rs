@@ -124,9 +124,9 @@ pub(crate) mod stub {
     use async_trait::async_trait;
 
     use crate::backend::error::BackendError;
-    use crate::backend::secret::SecretSnapshot;
     use crate::backend::{Backend, BackendCapabilities, BackendKind, SecretBackend};
-    use crate::secret::manager::{
+    use crate::secret::domain::SecretSnapshot;
+    use crate::secret::domain::{
         DeletedSecretSummary, SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest,
     };
 

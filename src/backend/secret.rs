@@ -7,22 +7,12 @@
 use async_trait::async_trait;
 use std::collections::HashMap;
 
-use crate::secret::manager::{
-    DeletedSecretSummary, SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest,
+use crate::secret::domain::{
+    DeletedSecretSummary, SecretProperties, SecretRequest, SecretSnapshot, SecretSummary,
+    SecretUpdateRequest,
 };
 
 use super::error::BackendError;
-
-/// A secret value/metadata snapshot paired with an opaque, non-reusable
-/// provider revision for generation/drift comparison. It is a compare-and-swap
-/// token only when a separately advertised conditional operation guarantees that
-/// contract. Callers must not infer ordering or expose provider internals.
-#[derive(Debug, Clone)]
-#[cfg_attr(not(feature = "ui"), allow(dead_code))]
-pub struct SecretSnapshot {
-    pub properties: SecretProperties,
-    pub revision: String,
-}
 
 /// Trait for secret management operations.
 ///
@@ -382,7 +372,7 @@ pub(crate) fn rename_request_from_properties(
 /// Validate the final destination request before any transfer mutation.
 pub(crate) fn validate_transfer_request(
     dest: &dyn crate::backend::Backend,
-    request: &crate::secret::manager::SecretRequest,
+    request: &crate::secret::domain::SecretRequest,
 ) -> crate::error::Result<()> {
     let reserved = crate::backend::ALWAYS_WRITTEN_TAGS.len()
         + usize::from(request.groups.as_ref().is_some_and(|g| !g.is_empty()))
@@ -431,7 +421,7 @@ pub(crate) fn transfer_metadata_revision(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::secret::manager::SecretRequest;
+    use crate::secret::domain::SecretRequest;
     use std::collections::HashMap;
     use std::sync::Mutex;
     use zeroize::Zeroizing;

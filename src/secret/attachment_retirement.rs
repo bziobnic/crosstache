@@ -20,7 +20,7 @@ use crate::secret::attachment_key::{
     self as key, AttachmentKeyRef, KeySlot, PointerKind, SecretVersion,
 };
 use crate::secret::attachment_rewrap::{self as maintenance, Ring};
-use crate::secret::manager::SecretProperties;
+use crate::secret::domain::SecretProperties;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 

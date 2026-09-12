@@ -12,7 +12,7 @@ use crosstache::backend::local::LocalBackend;
 use crosstache::backend::Backend;
 use crosstache::config::settings::AwsConfig;
 use crosstache::config::settings::LocalConfig;
-use crosstache::secret::manager::SecretRequest;
+use crosstache::secret::domain::SecretRequest;
 use tempfile::TempDir;
 use zeroize::Zeroizing;
 

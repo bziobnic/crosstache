@@ -7,7 +7,7 @@ use crosstache::backend::local::audit::ChainStatus;
 use crosstache::backend::local::LocalBackend;
 use crosstache::backend::Backend;
 use crosstache::config::settings::LocalConfig;
-use crosstache::secret::manager::{FieldUpdate, SecretRequest, SecretUpdateRequest};
+use crosstache::secret::domain::{FieldUpdate, SecretRequest, SecretUpdateRequest};
 use tempfile::TempDir;
 
 /// Build a local backend rooted in a temp dir.

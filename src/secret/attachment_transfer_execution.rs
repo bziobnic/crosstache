@@ -234,7 +234,8 @@ fn resolve_configured_path(
     outside_git(data.join("crosstache/transfer-recovery"))
 }
 
-use super::{attachment_rewrap as rewrap, manager::SecretProperties};
+use super::attachment_rewrap as rewrap;
+use super::domain::SecretProperties;
 use crate::backend::{
     error::BackendError, secret::rename_request_from_properties, TransferLocation,
 };
@@ -594,7 +595,7 @@ fn commitment(
 }
 fn request_commitment(
     identity: &age::x25519::Identity,
-    request: &super::manager::SecretRequest,
+    request: &super::domain::SecretRequest,
 ) -> Result<String> {
     // A fixed tuple plus sorted user tags makes the commitment independent of
     // HashMap iteration and serde_json's optional preserve_order feature.
@@ -821,7 +822,7 @@ async fn supported_route(
 fn destination_request(
     source: &SecretProperties,
     intent: &TransferIntent,
-) -> Result<super::manager::SecretRequest> {
+) -> Result<super::domain::SecretRequest> {
     let mut request = rename_request_from_properties(&intent.destination_name, source)?;
     if let Some(folder) = &intent.destination_folder {
         request.folder = if folder == "/" {

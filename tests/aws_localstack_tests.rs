@@ -15,7 +15,7 @@
 use crosstache::backend::aws::AwsBackend;
 use crosstache::backend::{Backend, BackendError};
 use crosstache::config::settings::AwsConfig;
-use crosstache::secret::manager::{FieldUpdate, SecretRequest, SecretUpdateRequest};
+use crosstache::secret::domain::{FieldUpdate, SecretRequest, SecretUpdateRequest};
 use zeroize::Zeroizing;
 
 fn skip_unless_enabled() -> bool {

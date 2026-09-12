@@ -9,7 +9,7 @@ use crate::secret::attachment_backup_codec::{self as codec, Bundle, ManifestFile
 use crate::secret::attachment_key::{
     self as key, AttachmentKeyId, AttachmentKeyRef, KeySlot, PointerKind, SecretVersion,
 };
-use crate::secret::manager::{SecretProperties, SecretRequest};
+use crate::secret::domain::{SecretProperties, SecretRequest};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};

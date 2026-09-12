@@ -4,7 +4,7 @@ use crate::backend::{
     Backend,
 };
 use crate::config::settings::LocalConfig;
-use crate::secret::manager::SecretRequest;
+use crate::secret::domain::SecretRequest;
 use crate::secret::{
     attachment_key::{self as key, AttachmentKeyRef, KeySlot, SecretVersion},
     attachment_rewrap, attachment_rotation,
@@ -295,7 +295,7 @@ async fn current_references_and_invalid_managed_files_block_retirement() {
 }
 
 use crate::backend::BackendError;
-use crate::secret::manager::SecretProperties;
+use crate::secret::domain::SecretProperties;
 use std::sync::atomic::{AtomicUsize, Ordering};
 struct FaultKeys<'a> {
     inner: Box<dyn AttachmentKeyStore + 'a>,
