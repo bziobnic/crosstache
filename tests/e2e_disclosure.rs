@@ -593,7 +593,9 @@ fn boundary_get_record_prints_envelope_fields() {
 }
 
 /// Boundary: `xv vault export --include-values`, in each format that carries
-/// values (`keeper` is covered by `tests/e2e_record_types.rs`).
+/// values (`keeper` is covered by
+/// `tests/e2e_local_backend.rs::keeper_export_requires_include_values` /
+/// `::keeper_export_round_trips_an_imported_file`).
 #[test]
 fn boundary_vault_export_include_values_prints_value() {
     let env = DisclosureEnv::seeded();

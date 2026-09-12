@@ -38,18 +38,23 @@ value without being added here.
 | Record envelope fields (field-level exception) | `xv get <name> --record` (`--format json\|yaml`) | `SecretValue::expose_secret` | `boundary_get_record_prints_envelope_fields` |
 | Clipboard copy | `xv get <name>` / `xv get <name> --field <f>` (no `--raw`) | `SecretValue::expose_secret` | `get_without_raw_never_prints_the_value` (negative: stdout/stderr stay canary-free) |
 | Vault export with values | `xv vault export --include-values` (json, env, txt) | `Secret::disclose` | `boundary_vault_export_include_values_prints_value` |
-| Vault export, Keeper format | `xv vault export --fmt keeper --include-values` | `Secret::disclose` | covered by `tests/e2e_record_types.rs` |
+| Vault export, Keeper format | `xv vault export --fmt keeper --include-values` | `Secret::disclose` | covered by `tests/e2e_local_backend.rs::keeper_export_requires_include_values` / `::keeper_export_round_trips_an_imported_file` |
 | Whole-vault plaintext export | `xv env pull` (json, yaml, csv, dotenv) | `Secret::disclose` | `boundary_env_pull_prints_value` |
 | Diff of differing values | `xv diff --show-values` | `Secret::disclose` | `boundary_diff_show_values_prints_value` (also asserts silence without the flag) |
 | Web reveal endpoint | `POST /api/secrets/{name}/value` | `Secret::disclose` | `boundary_web_reveal_returns_value` |
 | TUI reveal | `Space` on a selected secret in `xv tui` | `SecretValue::expose_secret` | `boundary_tui_reveal_renders_value` |
 | Scan match (value never printed) | `xv scan <dir>` | `SecretValue::expose_secret` | `boundary_scan_matches_the_value_without_printing_it` |
-| Connection-string components | `ConnectionComponent` table (`xv parse`, etc.) | value already exposed by the caller | not canary-testable — the parser takes a caller-provided `&str`; see tasks-3-4 report §6 |
+| Template/env injection to stdout or `--output` | `xv inject` (`{{ secret:name }}` / `xv://…` references) | `SecretValue::expose_secret` via `record_field_value` | not pinned by a canary test; covered functionally by `tests/e2e_local_backend.rs` (e.g. `inject_happy_path_renders_output`) |
+| Injection into a child process environment | `xv run` (masks stdout/stderr by default; see README) | `SecretValue::expose_secret` via `record_field_value` | not pinned by a canary test; covered functionally by `tests/e2e_local_backend.rs` (e.g. `run_happy_path_launches_child`) |
+| Connection-string components | `ConnectionComponent` table (`xv parse`, etc.) | value already exposed by the caller | not canary-testable — the parser takes a caller-provided `&str`; its `value` is a display type over an already-disclosed connection string, not a new disclosure |
 
 The web reveal endpoint's body is exactly `{"value": ..}` — narrower than
 `DisclosedSecret` — by deliberate choice: `name` and `content_type` add
 nothing the caller doesn't already have, and `tags` would put internal record
 markers on a second endpoint.
+
+**Not a boundary:** `xv totp` (`src/cli/totp_ops.rs`) exposes the seed only to
+derive the current code; it prints the generated code, never the seed.
 
 ## What the negative suite proves canary-free
 
@@ -74,13 +79,18 @@ assert both stay absent everywhere they must not appear:
 - the local audit log (`[local].audit`) and its rendered `xv audit` output
 - `RUST_LOG=trace` output under `xv --debug` for list/get/history/export
 - stderr for not-found secrets, fields, and vaults
-- every GET and mutating route in the web `build_router`, including a
-  round trip where the canary is sent inbound so an echoing route would be
-  caught (`every_get_route_is_value_free`,
+- every GET and mutating route in the web `build_router` except
+  `POST /api/files` (multipart upload; the request is rejected by the
+  `enforce_upload_envelope` middleware layer before the handler runs, so a
+  JSON probe would prove nothing — it is instead covered by `src/web/files.rs`'s
+  own tests), including a round trip where the canary is sent inbound so an
+  echoing route would be caught (`every_get_route_is_value_free`,
   `every_mutating_route_is_value_free`, `conversion_apply_is_value_free`)
 - `SecretRequest`'s redacted `Debug`, and `Display`/`Debug`/`code()` of the
   `BackendError`/`CrosstacheError` variants built from it, in `src/error.rs`
+- parse-error paths in `src/records/envelope.rs` never echo the envelope's
+  contents (`parse_errors_never_echo_the_envelope_contents`)
 
-No leak was found by this suite; see
-`.superpowers/sdd/2026-09-12-secret-domain-model-pr3/tasks-3-4-report.md`
-for the full run.
+No leak was found by this suite; the suites named above —
+`tests/e2e_disclosure.rs`, `src/web/disclosure_tests.rs`, `src/error.rs`,
+and `src/records/envelope.rs` — are the complete negative coverage.

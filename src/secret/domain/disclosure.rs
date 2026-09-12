@@ -16,7 +16,9 @@ use crate::utils::helpers::parse_connection_string;
 /// fields via `expose_secret` rather than `disclose`; both are listed in
 /// `docs/security.md`. `Debug` and `Serialize` are derived on purpose:
 /// unlike [`crate::secret::domain::SecretValue`], this type exists to be
-/// shown.
+/// shown. `value` is deliberately a plain `String`, not zeroized: its only
+/// consumers (the `serde_json`/`serde_yaml`/`csv` writers) copy it into
+/// unzeroized buffers anyway, so zeroizing here would not add protection.
 #[derive(Debug, Clone, Serialize)]
 pub struct DisclosedSecret {
     pub name: String,

@@ -2205,6 +2205,7 @@ XV_NO_PARENT_CONFIG=1 xv list            # only the cwd's .xv.toml is considered
   boundaries; use `--no-masking` only when you understand the consequences.
 - **`xv scan` value-never-leaked invariant.** The `Finding` struct never contains the matched value — only file/line/col + the secret's *name*. Enforced by a hand-maintained banned-key test on the on-disk schema.
 - **Secret-name handling.** Names are sanitized for Azure (alphanumeric + hyphens; original preserved in tags); names > 127 chars are SHA256-hashed.
+- **Disclosure boundaries.** See [`docs/security.md`](docs/security.md) for the full table of where plaintext deliberately leaves the process.
 
 ---
 
@@ -2262,6 +2263,7 @@ minisign-signed binaries for all four platforms.
 - [`docs/tui.md`](docs/tui.md) — terminal UI keymap
 - [`docs/web-ui.md`](docs/web-ui.md) — embedded web UI reference (themes, ZIP download)
 - [`docs/GROUPS.md`](docs/GROUPS.md) — group-based organization
+- [`docs/security.md`](docs/security.md) — disclosure boundary table (where plaintext deliberately leaves the process)
 
 ---
 
