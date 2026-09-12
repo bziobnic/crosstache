@@ -19,8 +19,9 @@
 //!
 //! Paths audited and deliberately NOT wired here: `xv cx rm` detaches a
 //! workspace alias without touching vault data, so the cached listing stays
-//! true; `xv init` refuses when a config exists and a new config has a new
-//! identity fingerprint, so old entries are simply never read again.
+//! true; `xv init` re-initializes only on explicit confirmation, and any
+//! identity change it makes shifts the fingerprint, so old entries are never
+//! read again.
 
 use crate::cache::{CacheKey, CacheManager};
 use crate::config::Config;

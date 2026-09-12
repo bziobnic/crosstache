@@ -60,8 +60,9 @@ The fingerprint is a SHA-256 (truncated to 16 hex chars) over a stable,
 deterministic serialization of:
 
 - the resolved global config path, and
-- the active backend's identity fields — Azure: tenant + subscription; AWS:
-  region + profile + endpoint URL; Local: resolved store path.
+- the identity fields of every built-in backend the config carries — Azure:
+  tenant + subscription; AWS: region + profile + endpoint URL; Local: resolved
+  store path.
 
 The backend *name* is deliberately not part of the fingerprint: it is already
 the next path component, and two configs that differ only in a named backend
@@ -117,7 +118,8 @@ re-tightened, missed entries are re-fetched).
 | vault delete/purge | `vaults` plus that `(backend, vault)`'s secret and file listings |
 | `backend rm` | `vaults` plus every listing under that backend name |
 | `migrate` (not dry-run) | destination `(kind, vault)` secret and file listings |
-| `transfer`/`copy`/`move` with `--apply`/`--resume` | destination listings; source listings too for a move |
+| secret copy/move | secret and file listings on the destination; source listings too for a move |
+| `transfer` with `--apply`/`--resume` | destination secret and file listings; source listings too for a move |
 | `cx rm`, `init` | nothing — no vault data changes |
 
 `<backend>` is always the registry name (`local`, `azure`, `aws`, or a

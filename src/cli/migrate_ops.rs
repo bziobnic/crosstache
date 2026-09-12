@@ -714,6 +714,11 @@ pub(crate) async fn execute_migrate(
 
     // 7. Print summary
     println!();
+    if migrated > 0 {
+        let target_backend = to_kind.to_string();
+        crate::cache::invalidation::on_secret_mutation(&config, &target_backend, &target_vault);
+        crate::cache::invalidation::on_file_mutation(&config, &target_backend, &target_vault);
+    }
     if !errors.is_empty() {
         output::warn(&format!(
             "Migrated {} secret(s), {} skipped, {} error(s)",
@@ -730,12 +735,6 @@ pub(crate) async fn execute_migrate(
             "Migrated {} secret(s) ({} skipped)",
             migrated, skipped
         ));
-        if !dry_run && migrated > 0 {
-            let target_backend = to_kind.to_string();
-            crate::cache::invalidation::on_secret_mutation(&config, &target_backend, &target_vault);
-            #[cfg(feature = "file-ops")]
-            crate::cache::invalidation::on_file_mutation(&config, &target_backend, &target_vault);
-        }
     }
 
     Ok(())

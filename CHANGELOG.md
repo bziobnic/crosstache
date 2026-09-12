@@ -94,8 +94,11 @@
   made them stale.** `xv vault delete|purge` now drops the removed vault's
   cached secret and file listings for exactly that backend (a same-named
   vault on another backend keeps its cache), `xv backend rm` drops every
-  listing under the removed backend, and `xv migrate` and an applied
-  `xv transfer`/`copy`/`move` drop the listings for the vaults they wrote.
+  listing under the removed backend, and `xv migrate` (even when some
+  secrets fail after others were written) and an applied `xv transfer`
+  drop the listings for the vaults they wrote, and `xv copy`/`xv move`
+  now drop the destination's file listing as well as its secret listing
+  so moved attachments are not hidden by a stale file list.
   Previously only the vault list was invalidated on the Azure path and
   nothing at all on local/AWS/named-backend vault deletes, so `xv ls
   --vault OLD` kept serving a deleted vault's listing until the TTL
