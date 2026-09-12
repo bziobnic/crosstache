@@ -6,8 +6,7 @@ use super::attachment_key::{self as key, AttachmentKeyId, DownloadPlan, KeySlot,
 use crate::backend::{attachment_keys::AttachmentKeyStore, file::FileBackend, local::crypto};
 use crate::blob::models::FileListRequest;
 use crate::error::{AttachmentError, CrosstacheError, Result};
-use crate::secret::domain::SecretProperties;
-use crate::secret::domain::SecretValue;
+use crate::secret::domain::SecretMetadata;
 use age::secrecy::ExposeSecret;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
@@ -16,7 +15,7 @@ fn drift() -> CrosstacheError {
     CrosstacheError::conflict("Attachment backup source changed; stop all writers and retry.")
 }
 
-fn require_enabled(props: &SecretProperties) -> Result<()> {
+fn require_enabled(props: &SecretMetadata) -> Result<()> {
     if !props.enabled || props.version.is_empty() {
         return Err(AttachmentError::KeyInvalid.into());
     }
@@ -35,7 +34,7 @@ async fn read_identity(
         KeySlot::Retained => key::retained_record_name(&id),
     };
     let props = keys
-        .get_secret_version(vault, &name, &reference.provider_version, true)
+        .get_secret_version(vault, &name, &reference.provider_version)
         .await?;
     require_enabled(&props)?;
     if props.version != reference.provider_version {
@@ -44,7 +43,7 @@ async fn read_identity(
     if slot == KeySlot::Retained && !key::is_marked_key_record(&props.content_type) {
         return Err(AttachmentError::KeyInvalid.into());
     }
-    let raw = props.value.ok_or(AttachmentError::KeyInvalid)?;
+    let raw = props.value;
     let identity = raw
         .expose_secret()
         .trim()
@@ -89,14 +88,11 @@ pub(crate) async fn collect(
     backend: &str,
     vault: &str,
 ) -> Result<Bundle> {
-    let pointer = keys
-        .get_secret(vault, key::ACTIVE_POINTER_SECRET, true)
-        .await?;
+    let (pointer, pointer_value) = keys
+        .get_secret(vault, key::ACTIVE_POINTER_SECRET)
+        .await?
+        .into_parts();
     require_enabled(&pointer)?;
-    let pointer_value = pointer
-        .value
-        .as_ref()
-        .ok_or(AttachmentError::PointerInvalid)?;
     let mut identities = BTreeMap::new();
     let mut references = Vec::<SourceRef>::new();
     let (active, legacy) = match key::parse_pointer_value(pointer_value.expose_secret()) {
@@ -143,7 +139,7 @@ pub(crate) async fn collect(
     for id in required {
         let parsed = AttachmentKeyId::parse(&id).ok_or(AttachmentError::KeyInvalid)?;
         let name = key::retained_record_name(&parsed);
-        let props = keys.get_secret(vault, &name, false).await?;
+        let props = keys.get_secret_metadata(vault, &name).await?;
         require_enabled(&props)?;
         if !key::is_marked_key_record(&props.content_type) {
             return Err(AttachmentError::KeyInvalid.into());
@@ -242,7 +238,7 @@ pub(crate) async fn collect(
         }
     }
     for (name, version) in current_records {
-        let props = keys.get_secret(vault, &name, false).await?;
+        let props = keys.get_secret_metadata(vault, &name).await?;
         if props.version != version
             || !props.enabled
             || !key::is_marked_key_record(&props.content_type)
@@ -265,12 +261,9 @@ pub(crate) async fn collect(
     if signature(&again) != signature(&listed) {
         return Err(drift());
     }
-    let latest = keys
-        .get_secret(vault, key::ACTIVE_POINTER_SECRET, true)
-        .await?;
+    let latest = keys.get_secret(vault, key::ACTIVE_POINTER_SECRET).await?;
     if latest.version != pointer.version
-        || latest.value.as_ref().map(SecretValue::expose_secret)
-            != pointer.value.as_ref().map(SecretValue::expose_secret)
+        || latest.value.expose_secret() != pointer_value.expose_secret()
         || !latest.enabled
     {
         return Err(drift());

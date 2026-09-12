@@ -7,8 +7,9 @@ use super::{BackendError, SecretBackend};
 use crate::secret::attachment_key::{
     self as key, classify_reserved_name, AttachmentKeyRef, ReservedClass,
 };
+#[cfg(test)]
 use crate::secret::domain::SecretValue;
-use crate::secret::domain::{SecretProperties, SecretRequest};
+use crate::secret::domain::{Secret, SecretMetadata, SecretRequest};
 use async_trait::async_trait;
 use serde::Serialize;
 
@@ -54,7 +55,7 @@ pub trait AttachmentKeyStore: Send + Sync {
         &self,
         _vault: &str,
         _reference: &AttachmentKeyRef,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         Err(BackendError::Unsupported(
             "attachment key retirement".into(),
         ))
@@ -70,26 +71,34 @@ pub trait AttachmentKeyStore: Send + Sync {
             "retained attachment key enumeration".into(),
         ))
     }
-    async fn get_secret(
+    async fn get_secret_metadata(
         &self,
         vault: &str,
         name: &str,
-        include_value: bool,
-    ) -> Result<SecretProperties, BackendError>;
+    ) -> Result<SecretMetadata, BackendError>;
+    async fn get_secret(&self, vault: &str, name: &str) -> Result<Secret, BackendError>;
+    /// Mirrors `SecretBackend`'s split so custody reads declare disclosure the
+    /// same way. No custody caller needs a value-free version read today.
+    #[allow(dead_code)]
+    async fn get_secret_version_metadata(
+        &self,
+        vault: &str,
+        name: &str,
+        version: &str,
+    ) -> Result<SecretMetadata, BackendError>;
     async fn get_secret_version(
         &self,
         vault: &str,
         name: &str,
         version: &str,
-        include_value: bool,
-    ) -> Result<SecretProperties, BackendError>;
+    ) -> Result<Secret, BackendError>;
     /// Commit a retained identity without replacing existing Local/AWS records.
     /// Versioned providers must return the exact new immutable version.
     async fn commit_retained_key(
         &self,
         _vault: &str,
         _request: SecretRequest,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         Err(BackendError::Unsupported(
             "retained attachment key commit".into(),
         ))
@@ -98,7 +107,7 @@ pub trait AttachmentKeyStore: Send + Sync {
         &self,
         vault: &str,
         request: SecretRequest,
-    ) -> Result<SecretProperties, BackendError>;
+    ) -> Result<SecretMetadata, BackendError>;
 }
 
 /// Only exact canonical custody names are accepted. Alias spellings are useful
@@ -144,7 +153,7 @@ fn retirement_conflict() -> BackendError {
     BackendError::Conflict("attachment retirement identity or metadata verification failed".into())
 }
 fn validate_retirement_record(
-    p: &SecretProperties,
+    p: &Secret,
     reference: &AttachmentKeyRef,
 ) -> Result<(), BackendError> {
     if p.name != key::retained_record_name(&reference.key_id)
@@ -156,10 +165,10 @@ fn validate_retirement_record(
     }
     let identity = p
         .value
-        .as_ref()
-        .map(SecretValue::expose_secret)
-        .and_then(|v| v.trim().parse::<age::x25519::Identity>().ok())
-        .ok_or_else(retirement_conflict)?;
+        .expose_secret()
+        .trim()
+        .parse::<age::x25519::Identity>()
+        .map_err(|_| retirement_conflict())?;
     if key::AttachmentKeyId::derive(&identity.to_public().to_string()) != reference.key_id {
         return Err(retirement_conflict());
     }
@@ -205,15 +214,15 @@ impl AttachmentKeyStore for RawAttachmentKeyStore<'_> {
         &self,
         vault: &str,
         reference: &AttachmentKeyRef,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         use crate::secret::domain::{FieldUpdate, SecretUpdateRequest};
         validate_retirement_ref(reference)?;
         let name = key::retained_record_name(&reference.key_id);
-        let before = self.secrets.get_secret(vault, &name, true).await?;
+        let before = self.secrets.get_secret(vault, &name).await?;
         validate_retirement_record(&before, reference)?;
         let exact = self
             .secrets
-            .get_secret_version(vault, &name, reference.provider_version.as_str(), true)
+            .get_secret_version(vault, &name, reference.provider_version.as_str())
             .await?;
         validate_retirement_record(&exact, reference)?;
         if before.value != exact.value {
@@ -245,7 +254,7 @@ impl AttachmentKeyStore for RawAttachmentKeyStore<'_> {
                 )
                 .await?;
         }
-        let after = self.secrets.get_secret(vault, &name, true).await?;
+        let after = self.secrets.get_secret(vault, &name).await?;
         validate_retirement_record(&after, reference)?;
         let mut expected_tags = before.tags.clone();
         expected_tags.insert(key::KEY_RETIRED_TAG.into(), "true".into());
@@ -264,13 +273,13 @@ impl AttachmentKeyStore for RawAttachmentKeyStore<'_> {
         }
         let exact_after = self
             .secrets
-            .get_secret_version(vault, &name, reference.provider_version.as_str(), true)
+            .get_secret_version(vault, &name, reference.provider_version.as_str())
             .await?;
         validate_retirement_record(&exact_after, reference)?;
         if exact_after.value != before.value {
             return Err(retirement_conflict());
         }
-        Ok(after)
+        Ok(after.into_metadata())
     }
 
     async fn list_retained_keys(
@@ -308,32 +317,43 @@ impl AttachmentKeyStore for RawAttachmentKeyStore<'_> {
         Ok(retained)
     }
 
-    async fn get_secret(
+    async fn get_secret_metadata(
         &self,
         vault: &str,
         name: &str,
-        include_value: bool,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         validate_name(name)?;
-        self.secrets.get_secret(vault, name, include_value).await
+        self.secrets.get_secret_metadata(vault, name).await
+    }
+    async fn get_secret(&self, vault: &str, name: &str) -> Result<Secret, BackendError> {
+        validate_name(name)?;
+        self.secrets.get_secret(vault, name).await
+    }
+    async fn get_secret_version_metadata(
+        &self,
+        vault: &str,
+        name: &str,
+        version: &str,
+    ) -> Result<SecretMetadata, BackendError> {
+        validate_name(name)?;
+        self.secrets
+            .get_secret_version_metadata(vault, name, version)
+            .await
     }
     async fn get_secret_version(
         &self,
         vault: &str,
         name: &str,
         version: &str,
-        include_value: bool,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<Secret, BackendError> {
         validate_name(name)?;
-        self.secrets
-            .get_secret_version(vault, name, version, include_value)
-            .await
+        self.secrets.get_secret_version(vault, name, version).await
     }
     async fn commit_retained_key(
         &self,
         vault: &str,
         request: SecretRequest,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         validate_retained_request(&request)?;
         if self.versioned_set {
             self.secrets.set_secret(vault, request).await
@@ -345,7 +365,7 @@ impl AttachmentKeyStore for RawAttachmentKeyStore<'_> {
         &self,
         vault: &str,
         request: SecretRequest,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         if !matches!(
             classify_reserved_name(&request.name),
             ReservedClass::ActivePointer
@@ -431,24 +451,35 @@ mod tests {
             &self,
             _: &str,
             _: SecretRequest,
-        ) -> Result<SecretProperties, BackendError> {
+        ) -> Result<SecretMetadata, BackendError> {
             unimplemented!()
         }
-        async fn get_secret(
+        async fn get_secret_metadata(
             &self,
             _: &str,
             _: &str,
-            _: bool,
-        ) -> Result<SecretProperties, BackendError> {
+        ) -> Result<SecretMetadata, BackendError> {
             unimplemented!()
         }
+
+        async fn get_secret(&self, _: &str, _: &str) -> Result<Secret, BackendError> {
+            unimplemented!()
+        }
+        async fn get_secret_version_metadata(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<SecretMetadata, BackendError> {
+            unimplemented!()
+        }
+
         async fn get_secret_version(
             &self,
             _: &str,
             _: &str,
             _: &str,
-            _: bool,
-        ) -> Result<SecretProperties, BackendError> {
+        ) -> Result<Secret, BackendError> {
             unimplemented!()
         }
         async fn list_secrets(
@@ -468,7 +499,7 @@ mod tests {
             _: &str,
             _: &str,
             _: crate::secret::domain::SecretUpdateRequest,
-        ) -> Result<SecretProperties, BackendError> {
+        ) -> Result<SecretMetadata, BackendError> {
             unimplemented!()
         }
     }
@@ -477,28 +508,39 @@ mod tests {
 
     #[async_trait]
     impl AttachmentKeyStore for LegacyKeyStore {
-        async fn get_secret(
+        async fn get_secret_metadata(
             &self,
             _: &str,
             _: &str,
-            _: bool,
-        ) -> Result<SecretProperties, BackendError> {
+        ) -> Result<SecretMetadata, BackendError> {
             unimplemented!()
         }
+
+        async fn get_secret(&self, _: &str, _: &str) -> Result<Secret, BackendError> {
+            unimplemented!()
+        }
+        async fn get_secret_version_metadata(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<SecretMetadata, BackendError> {
+            unimplemented!()
+        }
+
         async fn get_secret_version(
             &self,
             _: &str,
             _: &str,
             _: &str,
-            _: bool,
-        ) -> Result<SecretProperties, BackendError> {
+        ) -> Result<Secret, BackendError> {
             unimplemented!()
         }
         async fn set_secret(
             &self,
             _: &str,
             _: SecretRequest,
-        ) -> Result<SecretProperties, BackendError> {
+        ) -> Result<SecretMetadata, BackendError> {
             unimplemented!()
         }
     }
@@ -569,11 +611,11 @@ mod tests {
                 .await
                 .unwrap();
             assert!(matches!(
-                keys.get_secret("default", name, true).await,
+                keys.get_secret("default", name).await,
                 Err(BackendError::PermissionDenied(_))
             ));
             assert!(matches!(
-                keys.get_secret_version("default", name, &original.version, true)
+                keys.get_secret_version("default", name, &original.version)
                     .await,
                 Err(BackendError::PermissionDenied(_))
             ));
@@ -589,11 +631,10 @@ mod tests {
             ));
             assert_eq!(
                 raw.secrets()
-                    .get_secret("default", name, true)
+                    .get_secret("default", name)
                     .await
                     .unwrap()
                     .value
-                    .unwrap()
                     .expose_secret(),
                 "unchanged"
             );

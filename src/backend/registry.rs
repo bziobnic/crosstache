@@ -811,11 +811,10 @@ mod tests {
         assert_eq!(
             backend
                 .secrets()
-                .get_secret("default", "db", true)
+                .get_secret("default", "db")
                 .await
                 .unwrap()
                 .value
-                .unwrap()
                 .expose_secret(),
             "database password"
         );
@@ -857,7 +856,7 @@ mod tests {
             1
         );
         assert!(matches!(
-            keys.get_secret("default", "ordinary-secret", true).await,
+            keys.get_secret("default", "ordinary-secret").await,
             Err(BackendError::PermissionDenied(_))
         ));
     }
@@ -1073,7 +1072,7 @@ mod tests {
         let materialized = registry.materialize("local").unwrap();
         let error = materialized
             .secrets()
-            .get_secret("default", "anything", true)
+            .get_secret("default", "anything")
             .await
             .unwrap_err();
         assert!(matches!(error, BackendError::PermissionDenied(_)));
@@ -1113,7 +1112,7 @@ mod tests {
 
         let error = backend
             .secrets()
-            .get_secret("default", "existing", false)
+            .get_secret_metadata("default", "existing")
             .await
             .unwrap_err();
         assert!(matches!(error, BackendError::PermissionDenied(_)));

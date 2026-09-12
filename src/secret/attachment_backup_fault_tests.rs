@@ -7,7 +7,7 @@ use crate::backend::{
 use crate::blob::models::{FileInfo, FileUploadRequest};
 use crate::config::settings::LocalConfig;
 use crate::secret::attachments;
-use crate::secret::domain::SecretRequest;
+use crate::secret::domain::{Secret, SecretMetadata, SecretRequest, SecretValue};
 use crate::utils::progress::ProgressReporter;
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -62,13 +62,8 @@ impl AttachmentKeyStore for FaultKeys<'_> {
         self.inner.list_retained_keys(vault).await
     }
 
-    async fn get_secret(
-        &self,
-        vault: &str,
-        name: &str,
-        include_value: bool,
-    ) -> ProviderResult<SecretProperties> {
-        let mut props = self.inner.get_secret(vault, name, include_value).await?;
+    async fn get_secret_metadata(&self, vault: &str, name: &str) -> ProviderResult<SecretMetadata> {
+        let mut props = self.inner.get_secret_metadata(vault, name).await?;
         if name == key::ACTIVE_POINTER_SECRET
             && self.pointer_reads.fetch_add(1, Ordering::SeqCst) > 0
             && matches!(self.fault, KeyFault::PointerDrift)
@@ -78,27 +73,54 @@ impl AttachmentKeyStore for FaultKeys<'_> {
         Ok(props)
     }
 
+    async fn get_secret(&self, vault: &str, name: &str) -> ProviderResult<Secret> {
+        let mut props = self.inner.get_secret(vault, name).await?;
+        if name == key::ACTIVE_POINTER_SECRET
+            && self.pointer_reads.fetch_add(1, Ordering::SeqCst) > 0
+            && matches!(self.fault, KeyFault::PointerDrift)
+        {
+            props.version.push_str("-changed");
+        }
+        Ok(props)
+    }
+
+    async fn get_secret_version_metadata(
+        &self,
+        vault: &str,
+        name: &str,
+        version: &str,
+    ) -> ProviderResult<SecretMetadata> {
+        let mut props = self
+            .inner
+            .get_secret_version_metadata(vault, name, version)
+            .await?;
+        match self.fault {
+            KeyFault::ExactVersion => props.version.push_str("-wrong-version"),
+            KeyFault::Disabled => props.enabled = false,
+            KeyFault::MissingValue | KeyFault::PointerDrift => {}
+        }
+        Ok(props)
+    }
+
     async fn get_secret_version(
         &self,
         vault: &str,
         name: &str,
         version: &str,
-        include_value: bool,
-    ) -> ProviderResult<SecretProperties> {
-        let mut props = self
-            .inner
-            .get_secret_version(vault, name, version, include_value)
-            .await?;
+    ) -> ProviderResult<Secret> {
+        let mut props = self.inner.get_secret_version(vault, name, version).await?;
         match self.fault {
             KeyFault::ExactVersion => props.version.push_str("-wrong-version"),
             KeyFault::Disabled => props.enabled = false,
-            KeyFault::MissingValue => props.value = None,
+            // A value-free custody read is no longer representable (the type
+            // carries a value); an empty identity is the nearest unusable one.
+            KeyFault::MissingValue => props.value = SecretValue::new(String::new()),
             KeyFault::PointerDrift => {}
         }
         Ok(props)
     }
 
-    async fn set_secret(&self, _: &str, _: SecretRequest) -> ProviderResult<SecretProperties> {
+    async fn set_secret(&self, _: &str, _: SecretRequest) -> ProviderResult<SecretMetadata> {
         panic!("collector must never write custody")
     }
 }

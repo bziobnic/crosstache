@@ -120,11 +120,11 @@ async fn e2e_azure_secret_full_lifecycle() {
     // --- GET (with value) ---
     let got = backend
         .secrets()
-        .get_secret(&vault, &secret, true)
+        .get_secret(&vault, &secret)
         .await
         .expect("get_secret with value should succeed");
     assert_eq!(
-        got.value.as_ref().map(SecretValue::expose_secret),
+        Some(got.value.expose_secret()),
         Some(v1_value),
         "round-tripped value must match"
     );
@@ -132,14 +132,10 @@ async fn e2e_azure_secret_full_lifecycle() {
     // --- GET (metadata only) ---
     let meta = backend
         .secrets()
-        .get_secret(&vault, &secret, false)
+        .get_secret_metadata(&vault, &secret)
         .await
         .expect("get_secret metadata-only should succeed");
     assert_eq!(meta.name, secret);
-    assert!(
-        meta.value.is_none(),
-        "value must be absent when include_value=false"
-    );
 
     // --- EXISTS ---
     assert!(
@@ -175,24 +171,21 @@ async fn e2e_azure_secret_full_lifecycle() {
     );
     let got2 = backend
         .secrets()
-        .get_secret(&vault, &secret, true)
+        .get_secret(&vault, &secret)
         .await
         .expect("get after update should succeed");
-    assert_eq!(
-        got2.value.as_ref().map(SecretValue::expose_secret),
-        Some(v2_value)
-    );
+    assert_eq!(Some(got2.value.expose_secret()), Some(v2_value));
 
     // --- GET SPECIFIC VERSION (v1 still readable by id) ---
     // `version` is the bare Key Vault version segment, which is exactly
     // what get_secret_version expects.
     let v1_again = backend
         .secrets()
-        .get_secret_version(&vault, &secret, &v1_version, true)
+        .get_secret_version(&vault, &secret, &v1_version)
         .await
         .expect("get_secret_version for v1 should succeed");
     assert_eq!(
-        v1_again.value.as_ref().map(SecretValue::expose_secret),
+        Some(v1_again.value.expose_secret()),
         Some(v1_value),
         "the original version should still serve its original value"
     );
@@ -232,7 +225,7 @@ async fn e2e_azure_secret_full_lifecycle() {
         .expect("update_secret should succeed");
     let after_meta = backend
         .secrets()
-        .get_secret(&vault, &secret, false)
+        .get_secret_metadata(&vault, &secret)
         .await
         .expect("get_secret after metadata update should succeed");
     assert_eq!(
@@ -250,11 +243,11 @@ async fn e2e_azure_secret_full_lifecycle() {
         .expect("rollback to v1 should succeed");
     let rolled = backend
         .secrets()
-        .get_secret(&vault, &secret, true)
+        .get_secret(&vault, &secret)
         .await
         .expect("get after rollback should succeed");
     assert_eq!(
-        rolled.value.as_ref().map(SecretValue::expose_secret),
+        Some(rolled.value.expose_secret()),
         Some(v1_value),
         "rollback should restore the v1 value"
     );
@@ -285,11 +278,11 @@ async fn e2e_azure_secret_full_lifecycle() {
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     let restored = backend
         .secrets()
-        .get_secret(&vault, &secret, true)
+        .get_secret(&vault, &secret)
         .await
         .expect("get after restore should succeed");
     assert!(
-        restored.value.is_some(),
+        !restored.value.expose_secret().is_empty(),
         "restored secret should be readable again"
     );
 
@@ -323,13 +316,10 @@ async fn e2e_azure_rename_fails_closed() {
 
     let got = backend
         .secrets()
-        .get_secret(&vault, &source, true)
+        .get_secret(&vault, &source)
         .await
         .expect("source must remain after rejected rename");
-    assert_eq!(
-        got.value.as_ref().map(SecretValue::expose_secret),
-        Some("rename-me")
-    );
+    assert_eq!(Some(got.value.expose_secret()), Some("rename-me"));
     assert_eq!(got.tags.get("note").map(String::as_str), Some("rename e2e"));
     assert_eq!(got.tags.get("groups").map(String::as_str), Some("e2e"));
 
@@ -394,13 +384,10 @@ async fn e2e_azure_mv_sequence_fails_closed_at_rename() {
     // 4. Verify: source + folder update remain and no destination was created.
     let got = backend
         .secrets()
-        .get_secret(&vault, &source, true)
+        .get_secret(&vault, &source)
         .await
         .expect("source must remain after rejected rename");
-    assert_eq!(
-        got.value.as_ref().map(SecretValue::expose_secret),
-        Some("mv-me")
-    );
+    assert_eq!(Some(got.value.expose_secret()), Some("mv-me"));
     assert_eq!(got.tags.get("folder").map(String::as_str), Some("app"));
 
     assert!(!backend
@@ -438,11 +425,11 @@ async fn e2e_azure_bulk_set_and_get() {
     for (name, value) in entries {
         let got = backend
             .secrets()
-            .get_secret(&vault, name, true)
+            .get_secret(&vault, name)
             .await
             .unwrap_or_else(|e| panic!("get_secret {name} failed: {e:?}"));
         assert_eq!(
-            got.value.as_ref().map(SecretValue::expose_secret),
+            Some(got.value.expose_secret()),
             Some(value),
             "value mismatch for {name}"
         );
@@ -473,7 +460,10 @@ async fn e2e_azure_get_missing_secret_is_not_found() {
     let vault = test_vault();
     let missing = unique_name("missing");
 
-    let result = backend.secrets().get_secret(&vault, &missing, false).await;
+    let result = backend
+        .secrets()
+        .get_secret_metadata(&vault, &missing)
+        .await;
     assert!(
         matches!(result, Err(BackendError::NotFound { .. })),
         "getting a non-existent secret should map to BackendError::NotFound, got: {result:?}"

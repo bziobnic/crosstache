@@ -1,4 +1,4 @@
-//! Tag <-> SecretProperties round-trip for AWS backend.
+//! Tag <-> Secret round-trip for AWS backend.
 //!
 //! AWS Secrets Manager allows up to 50 tags per secret (vs Azure's 15);
 //! comfortable budget. Reserved keys live under the `xv:` prefix.
@@ -55,7 +55,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    /// Subset of `SecretProperties` fields we actually round-trip in tests.
+    /// Subset of `Secret` fields we actually round-trip in tests.
     #[derive(Debug, Default, Clone)]
     struct TestProps {
         original_name: String,

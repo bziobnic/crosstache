@@ -224,11 +224,11 @@ async fn e2e_aws_secret_full_lifecycle() {
     // --- GET (with value) ---
     let got = backend
         .secrets()
-        .get_secret(&vault, secret, true)
+        .get_secret(&vault, secret)
         .await
         .expect("get_secret with value should succeed");
     assert_eq!(
-        got.value.as_ref().map(SecretValue::expose_secret),
+        Some(got.value.expose_secret()),
         Some(v1_value),
         "round-tripped value must match"
     );
@@ -236,14 +236,10 @@ async fn e2e_aws_secret_full_lifecycle() {
     // --- GET (metadata only) ---
     let meta = backend
         .secrets()
-        .get_secret(&vault, secret, false)
+        .get_secret_metadata(&vault, secret)
         .await
         .expect("get_secret metadata-only should succeed");
     assert_eq!(meta.name, secret);
-    assert!(
-        meta.value.is_none(),
-        "value must be absent when include_value=false"
-    );
 
     // --- EXISTS ---
     assert!(
@@ -285,13 +281,10 @@ async fn e2e_aws_secret_full_lifecycle() {
     );
     let got2 = backend
         .secrets()
-        .get_secret(&vault, secret, true)
+        .get_secret(&vault, secret)
         .await
         .expect("get after update should succeed");
-    assert_eq!(
-        got2.value.as_ref().map(SecretValue::expose_secret),
-        Some(v2_value)
-    );
+    assert_eq!(Some(got2.value.expose_secret()), Some(v2_value));
 
     // --- LIST VERSIONS ---
     let versions = backend
@@ -331,7 +324,7 @@ async fn e2e_aws_secret_full_lifecycle() {
         .expect("update_secret should succeed");
     let after_meta = backend
         .secrets()
-        .get_secret(&vault, secret, false)
+        .get_secret_metadata(&vault, secret)
         .await
         .expect("get_secret after metadata update should succeed");
     assert_eq!(
@@ -360,11 +353,11 @@ async fn e2e_aws_secret_full_lifecycle() {
         .expect("rollback to v1 should succeed");
     let rolled = backend
         .secrets()
-        .get_secret(&vault, secret, true)
+        .get_secret(&vault, secret)
         .await
         .expect("get after rollback should succeed");
     assert_eq!(
-        rolled.value.as_ref().map(SecretValue::expose_secret),
+        Some(rolled.value.expose_secret()),
         Some(v1_value),
         "rollback should restore the v1 value"
     );
@@ -396,11 +389,11 @@ async fn e2e_aws_secret_full_lifecycle() {
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     let restored = backend
         .secrets()
-        .get_secret(&vault, secret, true)
+        .get_secret(&vault, secret)
         .await
         .expect("get after restore should succeed");
     assert!(
-        restored.value.is_some(),
+        !restored.value.expose_secret().is_empty(),
         "restored secret should be readable again"
     );
 
@@ -435,13 +428,10 @@ async fn e2e_aws_bulk_set_and_list() {
     for (name, value) in entries {
         let got = backend
             .secrets()
-            .get_secret(&vault, name, true)
+            .get_secret(&vault, name)
             .await
             .unwrap_or_else(|e| panic!("get_secret {name} failed: {e:?}"));
-        assert_eq!(
-            got.value.as_ref().map(SecretValue::expose_secret),
-            Some(value)
-        );
+        assert_eq!(Some(got.value.expose_secret()), Some(value));
     }
 
     // List should report exactly the 3 secrets — eventually consistent.

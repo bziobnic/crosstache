@@ -773,16 +773,12 @@ fn field_clipboard_outcome(
 /// commands.
 fn record_field_value(
     name: &str,
-    secret: &crate::secret::domain::SecretProperties,
+    secret: &crate::secret::domain::Secret,
     field: Option<&str>,
     types: &[RecordType],
 ) -> Result<Zeroizing<String>> {
     let is_rec = crate::records::is_record(&secret.content_type);
-    let raw_value = secret
-        .value
-        .as_ref()
-        .map(SecretValue::expose_secret)
-        .unwrap_or("");
+    let raw_value = secret.value.expose_secret();
 
     if let Some(field_name) = field {
         if !is_rec {
@@ -804,12 +800,7 @@ fn record_field_value(
     }
 
     if !is_rec {
-        return match &secret.value {
-            Some(v) => Ok(Zeroizing::new(v.expose_secret().to_owned())),
-            None => Err(CrosstacheError::config(format!(
-                "secret '{name}' resolved but has no value"
-            ))),
-        };
+        return Ok(Zeroizing::new(secret.value.expose_secret().to_owned()));
     }
 
     let envelope = parse_record_envelope_or_fail(name, &secret.content_type, raw_value)?;
@@ -887,13 +878,10 @@ pub(crate) async fn execute_secret_get_direct(
         let secret = if let Some(ref ver) = version {
             backend
                 .secrets()
-                .get_secret_version(&vault_name, name, ver, true)
+                .get_secret_version(&vault_name, name, ver)
                 .await?
         } else {
-            backend
-                .secrets()
-                .get_secret(&vault_name, name, true)
-                .await?
+            backend.secrets().get_secret(&vault_name, name).await?
         };
 
         let is_rec = crate::records::is_record(&secret.content_type);
@@ -916,11 +904,7 @@ pub(crate) async fn execute_secret_get_direct(
                     crate::records::RECORD_CONTENT_TYPE
                 )));
             }
-            let value = secret
-                .value
-                .as_ref()
-                .map(SecretValue::expose_secret)
-                .unwrap_or("");
+            let value = secret.value.expose_secret();
             let envelope = parse_record_envelope_or_fail(name, &secret.content_type, value)?;
             let mut all_fields: std::collections::BTreeMap<String, String> = envelope.clone();
             for (k, v) in &secret.tags {
@@ -975,11 +959,7 @@ pub(crate) async fn execute_secret_get_direct(
             // already validated the field exists, so re-parsing the
             // envelope here is purely for this classification, not for the
             // lookup/error-message logic (which lives in one place now).
-            let value = secret
-                .value
-                .as_ref()
-                .map(SecretValue::expose_secret)
-                .unwrap_or("");
+            let value = secret.value.expose_secret();
             let envelope = parse_record_envelope_or_fail(name, &secret.content_type, value)?;
             let is_secret_field = envelope.contains_key(&field_name);
 
@@ -1017,9 +997,7 @@ pub(crate) async fn execute_secret_get_direct(
         let effective_value: Option<Zeroizing<String>> = if is_rec {
             Some(record_field_value(name, &secret, None, &types)?)
         } else {
-            secret
-                .value
-                .map(|v| Zeroizing::new(v.expose_secret().to_owned()))
+            Some(Zeroizing::new(secret.value.expose_secret().to_owned()))
         };
 
         if raw {
@@ -2450,7 +2428,7 @@ async fn execute_secret_list_workspace(
             for secret_summary in display_candidates {
                 match backend
                     .secrets()
-                    .get_secret(&entry.vault, &secret_summary.name, false)
+                    .get_secret_metadata(&entry.vault, &secret_summary.name)
                     .await
                 {
                     Ok(secret_props) => {
@@ -2643,7 +2621,7 @@ pub(crate) async fn execute_secret_list_direct(
                 match reg
                     .active()
                     .secrets()
-                    .get_secret(&vault_name, &secret_summary.name, false)
+                    .get_secret_metadata(&vault_name, &secret_summary.name)
                     .await
                 {
                     Ok(secret_props) => {
@@ -2932,15 +2910,10 @@ pub(crate) async fn execute_secret_history_direct(
             )));
         }
 
-        // Version listings are metadata-only output: drop any plaintext the
-        // backend returned before the value reaches a formatter.
-        let versions: Vec<crate::secret::domain::SecretMetadata> = backend
-            .secrets()
-            .list_versions(&vault_name, name)
-            .await?
-            .into_iter()
-            .map(crate::secret::domain::SecretProperties::into_metadata)
-            .collect();
+        // Version listings are metadata-only by construction: `list_versions`
+        // cannot return a plaintext value at all.
+        let versions: Vec<crate::secret::domain::SecretMetadata> =
+            backend.secrets().list_versions(&vault_name, name).await?;
         if versions.is_empty() {
             let fmt = config.runtime_output_format;
             use crate::utils::format::TableFormatter;
@@ -3216,7 +3189,7 @@ pub(crate) async fn execute_rotation_policy_update(
     // not register as secret-value access in an audit trail).
     let existing = backend
         .secrets()
-        .get_secret(&vault_name, name, false)
+        .get_secret_metadata(&vault_name, name)
         .await
         .map_err(CrosstacheError::from)?;
 
@@ -3852,11 +3825,7 @@ async fn execute_record_field_update(
     reg: &BackendRegistry,
     backend_name: &str,
 ) -> Result<()> {
-    let secret = reg
-        .active()
-        .secrets()
-        .get_secret(vault_name, name, true)
-        .await?;
+    let secret = reg.active().secrets().get_secret(vault_name, name).await?;
     if !crate::records::is_record(&secret.content_type) {
         return Err(CrosstacheError::config(format!(
             "secret '{name}' is not a typed record (value is not marked {}); --field/--field-secret \
@@ -3972,7 +3941,7 @@ async fn execute_record_field_update(
 #[allow(clippy::too_many_arguments)]
 async fn apply_record_field_changes(
     name: &str,
-    secret: &crate::secret::domain::SecretProperties,
+    secret: &crate::secret::domain::Secret,
     metadata_updates: &BTreeMap<String, String>,
     secret_updates: &BTreeMap<String, String>,
     enabled_override: Option<bool>,
@@ -3980,14 +3949,10 @@ async fn apply_record_field_changes(
     config: &Config,
     backend: &dyn crate::backend::Backend,
     backend_name: &str,
-) -> Result<crate::secret::domain::SecretProperties> {
+) -> Result<crate::secret::domain::SecretMetadata> {
     let mut new_value: Option<SecretValue> = None;
     if !secret_updates.is_empty() {
-        let raw = secret
-            .value
-            .as_ref()
-            .map(SecretValue::expose_secret)
-            .unwrap_or("");
+        let raw = secret.value.expose_secret();
         let mut envelope = parse_record_envelope_or_fail(name, &secret.content_type, raw)?;
         for (k, v) in secret_updates {
             envelope.insert(k.clone(), v.clone());
@@ -4106,7 +4071,7 @@ async fn apply_record_field_changes(
 /// plan; fixes #330).
 fn resolve_primary_field<'a>(
     name: &str,
-    secret: &crate::secret::domain::SecretProperties,
+    secret: &crate::secret::domain::SecretMetadata,
     types: &'a [RecordType],
 ) -> Result<&'a RecordType> {
     let type_name = secret.tags.get(TYPE_TAG).cloned().unwrap_or_default();
@@ -4132,13 +4097,13 @@ fn resolve_primary_field<'a>(
 async fn execute_record_primary_update(
     name: &str,
     new_primary_value: &str,
-    secret: &crate::secret::domain::SecretProperties,
+    secret: &crate::secret::domain::Secret,
     enabled_override: Option<bool>,
     vault_name: &str,
     config: &Config,
     reg: &BackendRegistry,
     backend_name: &str,
-) -> Result<crate::secret::domain::SecretProperties> {
+) -> Result<crate::secret::domain::SecretMetadata> {
     let types = config.resolve_record_types().await?;
     let record_type = resolve_primary_field(name, secret, &types)?;
     let primary_name = record_type.primary().name.clone();
@@ -4178,7 +4143,7 @@ async fn execute_record_type_conversion(
     backend_name: &str,
 ) -> Result<()> {
     crate::records::validate_conversion_backend(backend)?;
-    let secret = backend.secrets().get_secret(vault_name, name, true).await?;
+    let secret = backend.secrets().get_secret(vault_name, name).await?;
     let types = config.resolve_record_types().await?;
     let mut request = crate::records::ConversionRequest::to_type(type_name);
     request.confirm_lossy = yes;
@@ -4219,11 +4184,7 @@ async fn execute_record_untype(
     backend_name: &str,
 ) -> Result<()> {
     crate::records::validate_conversion_backend(reg.active())?;
-    let secret = reg
-        .active()
-        .secrets()
-        .get_secret(vault_name, name, true)
-        .await?;
+    let secret = reg.active().secrets().get_secret(vault_name, name).await?;
     if !crate::records::is_record(&secret.content_type) {
         return Err(CrosstacheError::config(format!(
             "secret '{name}' is not a typed record; nothing to untype."
@@ -4515,7 +4476,7 @@ pub(crate) async fn execute_secret_update_direct(
                 let probe = reg
                     .active()
                     .secrets()
-                    .get_secret(&vault_name, name, false)
+                    .get_secret_metadata(&vault_name, name)
                     .await?;
                 if crate::records::is_record(&probe.content_type) {
                     // Bugbot review MAJOR: this branch used to apply the
@@ -4565,11 +4526,7 @@ pub(crate) async fn execute_secret_update_direct(
                     } else {
                         value.clone().unwrap_or_default()
                     };
-                    let existing = reg
-                        .active()
-                        .secrets()
-                        .get_secret(&vault_name, name, true)
-                        .await?;
+                    let existing = reg.active().secrets().get_secret(&vault_name, name).await?;
                     let props = execute_record_primary_update(
                         name,
                         &resolved_value,
@@ -4892,15 +4849,9 @@ pub(crate) async fn execute_diff_command(
     let mut values_b = std::collections::HashMap::new();
 
     for name in &names_a {
-        match backend_a
-            .secrets()
-            .get_secret(&vault1_resolved, name, true)
-            .await
-        {
+        match backend_a.secrets().get_secret(&vault1_resolved, name).await {
             Ok(props) => {
-                if let Some(val) = props.value {
-                    values_a.insert(name.clone(), val);
-                }
+                values_a.insert(name.clone(), props.value);
             }
             Err(e) => {
                 output::warn(&format!("Failed to get '{}' from {}: {}", name, vault1, e));
@@ -4909,15 +4860,9 @@ pub(crate) async fn execute_diff_command(
     }
 
     for name in &names_b {
-        match backend_b
-            .secrets()
-            .get_secret(&vault2_resolved, name, true)
-            .await
-        {
+        match backend_b.secrets().get_secret(&vault2_resolved, name).await {
             Ok(props) => {
-                if let Some(val) = props.value {
-                    values_b.insert(name.clone(), val);
-                }
+                values_b.insert(name.clone(), props.value);
             }
             Err(e) => {
                 output::warn(&format!("Failed to get '{}' from {}: {}", name, vault2, e));
@@ -5900,7 +5845,7 @@ pub(crate) async fn execute_secret_rotate(
     let existing_secret = reg
         .active()
         .secrets()
-        .get_secret(&vault_name, name, true)
+        .get_secret(&vault_name, name)
         .await
         .map_err(|e| {
             CrosstacheError::config(format!(
@@ -5985,6 +5930,7 @@ pub(crate) async fn execute_secret_rotate(
     } else {
         // Preserve existing secret metadata, with the rotation stamp merged
         // over it so a refreshed interval replaces the old one.
+        let (existing_secret, _) = existing_secret.into_parts();
         let mut tags = existing_secret.tags;
         tags.extend(stamp.clone());
         let set_request = SecretRequest {
@@ -6113,7 +6059,7 @@ async fn resolve_workspace_template_ref(
     let get_result = target
         .backend
         .secrets()
-        .get_secret(&target.entry.vault, &path, true)
+        .get_secret(&target.entry.vault, &path)
         .await
         .map_err(CrosstacheError::from);
 
@@ -6138,7 +6084,7 @@ async fn resolve_workspace_template_ref(
             let secret_props = target
                 .backend
                 .secrets()
-                .get_secret(&target.entry.vault, base, true)
+                .get_secret(&target.entry.vault, base)
                 .await
                 .map_err(CrosstacheError::from)?;
             let types = if crate::records::is_record(&secret_props.content_type) {
@@ -6176,7 +6122,7 @@ async fn resolve_uri_secret_workspace_aware(
     cross_backends: &mut std::collections::HashMap<BackendKind, Arc<dyn crate::backend::Backend>>,
     ws: Option<&crate::workspace::Workspace>,
     ws_registry: Option<&BackendRegistry>,
-) -> Result<crate::secret::domain::SecretProperties> {
+) -> Result<crate::secret::domain::Secret> {
     if backend_ref.backend.is_none() {
         if let (Some(ws), Some(ws_registry)) = (ws, ws_registry) {
             if let Some(entry) = ws.entry(&backend_ref.vault) {
@@ -6185,7 +6131,7 @@ async fn resolve_uri_secret_workspace_aware(
                     .map_err(|e| crate::workspace::resolve::entry_unavailable_error(entry, e))?;
                 return backend
                     .secrets()
-                    .get_secret(&entry.vault, secret_name, true)
+                    .get_secret(&entry.vault, secret_name)
                     .await
                     .map_err(CrosstacheError::from);
             }
@@ -6215,7 +6161,7 @@ async fn resolve_uri_secret(
     config: &Config,
     active_kind: BackendKind,
     cross_backends: &mut std::collections::HashMap<BackendKind, Arc<dyn crate::backend::Backend>>,
-) -> Result<crate::secret::domain::SecretProperties> {
+) -> Result<crate::secret::domain::Secret> {
     if let Some(backend_kind) = backend_ref.backend {
         if backend_kind != active_kind {
             // Cross-backend: reuse or create a cached backend instance
@@ -6228,13 +6174,13 @@ async fn resolve_uri_secret(
             }
             return cross_backends[&backend_kind]
                 .secrets()
-                .get_secret(&backend_ref.vault, secret_name, true)
+                .get_secret(&backend_ref.vault, secret_name)
                 .await
                 .map_err(CrosstacheError::from);
         }
     }
     active_secrets
-        .get_secret(&backend_ref.vault, secret_name, true)
+        .get_secret(&backend_ref.vault, secret_name)
         .await
         .map_err(CrosstacheError::from)
 }
@@ -6466,7 +6412,7 @@ async fn execute_secret_run(
         match reg
             .active()
             .secrets()
-            .get_secret(&vault_name, &secret.name, true)
+            .get_secret(&vault_name, &secret.name)
             .await
         {
             Ok(secret_props) => {
@@ -7036,7 +6982,7 @@ async fn execute_secret_inject(
             match reg
                 .active()
                 .secrets()
-                .get_secret(&vault_name, &secret_summary.name, true)
+                .get_secret(&vault_name, &secret_summary.name)
                 .await
             {
                 Ok(secret_props) => {
@@ -7117,7 +7063,7 @@ async fn execute_secret_inject(
                 match reg
                     .active()
                     .secrets()
-                    .get_secret(&vault_name, &secret_summary.name, true)
+                    .get_secret(&vault_name, &secret_summary.name)
                     .await
                 {
                     Ok(secret_props) => {
@@ -7436,12 +7382,12 @@ async fn execute_secret_copy(
 
     let source_secret = from_backend
         .secrets()
-        .get_secret(&from_vault_resolved, name, true)
+        .get_secret(&from_vault_resolved, name)
         .await?;
 
     if to_backend
         .secrets()
-        .get_secret(&to_vault_resolved, target_name, false)
+        .get_secret_metadata(&to_vault_resolved, target_name)
         .await
         .is_ok()
     {
@@ -7463,7 +7409,7 @@ async fn execute_secret_copy(
     // backends only read those attributes from the dedicated fields, not
     // from raw tags, so building the request by hand here previously
     // silently dropped group membership, folder, and note on copy/move.
-    let secret_request = rename_request_from_properties(target_name, &source_secret)?;
+    let secret_request = rename_request_from_properties(target_name, &source_secret);
 
     // Destination tag-budget check BEFORE any write: a lower-capped
     // destination (e.g. Azure's 15-tag limit) must reject an oversized
@@ -7542,7 +7488,7 @@ async fn execute_secret_move(
             .await?;
         to_backend
             .secrets()
-            .get_secret(&to_vault_resolved, target_name, false)
+            .get_secret_metadata(&to_vault_resolved, target_name)
             .await
             .is_ok()
     };
@@ -7927,7 +7873,15 @@ mod tests {
             &self,
             _vault: &str,
             _request: crate::secret::domain::SecretRequest,
-        ) -> std::result::Result<crate::secret::domain::SecretProperties, BackendError> {
+        ) -> std::result::Result<crate::secret::domain::SecretMetadata, BackendError> {
+            Err(BackendError::Unsupported("test backend".into()))
+        }
+
+        async fn get_secret_metadata(
+            &self,
+            _vault: &str,
+            _name: &str,
+        ) -> std::result::Result<crate::secret::domain::SecretMetadata, BackendError> {
             Err(BackendError::Unsupported("test backend".into()))
         }
 
@@ -7935,8 +7889,16 @@ mod tests {
             &self,
             _vault: &str,
             _name: &str,
-            _include_value: bool,
-        ) -> std::result::Result<crate::secret::domain::SecretProperties, BackendError> {
+        ) -> std::result::Result<crate::secret::domain::Secret, BackendError> {
+            Err(BackendError::Unsupported("test backend".into()))
+        }
+
+        async fn get_secret_version_metadata(
+            &self,
+            _vault: &str,
+            _name: &str,
+            _version: &str,
+        ) -> std::result::Result<crate::secret::domain::SecretMetadata, BackendError> {
             Err(BackendError::Unsupported("test backend".into()))
         }
 
@@ -7945,8 +7907,7 @@ mod tests {
             _vault: &str,
             _name: &str,
             _version: &str,
-            _include_value: bool,
-        ) -> std::result::Result<crate::secret::domain::SecretProperties, BackendError> {
+        ) -> std::result::Result<crate::secret::domain::Secret, BackendError> {
             Err(BackendError::Unsupported("test backend".into()))
         }
 
@@ -7971,7 +7932,7 @@ mod tests {
             _vault: &str,
             _name: &str,
             _request: crate::secret::domain::SecretUpdateRequest,
-        ) -> std::result::Result<crate::secret::domain::SecretProperties, BackendError> {
+        ) -> std::result::Result<crate::secret::domain::SecretMetadata, BackendError> {
             Err(BackendError::Unsupported("test backend".into()))
         }
 
@@ -8783,11 +8744,10 @@ mod tests {
         );
     }
 
-    fn fake_secret_properties(name: &str) -> crate::secret::domain::SecretProperties {
-        crate::secret::domain::SecretProperties {
+    fn fake_secret_properties(name: &str) -> crate::secret::domain::SecretMetadata {
+        crate::secret::domain::SecretMetadata {
             name: name.to_string(),
             original_name: name.to_string(),
-            value: None,
             version: "v1".to_string(),
             version_number: Some(1),
             created_timestamp: 0,

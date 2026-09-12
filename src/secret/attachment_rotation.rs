@@ -8,7 +8,7 @@ use crate::secret::attachment_key::{
     self as key, AttachmentKeyId, AttachmentKeyRef, KeySlot, PointerKind, SecretVersion,
 };
 use crate::secret::domain::SecretValue;
-use crate::secret::domain::{SecretProperties, SecretRequest};
+use crate::secret::domain::{Secret, SecretRequest};
 use age::secrecy::ExposeSecret;
 use serde::Serialize;
 use zeroize::Zeroizing;
@@ -43,11 +43,9 @@ fn request(name: &str, value: Zeroizing<String>, marked: bool) -> SecretRequest 
         folder: None,
     }
 }
-async fn pointer(keys: &dyn AttachmentKeyStore, vault: &str) -> Result<SecretProperties> {
-    let p = keys
-        .get_secret(vault, key::ACTIVE_POINTER_SECRET, true)
-        .await?;
-    if !p.enabled || p.value.is_none() {
+async fn pointer(keys: &dyn AttachmentKeyStore, vault: &str) -> Result<Secret> {
+    let p = keys.get_secret(vault, key::ACTIVE_POINTER_SECRET).await?;
+    if !p.enabled {
         return Err(AttachmentError::PointerInvalid.into());
     }
     if p.version.is_empty() {
@@ -55,7 +53,7 @@ async fn pointer(keys: &dyn AttachmentKeyStore, vault: &str) -> Result<SecretPro
     }
     Ok(p)
 }
-fn same_pointer(a: &SecretProperties, b: &SecretProperties) -> bool {
+fn same_pointer(a: &Secret, b: &Secret) -> bool {
     a.version == b.version && a.value == b.value && a.enabled == b.enabled
 }
 async fn exact(
@@ -71,7 +69,6 @@ async fn exact(
             vault,
             &key::retained_record_name(&reference.key_id),
             reference.provider_version.as_str(),
-            true,
         )
         .await?;
     if props.version != reference.provider_version.as_str() {
@@ -82,7 +79,6 @@ async fn exact(
     }
     let identity = props
         .value
-        .ok_or(AttachmentError::KeyInvalid)?
         .expose_secret()
         .trim()
         .parse::<age::x25519::Identity>()
@@ -98,7 +94,7 @@ async fn retained(
     id: &AttachmentKeyId,
 ) -> Result<AttachmentKeyRef> {
     let props = keys
-        .get_secret(vault, &key::retained_record_name(id), false)
+        .get_secret_metadata(vault, &key::retained_record_name(id))
         .await?;
     if !props.enabled || !key::is_marked_key_record(&props.content_type) {
         return Err(AttachmentError::KeyInvalid.into());
@@ -134,12 +130,7 @@ pub async fn rotate(
     apply: bool,
 ) -> Result<RotationReport> {
     let original = pointer(keys, vault).await?;
-    let (active, legacy) = match original
-        .value
-        .as_ref()
-        .map(SecretValue::expose_secret)
-        .and_then(key::parse_pointer_value)
-    {
+    let (active, legacy) = match key::parse_pointer_value(original.value.expose_secret()) {
         Some(PointerKind::V2 { active, legacy }) if &active == expected => (active, legacy),
         _ => return Err(conflict()),
     };
@@ -172,7 +163,7 @@ pub async fn rotate(
     keys.preflight_set_secret(vault, &name).await?;
     // Azure's retained commit is versioned, so explicitly refuse any existing
     // candidate name before committing as well as using create-only custody APIs.
-    match keys.get_secret(vault, &name, false).await {
+    match keys.get_secret_metadata(vault, &name).await {
         Err(BackendError::NotFound { .. }) => {}
         Ok(_) => return Err(conflict()),
         Err(e) => return Err(e.into()),
@@ -215,13 +206,11 @@ pub async fn rotate(
         return Err(AttachmentError::CommitUnconfirmed.into());
     }
     let confirmed = pointer(keys, vault).await?;
-    if confirmed.version != published.version
-        || confirmed.value.as_ref().map(SecretValue::expose_secret) != Some(value.as_str())
-    {
+    if confirmed.version != published.version || confirmed.value.expose_secret() != value.as_str() {
         return Err(AttachmentError::CommitUnconfirmed.into());
     }
     let exact_pointer = keys
-        .get_secret_version(vault, key::ACTIVE_POINTER_SECRET, &published.version, true)
+        .get_secret_version(vault, key::ACTIVE_POINTER_SECRET, &published.version)
         .await?;
     if !same_pointer(&confirmed, &exact_pointer) {
         return Err(AttachmentError::CommitUnconfirmed.into());

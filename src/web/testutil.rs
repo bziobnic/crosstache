@@ -128,7 +128,8 @@ pub(crate) mod stub {
     use crate::secret::domain::SecretSnapshot;
     use crate::secret::domain::SecretValue;
     use crate::secret::domain::{
-        DeletedSecretSummary, SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest,
+        DeletedSecretSummary, Secret, SecretMetadata, SecretRequest, SecretSummary,
+        SecretUpdateRequest, SnapshotValue,
     };
 
     /// Stored file entry: (content, content_type, metadata).
@@ -358,10 +359,10 @@ pub(crate) mod stub {
     }
 
     /// Mirror how real backends surface metadata: groups/note/folder appear
-    /// under canonical tag keys in `SecretProperties.tags`.
+    /// under canonical tag keys in `Secret.tags`.
     /// (Duplicated from `src/backend/secret.rs`'s test module — that copy is
     /// test-only code private to a different module.)
-    pub(crate) fn props_from_request(req: &SecretRequest, include_value: bool) -> SecretProperties {
+    pub(crate) fn metadata_from_request(req: &SecretRequest) -> SecretMetadata {
         let mut tags = req.tags.clone().unwrap_or_default();
         if let Some(groups) = req.groups.as_ref().filter(|g| !g.is_empty()) {
             tags.insert("groups".to_string(), groups.join(","));
@@ -374,10 +375,9 @@ pub(crate) mod stub {
         }
         tags.insert("original_name".to_string(), req.name.clone());
         tags.insert("created_by".to_string(), "crosstache".to_string());
-        SecretProperties {
+        SecretMetadata {
             name: req.name.clone(),
             original_name: req.name.clone(),
-            value: include_value.then(|| req.value.clone()),
             version: "v1".to_string(),
             version_number: Some(1),
             created_timestamp: 0,
@@ -389,6 +389,13 @@ pub(crate) mod stub {
             tags,
             content_type: req.content_type.clone().unwrap_or_default(),
             recovery_level: None,
+        }
+    }
+
+    pub(crate) fn secret_from_request(req: &SecretRequest) -> Secret {
+        Secret {
+            metadata: metadata_from_request(req),
+            value: req.value.clone(),
         }
     }
 
@@ -410,8 +417,8 @@ pub(crate) mod stub {
             &self,
             _vault: &str,
             request: SecretRequest,
-        ) -> Result<SecretProperties, BackendError> {
-            let props = props_from_request(&request, false);
+        ) -> Result<SecretMetadata, BackendError> {
+            let props = metadata_from_request(&request);
             self.secrets
                 .lock()
                 .unwrap()
@@ -427,7 +434,7 @@ pub(crate) mod stub {
             &self,
             _vault: &str,
             request: SecretRequest,
-        ) -> Result<SecretProperties, BackendError> {
+        ) -> Result<SecretMetadata, BackendError> {
             let mut secrets = self.secrets.lock().unwrap();
             if secrets.contains_key(&request.name) {
                 return Err(BackendError::Conflict(format!(
@@ -435,7 +442,7 @@ pub(crate) mod stub {
                     request.name
                 )));
             }
-            let props = props_from_request(&request, false);
+            let props = metadata_from_request(&request);
             secrets.insert(request.name.clone(), request);
             self.revisions
                 .lock()
@@ -448,9 +455,15 @@ pub(crate) mod stub {
             &self,
             vault: &str,
             name: &str,
-            include_value: bool,
+            with_value: SnapshotValue,
         ) -> Result<SecretSnapshot, BackendError> {
-            let properties = self.get_secret(vault, name, include_value).await?;
+            let (metadata, value) = match with_value {
+                SnapshotValue::Include => {
+                    let (metadata, value) = self.get_secret(vault, name).await?.into_parts();
+                    (metadata, Some(value))
+                }
+                SnapshotValue::Omit => (self.get_secret_metadata(vault, name).await?, None),
+            };
             let revision = self
                 .revisions
                 .lock()
@@ -459,26 +472,47 @@ pub(crate) mod stub {
                 .cloned()
                 .ok_or_else(|| BackendError::Internal("missing test revision".into()))?;
             Ok(SecretSnapshot {
-                properties,
+                metadata,
+                value,
                 revision,
             })
         }
 
-        async fn get_secret(
+        async fn get_secret_metadata(
             &self,
             _vault: &str,
             name: &str,
-            include_value: bool,
-        ) -> Result<SecretProperties, BackendError> {
+        ) -> Result<SecretMetadata, BackendError> {
             self.secrets
                 .lock()
                 .unwrap()
                 .get(name)
-                .map(|r| props_from_request(r, include_value))
+                .map(metadata_from_request)
                 .ok_or_else(|| BackendError::NotFound {
                     name: name.to_string(),
                     suggestion: None,
                 })
+        }
+
+        async fn get_secret(&self, _vault: &str, name: &str) -> Result<Secret, BackendError> {
+            self.secrets
+                .lock()
+                .unwrap()
+                .get(name)
+                .map(secret_from_request)
+                .ok_or_else(|| BackendError::NotFound {
+                    name: name.to_string(),
+                    suggestion: None,
+                })
+        }
+
+        async fn get_secret_version_metadata(
+            &self,
+            vault: &str,
+            name: &str,
+            _version: &str,
+        ) -> Result<SecretMetadata, BackendError> {
+            self.get_secret_metadata(vault, name).await
         }
 
         async fn get_secret_version(
@@ -486,11 +520,10 @@ pub(crate) mod stub {
             vault: &str,
             name: &str,
             _version: &str,
-            include_value: bool,
-        ) -> Result<SecretProperties, BackendError> {
+        ) -> Result<Secret, BackendError> {
             // The stub keeps a single generation per name (version "v1"), so an
             // exact-version read resolves to the current value.
-            self.get_secret(vault, name, include_value).await
+            self.get_secret(vault, name).await
         }
 
         async fn list_secrets(
@@ -554,7 +587,7 @@ pub(crate) mod stub {
             &self,
             _vault: &str,
             name: &str,
-        ) -> Result<SecretProperties, BackendError> {
+        ) -> Result<SecretMetadata, BackendError> {
             let mut secrets = self.secrets.lock().unwrap();
             if secrets.contains_key(name) {
                 return Err(BackendError::Conflict(format!(
@@ -567,7 +600,7 @@ pub(crate) mod stub {
                     suggestion: None,
                 }
             })?;
-            let props = props_from_request(&request, false);
+            let props = metadata_from_request(&request);
             secrets.insert(name.to_string(), request);
             self.revisions
                 .lock()
@@ -611,7 +644,7 @@ pub(crate) mod stub {
             _vault: &str,
             name: &str,
             request: SecretUpdateRequest,
-        ) -> Result<SecretProperties, BackendError> {
+        ) -> Result<SecretMetadata, BackendError> {
             if let Some(message) = self.update_error {
                 return Err(BackendError::Internal(message.into()));
             }
@@ -644,7 +677,7 @@ pub(crate) mod stub {
                 current.tags = request.tags;
             }
 
-            let props = props_from_request(&current, false);
+            let props = metadata_from_request(&current);
             secrets.insert(name.to_string(), current);
             self.revisions
                 .lock()
@@ -659,7 +692,7 @@ pub(crate) mod stub {
             name: &str,
             expected_revision: &str,
             request: SecretUpdateRequest,
-        ) -> Result<SecretProperties, BackendError> {
+        ) -> Result<SecretMetadata, BackendError> {
             if let Some(value) = self.conversion_cas_race_value {
                 let mut secrets = self.secrets.lock().unwrap();
                 let current = secrets
@@ -693,7 +726,7 @@ pub(crate) mod stub {
             vault: &str,
             name: &str,
             expected_revision: &str,
-        ) -> Result<SecretProperties, BackendError> {
+        ) -> Result<SecretMetadata, BackendError> {
             if let Some(value) = self.conversion_cas_race_value {
                 let mut secrets = self.secrets.lock().unwrap();
                 let current = secrets
@@ -719,7 +752,7 @@ pub(crate) mod stub {
                     name: name.to_string(),
                 });
             }
-            self.get_secret(vault, name, false).await
+            self.get_secret_metadata(vault, name).await
         }
 
         async fn rename_secret_if_revision(
@@ -728,7 +761,7 @@ pub(crate) mod stub {
             name: &str,
             new_name: &str,
             expected_revision: &str,
-        ) -> Result<SecretProperties, BackendError> {
+        ) -> Result<SecretMetadata, BackendError> {
             if self.rename_source_race {
                 self.revisions
                     .lock()
@@ -760,7 +793,7 @@ pub(crate) mod stub {
                 suggestion: None,
             })?;
             request.name = new_name.to_string();
-            let props = props_from_request(&request, false);
+            let props = metadata_from_request(&request);
             secrets.insert(new_name.to_string(), request);
             let mut revisions = self.revisions.lock().unwrap();
             revisions.remove(name);
@@ -773,7 +806,7 @@ pub(crate) mod stub {
             vault: &str,
             name: &str,
             new_name: &str,
-        ) -> Result<SecretProperties, BackendError> {
+        ) -> Result<SecretMetadata, BackendError> {
             let revision = self
                 .revisions
                 .lock()

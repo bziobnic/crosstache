@@ -8,7 +8,7 @@ use crate::records::{
     RECORD_CONTENT_TYPE, TYPE_TAG,
 };
 use crate::secret::domain::SecretValue;
-use crate::secret::domain::{FieldUpdate, SecretProperties, SecretUpdateRequest};
+use crate::secret::domain::{FieldUpdate, Secret, SecretMetadata, SecretUpdateRequest};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
@@ -108,7 +108,7 @@ impl std::fmt::Debug for ConversionPreview {
 
 #[derive(Clone)]
 struct PreparedConversion {
-    original: SecretProperties,
+    original: SecretMetadata,
     value: String,
     content_type: String,
     tags: HashMap<String, String>,
@@ -128,7 +128,7 @@ struct SourceFields {
 
 /// Build a deterministic, display-safe conversion plan without writing.
 pub fn preview_conversion(
-    secret: &SecretProperties,
+    secret: &Secret,
     types: &[RecordType],
     request: ConversionRequest,
 ) -> Result<ConversionPreview> {
@@ -150,7 +150,7 @@ pub fn preview_conversion(
     }
 }
 
-fn source_fields(secret: &SecretProperties, types: &[RecordType]) -> Result<SourceFields> {
+fn source_fields(secret: &Secret, types: &[RecordType]) -> Result<SourceFields> {
     if !is_record(&secret.content_type) {
         return Ok(SourceFields::default());
     }
@@ -162,11 +162,7 @@ fn source_fields(secret: &SecretProperties, types: &[RecordType]) -> Result<Sour
             secret.original_name
         ))
     })?;
-    let raw = secret
-        .value
-        .as_ref()
-        .map(SecretValue::expose_secret)
-        .unwrap_or("");
+    let raw = secret.value.expose_secret();
     let envelope = parse_envelope(raw).map_err(|_| {
         CrosstacheError::config(format!(
             "secret '{}' has a malformed {RECORD_CONTENT_TYPE} envelope; conversion aborted",
@@ -207,7 +203,7 @@ fn source_fields(secret: &SecretProperties, types: &[RecordType]) -> Result<Sour
 }
 
 fn preview_to_plain(
-    secret: &SecretProperties,
+    secret: &Secret,
     source_is_record: bool,
     source: SourceFields,
     confirm_lossy: bool,
@@ -256,7 +252,7 @@ fn preview_to_plain(
 }
 
 fn preview_to_type(
-    secret: &SecretProperties,
+    secret: &Secret,
     types: &[RecordType],
     source_is_record: bool,
     source: SourceFields,
@@ -291,10 +287,7 @@ fn preview_to_type(
     }
 
     if !source_is_record {
-        let value = secret
-            .value
-            .as_ref()
-            .map(SecretValue::expose_secret)
+        let value = Some(secret.value.expose_secret())
             .filter(|value| !value.is_empty())
             .ok_or_else(|| {
                 CrosstacheError::config(format!(
@@ -429,7 +422,7 @@ fn preview_to_type(
 
 #[allow(clippy::too_many_arguments)]
 fn finish_typed_preview(
-    secret: &SecretProperties,
+    secret: &Secret,
     target: &RecordType,
     all_target_fields: BTreeMap<String, String>,
     retained: Vec<String>,
@@ -499,7 +492,7 @@ fn finish_typed_preview(
     let (current_groups, current_note, current_folder) = split_denormalized_tags(&mut current_tags);
     let no_op = same_type_candidate
         && secret.content_type == RECORD_CONTENT_TYPE
-        && secret.value.as_ref().map(SecretValue::expose_secret) == Some(prepared.value.as_str())
+        && secret.value.expose_secret() == prepared.value.as_str()
         && current_tags == prepared.tags
         && current_groups == prepared.groups
         && current_note == prepared.note
@@ -531,7 +524,7 @@ fn kind_name(kind: FieldKind) -> &'static str {
 }
 
 fn prepare_common(
-    secret: &SecretProperties,
+    secret: &Secret,
     value: String,
     content_type: String,
     record_tags: HashMap<String, String>,
@@ -544,7 +537,7 @@ fn prepare_common(
     let (groups, note, folder) = split_denormalized_tags(&mut tags);
     tags.extend(record_tags);
     PreparedConversion {
-        original: secret.clone(),
+        original: secret.metadata(),
         value,
         content_type,
         tags,
@@ -580,7 +573,7 @@ pub fn validate_conditional_conversion_backend(backend: &dyn Backend) -> Result<
 }
 
 enum ConversionCommit {
-    NoOp(SecretProperties),
+    NoOp(SecretMetadata),
     Update(SecretUpdateRequest),
 }
 
@@ -716,7 +709,7 @@ pub async fn apply_conversion(
     name: &str,
     expected_revision: &str,
     preview: ConversionPreview,
-) -> Result<SecretProperties> {
+) -> Result<SecretMetadata> {
     validate_conditional_conversion_backend(backend)?;
     match prepare_conversion_commit(backend, name, preview)? {
         ConversionCommit::NoOp(_) => backend
@@ -739,7 +732,7 @@ pub async fn apply_atomic_conversion(
     vault: &str,
     name: &str,
     preview: ConversionPreview,
-) -> Result<SecretProperties> {
+) -> Result<SecretMetadata> {
     validate_conversion_backend(backend)?;
     match prepare_conversion_commit(backend, name, preview)? {
         ConversionCommit::NoOp(properties) => Ok(properties),
@@ -761,42 +754,38 @@ mod tests {
         builtin_types, FieldDef, RecordType, TypeSource, RECORD_CONTENT_TYPE, TYPE_TAG,
     };
     use crate::secret::domain::SecretValue;
-    use crate::secret::domain::{
-        SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest,
-    };
+    use crate::secret::domain::{Secret, SecretRequest, SecretSummary, SecretUpdateRequest};
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
     use std::collections::{BTreeMap, HashMap};
     use std::sync::{Arc, Mutex};
 
-    fn properties(
-        value: &str,
-        content_type: &str,
-        tags: HashMap<String, String>,
-    ) -> SecretProperties {
-        SecretProperties {
-            name: "secret".into(),
-            original_name: "secret".into(),
-            value: Some(SecretValue::new(value)),
-            version: "1".into(),
-            version_number: Some(1),
-            created_timestamp: 0,
-            created_on: String::new(),
-            updated_on: String::new(),
-            enabled: false,
-            expires_on: None,
-            not_before: None,
-            tags,
-            content_type: content_type.into(),
-            recovery_level: None,
+    fn properties(value: &str, content_type: &str, tags: HashMap<String, String>) -> Secret {
+        Secret {
+            metadata: SecretMetadata {
+                name: "secret".into(),
+                original_name: "secret".into(),
+                version: "1".into(),
+                version_number: Some(1),
+                created_timestamp: 0,
+                created_on: String::new(),
+                updated_on: String::new(),
+                enabled: false,
+                expires_on: None,
+                not_before: None,
+                tags,
+                content_type: content_type.into(),
+                recovery_level: None,
+            },
+            value: SecretValue::new(value),
         }
     }
 
-    fn plain(value: &str) -> SecretProperties {
+    fn plain(value: &str) -> Secret {
         properties(value, "", HashMap::new())
     }
 
-    fn login_record() -> SecretProperties {
+    fn login_record() -> Secret {
         properties(
             r#"{"password":"hunter2"}"#,
             RECORD_CONTENT_TYPE,
@@ -828,7 +817,7 @@ mod tests {
         }
     }
 
-    fn custom_record(type_name: &str, token_kind: FieldKind) -> SecretProperties {
+    fn custom_record(type_name: &str, token_kind: FieldKind) -> Secret {
         let mut tags = HashMap::from([(TYPE_TAG.into(), type_name.into())]);
         let envelope = match token_kind {
             FieldKind::Secret => r#"{"password":"hunter2","token":"private-token"}"#,
@@ -889,17 +878,33 @@ mod tests {
             &self,
             _vault: &str,
             _request: SecretRequest,
-        ) -> std::result::Result<SecretProperties, BackendError> {
+        ) -> std::result::Result<SecretMetadata, BackendError> {
             unreachable!("conversion must not create an intermediate secret")
+        }
+
+        async fn get_secret_metadata(
+            &self,
+            _vault: &str,
+            _name: &str,
+        ) -> std::result::Result<SecretMetadata, BackendError> {
+            unreachable!("preview already contains the source snapshot")
         }
 
         async fn get_secret(
             &self,
             _vault: &str,
             _name: &str,
-            _include_value: bool,
-        ) -> std::result::Result<SecretProperties, BackendError> {
+        ) -> std::result::Result<Secret, BackendError> {
             unreachable!("preview already contains the source snapshot")
+        }
+
+        async fn get_secret_version_metadata(
+            &self,
+            _vault: &str,
+            _name: &str,
+            _version: &str,
+        ) -> std::result::Result<SecretMetadata, BackendError> {
+            unreachable!()
         }
 
         async fn get_secret_version(
@@ -907,8 +912,7 @@ mod tests {
             _vault: &str,
             _name: &str,
             _version: &str,
-            _include_value: bool,
-        ) -> std::result::Result<SecretProperties, BackendError> {
+        ) -> std::result::Result<Secret, BackendError> {
             unreachable!()
         }
 
@@ -933,12 +937,12 @@ mod tests {
             _vault: &str,
             _name: &str,
             request: SecretUpdateRequest,
-        ) -> std::result::Result<SecretProperties, BackendError> {
+        ) -> std::result::Result<SecretMetadata, BackendError> {
             self.updates.lock().unwrap().push(request);
             if self.fail_update {
                 Err(BackendError::Network("simulated update failure".into()))
             } else {
-                Ok(plain("updated"))
+                Ok(plain("updated").into_metadata())
             }
         }
 
@@ -948,7 +952,7 @@ mod tests {
             name: &str,
             expected_revision: &str,
             request: SecretUpdateRequest,
-        ) -> std::result::Result<SecretProperties, BackendError> {
+        ) -> std::result::Result<SecretMetadata, BackendError> {
             self.conditional_revisions
                 .lock()
                 .unwrap()
@@ -961,12 +965,12 @@ mod tests {
             _vault: &str,
             _name: &str,
             expected_revision: &str,
-        ) -> std::result::Result<SecretProperties, BackendError> {
+        ) -> std::result::Result<SecretMetadata, BackendError> {
             self.conditional_revisions
                 .lock()
                 .unwrap()
                 .push(expected_revision.to_string());
-            Ok(login_record())
+            Ok(login_record().into_metadata())
         }
     }
 
@@ -1005,16 +1009,32 @@ mod tests {
             &self,
             _vault: &str,
             _request: SecretRequest,
-        ) -> std::result::Result<SecretProperties, BackendError> {
+        ) -> std::result::Result<SecretMetadata, BackendError> {
             unreachable!("conditional preflight must fail before source reads or writes")
+        }
+
+        async fn get_secret_metadata(
+            &self,
+            _vault: &str,
+            _name: &str,
+        ) -> std::result::Result<SecretMetadata, BackendError> {
+            unreachable!("conditional preflight must fail before source reads")
         }
 
         async fn get_secret(
             &self,
             _vault: &str,
             _name: &str,
-            _include_value: bool,
-        ) -> std::result::Result<SecretProperties, BackendError> {
+        ) -> std::result::Result<Secret, BackendError> {
+            unreachable!("conditional preflight must fail before source reads")
+        }
+
+        async fn get_secret_version_metadata(
+            &self,
+            _vault: &str,
+            _name: &str,
+            _version: &str,
+        ) -> std::result::Result<SecretMetadata, BackendError> {
             unreachable!("conditional preflight must fail before source reads")
         }
 
@@ -1023,8 +1043,7 @@ mod tests {
             _vault: &str,
             _name: &str,
             _version: &str,
-            _include_value: bool,
-        ) -> std::result::Result<SecretProperties, BackendError> {
+        ) -> std::result::Result<Secret, BackendError> {
             unreachable!("conditional preflight must fail before source reads")
         }
 
@@ -1049,7 +1068,7 @@ mod tests {
             _vault: &str,
             _name: &str,
             _request: SecretUpdateRequest,
-        ) -> std::result::Result<SecretProperties, BackendError> {
+        ) -> std::result::Result<SecretMetadata, BackendError> {
             unreachable!("conditional preflight must fail before writes")
         }
 
@@ -1059,7 +1078,7 @@ mod tests {
             _name: &str,
             _expected_revision: &str,
             _request: SecretUpdateRequest,
-        ) -> std::result::Result<SecretProperties, BackendError> {
+        ) -> std::result::Result<SecretMetadata, BackendError> {
             unreachable!("conditional preflight must fail before update CAS")
         }
     }

@@ -59,7 +59,7 @@ fn invalid_status(problem: AttachmentError) -> KeyStatus {
 /// record's identity-derived ID. Domain integrity problems are reported with
 /// stable safe codes; provider failures are returned to the caller.
 pub async fn key_status(keys: &dyn AttachmentKeyStore, vault: &str) -> Result<KeyStatus> {
-    let pointer = match keys.get_secret(vault, ACTIVE_POINTER_SECRET, true).await {
+    let pointer = match keys.get_secret(vault, ACTIVE_POINTER_SECRET).await {
         Ok(pointer) => pointer,
         Err(BackendError::NotFound { .. }) => {
             return Ok(KeyStatus {
@@ -74,9 +74,7 @@ pub async fn key_status(keys: &dyn AttachmentKeyStore, vault: &str) -> Result<Ke
         Err(error) => return Err(error.into()),
     };
 
-    let Some(value) = pointer.value else {
-        return Ok(invalid_status(AttachmentError::PointerInvalid));
-    };
+    let (pointer, value) = pointer.into_parts();
     match attachment_key::parse_pointer_value(value.expose_secret()) {
         Some(PointerKind::V1RawIdentity) => {
             if pointer.version.is_empty() {
@@ -100,16 +98,14 @@ pub async fn key_status(keys: &dyn AttachmentKeyStore, vault: &str) -> Result<Ke
         }
         Some(PointerKind::V2 { active, legacy }) => {
             let name = attachment_key::retained_record_name(&active);
-            let record = match keys.get_secret(vault, &name, true).await {
+            let record = match keys.get_secret(vault, &name).await {
                 Ok(record) => record,
                 Err(BackendError::NotFound { .. }) => {
                     return Ok(invalid_status(AttachmentError::KeyMissing));
                 }
                 Err(error) => return Err(error.into()),
             };
-            let Some(identity) = record.value else {
-                return Ok(invalid_status(AttachmentError::KeyInvalid));
-            };
+            let (record, identity) = record.into_parts();
             if record.version.is_empty() {
                 return Ok(invalid_status(AttachmentError::KeyVersionInvalid));
             }
@@ -194,42 +190,62 @@ mod tests {
 
     use crate::backend::file::FileDownloadSnapshot;
     use crate::blob::models::{FileInfo, FileUploadRequest};
-    use crate::secret::domain::{SecretProperties, SecretRequest, SecretValue};
+    use crate::secret::domain::{Secret, SecretMetadata, SecretRequest, SecretValue};
     use crate::utils::progress::ProgressReporter;
 
-    fn secret(name: &str, value: Option<String>, version: &str) -> SecretProperties {
-        SecretProperties {
-            name: name.into(),
-            original_name: name.into(),
-            value: value.map(SecretValue::new),
-            version: version.into(),
-            version_number: None,
-            created_timestamp: 0,
-            created_on: String::new(),
-            updated_on: String::new(),
-            enabled: true,
-            expires_on: None,
-            not_before: None,
-            tags: HashMap::new(),
-            content_type: String::new(),
-            recovery_level: None,
+    fn secret(name: &str, value: Option<String>, version: &str) -> Secret {
+        Secret {
+            metadata: SecretMetadata {
+                name: name.into(),
+                original_name: name.into(),
+                version: version.into(),
+                version_number: None,
+                created_timestamp: 0,
+                created_on: String::new(),
+                updated_on: String::new(),
+                enabled: true,
+                expires_on: None,
+                not_before: None,
+                tags: HashMap::new(),
+                content_type: String::new(),
+                recovery_level: None,
+            },
+            value: SecretValue::new(value.unwrap_or_default()),
         }
     }
 
     struct FakeKeys {
-        records: HashMap<String, SecretProperties>,
+        records: HashMap<String, Secret>,
         deny_reads: bool,
         writes: AtomicUsize,
     }
 
     #[async_trait]
     impl AttachmentKeyStore for FakeKeys {
+        async fn get_secret_metadata(
+            &self,
+            _vault: &str,
+            name: &str,
+        ) -> std::result::Result<SecretMetadata, BackendError> {
+            if self.deny_reads {
+                return Err(BackendError::PermissionDenied(
+                    "opaque provider detail".into(),
+                ));
+            }
+            self.records
+                .get(name)
+                .map(|record| record.metadata.clone())
+                .ok_or(BackendError::NotFound {
+                    name: name.into(),
+                    suggestion: None,
+                })
+        }
+
         async fn get_secret(
             &self,
             _vault: &str,
             name: &str,
-            _include_value: bool,
-        ) -> std::result::Result<SecretProperties, BackendError> {
+        ) -> std::result::Result<Secret, BackendError> {
             if self.deny_reads {
                 return Err(BackendError::PermissionDenied(
                     "opaque provider detail".into(),
@@ -244,13 +260,21 @@ mod tests {
                 })
         }
 
+        async fn get_secret_version_metadata(
+            &self,
+            _vault: &str,
+            _name: &str,
+            _version: &str,
+        ) -> std::result::Result<SecretMetadata, BackendError> {
+            panic!("status must not request historical versions")
+        }
+
         async fn get_secret_version(
             &self,
             _vault: &str,
             _name: &str,
             _version: &str,
-            _include_value: bool,
-        ) -> std::result::Result<SecretProperties, BackendError> {
+        ) -> std::result::Result<Secret, BackendError> {
             panic!("status must not request historical versions")
         }
 
@@ -258,13 +282,13 @@ mod tests {
             &self,
             _vault: &str,
             _request: SecretRequest,
-        ) -> std::result::Result<SecretProperties, BackendError> {
+        ) -> std::result::Result<SecretMetadata, BackendError> {
             self.writes.fetch_add(1, Ordering::SeqCst);
             panic!("status must not mutate custody")
         }
     }
 
-    fn fake_keys(records: impl IntoIterator<Item = SecretProperties>) -> FakeKeys {
+    fn fake_keys(records: impl IntoIterator<Item = Secret>) -> FakeKeys {
         FakeKeys {
             records: records.into_iter().map(|p| (p.name.clone(), p)).collect(),
             deny_reads: false,
@@ -292,7 +316,7 @@ mod tests {
         assert!(matches!(
             backend
                 .secrets()
-                .get_secret("default", ACTIVE_POINTER_SECRET, true)
+                .get_secret("default", ACTIVE_POINTER_SECRET)
                 .await,
             Err(BackendError::NotFound { .. })
         ));

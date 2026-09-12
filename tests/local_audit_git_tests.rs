@@ -107,7 +107,7 @@ async fn audit_records_the_full_secret_lifecycle() {
         .await
         .unwrap();
     be.secrets()
-        .get_secret("default", "DB_PASSWORD", true)
+        .get_secret("default", "DB_PASSWORD")
         .await
         .unwrap();
     be.secrets()
@@ -180,9 +180,9 @@ async fn metadata_only_reads_are_not_logged_as_value_access() {
         .await
         .unwrap();
 
-    // include_value = false — backs listings and existence checks.
+    // Metadata-only read — backs listings and existence checks.
     be.secrets()
-        .get_secret("default", "A", false)
+        .get_secret_metadata("default", "A")
         .await
         .unwrap();
     be.secrets().secret_exists("default", "A").await.unwrap();
@@ -403,11 +403,8 @@ async fn history_and_rollback_still_work_alongside_git() {
     assert!(versions.len() >= 2, "version archive still populated");
 
     be.secrets().rollback("default", "A", "v1").await.unwrap();
-    let current = be.secrets().get_secret("default", "A", true).await.unwrap();
-    assert_eq!(
-        current.value.as_ref().map(SecretValue::expose_secret),
-        Some("v1")
-    );
+    let current = be.secrets().get_secret("default", "A").await.unwrap();
+    assert_eq!(Some(current.value.expose_secret()), Some("v1"));
 
     let subjects: Vec<String> = be
         .git_store()
@@ -444,7 +441,7 @@ async fn a_read_of_a_missing_secret_is_audited_as_notfound() {
 
     let err = be
         .secrets()
-        .get_secret("default", "NOPE", true)
+        .get_secret("default", "NOPE")
         .await
         .expect_err("missing secret");
     assert!(matches!(
@@ -475,7 +472,7 @@ async fn a_metadata_only_read_of_a_missing_secret_is_not_audited() {
     // noise, and the success path already declines to log them.
     let tmp = TempDir::new().unwrap();
     let be = backend(&tmp, true, false);
-    let _ = be.secrets().get_secret("default", "NOPE", false).await;
+    let _ = be.secrets().get_secret_metadata("default", "NOPE").await;
     let _ = be.secrets().secret_exists("default", "NOPE").await;
     assert!(audit_records(&tmp).is_empty());
 }
@@ -499,7 +496,7 @@ async fn undecryptable_ciphertext_is_audited_as_decryption_failed() {
 
     let err = be
         .secrets()
-        .get_secret("default", "DB_PASSWORD", true)
+        .get_secret("default", "DB_PASSWORD")
         .await
         .expect_err("corrupt ciphertext must not decrypt");
     assert!(
@@ -563,9 +560,9 @@ async fn failure_records_never_contain_secret_values() {
     // failure path.
     let age_path = tmp.path().join("store/vaults/default/secrets/CANARY.age");
     std::fs::write(&age_path, b"corrupt").unwrap();
-    let _ = be.secrets().get_secret("default", "CANARY", true).await;
+    let _ = be.secrets().get_secret("default", "CANARY").await;
     // And an invalid-argument failure via a traversal vault name.
-    let _ = be.secrets().get_secret("../escape", "CANARY", true).await;
+    let _ = be.secrets().get_secret("../escape", "CANARY").await;
 
     let raw =
         std::fs::read_to_string(tmp.path().join("store/vaults/default/.audit/log.jsonl")).unwrap();
@@ -607,12 +604,9 @@ async fn successes_and_failures_interleave_in_one_verifiable_chain() {
         .set_secret("default", request("A", "v"))
         .await
         .unwrap();
-    let _ = be.secrets().get_secret("default", "MISSING", true).await;
-    be.secrets().get_secret("default", "A", true).await.unwrap();
-    let _ = be
-        .secrets()
-        .get_secret("default", "ALSO_MISSING", true)
-        .await;
+    let _ = be.secrets().get_secret("default", "MISSING").await;
+    be.secrets().get_secret("default", "A").await.unwrap();
+    let _ = be.secrets().get_secret("default", "ALSO_MISSING").await;
 
     let records = audit_records(&tmp);
     let pairs: Vec<(&str, &str)> = records
@@ -644,7 +638,7 @@ async fn successes_and_failures_interleave_in_one_verifiable_chain() {
 async fn failures_are_not_audited_when_auditing_is_off() {
     let tmp = TempDir::new().unwrap();
     let be = backend(&tmp, false, false);
-    let _ = be.secrets().get_secret("default", "NOPE", true).await;
+    let _ = be.secrets().get_secret("default", "NOPE").await;
     assert!(!tmp.path().join("store/vaults/default/.audit").exists());
 }
 

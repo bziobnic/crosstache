@@ -1,4 +1,4 @@
-use crate::secret::domain::{SecretProperties, SecretSummary};
+use crate::secret::domain::{SecretMetadata, SecretSummary};
 use crate::vault::models::VaultSummary;
 
 #[derive(Debug)]
@@ -26,7 +26,7 @@ pub enum Message {
     HistoryLoaded {
         vault: String,
         name: String,
-        versions: Vec<SecretProperties>,
+        versions: Vec<SecretMetadata>,
     },
     AuditLoaded {
         vault: String,

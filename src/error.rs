@@ -1457,7 +1457,7 @@ mod tests {
             // Common structured output/cache payloads are metadata summaries.
             // SecretSummary and SecretMetadata are value-free by construction:
             // the plaintext type `SecretValue` has no serde impls, so the
-            // value-bearing SecretProperties/SecretRequest cannot be
+            // value-bearing Secret/SecretRequest cannot be
             // serialized at all and never need an entry here.
             SecuritySurface {
                 category: "structured output",

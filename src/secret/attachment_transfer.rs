@@ -4,7 +4,6 @@
 //! authority through progress flags or plaintext-value hashes.
 use crate::backend::{error::BackendError, local::crypto, Backend, SecretBackend};
 use crate::error::{CrosstacheError, Result};
-use crate::secret::domain::SecretValue;
 use crate::secret::{attachment_key as key, attachment_rewrap as rewrap};
 use age::secrecy::ExposeSecret;
 use hmac::{Hmac, Mac};
@@ -230,7 +229,7 @@ impl TransferPlan {
 async fn absent(backend: &dyn Backend, endpoint: &TransferEndpoint, name: &str) -> Result<()> {
     match backend
         .guarded_secrets()
-        .get_secret(&endpoint.vault, name, false)
+        .get_secret_metadata(&endpoint.vault, name)
         .await
     {
         Err(BackendError::NotFound { .. }) => {}
@@ -302,7 +301,7 @@ pub async fn plan(
     absent(destination, &intent.destination, &intent.destination_name).await?;
     let source_secret = source
         .guarded_secrets()
-        .get_secret(&intent.source.vault, &intent.source_name, false)
+        .get_secret_metadata(&intent.source.vault, &intent.source_name)
         .await?;
     let names = source
         .attachment_names(&intent.source.vault, &intent.source_name)
@@ -328,9 +327,9 @@ pub async fn plan(
             .ok_or_else(|| BackendError::Unsupported("destination attachment storage".into()))?;
         let keys = source.attachment_keys();
         let pointer = keys
-            .get_secret(&i.source.vault, key::ACTIVE_POINTER_SECRET, true)
+            .get_secret(&i.source.vault, key::ACTIVE_POINTER_SECRET)
             .await?;
-        let active = match pointer.value.as_ref().map(SecretValue::expose_secret).and_then(key::parse_pointer_value) {
+        let active = match key::parse_pointer_value(pointer.value.expose_secret()) {
             Some(key::PointerKind::V2 { active, .. }) => active,
             _ => return Err(BackendError::Unsupported("transfer preview requires a healthy V2 attachment key ring; upgrade the key ring first".into()).into()),
         };
@@ -437,7 +436,7 @@ pub async fn plan(
     }
     let current_secret = source
         .guarded_secrets()
-        .get_secret(&i.source.vault, &i.source_name, false)
+        .get_secret_metadata(&i.source.vault, &i.source_name)
         .await?;
     if current_secret.name != source_secret.name
         || current_secret.original_name != source_secret.original_name

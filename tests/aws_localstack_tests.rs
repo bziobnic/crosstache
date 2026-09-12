@@ -71,11 +71,11 @@ async fn localstack_set_get_round_trip() {
 
     let got = backend
         .secrets()
-        .get_secret(&vault, "round-trip-test", true)
+        .get_secret(&vault, "round-trip-test")
         .await
         .unwrap();
     assert_eq!(
-        got.value.as_ref().map(|v| v.expose_secret().to_string()),
+        Some(got.value.expose_secret().to_string()),
         Some("test-value-42".to_string())
     );
     // Groups are written as the "xv:groups" resource tag, but get_secret
@@ -122,11 +122,11 @@ async fn localstack_rename_fails_closed() {
 
     let got = backend
         .secrets()
-        .get_secret(&vault, "rename-src", true)
+        .get_secret(&vault, "rename-src")
         .await
         .unwrap();
     assert_eq!(
-        got.value.as_ref().map(|v| v.expose_secret().to_string()),
+        Some(got.value.expose_secret().to_string()),
         Some("rename-value".to_string())
     );
     assert_eq!(got.tags.get("groups").map(String::as_str), Some("team"));
@@ -197,11 +197,11 @@ async fn localstack_mv_sequence_fails_closed_at_rename() {
     // 4. Verify: the source and its folder update remain, and no dest exists.
     let got = backend
         .secrets()
-        .get_secret(&vault, "mv-src", true)
+        .get_secret(&vault, "mv-src")
         .await
         .unwrap();
     assert_eq!(
-        got.value.as_ref().map(|v| v.expose_secret().to_string()),
+        Some(got.value.expose_secret().to_string()),
         Some("mv-value".to_string())
     );
     assert_eq!(got.tags.get("folder").map(String::as_str), Some("app"));

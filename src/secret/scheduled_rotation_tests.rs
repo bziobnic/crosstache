@@ -103,13 +103,11 @@ fn invalid_policy() -> HashMap<String, String> {
 async fn value_of(backend: &Arc<dyn Backend>, name: &str) -> String {
     backend
         .secrets()
-        .get_secret(VAULT, name, true)
+        .get_secret(VAULT, name)
         .await
         .unwrap()
         .value
-        .as_ref()
-        .map(SecretValue::expose_secret)
-        .unwrap()
+        .expose_secret()
         .to_string()
 }
 

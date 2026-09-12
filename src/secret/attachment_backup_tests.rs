@@ -2,6 +2,7 @@ use super::*;
 use crate::backend::{local::LocalBackend, Backend};
 use crate::blob::models::FileUploadRequest;
 use crate::config::settings::LocalConfig;
+use crate::secret::domain::SecretValue;
 use crate::secret::{attachment_backup_codec as codec, attachment_key as key, attachments};
 use std::collections::HashMap;
 
@@ -71,7 +72,7 @@ async fn export_of_missing_pointer_does_not_initialize_keys() {
     .is_err());
     assert!(backend
         .attachment_keys()
-        .get_secret("default", key::ACTIVE_POINTER_SECRET, false)
+        .get_secret_metadata("default", key::ACTIVE_POINTER_SECRET)
         .await
         .is_err());
 }
@@ -110,11 +111,10 @@ async fn export_canonicalizes_whitespace_identities_without_changing_source() {
         canonical.expose_secret()
     );
     assert_eq!(
-        keys.get_secret("default", key::ACTIVE_POINTER_SECRET, true)
+        keys.get_secret("default", key::ACTIVE_POINTER_SECRET)
             .await
             .unwrap()
             .value
-            .unwrap()
             .expose_secret(),
         raw
     );
@@ -210,7 +210,7 @@ async fn source_v1_history_and_v2_current_files_restore_with_new_versions() {
         .await
         .unwrap();
     let source_pointer = source_keys
-        .get_secret("default", key::ACTIVE_POINTER_SECRET, true)
+        .get_secret("default", key::ACTIVE_POINTER_SECRET)
         .await
         .unwrap();
     let bundle = collect(source_keys.as_ref(), source_files, "local", "default")
@@ -271,7 +271,7 @@ async fn source_v1_history_and_v2_current_files_restore_with_new_versions() {
     assert_eq!(report.outcome, "ready");
     assert!(target
         .attachment_keys()
-        .get_secret("default", key::ACTIVE_POINTER_SECRET, false)
+        .get_secret_metadata("default", key::ACTIVE_POINTER_SECRET)
         .await
         .is_err());
     attachment_restore::restore(
@@ -314,7 +314,7 @@ async fn source_v1_history_and_v2_current_files_restore_with_new_versions() {
         assert_eq!(dst.metadata["note"], "preserved");
     }
     let pointer_after = source_keys
-        .get_secret("default", key::ACTIVE_POINTER_SECRET, true)
+        .get_secret("default", key::ACTIVE_POINTER_SECRET)
         .await
         .unwrap();
     assert_eq!(source_pointer.version, pointer_after.version);

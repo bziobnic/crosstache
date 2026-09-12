@@ -113,22 +113,17 @@ pub fn spawn_load_value(
         };
         let result = be
             .secrets()
-            .get_secret(&vault, &name, true)
+            .get_secret(&vault, &name)
             .await
             .map_err(CrosstacheError::from);
         let msg = match result {
             Ok(props) => {
                 let content_type = props.content_type.clone();
-                match props.value {
-                    Some(v) => Message::ValueLoaded {
-                        vault: key,
-                        name,
-                        value: Zeroizing::new(v.expose_secret().to_string()),
-                        content_type,
-                    },
-                    None => Message::Error(CrosstacheError::config(format!(
-                        "secret {name} has no value"
-                    ))),
+                Message::ValueLoaded {
+                    vault: key,
+                    name,
+                    value: Zeroizing::new(props.value.expose_secret().to_string()),
+                    content_type,
                 }
             }
             Err(e) => Message::Error(e),

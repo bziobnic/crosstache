@@ -4,8 +4,8 @@ use crate::backend::error::BackendError;
 use crate::backend::SecretBackend;
 use crate::secret::domain::SecretValue;
 use crate::secret::domain::{
-    DeletedSecretSummary, FieldUpdate, SecretProperties, SecretRequest, SecretSummary,
-    SecretUpdateRequest,
+    DeletedSecretSummary, FieldUpdate, Secret, SecretMetadata, SecretRequest, SecretSummary,
+    SecretUpdateRequest, SnapshotValue,
 };
 use aws_sdk_secretsmanager::operation::describe_secret::DescribeSecretOutput;
 use aws_sdk_secretsmanager::operation::get_secret_value::GetSecretValueOutput;
@@ -134,7 +134,7 @@ impl AwsSecretBackend {
         _vault: &str,
         request: &SecretRequest,
         aws_full_name: &str,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         use crate::backend::aws::metadata::{
             TAG_CONTENT_TYPE, TAG_EXPIRES_AT, TAG_FOLDER, TAG_GROUPS, TAG_ORIGINAL_NAME,
         };
@@ -235,10 +235,9 @@ impl AwsSecretBackend {
             .map_err(super::errors::from_tag)?;
 
         let version = put_out.version_id().unwrap_or("").to_string();
-        Ok(SecretProperties {
+        Ok(SecretMetadata {
             name: request.name.clone(),
             original_name: request.name.clone(),
-            value: None,
             version,
             version_number: None,
             created_timestamp: 0,
@@ -255,12 +254,12 @@ impl AwsSecretBackend {
 
     /// List all versions of a secret from the AWS API.
     ///
-    /// Maps version info to `SecretProperties` entries (without values).
+    /// Maps version info to `SecretMetadata` entries.
     async fn list_versions_impl(
         &self,
         vault: &str,
         name: &str,
-    ) -> Result<Vec<SecretProperties>, BackendError> {
+    ) -> Result<Vec<SecretMetadata>, BackendError> {
         use crate::backend::aws::encoding::aws_name;
         let aws_full_name = aws_name(vault, name);
 
@@ -273,7 +272,7 @@ impl AwsSecretBackend {
             .await
             .map_err(|e| super::errors::from_list_versions(name, e))?;
 
-        let mut versions: Vec<SecretProperties> = Vec::new();
+        let mut versions: Vec<SecretMetadata> = Vec::new();
         for v in out.versions() {
             let version_id = v.version_id().unwrap_or("").to_string();
             let created_timestamp = v.created_date().map(|d| d.secs()).unwrap_or(0);
@@ -297,10 +296,9 @@ impl AwsSecretBackend {
                 tags.insert("aws:stages".to_string(), stages_str);
             }
 
-            versions.push(SecretProperties {
+            versions.push(SecretMetadata {
                 name: name.to_string(),
                 original_name: name.to_string(),
-                value: None,
                 version: version_id,
                 version_number: None,
                 created_timestamp,
@@ -320,15 +318,17 @@ impl AwsSecretBackend {
     /// AWS tags describe the record, not individual versions. Preserve that
     /// metadata while binding the value to the version actually returned by
     /// GetSecretValue; DescribeSecret's AWSCURRENT may have advanced meanwhile.
-    fn props_from_value(
+    fn secret_from_value(
         &self,
         describe: &DescribeSecretOutput,
         value: &GetSecretValueOutput,
         fallback_name: &str,
-    ) -> SecretProperties {
-        let mut props = self.props_from_describe(describe, fallback_name);
+    ) -> Result<Secret, BackendError> {
+        let mut props = self.metadata_from_describe(describe, fallback_name);
         props.version = value.version_id().unwrap_or_default().to_string();
-        props.value = value.secret_string().map(SecretValue::new);
+        let plaintext = value.secret_string().map(SecretValue::new).ok_or_else(|| {
+            BackendError::Internal(format!("provider returned no value for '{fallback_name}'"))
+        })?;
         // Never label a historical version current or reuse record-level tags
         // as evidence about this version's mutable AWS stage labels.
         props.tags.remove("aws:stages");
@@ -343,18 +343,21 @@ impl AwsSecretBackend {
                 .map(|dt| dt.to_string())
                 .unwrap_or_default();
         }
-        props
+        Ok(Secret {
+            metadata: props,
+            value: plaintext,
+        })
     }
 
-    /// Build a `SecretProperties` from a `DescribeSecretOutput`.
+    /// Build a `SecretMetadata` from a `DescribeSecretOutput`.
     ///
     /// The `fallback_name` is the user-facing name used when the `xv:original_name`
     /// tag is absent.
-    fn props_from_describe(
+    fn metadata_from_describe(
         &self,
         describe: &DescribeSecretOutput,
         fallback_name: &str,
-    ) -> SecretProperties {
+    ) -> SecretMetadata {
         use crate::backend::aws::metadata::{
             TAG_CONTENT_TYPE, TAG_EXPIRES_AT, TAG_FOLDER, TAG_GROUPS, TAG_MIGRATED_AT,
             TAG_MIGRATED_FROM, TAG_ORIGINAL_NAME,
@@ -449,10 +452,9 @@ impl AwsSecretBackend {
             })
             .unwrap_or_default();
 
-        SecretProperties {
+        SecretMetadata {
             name: name.clone(),
             original_name: original_name.unwrap_or_else(|| fallback_name.to_string()),
-            value: None,
             version,
             version_number: None,
             created_timestamp,
@@ -474,7 +476,7 @@ impl AwsSecretBackend {
         vault: &str,
         request: SecretRequest,
         update_existing: bool,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         use crate::backend::aws::encoding::{aws_name, validate_full_secret_name};
 
         validate_full_secret_name(vault, &request.name)?;
@@ -508,10 +510,9 @@ impl AwsSecretBackend {
             }
         };
 
-        Ok(SecretProperties {
+        Ok(SecretMetadata {
             name: request.name.clone(),
             original_name: request.name.clone(),
-            value: None,
             version: version_id,
             version_number: None,
             created_timestamp: 0,
@@ -617,7 +618,7 @@ impl SecretBackend for AwsSecretBackend {
         &self,
         vault: &str,
         name: &str,
-        include_value: bool,
+        with_value: SnapshotValue,
     ) -> Result<crate::secret::domain::SecretSnapshot, BackendError> {
         let full_name = super::encoding::aws_name(vault, name);
         let before = self
@@ -632,7 +633,7 @@ impl SecretBackend for AwsSecretBackend {
                 "AWS transfer resolved a different physical secret name".into(),
             ));
         }
-        let mut properties = self.props_from_describe(&before, name);
+        let metadata = self.metadata_from_describe(&before, name);
         let current_count = before
             .version_ids_to_stages()
             .map(|versions| {
@@ -642,27 +643,28 @@ impl SecretBackend for AwsSecretBackend {
                     .count()
             })
             .unwrap_or(0);
-        if current_count != 1 || properties.version.is_empty() || before.deleted_date().is_some() {
+        if current_count != 1 || metadata.version.is_empty() || before.deleted_date().is_some() {
             return Err(BackendError::Unsupported(
                 "AWS transfer requires one live current provider version".into(),
             ));
         }
-        let revision = transfer_describe_revision(&before, &properties)?;
-        if include_value {
+        let revision = transfer_describe_revision(&before, &metadata)?;
+        let mut plaintext = None;
+        if with_value == SnapshotValue::Include {
             let value = self
                 .client
                 .get_secret_value()
                 .secret_id(&full_name)
-                .version_id(&properties.version)
+                .version_id(&metadata.version)
                 .send()
                 .await
                 .map_err(|error| super::errors::from_get_value(name, error))?;
-            if value.version_id() != Some(properties.version.as_str()) {
+            if value.version_id() != Some(metadata.version.as_str()) {
                 return Err(BackendError::Conflict(
                     "AWS returned a different transfer value version".into(),
                 ));
             }
-            properties.value = Some(SecretValue::new(
+            plaintext = Some(SecretValue::new(
                 value
                     .secret_string()
                     .ok_or_else(|| BackendError::Unsupported("binary AWS transfer secrets".into()))?
@@ -676,14 +678,16 @@ impl SecretBackend for AwsSecretBackend {
             .send()
             .await
             .map_err(|error| super::errors::from_describe(name, error))?;
-        if transfer_describe_revision(&after, &self.props_from_describe(&after, name))? != revision
+        if transfer_describe_revision(&after, &self.metadata_from_describe(&after, name))?
+            != revision
         {
             return Err(BackendError::Conflict(
                 "AWS secret metadata/version changed during transfer read".into(),
             ));
         }
         Ok(crate::secret::domain::SecretSnapshot {
-            properties,
+            metadata,
+            value: plaintext,
             revision,
         })
     }
@@ -694,7 +698,7 @@ impl SecretBackend for AwsSecretBackend {
         &self,
         vault: &str,
         request: SecretRequest,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         self.set_secret_with_mode(vault, request, true).await
     }
 
@@ -702,34 +706,39 @@ impl SecretBackend for AwsSecretBackend {
         &self,
         vault: &str,
         request: SecretRequest,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         // AWS CreateSecret is the conditional commit point: a concurrent
         // destination returns ResourceExistsException, mapped to Conflict,
         // and is never routed into UpdateSecret.
         self.set_secret_with_mode(vault, request, false).await
     }
 
-    async fn get_secret(
+    /// Metadata read: DescribeSecret only — exactly the provider call the
+    /// pre-split value-free path made.
+    async fn get_secret_metadata(
         &self,
         vault: &str,
         name: &str,
-        include_value: bool,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         use crate::backend::aws::encoding::aws_name;
         let aws_full_name = aws_name(vault, name);
 
-        if !include_value {
-            let describe = self
-                .client
-                .describe_secret()
-                .secret_id(&aws_full_name)
-                .send()
-                .await
-                .map_err(|e| super::errors::from_describe(name, e))?;
-            return Ok(self.props_from_describe(&describe, name));
-        }
+        let describe = self
+            .client
+            .describe_secret()
+            .secret_id(&aws_full_name)
+            .send()
+            .await
+            .map_err(|e| super::errors::from_describe(name, e))?;
+        Ok(self.metadata_from_describe(&describe, name))
+    }
 
-        // include_value: run describe + get_secret_value concurrently.
+    /// Value read: DescribeSecret + GetSecretValue concurrently — exactly the
+    /// provider calls the pre-split value-bearing path made.
+    async fn get_secret(&self, vault: &str, name: &str) -> Result<Secret, BackendError> {
+        use crate::backend::aws::encoding::aws_name;
+        let aws_full_name = aws_name(vault, name);
+
         let describe_fut = self
             .client
             .describe_secret()
@@ -745,7 +754,25 @@ impl SecretBackend for AwsSecretBackend {
         let describe = describe.map_err(|e| super::errors::from_describe(name, e))?;
         let value = value.map_err(|e| super::errors::from_get_value(name, e))?;
 
-        Ok(self.props_from_value(&describe, &value, name))
+        self.secret_from_value(&describe, &value, name)
+    }
+
+    /// Version metadata read: ListSecretVersionIds — exactly the provider call
+    /// the pre-split value-free path made.
+    async fn get_secret_version_metadata(
+        &self,
+        vault: &str,
+        name: &str,
+        version: &str,
+    ) -> Result<SecretMetadata, BackendError> {
+        self.list_versions(vault, name)
+            .await?
+            .into_iter()
+            .find(|p| p.version == version)
+            .ok_or_else(|| BackendError::NotFound {
+                name: format!("{name} (version {version})"),
+                suggestion: None,
+            })
     }
 
     async fn get_secret_version(
@@ -753,22 +780,9 @@ impl SecretBackend for AwsSecretBackend {
         vault: &str,
         name: &str,
         version: &str,
-        include_value: bool,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<Secret, BackendError> {
         use crate::backend::aws::encoding::aws_name;
         let aws_full_name = aws_name(vault, name);
-
-        // If value not requested, find it in the version list.
-        if !include_value {
-            let mut versions = self.list_versions(vault, name).await?;
-            return versions
-                .drain(..)
-                .find(|p| p.version == version)
-                .ok_or_else(|| BackendError::NotFound {
-                    name: format!("{name} (version {version})"),
-                    suggestion: None,
-                });
-        }
 
         // Custody markers and other AWS tags are record-level metadata.
         // A denied/failed DescribeSecret must fail this read rather than fabricate
@@ -788,14 +802,14 @@ impl SecretBackend for AwsSecretBackend {
             .send()
             .await
             .map_err(|e| super::errors::from_get_value(name, e))?;
-        Ok(self.props_from_value(&describe, &value, name))
+        self.secret_from_value(&describe, &value, name)
     }
 
     async fn list_versions(
         &self,
         vault: &str,
         name: &str,
-    ) -> Result<Vec<SecretProperties>, BackendError> {
+    ) -> Result<Vec<SecretMetadata>, BackendError> {
         self.list_versions_impl(vault, name).await
     }
 
@@ -862,7 +876,7 @@ impl SecretBackend for AwsSecretBackend {
                     .filter(|s| !s.is_empty());
 
                 // Extract folder/original-name tags the same way
-                // props_from_describe does for get_secret, so folder-qualified
+                // metadata_from_describe does for get_secret, so folder-qualified
                 // `xv mv`/`xv ls` work on AWS-listed summaries too.
                 let folder_val = entry
                     .tags()
@@ -936,7 +950,7 @@ impl SecretBackend for AwsSecretBackend {
         vault: &str,
         name: &str,
         request: SecretUpdateRequest,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         use crate::backend::aws::encoding::aws_name;
         use crate::backend::aws::metadata::{
             TAG_CONTENT_TYPE, TAG_EXPIRES_AT, TAG_FOLDER, TAG_GROUPS,
@@ -1106,7 +1120,7 @@ impl SecretBackend for AwsSecretBackend {
                 .map_err(super::errors::from_tag)?;
         }
 
-        self.get_secret(vault, name, false).await
+        self.get_secret_metadata(vault, name).await
     }
 
     async fn purge_secret(&self, vault: &str, name: &str) -> Result<(), BackendError> {
@@ -1145,7 +1159,7 @@ impl SecretBackend for AwsSecretBackend {
         vault: &str,
         name: &str,
         version: &str,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         use crate::backend::aws::encoding::aws_name;
         let aws_full_name = aws_name(vault, name);
 
@@ -1182,14 +1196,14 @@ impl SecretBackend for AwsSecretBackend {
             .map_err(|e| super::errors::from_update_stage(name, e))?;
 
         // Fetch and return the current secret properties
-        self.get_secret(vault, name, false).await
+        self.get_secret_metadata(vault, name).await
     }
 
     async fn restore_secret(
         &self,
         vault: &str,
         name: &str,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         use crate::backend::aws::encoding::aws_name;
         let aws_full_name = aws_name(vault, name);
         self.client
@@ -1199,7 +1213,7 @@ impl SecretBackend for AwsSecretBackend {
             .await
             .map_err(|e| super::errors::from_restore(name, e))?;
         // After restore, fetch the metadata
-        self.get_secret(vault, name, false).await
+        self.get_secret_metadata(vault, name).await
     }
 
     async fn list_deleted_secrets(
@@ -1319,7 +1333,7 @@ mod transfer_tests;
 
 fn transfer_describe_revision(
     describe: &DescribeSecretOutput,
-    properties: &SecretProperties,
+    properties: &SecretMetadata,
 ) -> Result<String, BackendError> {
     use sha2::{Digest, Sha256};
     let mut tags: Vec<_> = describe

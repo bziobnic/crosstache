@@ -2,6 +2,7 @@ use super::*;
 use crate::backend::{local::LocalBackend, Backend};
 use crate::config::settings::LocalConfig;
 use crate::secret::attachment_backup_codec::{IdentityRecord, ManifestFile, SourceRef};
+use crate::secret::domain::SecretMetadata;
 use age::secrecy::ExposeSecret;
 
 async fn fixture() -> (tempfile::TempDir, LocalBackend, Bundle, Vec<u8>) {
@@ -93,8 +94,7 @@ async fn attachment_restore_cross_vault_preview_apply_and_retry() {
     assert_eq!(preview.outcome, "ready");
     assert!(keys.list_retained_keys("default").await.unwrap().is_empty());
     assert!(matches!(
-        keys.get_secret("default", key::ACTIVE_POINTER_SECRET, true)
-            .await,
+        keys.get_secret("default", key::ACTIVE_POINTER_SECRET).await,
         Err(BackendError::NotFound { .. })
     ));
     restore(keys.as_ref(), files, "default", &bundle, true, false)
@@ -369,8 +369,7 @@ async fn attachment_restore_retry_after_unconfirmed_file_replacement() {
             .is_err()
     );
     assert!(matches!(
-        keys.get_secret("default", key::ACTIVE_POINTER_SECRET, true)
-            .await,
+        keys.get_secret("default", key::ACTIVE_POINTER_SECRET).await,
         Err(BackendError::NotFound { .. })
     ));
     let key_before = retained(keys.as_ref(), "default", &bundle.active_key_id)
@@ -416,12 +415,11 @@ impl AttachmentKeyStore for FaultKeys<'_> {
         self.inner.preflight_set_secret(v, n).await
     }
 
-    async fn get_secret(
+    async fn get_secret_metadata(
         &self,
         v: &str,
         n: &str,
-        b: bool,
-    ) -> std::result::Result<SecretProperties, BackendError> {
+    ) -> std::result::Result<SecretMetadata, BackendError> {
         if n == key::ACTIVE_POINTER_SECRET
             && self.mode == "pointer-drift"
             && self
@@ -436,24 +434,62 @@ impl AttachmentKeyStore for FaultKeys<'_> {
                 )
                 .await?;
         }
-        let mut p = self.inner.get_secret(v, n, b).await?;
+        // A value-free custody read is no longer representable on the metadata
+        // path; the omitted-pointer fault is injected on the value read instead.
+        self.inner.get_secret_metadata(v, n).await
+    }
+
+    async fn get_secret(&self, v: &str, n: &str) -> std::result::Result<Secret, BackendError> {
+        if n == key::ACTIVE_POINTER_SECRET
+            && self.mode == "pointer-drift"
+            && self
+                .pointer_reads
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                == 1
+        {
+            self.inner
+                .set_secret(
+                    v,
+                    request(n, Zeroizing::new("changed after preflight".into()), false),
+                )
+                .await?;
+        }
+        let mut p = self.inner.get_secret(v, n).await?;
         if n == key::ACTIVE_POINTER_SECRET && self.mode == "omitted-pointer" {
-            p.value = None;
+            p.value = crate::secret::domain::SecretValue::new(String::new());
         }
         Ok(p)
     }
+    async fn get_secret_version_metadata(
+        &self,
+        v: &str,
+        n: &str,
+        version: &str,
+    ) -> std::result::Result<SecretMetadata, BackendError> {
+        let mut p = self
+            .inner
+            .get_secret_version_metadata(v, n, version)
+            .await?;
+        match self.mode {
+            "wrong-version" => p.version = "different-returned-version".into(),
+            "disabled-exact" => p.enabled = false,
+            "omitted-exact" => {}
+            _ => {}
+        }
+        Ok(p)
+    }
+
     async fn get_secret_version(
         &self,
         v: &str,
         n: &str,
         version: &str,
-        b: bool,
-    ) -> std::result::Result<SecretProperties, BackendError> {
-        let mut p = self.inner.get_secret_version(v, n, version, b).await?;
+    ) -> std::result::Result<Secret, BackendError> {
+        let mut p = self.inner.get_secret_version(v, n, version).await?;
         match self.mode {
             "wrong-version" => p.version = "different-returned-version".into(),
             "disabled-exact" => p.enabled = false,
-            "omitted-exact" => p.value = None,
+            "omitted-exact" => p.value = crate::secret::domain::SecretValue::new(String::new()),
             _ => {}
         }
         Ok(p)
@@ -462,7 +498,7 @@ impl AttachmentKeyStore for FaultKeys<'_> {
         &self,
         v: &str,
         r: SecretRequest,
-    ) -> std::result::Result<SecretProperties, BackendError> {
+    ) -> std::result::Result<SecretMetadata, BackendError> {
         let p = self.inner.commit_retained_key(v, r).await?;
         if self.mode == "commit-conflict" {
             return Err(BackendError::Conflict("concurrent winner".into()));
@@ -476,7 +512,7 @@ impl AttachmentKeyStore for FaultKeys<'_> {
         &self,
         v: &str,
         r: SecretRequest,
-    ) -> std::result::Result<SecretProperties, BackendError> {
+    ) -> std::result::Result<SecretMetadata, BackendError> {
         let mut p = self.inner.set_secret(v, r).await?;
         if self.mode == "after-pointer" {
             return Err(BackendError::Network("interrupted after pointer".into()));
@@ -634,8 +670,7 @@ async fn attachment_restore_snapshot_drift_and_bad_readback_do_not_publish() {
                 .is_err()
         );
         assert!(matches!(
-            keys.get_secret("default", key::ACTIVE_POINTER_SECRET, true)
-                .await,
+            keys.get_secret("default", key::ACTIVE_POINTER_SECRET).await,
             Err(BackendError::NotFound { .. })
         ));
         restore(keys.as_ref(), files, "default", &bundle, true, false)
@@ -745,7 +780,7 @@ async fn attachment_restore_policy_pointer_denial_preflights_before_all_writes()
             .is_empty());
         assert!(matches!(
             raw.attachment_keys()
-                .get_secret("default", key::ACTIVE_POINTER_SECRET, true)
+                .get_secret("default", key::ACTIVE_POINTER_SECRET)
                 .await,
             Err(BackendError::NotFound { .. })
         ));
@@ -877,7 +912,7 @@ async fn attachment_restore_policy_exact_readback_denial_preflights_before_write
             .is_empty());
         assert!(matches!(
             raw.attachment_keys()
-                .get_secret("default", key::ACTIVE_POINTER_SECRET, true)
+                .get_secret("default", key::ACTIVE_POINTER_SECRET)
                 .await,
             Err(BackendError::NotFound { .. })
         ));
@@ -973,7 +1008,7 @@ async fn attachment_restore_valid_v1_with_whitespace_is_never_repaired() {
     );
     assert!(keys.list_retained_keys("default").await.unwrap().is_empty());
     assert_eq!(
-        keys.get_secret("default", key::ACTIVE_POINTER_SECRET, true)
+        keys.get_secret("default", key::ACTIVE_POINTER_SECRET)
             .await
             .unwrap()
             .version,

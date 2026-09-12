@@ -1982,7 +1982,7 @@ fn run_aborts_on_failing_uri_reference() {
 // The "resolved but has no value" branch (added for both loops: a backend
 // returning `Ok` with `value: None`) is likewise not independently testable
 // here: local's `get_secret` always returns `Some(value)` when
-// `include_value: true` (verified in `src/backend/local/secrets.rs`), and
+// the value-bearing read (verified in `src/backend/local/secrets.rs`), and
 // `xv set --stdin` with empty input is rejected at write time
 // ("Secret value cannot be empty", exit 3) — so an empty-but-present value,
 // which would still be `Some("")` rather than `None`, isn't reachable via the
@@ -2821,7 +2821,7 @@ fn keeper_import_keeps_a_note_only_record() {
     assert_eq!(env.get_raw("Adaxes License"), "license key ABC-123");
 }
 
-/// `SecretProperties` lost its serde derives; `xv history --format json`
+/// `Secret` lost its serde derives; `xv history --format json`
 /// renders `SecretMetadata`, so the always-null `value` key is gone and no
 /// value can ever appear here.
 #[test]

@@ -10,11 +10,14 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::backend::atomic_rename_available;
+use crate::backend::BackendError;
 use crate::records::{
     apply_conversion, preview_conversion, validate_conditional_conversion_backend,
     ConversionPreview, ConversionRequest,
 };
-use crate::secret::domain::{DeletedSecretSummary, SecretMetadata};
+use crate::secret::domain::{
+    DeletedSecretSummary, Secret, SecretMetadata, SecretSnapshot, SnapshotValue,
+};
 #[cfg(feature = "file-ops")]
 use crate::secret::{
     attachment_transfer::{TransferEndpoint, TransferIntent, TransferOperation},
@@ -317,6 +320,19 @@ pub(crate) async fn list_attachment_rename_recovery(
     Ok(Json(visible))
 }
 
+/// A snapshot read with [`SnapshotValue::Include`] always carries its value; a
+/// missing one is a provider contract break, not a value-free result.
+fn snapshot_secret(snapshot: &SecretSnapshot) -> Result<Secret, ApiError> {
+    Ok(Secret {
+        metadata: snapshot.metadata.clone(),
+        value: snapshot.value.clone().ok_or_else(|| {
+            ApiError::Backend(BackendError::Internal(
+                "provider returned no value".to_string(),
+            ))
+        })?,
+    })
+}
+
 fn structured_error(
     status: StatusCode,
     code: &'static str,
@@ -553,9 +569,9 @@ pub(crate) async fn preview_conversion_route(
     let snapshot = target
         .backend
         .secrets()
-        .get_secret_snapshot(&target.context.vault, &name, true)
+        .get_secret_snapshot(&target.context.vault, &name, SnapshotValue::Include)
         .await?;
-    let preview = preview_conversion(&snapshot.properties, &state.types, request)
+    let preview = preview_conversion(&snapshot_secret(&snapshot)?, &state.types, request)
         .map_err(conversion_service_error)?;
     Ok(Json(ConversionPreviewResponse {
         summary: preview,
@@ -583,9 +599,9 @@ pub(crate) async fn apply_conversion_route(
     let snapshot = target
         .backend
         .secrets()
-        .get_secret_snapshot(&target.context.vault, &name, true)
+        .get_secret_snapshot(&target.context.vault, &name, SnapshotValue::Include)
         .await?;
-    let preview = preview_conversion(&snapshot.properties, &state.types, request)
+    let preview = preview_conversion(&snapshot_secret(&snapshot)?, &state.types, request)
         .map_err(conversion_service_error)?;
     if preview.requires_confirmation {
         return Err(structured_error(
@@ -622,7 +638,7 @@ pub(crate) async fn apply_conversion_route(
     )
     .await
     .map_err(conversion_apply_error)?;
-    let mut secret = secret.into_metadata();
+    let mut secret = secret;
     secret.tags.clear();
     Ok(Json(ConversionResult { secret, summary }))
 }
@@ -742,7 +758,7 @@ pub(crate) async fn rename(
     let snapshot = target
         .backend
         .secrets()
-        .get_secret_snapshot(&target.context.vault, &name, false)
+        .get_secret_snapshot(&target.context.vault, &name, SnapshotValue::Omit)
         .await?;
     if target
         .backend
@@ -770,7 +786,7 @@ pub(crate) async fn rename(
         )
         .await
         .map_err(rename_backend_error)?;
-    let mut renamed = renamed.into_metadata();
+    let mut renamed = renamed;
     renamed.tags.clear();
     Ok(Json(renamed))
 }
@@ -799,7 +815,7 @@ pub(crate) async fn restore(
         .secrets()
         .restore_secret(&target.context.vault, &name)
         .await?;
-    Ok(Json(restored.into_metadata()))
+    Ok(Json(restored))
 }
 
 pub(crate) async fn purge(
@@ -820,7 +836,6 @@ pub(crate) async fn purge(
 mod tests {
     #[cfg(feature = "file-ops")]
     use super::{attachment_transfer_error, ApiError};
-    use crate::secret::domain::SecretValue;
     use std::sync::Arc;
 
     use axum::body::Body;
@@ -1286,13 +1301,10 @@ mod tests {
         assert_eq!(error["error"]["code"], "xv-attachments-block-rename");
         let source = backend
             .secrets()
-            .get_secret("default", "source", true)
+            .get_secret("default", "source")
             .await
             .unwrap();
-        assert_eq!(
-            source.value.as_ref().map(SecretValue::expose_secret),
-            Some("source-value")
-        );
+        assert_eq!(Some(source.value.expose_secret()), Some("source-value"));
         assert!(!backend
             .secrets()
             .secret_exists("default", "destination")
@@ -2391,12 +2403,9 @@ mod tests {
         let history = state
             .base_backend()
             .secrets()
-            .get_secret_version("default", "recreated", "v1", true)
+            .get_secret_version("default", "recreated", "v1")
             .await
             .unwrap();
-        assert_eq!(
-            history.value.as_ref().map(SecretValue::expose_secret),
-            Some("live-v1")
-        );
+        assert_eq!(Some(history.value.expose_secret()), Some("live-v1"));
     }
 }

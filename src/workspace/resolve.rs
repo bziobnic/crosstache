@@ -508,22 +508,19 @@ mod tests {
         let work_backend = registry.materialize("local-a").unwrap();
         let written = work_backend
             .secrets()
-            .get_secret("default", "SHARED_NAME", true)
+            .get_secret("default", "SHARED_NAME")
             .await
             .expect("must be written to work");
-        assert_eq!(
-            written.value.as_ref().map(SecretValue::expose_secret),
-            Some("work-value")
-        );
+        assert_eq!(Some(written.value.expose_secret()), Some("work-value"));
 
         // The stage copy must be untouched.
         let stage_copy = stage_backend
             .secrets()
-            .get_secret("default", "SHARED_NAME", true)
+            .get_secret("default", "SHARED_NAME")
             .await
             .expect("stage copy untouched");
         assert_eq!(
-            stage_copy.value.as_ref().map(SecretValue::expose_secret),
+            Some(stage_copy.value.expose_secret()),
             Some("stage-original")
         );
     }
