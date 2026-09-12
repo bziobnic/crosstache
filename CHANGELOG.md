@@ -88,7 +88,7 @@
   outcome from a prior installation is labeled `(previous install)` until a
   new run completes under the current manifest.
 - **Secret plaintext is now a dedicated `SecretValue` type.** Every
-  value-bearing internal model (`SecretProperties`, `SecretRequest`,
+  value-bearing internal model (`SecretMetadata`, `SecretRequest`,
   `SecretUpdateRequest`, `SecretSnapshot`) lost its serde derives and prints
   `SecretValue([REDACTED])` under `{:?}`; the only plaintext read is
   `expose_secret()`. Web metadata responses (`GET/PUT/PATCH /secrets/{name}`,
@@ -98,6 +98,23 @@
   Azure-era `secret::manager` into `secret::domain`. `xv history --format
   json|yaml` likewise no longer emits the always-`null` `value` key; csv,
   table, plain, raw, and template output are unchanged.
+- **`SecretBackend`/`SecretOperations` getters are split by value disclosure
+  instead of a single boolean flag.**
+  `get_secret_metadata`/`get_secret_version_metadata` return `SecretMetadata`;
+  `get_secret`/`get_secret_version` return `Secret { metadata, value:
+  SecretValue }` and always carry a value; every write and `list_versions`
+  return `SecretMetadata`; `get_secret_snapshot` takes
+  `SnapshotValue::{Omit, Include}`. The old combined value/metadata struct is
+  gone. Backends keep provider-call parity: local's metadata path never
+  decrypts, AWS's metadata path is `DescribeSecret` only, and Azure's HTTP
+  calls are unchanged. Web
+  `GET /secrets/{name}` is now served by the metadata getter; only
+  `POST /secrets/{name}/value` can return a value. A provider record with no
+  value (an AWS binary secret) now makes `xv get`, the web reveal endpoint,
+  exports, and scan fail with "provider returned no value" instead of
+  silently yielding `null` or skipping the secret, and export/scan no longer
+  skip value-less secrets — unreachable on local/Azure, and refused up front
+  by the AWS adapter.
 
 ### Fixed
 
