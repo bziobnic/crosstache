@@ -642,20 +642,30 @@ pub(crate) async fn execute_migrate(
         }
     }
 
+    let invalidate_destination = || {
+        let target_backend = to_kind.to_string();
+        crate::cache::invalidation::on_secret_mutation(&config, &target_backend, &target_vault);
+        crate::cache::invalidation::on_file_mutation(&config, &target_backend, &target_vault);
+    };
+
     #[cfg(feature = "file-ops")]
     let attached_count = attached_intents.len();
     #[cfg(not(feature = "file-ops"))]
     let attached_count = 0;
     #[cfg(feature = "file-ops")]
     for intent in attached_intents {
-        crate::cli::transfer_support::run_attached(
+        if let Err(e) = crate::cli::transfer_support::run_attached(
             source.as_ref(),
             target.as_ref(),
             intent,
             &attachments,
             false,
         )
-        .await?;
+        .await
+        {
+            invalidate_destination();
+            return Err(e);
+        }
     }
 
     // 6. Migrate secrets concurrently with backoff retry
@@ -715,9 +725,7 @@ pub(crate) async fn execute_migrate(
     // 7. Print summary
     println!();
     if migrated > 0 {
-        let target_backend = to_kind.to_string();
-        crate::cache::invalidation::on_secret_mutation(&config, &target_backend, &target_vault);
-        crate::cache::invalidation::on_file_mutation(&config, &target_backend, &target_vault);
+        invalidate_destination();
     }
     if !errors.is_empty() {
         output::warn(&format!(
