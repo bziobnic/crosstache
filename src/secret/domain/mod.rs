@@ -8,7 +8,10 @@
 //! Value-bearing composites (`Secret`, `SecretRequest`,
 //! `SecretUpdateRequest`, `SecretSnapshot`) derive `Debug` (redacted through
 //! `SecretValue`) but never serde; `Secret::into_metadata` is the
-//! one way a secret becomes serializable, and it drops the plaintext.
+//! one way a secret becomes serializable without its plaintext, and
+//! [`Secret::disclose`] is the only way it becomes serializable *with* it —
+//! so `grep -rn "\.disclose(" src` lists every serializing disclosure
+//! boundary.
 //!
 //! This module imports nothing from `crate::backend`, `crate::cli`,
 //! `crate::web`, or `crate::secret::manager`; adapters translate provider

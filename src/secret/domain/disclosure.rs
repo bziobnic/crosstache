@@ -1,9 +1,29 @@
 //! Types that carry plaintext on purpose. Everything here is a reviewed disclosure boundary.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use tabled::Tabled;
 
 use crate::utils::helpers::parse_connection_string;
+
+/// A secret whose plaintext has been deliberately released as a plain
+/// `String` for serialization at a reviewed boundary.
+///
+/// Constructed only by [`crate::secret::domain::Secret::disclose`], so
+/// `grep -rn "\.disclose(" src` is the complete list of serializing
+/// disclosure boundaries. `Debug` and `Serialize` are derived on purpose:
+/// unlike [`crate::secret::domain::SecretValue`], this type exists to be
+/// shown.
+#[derive(Debug, Clone, Serialize)]
+// Constructed by `Secret::disclose`; the `xv` binary's own module tree has no
+// disclosure boundary wired to it yet, so it lints as dead there.
+#[allow(dead_code)]
+pub struct DisclosedSecret {
+    pub name: String,
+    pub value: String,
+    pub content_type: String,
+    pub tags: HashMap<String, String>,
+}
 
 /// Connection string component
 #[derive(Debug, Clone, Serialize, Deserialize, Tabled)]

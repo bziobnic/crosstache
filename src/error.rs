@@ -1589,6 +1589,26 @@ mod tests {
                 fields: &["target", "level", "message", "error", "backend"],
                 allowed_value_like_fields: &[],
             },
+            // Disclosure boundaries: the two types that carry plaintext on
+            // purpose. `DisclosedSecret` is built only by `Secret::disclose`
+            // and `ConnectionComponent` only by `parse_connection_components`,
+            // both of which are reviewed reveal paths, so `value` is allowed
+            // here and nowhere else. Any *other* value-like field added to
+            // these types is still a bug.
+            SecuritySurface {
+                category: "disclosure boundary",
+                name: "DisclosedSecret",
+                fields: &["name", "value", "content_type", "tags"],
+                allowed_value_like_fields: &["value"],
+            },
+            SecuritySurface {
+                category: "disclosure boundary",
+                name: "ConnectionComponent",
+                fields: &["key", "value", "description"],
+                // `key` is the connection-string parameter *name*
+                // ("Server", "Password"), not key material.
+                allowed_value_like_fields: &["value", "key"],
+            },
         ];
 
         assert_no_value_like_fields(&surfaces);

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tabled::Tabled;
 
+use crate::secret::domain::disclosure::DisclosedSecret;
 use crate::secret::domain::SecretValue;
 
 /// Value-free view of a secret: everything in [`Secret`] except the
@@ -103,6 +104,21 @@ impl Secret {
     /// Split into the value-free half and the plaintext.
     pub fn into_parts(self) -> (SecretMetadata, SecretValue) {
         (self.metadata, self.value)
+    }
+
+    /// Release the plaintext as a serializable [`DisclosedSecret`].
+    ///
+    /// The only way a value becomes a serializable `String`. Every caller is
+    /// a reviewed disclosure boundary; `grep -rn "\.disclose(" src` lists
+    /// them all.
+    #[allow(dead_code)] // No boundary is routed through it yet; see PR 3 task 2.
+    pub fn disclose(self) -> DisclosedSecret {
+        DisclosedSecret {
+            name: self.metadata.name,
+            value: self.value.expose_secret().to_string(),
+            content_type: self.metadata.content_type,
+            tags: self.metadata.tags,
+        }
     }
 }
 
@@ -231,6 +247,29 @@ mod tests {
             replace_groups: false,
         };
         assert!(!format!("{upd:?}").contains(CANARY));
+    }
+
+    #[test]
+    fn disclose_carries_name_value_content_type_and_tags() {
+        let d = secret().disclose();
+        assert_eq!(d.name, "n");
+        assert_eq!(d.value, CANARY);
+        assert_eq!(d.content_type, "text/plain");
+        assert_eq!(d.tags.get("k").map(String::as_str), Some("v"));
+
+        let json = serde_json::to_string(&d).unwrap();
+        assert!(json.contains(CANARY));
+        assert!(json.contains("\"value\""));
+        assert!(json.contains("\"name\":\"n\""));
+        assert!(json.contains("\"content_type\":\"text/plain\""));
+        assert!(json.contains("\"tags\":{\"k\":\"v\"}"));
+    }
+
+    #[test]
+    fn disclosed_secret_debug_shows_the_value_on_purpose() {
+        // The inverse of the `SecretValue` redaction canary: `DisclosedSecret`
+        // exists to be shown, so its `Debug` must not hide the plaintext.
+        assert!(format!("{:?}", secret().disclose()).contains(CANARY));
     }
 
     #[test]
