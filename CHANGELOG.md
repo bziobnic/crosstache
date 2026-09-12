@@ -90,6 +90,19 @@
 
 ### Fixed
 
+- **Listing caches no longer outlive the vault, backend, or transfer that
+  made them stale.** `xv vault delete|purge` now drops the removed vault's
+  cached secret and file listings for exactly that backend (a same-named
+  vault on another backend keeps its cache), `xv backend rm` drops every
+  listing under the removed backend, and `xv migrate` and an applied
+  `xv transfer`/`copy`/`move` drop the listings for the vaults they wrote.
+  Previously only the vault list was invalidated on the Azure path and
+  nothing at all on local/AWS/named-backend vault deletes, so `xv ls
+  --vault OLD` kept serving a deleted vault's listing until the TTL
+  expired. Dry runs, previews, refused confirmations, and failed removals
+  leave the cache untouched. `docs/cache.md` now lists what each mutation
+  invalidates, states that `XV_CACHE_STRICT` is warning-only by design,
+  and no longer claims the identity fingerprint includes the backend name.
 - **Task Scheduler's saved task definition is decoded correctly.**
   `schtasks /Query /XML` emits UTF-16LE; its output was being read as UTF-8, so
   the definition an install rollback saves — and hands back to

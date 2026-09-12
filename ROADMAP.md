@@ -80,13 +80,6 @@ now shipped):
   change should get its own `schema_version` rather than repeating that
   pattern.
 
-### P1 — Finish cache invalidation on vault removal
-
-Vault deletion and purge currently invalidate the vault list but leave that
-vault's cached secret/file listings behind. Wire the existing
-`cache::invalidation::on_vault_removed` seam into successful removal paths and
-cover both built-in and named backends.
-
 ### P1 — Split secret-domain types from provider/legacy manager types
 
 Backend-neutral traits still exchange request/property models owned by
@@ -95,6 +88,14 @@ Move value-bearing requests, summaries, properties, updates, and deleted/version
 models into a dedicated secret-domain module with explicit redaction/zeroization
 contracts. Keep provider adapters responsible for translation and avoid another
 flag-day rewrite.
+
+### P3 — Vault-list cache is Azure-only on the read side
+
+`xv vault list` on the trait path (local, AWS, and named backends) neither
+reads nor writes the `vaults` cache entry; only the Azure dispatch does. The
+removal-side invalidation shipped for all backends, so wiring the read side
+is a small follow-up: read/write `CacheKey::VaultList` in the trait-path
+`List` arm of `src/cli/vault_ops.rs` the way `execute_vault_list` does.
 
 ## Product and platform work
 

@@ -59,10 +59,13 @@ top-level path component:
 The fingerprint is a SHA-256 (truncated to 16 hex chars) over a stable,
 deterministic serialization of:
 
-- the resolved global config path,
-- the effective backend name, and
+- the resolved global config path, and
 - the active backend's identity fields — Azure: tenant + subscription; AWS:
   region + profile + endpoint URL; Local: resolved store path.
+
+The backend *name* is deliberately not part of the fingerprint: it is already
+the next path component, and two configs that differ only in a named backend
+already differ by config path.
 
 It contains **no secret material, timestamps, or randomness**, so it is
 identical between a foreground command and the `xv cache refresh` child process
@@ -90,6 +93,12 @@ which is useful in CI. This changes logging **only**: `xv ls`/`vault list`/
 `file list` still succeed with a broken cache, and reads still degrade to a
 live fetch. Loud, never fatal.
 
+This is a deliberate contract, not a gap: the cache is a read accelerator, and
+a mode that failed `xv ls` because a cache file was unwritable would turn a
+cache problem into an outage for exactly the commands scripts depend on. There
+is no fail-nonzero variant and none is planned; use `xv doctor` or
+`xv cache status` to surface cache problems in CI.
+
 ### `xv doctor` cache check
 
 `xv doctor` prints a `Cache:` line and reports whether the cache tree uses
@@ -98,11 +107,28 @@ layout. It is advisory only and does not change doctor's exit status — a
 degraded cache is non-fatal and self-heals on the next command (modes are
 re-tightened, missed entries are re-fetched).
 
+### What invalidates what
+
+| Mutation | Dropped |
+| --- | --- |
+| secret set/update/delete/restore/rename/rotate/import/copy/move | `secrets:<backend>:<vault>` on every vault written |
+| file upload/delete/sync | both `files:*` variants for that vault |
+| vault create/restore/update | `vaults` |
+| vault delete/purge | `vaults` plus that `(backend, vault)`'s secret and file listings |
+| `backend rm` | `vaults` plus every listing under that backend name |
+| `migrate` (not dry-run) | destination `(kind, vault)` secret and file listings |
+| `transfer`/`copy`/`move` with `--apply`/`--resume` | destination listings; source listings too for a move |
+| `cx rm`, `init` | nothing — no vault data changes |
+
+`<backend>` is always the registry name (`local`, `azure`, `aws`, or a
+`named_backends` key); `migrate` addresses backends by kind, so its entries
+live under the kind name.
+
 ## Common pitfalls
 
 | Symptom | Cause / fix |
 |---------|-------------|
-| Vault list is gone after delete, but `xv ls --vault OLD` still looks populated | Vault create/delete/purge currently invalidate only the vault list. That vault's secret/file listing files can linger until TTL expiry. `xv cache clear --vault OLD` drops the current identity's entries for that name; `xv cache clear` with no vault resets every identity. |
+| A listing looks stale after a vault, backend, migrate, or transfer removed or rewrote it | Vault delete/purge, `backend rm`, `migrate`, and an applied `transfer` drop the affected `(backend, vault)` listings eagerly. If you still see stale data, the write came from outside `xv` (portal, another machine): `xv ls --no-cache` or `xv cache clear --vault NAME`. |
 | Switching Azure tenants or AWS profiles still shows the previous listing | Pre-v5 caches keyed only on backend name. v5 scopes paths by identity fingerprint; a miss is expected, then a live fetch. |
 | Agent-enforced `xv ls` never hits cache | Enforcement disables the client cache entirely. |
 
