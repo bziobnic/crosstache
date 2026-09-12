@@ -35,7 +35,7 @@ pub fn connection_string_key_description(key: &str) -> String {
 }
 
 /// Parse a connection string into described components, without needing a
-/// [`SecretManager`]. Wraps [`crate::utils::helpers::parse_connection_string`]
+/// `SecretManager`. Wraps [`crate::utils::helpers::parse_connection_string`]
 /// (the raw key/value parser) and annotates each pair with a description.
 pub fn parse_connection_components(connection_string: &str) -> Vec<ConnectionComponent> {
     parse_connection_string(connection_string)

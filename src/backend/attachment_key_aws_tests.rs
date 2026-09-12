@@ -6,6 +6,7 @@ use crate::secret::attachment_key::{
     retained_record_name, AttachmentKeyId, KEY_RECORD_CONTENT_TYPE,
 };
 use crate::secret::domain::SecretRequest;
+use crate::secret::domain::SecretValue;
 use age::secrecy::ExposeSecret;
 use aws_sdk_secretsmanager::{config::Region, Client, Config};
 use aws_smithy_runtime_api::client::http::{
@@ -18,7 +19,6 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::Barrier;
-use zeroize::Zeroizing;
 
 const VAULT: &str = "attachment-test";
 
@@ -195,7 +195,7 @@ fn key_request() -> SecretRequest {
     let key_id = AttachmentKeyId::derive(&identity.to_public().to_string());
     SecretRequest {
         name: retained_record_name(&key_id),
-        value: Zeroizing::new(identity.to_string().expose_secret().to_owned()),
+        value: SecretValue::new(identity.to_string().expose_secret().to_owned()),
         content_type: Some(KEY_RECORD_CONTENT_TYPE.into()),
         enabled: None,
         expires_on: None,
@@ -230,7 +230,10 @@ async fn retained_commit_returns_create_secret_version_and_reads_exact_material(
     assert_eq!(read.tags["owner"], "custody");
     assert_eq!(read.tags["note"], "retained note");
     assert_eq!(read.tags["aws:stages"], "AWSPREVIOUS");
-    assert_eq!(read.value.unwrap().as_str(), request.value.as_str());
+    assert_eq!(
+        read.value.unwrap().expose_secret(),
+        request.value.expose_secret()
+    );
     assert_eq!(
         state.lock().unwrap().operations,
         ["CreateSecret", "DescribeSecret", "GetSecretValue"]
@@ -255,7 +258,10 @@ async fn concurrent_same_name_retained_commits_conflict_without_mutating_winner(
         .get_secret_version(VAULT, &request.name, &winner.version, true)
         .await
         .unwrap();
-    assert_eq!(read.value.unwrap().as_str(), request.value.as_str());
+    assert_eq!(
+        read.value.unwrap().expose_secret(),
+        request.value.expose_secret()
+    );
     assert_eq!(winner.version, format!("{:032}", 1));
     let state = state.lock().unwrap();
     assert_eq!(state.records.len(), 1);
@@ -291,7 +297,10 @@ async fn concurrent_distinct_retained_keys_remain_independently_exact_version_re
             .unwrap();
         assert_eq!(read.name, request.name);
         assert_eq!(read.version, committed.version);
-        assert_eq!(read.value.unwrap().as_str(), request.value.as_str());
+        assert_eq!(
+            read.value.unwrap().expose_secret(),
+            request.value.expose_secret()
+        );
     }
     let state = state.lock().unwrap();
     assert_eq!(state.records.len(), 2);
@@ -406,7 +415,10 @@ async fn aws_current_value_version_comes_from_value_response_not_describe() {
         .await
         .unwrap();
     assert_eq!(read.version, committed.version);
-    assert_eq!(read.value.unwrap().as_str(), request.value.as_str());
+    assert_eq!(
+        read.value.unwrap().expose_secret(),
+        request.value.expose_secret()
+    );
     assert_eq!(read.content_type, KEY_RECORD_CONTENT_TYPE);
     assert_eq!(read.tags["aws:stages"], "AWSPREVIOUS");
 }
@@ -469,7 +481,10 @@ async fn retirement_aws_transport_only_adds_one_tag_without_value_or_version_wri
         .get_secret_version(VAULT, &request.name, &committed.version, true)
         .await
         .unwrap();
-    assert_eq!(original.value.unwrap().as_str(), request.value.as_str());
+    assert_eq!(
+        original.value.unwrap().expose_secret(),
+        request.value.expose_secret()
+    );
     keys.mark_retired(VAULT, &reference).await.unwrap();
     let state = state.lock().unwrap();
     assert_eq!(state.records.len(), 1);

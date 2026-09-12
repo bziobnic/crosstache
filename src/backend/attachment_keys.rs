@@ -7,6 +7,7 @@ use super::{BackendError, SecretBackend};
 use crate::secret::attachment_key::{
     self as key, classify_reserved_name, AttachmentKeyRef, ReservedClass,
 };
+use crate::secret::domain::SecretValue;
 use crate::secret::domain::{SecretProperties, SecretRequest};
 use async_trait::async_trait;
 use serde::Serialize;
@@ -155,7 +156,8 @@ fn validate_retirement_record(
     }
     let identity = p
         .value
-        .as_deref()
+        .as_ref()
+        .map(SecretValue::expose_secret)
         .and_then(|v| v.trim().parse::<age::x25519::Identity>().ok())
         .ok_or_else(retirement_conflict)?;
     if key::AttachmentKeyId::derive(&identity.to_public().to_string()) != reference.key_id {
@@ -361,12 +363,11 @@ mod tests {
     use super::*;
     use crate::backend::{local::LocalBackend, Backend};
     use crate::config::settings::LocalConfig;
-    use zeroize::Zeroizing;
 
     fn request(name: &str, value: &str) -> SecretRequest {
         SecretRequest {
             name: name.into(),
-            value: Zeroizing::new(value.into()),
+            value: SecretValue::new(value),
             content_type: None,
             enabled: None,
             expires_on: None,
@@ -593,7 +594,7 @@ mod tests {
                     .unwrap()
                     .value
                     .unwrap()
-                    .as_str(),
+                    .expose_secret(),
                 "unchanged"
             );
         }

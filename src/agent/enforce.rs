@@ -871,6 +871,7 @@ fn validate_audit_text(label: &str, value: &str, max_bytes: usize) -> Result<(),
 
 #[cfg(test)]
 mod tests {
+    use crate::secret::domain::SecretValue;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
@@ -1093,7 +1094,7 @@ mod tests {
         ));
         let request = SecretRequest {
             name: "xv-attachment-key".into(),
-            value: zeroize::Zeroizing::new("DO-NOT-LOG-KEY".into()),
+            value: SecretValue::new("DO-NOT-LOG-KEY"),
             content_type: None,
             enabled: None,
             expires_on: None,
@@ -1141,7 +1142,7 @@ mod tests {
                 "default",
                 crate::secret::domain::SecretRequest {
                     name: "db".into(),
-                    value: zeroize::Zeroizing::new("database password".into()),
+                    value: SecretValue::new("database password"),
                     content_type: None,
                     enabled: None,
                     expires_on: None,

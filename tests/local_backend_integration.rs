@@ -10,9 +10,9 @@ use crosstache::backend::error::BackendError;
 use crosstache::backend::Backend;
 use crosstache::config::settings::LocalConfig;
 use crosstache::secret::domain::SecretRequest;
+use crosstache::secret::domain::SecretValue;
 use crosstache::vault::models::VaultCreateRequest;
 use tempfile::TempDir;
-use zeroize::Zeroizing;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -35,7 +35,7 @@ fn make_backend(tmp: &TempDir) -> crosstache::backend::local::LocalBackend {
 fn secret_req(name: &str, value: &str) -> SecretRequest {
     SecretRequest {
         name: name.to_string(),
-        value: Zeroizing::new(value.to_string()),
+        value: SecretValue::new(value.to_string()),
         content_type: None,
         enabled: None,
         expires_on: None,
@@ -98,7 +98,7 @@ async fn test_full_secret_lifecycle() {
         .get_secret("default", "DB_PASSWORD", true)
         .await
         .unwrap();
-    assert_eq!(&*got.value.unwrap(), "hunter2");
+    assert_eq!(got.value.unwrap().expose_secret(), "hunter2");
 
     // Update secret (new value via set_secret)
     let updated = secrets
@@ -112,7 +112,7 @@ async fn test_full_secret_lifecycle() {
         .get_secret("default", "DB_PASSWORD", true)
         .await
         .unwrap();
-    assert_eq!(&*got.value.unwrap(), "new-password");
+    assert_eq!(got.value.unwrap().expose_secret(), "new-password");
 
     // Delete secret
     secrets
@@ -169,7 +169,7 @@ async fn test_version_history_and_rollback() {
         .get_secret("default", "API_KEY", true)
         .await
         .unwrap();
-    assert_eq!(&*got.value.unwrap(), "v1-value");
+    assert_eq!(got.value.unwrap().expose_secret(), "v1-value");
 }
 
 #[tokio::test]
@@ -205,7 +205,7 @@ async fn test_soft_delete_restore_purge() {
         .get_secret("default", "TEMP_KEY", true)
         .await
         .unwrap();
-    assert_eq!(&*got.value.unwrap(), "secret-value");
+    assert_eq!(got.value.unwrap().expose_secret(), "secret-value");
 
     // Delete again
     secrets.delete_secret("default", "TEMP_KEY").await.unwrap();
@@ -388,7 +388,7 @@ async fn test_special_characters_in_names() {
         .get_secret("default", "my/secret@test", true)
         .await
         .unwrap();
-    assert_eq!(&*got.value.unwrap(), "slash-value");
+    assert_eq!(got.value.unwrap().expose_secret(), "slash-value");
     assert_eq!(got.name, "my/secret@test");
 
     // Secret with spaces
@@ -400,7 +400,7 @@ async fn test_special_characters_in_names() {
         .get_secret("default", "has spaces", true)
         .await
         .unwrap();
-    assert_eq!(&*got.value.unwrap(), "space-value");
+    assert_eq!(got.value.unwrap().expose_secret(), "space-value");
     assert_eq!(got.name, "has spaces");
 
     // Secret with unicode/emoji
@@ -409,7 +409,7 @@ async fn test_special_characters_in_names() {
         .await
         .unwrap();
     let got = secrets.get_secret("default", "key-🔑", true).await.unwrap();
-    assert_eq!(&*got.value.unwrap(), "emoji-value");
+    assert_eq!(got.value.unwrap().expose_secret(), "emoji-value");
 
     // List should show all three
     let list = secrets.list_secrets("default", None).await.unwrap();
@@ -451,10 +451,16 @@ async fn test_multiple_vaults() {
 
     // Values should be different (vault isolation)
     let prod_val = secrets.get_secret("prod", "DB_URL", true).await.unwrap();
-    assert_eq!(&*prod_val.value.unwrap(), "prod-db.example.com");
+    assert_eq!(
+        prod_val.value.unwrap().expose_secret(),
+        "prod-db.example.com"
+    );
 
     let staging_val = secrets.get_secret("staging", "DB_URL", true).await.unwrap();
-    assert_eq!(&*staging_val.value.unwrap(), "staging-db.example.com");
+    assert_eq!(
+        staging_val.value.unwrap().expose_secret(),
+        "staging-db.example.com"
+    );
 
     // Default vault should be empty (no secrets set there)
     let default_secrets = secrets.list_secrets("default", None).await.unwrap();
@@ -549,7 +555,7 @@ async fn test_empty_and_large_values() {
         .get_secret("default", "empty-secret", true)
         .await
         .unwrap();
-    assert_eq!(&*got.value.unwrap(), "");
+    assert_eq!(got.value.unwrap().expose_secret(), "");
 
     // Large value (64KB)
     let large = "x".repeat(65536);
@@ -572,7 +578,7 @@ async fn test_secret_with_metadata() {
 
     let req = SecretRequest {
         name: "tagged-secret".into(),
-        value: Zeroizing::new("val".into()),
+        value: SecretValue::new("val"),
         content_type: Some("application/json".into()),
         enabled: Some(true),
         expires_on: None,

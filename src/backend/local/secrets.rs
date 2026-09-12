@@ -21,13 +21,12 @@ use crate::utils::helpers::{create_private_dir, write_private};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use zeroize::Zeroizing;
 
 use crate::backend::error::BackendError;
 use crate::backend::secret::SecretBackend;
 use crate::secret::domain::{
     DeletedSecretSummary, SecretProperties, SecretRequest, SecretSnapshot, SecretSummary,
-    SecretUpdateRequest,
+    SecretUpdateRequest, SecretValue,
 };
 
 use super::audit::{AuditOp, LocalAuditLog, RESOURCE_VAULT_WIDE};
@@ -395,7 +394,7 @@ fn migrate_trash_dir(
 // Conversion helpers
 // ---------------------------------------------------------------------------
 
-fn meta_to_properties(meta: &SecretMeta, value: Option<Zeroizing<String>>) -> SecretProperties {
+fn meta_to_properties(meta: &SecretMeta, value: Option<SecretValue>) -> SecretProperties {
     let version_num = meta
         .version
         .strip_prefix('v')
@@ -2370,7 +2369,7 @@ impl LocalSecretBackend {
             self.set_attachment_pair_locked(
                 vault,
                 &stem,
-                &request.value,
+                request.value.expose_secret(),
                 &meta,
                 old_snapshot.as_ref(),
             )?;
@@ -2384,7 +2383,11 @@ impl LocalSecretBackend {
         let ap_tmp = temp_path_for(&ap)?;
         let mp_tmp = temp_path_for(&mp)?;
 
-        crypto::encrypt_to_file(&ap_tmp, request.value.as_bytes(), &recipients)?;
+        crypto::encrypt_to_file(
+            &ap_tmp,
+            request.value.expose_secret().as_bytes(),
+            &recipients,
+        )?;
         write_meta(
             &mp_tmp,
             &meta,
@@ -2457,7 +2460,9 @@ impl LocalSecretBackend {
         }
         let value = if include_value {
             let ap = age_path(&self.store_path, vault, &stem)?;
-            Some(crypto::decrypt_from_file(&ap, &self.identity)?)
+            Some(SecretValue::new(
+                crypto::decrypt_from_file(&ap, &self.identity)?.as_str(),
+            ))
         } else {
             None
         };
@@ -2895,7 +2900,9 @@ impl SecretBackend for LocalSecretBackend {
                     )));
                 }
 
-                Some(crypto::decrypt_from_file(&ap, &self.identity)?)
+                Some(SecretValue::new(
+                    crypto::decrypt_from_file(&ap, &self.identity)?.as_str(),
+                ))
             } else {
                 None
             };
@@ -2939,7 +2946,9 @@ impl SecretBackend for LocalSecretBackend {
                                 age_file.display()
                             )));
                         }
-                        Some(crypto::decrypt_from_file(&age_file, &self.identity)?)
+                        Some(SecretValue::new(
+                            crypto::decrypt_from_file(&age_file, &self.identity)?.as_str(),
+                        ))
                     } else {
                         None
                     };
@@ -2982,7 +2991,9 @@ impl SecretBackend for LocalSecretBackend {
                     )));
                 }
 
-                Some(crypto::decrypt_from_file(&age_file, &self.identity)?)
+                Some(SecretValue::new(
+                    crypto::decrypt_from_file(&age_file, &self.identity)?.as_str(),
+                ))
             } else {
                 None
             };
@@ -3226,7 +3237,7 @@ impl SecretBackend for LocalSecretBackend {
                 durable_write_private(&transaction.old_meta, &old_meta_bytes)?;
                 crypto::encrypt_to_file(
                     &transaction.new_age,
-                    new_value.as_bytes(),
+                    new_value.expose_secret().as_bytes(),
                     &self.recipients,
                 )?;
                 sync_file(&transaction.new_age)?;
@@ -3971,7 +3982,7 @@ mod tests {
     fn make_request(name: &str, value: &str) -> SecretRequest {
         SecretRequest {
             name: name.to_string(),
-            value: Zeroizing::new(value.to_string()),
+            value: SecretValue::new(value.to_string()),
             content_type: Some("text/plain".into()),
             enabled: Some(true),
             expires_on: None,
@@ -4029,7 +4040,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            got.value.as_deref().map(|z| z.to_string()),
+            got.value.as_ref().map(|v| v.expose_secret().to_string()),
             Some("s3cr3t".into())
         );
         assert_eq!(got.tags.get("note").map(String::as_str), Some("test note"));
@@ -4094,8 +4105,14 @@ mod tests {
         // Both readable through the encryption-on backend.
         let a = enc.get_secret("default", "old-plain", true).await.unwrap();
         let b = enc.get_secret("default", "new-enc", true).await.unwrap();
-        assert_eq!(a.value.as_deref().map(|z| z.to_string()), Some("v1".into()));
-        assert_eq!(b.value.as_deref().map(|z| z.to_string()), Some("v2".into()));
+        assert_eq!(
+            a.value.as_ref().map(|v| v.expose_secret().to_string()),
+            Some("v1".into())
+        );
+        assert_eq!(
+            b.value.as_ref().map(|v| v.expose_secret().to_string()),
+            Some("v2".into())
+        );
 
         // list_secrets sees both regardless of meta encoding.
         let listed = enc.list_secrets("default", None).await.unwrap();
@@ -4188,7 +4205,10 @@ mod tests {
 
         // Values and metadata still resolve correctly post-migration.
         let a = enc.get_secret("default", "a", true).await.unwrap();
-        assert_eq!(a.value.as_deref().map(|z| z.to_string()), Some("1b".into()));
+        assert_eq!(
+            a.value.as_ref().map(|v| v.expose_secret().to_string()),
+            Some("1b".into())
+        );
         let listed = enc.list_secrets("default", None).await.unwrap();
         assert_eq!(listed.len(), 2);
 
@@ -4230,7 +4250,7 @@ mod tests {
             .get_secret("default", "db-pass", true)
             .await
             .unwrap();
-        assert_eq!(&*props.value.unwrap(), "hunter2");
+        assert_eq!(props.value.unwrap().expose_secret(), "hunter2");
     }
 
     #[tokio::test]
@@ -4262,7 +4282,7 @@ mod tests {
 
         // Current value
         let current = backend.get_secret("default", "key", true).await.unwrap();
-        assert_eq!(&*current.value.unwrap(), "v2-value");
+        assert_eq!(current.value.unwrap().expose_secret(), "v2-value");
 
         // Version history
         let versions = backend.list_versions("default", "key").await.unwrap();
@@ -4363,7 +4383,7 @@ mod tests {
             .get_secret("default", "restore-me", true)
             .await
             .unwrap();
-        assert_eq!(&*got.value.unwrap(), "original-value");
+        assert_eq!(got.value.unwrap().expose_secret(), "original-value");
 
         // Deleted list should be empty
         let deleted = backend.list_deleted_secrets("default").await.unwrap();
@@ -4450,7 +4470,7 @@ mod tests {
             .get_secret_version("default", "stale-purge", "v1", true)
             .await
             .unwrap();
-        assert_eq!(&*history.value.unwrap(), "v1");
+        assert_eq!(history.value.unwrap().expose_secret(), "v1");
     }
 
     #[tokio::test]
@@ -4476,12 +4496,12 @@ mod tests {
             .get_secret("default", "recreated", true)
             .await
             .unwrap();
-        assert_eq!(&*active.value.unwrap(), "live-v2");
+        assert_eq!(active.value.unwrap().expose_secret(), "live-v2");
         let history = backend
             .get_secret_version("default", "recreated", "v1", true)
             .await
             .unwrap();
-        assert_eq!(&*history.value.unwrap(), "live-v1");
+        assert_eq!(history.value.unwrap().expose_secret(), "live-v1");
         assert!(backend
             .list_deleted_secrets("default")
             .await
@@ -4510,7 +4530,7 @@ mod tests {
             .get_secret("default", "rb-test", true)
             .await
             .unwrap();
-        assert_eq!(&*current.value.unwrap(), "v2-value");
+        assert_eq!(current.value.unwrap().expose_secret(), "v2-value");
 
         // Rollback to v1
         let rolled = backend.rollback("default", "rb-test", "v1").await.unwrap();
@@ -4521,7 +4541,7 @@ mod tests {
             .get_secret("default", "rb-test", true)
             .await
             .unwrap();
-        assert_eq!(&*after.value.unwrap(), "v1-value");
+        assert_eq!(after.value.unwrap().expose_secret(), "v1-value");
     }
 
     #[tokio::test]
@@ -4657,7 +4677,7 @@ mod tests {
         let update = SecretUpdateRequest {
             name: "versioned".into(),
             expected_revision: None,
-            value: Some(Zeroizing::new("new".into())),
+            value: Some(SecretValue::new("new")),
             content_type: None,
             enabled: None,
             expires_on: FieldUpdate::Unchanged,
@@ -4680,7 +4700,7 @@ mod tests {
             .get_secret("default", "versioned", true)
             .await
             .unwrap();
-        assert_eq!(&*got.value.unwrap(), "new");
+        assert_eq!(got.value.unwrap().expose_secret(), "new");
     }
 
     async fn assert_update_failure_rolls_back(opaque: bool) {
@@ -4698,7 +4718,7 @@ mod tests {
             let request = SecretUpdateRequest {
                 name: "atomic".into(),
                 expected_revision: None,
-                value: Some(Zeroizing::new("new-value".into())),
+                value: Some(SecretValue::new("new-value")),
                 content_type: Some(RECORD_CONTENT_TYPE.into()),
                 enabled: Some(false),
                 expires_on: crate::secret::domain::FieldUpdate::Unchanged,
@@ -4717,7 +4737,7 @@ mod tests {
             assert!(error.to_string().contains("injected"), "{error}");
             let current = backend.get_secret("default", "atomic", true).await.unwrap();
             assert_eq!(
-                current.value.as_deref().map(|v| v.as_str()),
+                current.value.as_ref().map(SecretValue::expose_secret),
                 Some("old-value")
             );
             assert_eq!(current.version, "v1");
@@ -4739,7 +4759,7 @@ mod tests {
         SecretUpdateRequest {
             name: "atomic".into(),
             expected_revision: None,
-            value: Some(Zeroizing::new("new-value".into())),
+            value: Some(SecretValue::new("new-value")),
             content_type: Some(RECORD_CONTENT_TYPE.into()),
             enabled: Some(false),
             expires_on: crate::secret::domain::FieldUpdate::Unchanged,
@@ -4809,7 +4829,7 @@ mod tests {
             .unwrap();
         reader.join().unwrap();
         assert_eq!(
-            observed.value.as_deref().map(|v| v.as_str()),
+            observed.value.as_ref().map(SecretValue::expose_secret),
             Some("new-value")
         );
         assert_eq!(observed.content_type, RECORD_CONTENT_TYPE);
@@ -4860,7 +4880,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(
-                recovered.value.as_deref().map(|v| v.as_str()),
+                recovered.value.as_ref().map(SecretValue::expose_secret),
                 Some("old-value"),
                 "stage {stage}"
             );
@@ -5011,7 +5031,7 @@ mod tests {
                     .await
                     .unwrap();
                 assert_eq!(
-                    current.value.as_deref().map(|value| value.as_str()),
+                    current.value.as_ref().map(SecretValue::expose_secret),
                     Some("post-crash")
                 );
             }
@@ -5027,7 +5047,7 @@ mod tests {
                     .await
                     .unwrap();
                 assert_eq!(
-                    current.value.as_deref().map(|value| value.as_str()),
+                    current.value.as_ref().map(SecretValue::expose_secret),
                     Some("old-value")
                 );
             }
@@ -5072,7 +5092,7 @@ mod tests {
         assert!(!has_pending_update_journal(&backend, "default", "atomic"));
         let current = backend.get_secret("default", "atomic", true).await.unwrap();
         assert_eq!(
-            current.value.as_deref().map(|value| value.as_str()),
+            current.value.as_ref().map(SecretValue::expose_secret),
             Some("old-value")
         );
 
@@ -5090,7 +5110,7 @@ mod tests {
         assert!(!has_pending_update_journal(&opaque, "default", "atomic"));
         let current = opaque.get_secret("default", "atomic", true).await.unwrap();
         assert_eq!(
-            current.value.as_deref().map(|value| value.as_str()),
+            current.value.as_ref().map(SecretValue::expose_secret),
             Some("old-value")
         );
     }
@@ -5155,7 +5175,7 @@ mod tests {
                 backend.reencrypt_all_metadata(false).unwrap();
                 let current = backend.get_secret("default", "atomic", true).await.unwrap();
                 assert_eq!(
-                    current.value.as_deref().map(|value| value.as_str()),
+                    current.value.as_ref().map(SecretValue::expose_secret),
                     Some("old-value")
                 );
             }
@@ -5166,7 +5186,7 @@ mod tests {
                     .await
                     .unwrap();
                 assert_eq!(
-                    current.value.as_deref().map(|value| value.as_str()),
+                    current.value.as_ref().map(SecretValue::expose_secret),
                     Some("old-value")
                 );
             }
@@ -5295,7 +5315,7 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].content_type, RECORD_CONTENT_TYPE);
         assert_eq!(
-            version.value.as_deref().map(|value| value.as_str()),
+            version.value.as_ref().map(SecretValue::expose_secret),
             Some("old-value")
         );
         assert_eq!(version.version, "v1");
@@ -5340,7 +5360,7 @@ mod tests {
                     .await
                     .unwrap();
                 assert_eq!(
-                    version.value.as_deref().map(|value| value.as_str()),
+                    version.value.as_ref().map(SecretValue::expose_secret),
                     Some("old-value")
                 );
             }
@@ -5367,7 +5387,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            current.value.as_deref().map(|value| value.as_str()),
+            current.value.as_ref().map(SecretValue::expose_secret),
             Some("old-value")
         );
         assert_eq!(current.version, "v1");
@@ -5431,7 +5451,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(
-                current.value.as_deref().map(|value| value.as_str()),
+                current.value.as_ref().map(SecretValue::expose_secret),
                 Some("old-value")
             );
             assert_eq!(current.version, "v1");
@@ -5465,7 +5485,7 @@ mod tests {
 
         let current = backend.get_secret("default", "atomic", true).await.unwrap();
         assert_eq!(
-            current.value.as_deref().map(|value| value.as_str()),
+            current.value.as_ref().map(SecretValue::expose_secret),
             Some("old-value")
         );
         assert!(!journal_temp.exists());
@@ -5522,7 +5542,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(
-                recovered.value.as_deref().map(|value| value.as_str()),
+                recovered.value.as_ref().map(SecretValue::expose_secret),
                 Some("old-value"),
                 "recovery stage {recovery_stage}"
             );
@@ -5539,7 +5559,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(
-                final_value.value.as_deref().map(|value| value.as_str()),
+                final_value.value.as_ref().map(SecretValue::expose_secret),
                 Some("post-recovery"),
                 "recovery stage {recovery_stage} left rollback state live"
             );
@@ -5798,7 +5818,7 @@ mod tests {
             .get_secret("default", "my/secret:key", true)
             .await
             .unwrap();
-        assert_eq!(&*got.value.unwrap(), "val");
+        assert_eq!(got.value.unwrap().expose_secret(), "val");
         assert_eq!(got.name, "my/secret:key");
     }
 
@@ -5826,7 +5846,7 @@ mod tests {
         // Recover restores the most recent snapshot.
         backend.restore_secret("default", "cycle").await.unwrap();
         let got = backend.get_secret("default", "cycle", true).await.unwrap();
-        assert_eq!(&*got.value.unwrap(), "second-value");
+        assert_eq!(got.value.unwrap().expose_secret(), "second-value");
 
         // The older snapshot is still in the trash.
         let deleted = backend.list_deleted_secrets("default").await.unwrap();
@@ -5836,7 +5856,7 @@ mod tests {
         backend.delete_secret("default", "cycle").await.unwrap();
         backend.restore_secret("default", "cycle").await.unwrap();
         let got = backend.get_secret("default", "cycle", true).await.unwrap();
-        assert_eq!(&*got.value.unwrap(), "second-value");
+        assert_eq!(got.value.unwrap().expose_secret(), "second-value");
 
         // Restoring the older snapshot over that live value is a visible
         // conflict; the older trash entry remains recoverable.
@@ -5846,7 +5866,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, BackendError::Conflict(_)));
         let got = backend.get_secret("default", "cycle", true).await.unwrap();
-        assert_eq!(&*got.value.unwrap(), "second-value");
+        assert_eq!(got.value.unwrap().expose_secret(), "second-value");
 
         let deleted = backend.list_deleted_secrets("default").await.unwrap();
         assert_eq!(deleted.len(), 1);
@@ -5876,7 +5896,7 @@ mod tests {
             .get_secret("default", "collide", true)
             .await
             .unwrap();
-        assert_eq!(&*got.value.unwrap(), "second");
+        assert_eq!(got.value.unwrap().expose_secret(), "second");
 
         // ...nor the previously trashed snapshot, which is still recoverable.
         let deleted = backend.list_deleted_secrets("default").await.unwrap();
@@ -5888,7 +5908,7 @@ mod tests {
             .get_secret("default", "collide", true)
             .await
             .unwrap();
-        assert_eq!(&*got.value.unwrap(), "second");
+        assert_eq!(got.value.unwrap().expose_secret(), "second");
 
         let error = backend
             .restore_secret("default", "collide")
@@ -5899,7 +5919,7 @@ mod tests {
             .get_secret("default", "collide", true)
             .await
             .unwrap();
-        assert_eq!(&*got.value.unwrap(), "second");
+        assert_eq!(got.value.unwrap().expose_secret(), "second");
         assert_eq!(
             backend.list_deleted_secrets("default").await.unwrap().len(),
             1
@@ -5941,7 +5961,7 @@ mod tests {
 
         backend.restore_secret("default", "legacy").await.unwrap();
         let got = backend.get_secret("default", "legacy", true).await.unwrap();
-        assert_eq!(&*got.value.unwrap(), "newer-value");
+        assert_eq!(got.value.unwrap().expose_secret(), "newer-value");
 
         // The legacy entry is restored last.
         backend.delete_secret("default", "legacy").await.unwrap();
@@ -5963,7 +5983,7 @@ mod tests {
 
         backend.restore_secret("default", "legacy").await.unwrap();
         let got = backend.get_secret("default", "legacy", true).await.unwrap();
-        assert_eq!(&*got.value.unwrap(), "legacy-value");
+        assert_eq!(got.value.unwrap().expose_secret(), "legacy-value");
     }
 
     #[tokio::test]
@@ -5993,7 +6013,7 @@ mod tests {
             .get_secret("default", "overwrite", true)
             .await
             .unwrap();
-        assert_eq!(&*got.value.unwrap(), "live-value");
+        assert_eq!(got.value.unwrap().expose_secret(), "live-value");
         assert_eq!(
             backend.list_deleted_secrets("default").await.unwrap().len(),
             1
@@ -6168,7 +6188,7 @@ mod tests {
             .get_secret("default", "DB-PASSWORD", true)
             .await
             .unwrap();
-        assert_eq!(&*got.value.unwrap(), "s3cret");
+        assert_eq!(got.value.unwrap().expose_secret(), "s3cret");
         let listed = backend.list_secrets("default", None).await.unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].name, "DB-PASSWORD");
@@ -6236,21 +6256,23 @@ mod tests {
 
         // Both readable by their exact byte-identity names.
         assert_eq!(
-            &*backend
+            backend
                 .get_secret("default", nfc, true)
                 .await
                 .unwrap()
                 .value
-                .unwrap(),
+                .unwrap()
+                .expose_secret(),
             "one"
         );
         assert_eq!(
-            &*backend
+            backend
                 .get_secret("default", nfd, true)
                 .await
                 .unwrap()
                 .value
-                .unwrap(),
+                .unwrap()
+                .expose_secret(),
             "two"
         );
         let listed = backend.list_secrets("default", None).await.unwrap();
@@ -6289,7 +6311,7 @@ mod tests {
             .get_secret("default", "alpha", true)
             .await
             .unwrap();
-        assert_eq!(&*pre.value.unwrap(), "a2");
+        assert_eq!(pre.value.unwrap().expose_secret(), "a2");
 
         // Migrate.
         let report = opaque_backend.migrate_all(false).unwrap();
@@ -6307,12 +6329,13 @@ mod tests {
 
         // Values + listing intact.
         assert_eq!(
-            &*opaque_backend
+            opaque_backend
                 .get_secret("default", "alpha", true)
                 .await
                 .unwrap()
                 .value
-                .unwrap(),
+                .unwrap()
+                .expose_secret(),
             "a2"
         );
         let listed = opaque_backend.list_secrets("default", None).await.unwrap();
@@ -6374,12 +6397,13 @@ mod tests {
             Some(legacy_name)
         );
         assert_eq!(
-            &*opaque_backend
+            opaque_backend
                 .get_secret("default", legacy_name, true)
                 .await
                 .unwrap()
                 .value
-                .unwrap(),
+                .unwrap()
+                .expose_secret(),
             "secret"
         );
     }
@@ -6452,7 +6476,7 @@ mod tests {
             .get_secret_version("default", "split-ver", "v1", true)
             .await
             .unwrap();
-        assert_eq!(&*v1.value.unwrap(), "v1-value");
+        assert_eq!(v1.value.unwrap().expose_secret(), "v1-value");
 
         // Rollback must restore v1, not report not found.
         opaque_backend
@@ -6463,7 +6487,7 @@ mod tests {
             .get_secret("default", "split-ver", true)
             .await
             .unwrap();
-        assert_eq!(&*current.value.unwrap(), "v1-value");
+        assert_eq!(current.value.unwrap().expose_secret(), "v1-value");
 
         // ensure_opaque_layout at end of rollback merges legacy archives forward.
         assert!(
@@ -6514,7 +6538,7 @@ mod tests {
             .get_secret_version("default", "split-empty", "v1", true)
             .await
             .unwrap();
-        assert_eq!(&*v1.value.unwrap(), "v1-value");
+        assert_eq!(v1.value.unwrap().expose_secret(), "v1-value");
 
         opaque_backend
             .rollback("default", "split-empty", "v1")
@@ -6524,7 +6548,7 @@ mod tests {
             .get_secret("default", "split-empty", true)
             .await
             .unwrap();
-        assert_eq!(&*current.value.unwrap(), "v1-value");
+        assert_eq!(current.value.unwrap().expose_secret(), "v1-value");
     }
 
     #[tokio::test]
@@ -6561,12 +6585,13 @@ mod tests {
         assert_eq!(listed.iter().filter(|s| s.name == "halfway").count(), 1);
         // Still readable via the legacy fallback.
         assert_eq!(
-            &*opaque_backend
+            opaque_backend
                 .get_secret("default", "halfway", true)
                 .await
                 .unwrap()
                 .value
-                .unwrap(),
+                .unwrap()
+                .expose_secret(),
             "hv"
         );
     }
@@ -6666,7 +6691,7 @@ mod tests {
 
         let opaque_backend = reopen_opaque(&tmp, false);
         let mut update = unchanged_update("upg-val");
-        update.value = Some(Zeroizing::new("v2".into()));
+        update.value = Some(SecretValue::new("v2"));
         opaque_backend
             .update_secret("default", "upg-val", update)
             .await
@@ -6706,7 +6731,7 @@ mod tests {
             .get_secret("default", "rbr", true)
             .await
             .unwrap();
-        assert_eq!(&*after.value.unwrap(), "v1");
+        assert_eq!(after.value.unwrap().expose_secret(), "v1");
 
         let sdir = secrets_path(&tmp, "default");
         assert!(!sdir.join("rbr.meta.json").exists());
@@ -6923,12 +6948,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            &*opaque_backend
+            opaque_backend
                 .get_secret("default", "trashed-legacy", true)
                 .await
                 .unwrap()
                 .value
-                .unwrap(),
+                .unwrap()
+                .expose_secret(),
             "v"
         );
     }
@@ -6975,7 +7001,7 @@ mod tests {
             .get_secret("default", "same-name", true)
             .await
             .unwrap();
-        let winner_value = winner.value.as_ref().map(|value| value.as_str());
+        let winner_value = winner.value.as_ref().map(SecretValue::expose_secret);
         assert!(matches!(winner_value, Some("first") | Some("second")));
     }
 
@@ -7014,7 +7040,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            current.value.as_deref().map(|value| value.as_str()),
+            current.value.as_ref().map(SecretValue::expose_secret),
             Some("newer")
         );
     }
@@ -7282,7 +7308,7 @@ mod tests {
             .unwrap());
         let source = backend.get_secret("default", "source", true).await.unwrap();
         assert_eq!(
-            source.value.as_deref().map(|value| value.as_str()),
+            source.value.as_ref().map(SecretValue::expose_secret),
             Some("newer")
         );
     }
@@ -7317,7 +7343,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            destination.value.as_deref().map(|value| value.as_str()),
+            destination.value.as_ref().map(SecretValue::expose_secret),
             Some("concurrent-value")
         );
         assert!(backend.secret_exists("default", "source").await.unwrap());
@@ -7438,7 +7464,7 @@ mod tests {
 
             let recovered = backend.get_secret("default", "source", true).await.unwrap();
             assert_eq!(
-                recovered.value.as_deref().map(|value| value.as_str()),
+                recovered.value.as_ref().map(SecretValue::expose_secret),
                 Some("source-value"),
                 "stage {stage}"
             );
@@ -7492,7 +7518,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(
-                source.value.as_deref().map(|v| v.as_str()),
+                source.value.as_ref().map(SecretValue::expose_secret),
                 Some("source-value")
             );
             assert!(!reopened
@@ -7528,7 +7554,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            source.value.as_deref().map(|v| v.as_str()),
+            source.value.as_ref().map(SecretValue::expose_secret),
             Some("source-value")
         );
         assert!(!transaction.dir.exists());
@@ -7607,7 +7633,10 @@ mod tests {
             .get_secret("default", "new-name", true)
             .await
             .unwrap();
-        assert_eq!(got.value.as_ref().map(|v| v.as_str()), Some("v1"));
+        assert_eq!(
+            got.value.as_ref().map(SecretValue::expose_secret),
+            Some("v1")
+        );
         assert_eq!(got.tags.get("groups").map(String::as_str), Some("team"));
         assert_eq!(got.tags.get("note").map(String::as_str), Some("keep"));
         assert_eq!(got.tags.get("folder").map(String::as_str), Some("proj"));
@@ -7716,7 +7745,7 @@ mod tests {
                             if stage == 4 || replacement {
                                 let current = current.unwrap();
                                 assert_eq!(
-                                    current.value.as_ref().map(|v| v.as_str()),
+                                    current.value.as_ref().map(SecretValue::expose_secret),
                                     Some(if stage == 4 { "new-key" } else { "old-key" }),
                                     "stage {stage}"
                                 );
@@ -7762,7 +7791,7 @@ mod tests {
                                     .await
                                     .unwrap();
                                 assert_eq!(
-                                    archived.value.as_ref().map(|v| v.as_str()),
+                                    archived.value.as_ref().map(SecretValue::expose_secret),
                                     Some("old-key")
                                 );
                             }
@@ -7802,7 +7831,7 @@ mod tests {
                         Err(BackendError::Conflict(_))
                     ));
                     let stored = backend.get_secret("default", name, true).await.unwrap();
-                    assert_eq!(stored.value.unwrap().as_str(), "retry-value");
+                    assert_eq!(stored.value.unwrap().expose_secret(), "retry-value");
                 }
             }
         }
@@ -7888,7 +7917,7 @@ mod tests {
                     .await
                     .unwrap();
                 assert_eq!(
-                    current.value.as_ref().map(|v| v.as_str()),
+                    current.value.as_ref().map(SecretValue::expose_secret),
                     Some("retry-key")
                 );
                 assert_eq!(current.version, "v1");
@@ -7932,7 +7961,7 @@ mod tests {
             .block_on(backend.get_secret("default", RETAINED_KEY, true))
             .unwrap();
         assert_eq!(
-            current.value.as_ref().map(|v| v.as_str()),
+            current.value.as_ref().map(SecretValue::expose_secret),
             Some(if a.is_ok() { "first" } else { "second" })
         );
         assert_eq!(current.version, "v1");
@@ -8027,7 +8056,10 @@ mod tests {
             .get_secret("default", KEY_POINTER, true)
             .await
             .unwrap();
-        assert_eq!(old.value.as_ref().map(|v| v.as_str()), Some("second-key"));
+        assert_eq!(
+            old.value.as_ref().map(SecretValue::expose_secret),
+            Some("second-key")
+        );
         assert_eq!(old.version, "v2");
         assert_eq!(fs::read(archive.join("v1.age")).unwrap(), first_age);
         assert_eq!(fs::read(archive.join("v1.meta.json")).unwrap(), first_meta);
@@ -8059,6 +8091,9 @@ mod tests {
             .get_secret_version("default", KEY_POINTER, "v1", true)
             .await
             .unwrap();
-        assert_eq!(first.value.as_ref().map(|v| v.as_str()), Some("first-key"));
+        assert_eq!(
+            first.value.as_ref().map(SecretValue::expose_secret),
+            Some("first-key")
+        );
     }
 }

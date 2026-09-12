@@ -476,9 +476,9 @@ impl SecretBackend for GuardedSecretBackend<'_> {
 mod tests {
     use super::*;
     use crate::secret::attachment_key::KEY_RECORD_CONTENT_TYPE;
+    use crate::secret::domain::SecretValue;
     use std::collections::HashMap;
     use std::sync::Mutex;
-    use zeroize::Zeroizing;
 
     const STRICT: &str =
         "xv-attachment-key-ak1-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -635,7 +635,7 @@ mod tests {
     fn req(name: &str) -> SecretRequest {
         SecretRequest {
             name: name.to_string(),
-            value: Zeroizing::new("v".to_string()),
+            value: SecretValue::new("v".to_string()),
             content_type: None,
             enabled: Some(true),
             expires_on: None,

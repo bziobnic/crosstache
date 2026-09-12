@@ -5,6 +5,7 @@ use crate::config::Config;
 use crate::error::CrosstacheError;
 use crate::tui::message::Message;
 use tokio::sync::mpsc::Sender;
+use zeroize::Zeroizing;
 
 /// Resolve the backend the TUI data tasks read through: the one handed in when
 /// the shared registry built at startup, otherwise constructed on demand from
@@ -122,7 +123,7 @@ pub fn spawn_load_value(
                     Some(v) => Message::ValueLoaded {
                         vault: key,
                         name,
-                        value: zeroize::Zeroizing::new(v.as_str().to_string()),
+                        value: Zeroizing::new(v.expose_secret().to_string()),
                         content_type,
                     },
                     None => Message::Error(CrosstacheError::config(format!(

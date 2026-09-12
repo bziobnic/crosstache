@@ -15,8 +15,8 @@
 use crosstache::backend::aws::AwsBackend;
 use crosstache::backend::{Backend, BackendError};
 use crosstache::config::settings::AwsConfig;
+use crosstache::secret::domain::SecretValue;
 use crosstache::secret::domain::{FieldUpdate, SecretRequest, SecretUpdateRequest};
-use zeroize::Zeroizing;
 
 fn skip_unless_enabled() -> bool {
     if std::env::var("AWS_INTEGRATION_TESTS").is_err() {
@@ -57,7 +57,7 @@ async fn localstack_set_get_round_trip() {
 
     let request = SecretRequest {
         name: "round-trip-test".into(),
-        value: Zeroizing::new("test-value-42".into()),
+        value: SecretValue::new("test-value-42"),
         groups: Some(vec!["test".into()]),
         content_type: None,
         enabled: None,
@@ -75,7 +75,7 @@ async fn localstack_set_get_round_trip() {
         .await
         .unwrap();
     assert_eq!(
-        got.value.as_ref().map(|v| v.as_str().to_string()),
+        got.value.as_ref().map(|v| v.expose_secret().to_string()),
         Some("test-value-42".to_string())
     );
     // Groups are written as the "xv:groups" resource tag, but get_secret
@@ -101,7 +101,7 @@ async fn localstack_rename_fails_closed() {
 
     let request = SecretRequest {
         name: "rename-src".into(),
-        value: Zeroizing::new("rename-value".into()),
+        value: SecretValue::new("rename-value"),
         groups: Some(vec!["team".into()]),
         note: Some("ride along".into()),
         content_type: None,
@@ -126,7 +126,7 @@ async fn localstack_rename_fails_closed() {
         .await
         .unwrap();
     assert_eq!(
-        got.value.as_ref().map(|v| v.as_str().to_string()),
+        got.value.as_ref().map(|v| v.expose_secret().to_string()),
         Some("rename-value".to_string())
     );
     assert_eq!(got.tags.get("groups").map(String::as_str), Some("team"));
@@ -152,7 +152,7 @@ async fn localstack_mv_sequence_fails_closed_at_rename() {
     // 1. Create source with folder "db".
     let request = SecretRequest {
         name: "mv-src".into(),
-        value: Zeroizing::new("mv-value".into()),
+        value: SecretValue::new("mv-value"),
         groups: None,
         note: None,
         content_type: None,
@@ -201,7 +201,7 @@ async fn localstack_mv_sequence_fails_closed_at_rename() {
         .await
         .unwrap();
     assert_eq!(
-        got.value.as_ref().map(|v| v.as_str().to_string()),
+        got.value.as_ref().map(|v| v.expose_secret().to_string()),
         Some("mv-value".to_string())
     );
     assert_eq!(got.tags.get("folder").map(String::as_str), Some("app"));
@@ -224,7 +224,7 @@ async fn localstack_list_paginates() {
     for i in 0..5 {
         let request = SecretRequest {
             name: format!("test-{}", i),
-            value: Zeroizing::new(format!("value-{}", i)),
+            value: SecretValue::new(format!("value-{}", i)),
             content_type: None,
             enabled: None,
             expires_on: None,
@@ -266,7 +266,7 @@ async fn localstack_list_secrets_exposes_folder_tag() {
 
     let request = SecretRequest {
         name: "db-pass".into(),
-        value: Zeroizing::new("folder-value".into()),
+        value: SecretValue::new("folder-value"),
         groups: None,
         note: None,
         content_type: None,
@@ -306,7 +306,7 @@ async fn localstack_deleted_listing_exposes_original_name() {
 
     let request = SecretRequest {
         name: "Round.Trip".into(),
-        value: Zeroizing::new("deleted-value".into()),
+        value: SecretValue::new("deleted-value"),
         groups: None,
         note: None,
         content_type: None,

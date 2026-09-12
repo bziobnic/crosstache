@@ -446,11 +446,12 @@ mod tests {
     #[tokio::test]
     async fn azure_custody_commit_reaches_versioned_set_and_preserves_auth_failure() {
         use crate::secret::domain::SecretRequest;
+        use crate::secret::domain::SecretValue;
         let auth = Arc::new(StubAzureAuthProvider::default());
         let backend = AzureBackend::new(&Config::default(), auth.clone()).unwrap();
         let request = SecretRequest {
             name: format!("xv-attachment-key-ak1-{}", "a".repeat(64)),
-            value: zeroize::Zeroizing::new("test-key-value".into()),
+            value: SecretValue::new("test-key-value"),
             content_type: Some(crate::secret::attachment_key::KEY_RECORD_CONTENT_TYPE.into()),
             enabled: None,
             expires_on: None,

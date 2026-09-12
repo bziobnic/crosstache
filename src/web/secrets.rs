@@ -14,7 +14,7 @@ use crate::records::{
     apply_conversion, preview_conversion, validate_conditional_conversion_backend,
     ConversionPreview, ConversionRequest,
 };
-use crate::secret::domain::{DeletedSecretSummary, SecretProperties};
+use crate::secret::domain::{DeletedSecretSummary, SecretMetadata};
 #[cfg(feature = "file-ops")]
 use crate::secret::{
     attachment_transfer::{TransferEndpoint, TransferIntent, TransferOperation},
@@ -53,7 +53,7 @@ pub(crate) enum ConversionTargetBody {
 
 #[derive(Serialize)]
 pub(crate) struct ConversionResult {
-    secret: SecretProperties,
+    secret: SecretMetadata,
     summary: ConversionPreview,
 }
 
@@ -469,11 +469,6 @@ fn conversion_apply_error(error: crate::error::CrosstacheError) -> ApiError {
     }
 }
 
-fn redact_conversion_properties(properties: &mut SecretProperties) {
-    properties.value = None;
-    properties.tags.clear();
-}
-
 fn conversion_backend_preflight(backend: &dyn crate::backend::Backend) -> Result<(), ApiError> {
     validate_conditional_conversion_backend(backend).map_err(|_| {
         structured_error(
@@ -618,7 +613,7 @@ pub(crate) async fn apply_conversion_route(
         ));
     }
     let summary = preview.clone();
-    let mut secret = apply_conversion(
+    let secret = apply_conversion(
         target.backend.as_ref(),
         &target.context.vault,
         &name,
@@ -627,7 +622,8 @@ pub(crate) async fn apply_conversion_route(
     )
     .await
     .map_err(conversion_apply_error)?;
-    redact_conversion_properties(&mut secret);
+    let mut secret = secret.into_metadata();
+    secret.tags.clear();
     Ok(Json(ConversionResult { secret, summary }))
 }
 
@@ -697,7 +693,7 @@ pub(crate) async fn rename(
     Path(name): Path<String>,
     Query(query): Query<VaultQuery>,
     request: Request,
-) -> Result<Json<SecretProperties>, ApiError> {
+) -> Result<Json<SecretMetadata>, ApiError> {
     let body: RenameBody = bounded_json(
         request,
         MAX_RENAME_REQUEST_BYTES,
@@ -763,7 +759,7 @@ pub(crate) async fn rename(
         ));
     }
 
-    let mut renamed = target
+    let renamed = target
         .backend
         .secrets()
         .rename_secret_if_revision(
@@ -774,7 +770,7 @@ pub(crate) async fn rename(
         )
         .await
         .map_err(rename_backend_error)?;
-    renamed.value = None;
+    let mut renamed = renamed.into_metadata();
     renamed.tags.clear();
     Ok(Json(renamed))
 }
@@ -796,14 +792,14 @@ pub(crate) async fn restore(
     State(state): State<Arc<WebState>>,
     Path(name): Path<String>,
     Query(query): Query<VaultQuery>,
-) -> Result<Json<SecretProperties>, ApiError> {
+) -> Result<Json<SecretMetadata>, ApiError> {
     let target = query.target(&state)?;
     let restored = target
         .backend
         .secrets()
         .restore_secret(&target.context.vault, &name)
         .await?;
-    Ok(Json(restored))
+    Ok(Json(restored.into_metadata()))
 }
 
 pub(crate) async fn purge(
@@ -824,6 +820,7 @@ pub(crate) async fn purge(
 mod tests {
     #[cfg(feature = "file-ops")]
     use super::{attachment_transfer_error, ApiError};
+    use crate::secret::domain::SecretValue;
     use std::sync::Arc;
 
     use axum::body::Body;
@@ -1133,7 +1130,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(converted["secret"]["content_type"], "");
         assert_eq!(converted["secret"]["tags"], json!({}));
-        assert!(converted["secret"]["value"].is_null());
+        assert!(converted["secret"].get("value").is_none());
         assert!(!converted.to_string().contains("route-secret-value"));
         assert!(!converted.to_string().contains("route-public-value"));
     }
@@ -1293,7 +1290,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            source.value.as_deref().map(|value| value.as_str()),
+            source.value.as_ref().map(SecretValue::expose_secret),
             Some("source-value")
         );
         assert!(!backend
@@ -1378,7 +1375,7 @@ mod tests {
         );
         assert_eq!(converted["secret"]["tags"], json!({}));
         assert_eq!(converted["summary"]["dropped"], json!(["username"]));
-        assert!(converted["secret"]["value"].is_null());
+        assert!(converted["secret"].get("value").is_none());
         let serialized = converted.to_string();
         assert!(!serialized.contains("route-secret-value"));
         assert!(!serialized.contains("route-public-value"));
@@ -2064,7 +2061,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(renamed["original_name"], "destination");
-        assert!(renamed["value"].is_null());
+        assert!(renamed.get("value").is_none());
         assert!(!renamed.to_string().contains("rename-secret-value"));
 
         let (source_status, _) = get_json(app.clone(), "GET", "/api/secrets/source", None).await;
@@ -2357,7 +2354,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            history.value.as_ref().map(|value| value.as_str()),
+            history.value.as_ref().map(SecretValue::expose_secret),
             Some("live-v1")
         );
     }

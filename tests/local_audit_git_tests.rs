@@ -7,6 +7,7 @@ use crosstache::backend::local::audit::ChainStatus;
 use crosstache::backend::local::LocalBackend;
 use crosstache::backend::Backend;
 use crosstache::config::settings::LocalConfig;
+use crosstache::secret::domain::SecretValue;
 use crosstache::secret::domain::{FieldUpdate, SecretRequest, SecretUpdateRequest};
 use tempfile::TempDir;
 
@@ -30,7 +31,7 @@ fn backend(tmp: &TempDir, audit: bool, git: bool) -> LocalBackend {
 fn request(name: &str, value: &str) -> SecretRequest {
     SecretRequest {
         name: name.to_string(),
-        value: value.to_string().into(),
+        value: SecretValue::new(value),
         content_type: None,
         enabled: None,
         expires_on: None,
@@ -403,7 +404,10 @@ async fn history_and_rollback_still_work_alongside_git() {
 
     be.secrets().rollback("default", "A", "v1").await.unwrap();
     let current = be.secrets().get_secret("default", "A", true).await.unwrap();
-    assert_eq!(current.value.as_deref().map(|v| v.as_str()), Some("v1"));
+    assert_eq!(
+        current.value.as_ref().map(SecretValue::expose_secret),
+        Some("v1")
+    );
 
     let subjects: Vec<String> = be
         .git_store()

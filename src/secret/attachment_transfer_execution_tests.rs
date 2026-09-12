@@ -2,6 +2,7 @@ use super::*;
 use crate::backend::local::LocalBackend;
 use crate::config::settings::LocalConfig;
 use crate::secret::domain::SecretRequest;
+use crate::secret::domain::SecretValue;
 use std::collections::HashMap;
 fn intent() -> TransferIntent {
     use transfer::TransferEndpoint;
@@ -33,7 +34,7 @@ async fn fixture() -> (tempfile::TempDir, LocalBackend, RecoveryStore) {
             "default",
             SecretRequest {
                 name: "db".into(),
-                value: Zeroizing::new("secret-value-canary".into()),
+                value: SecretValue::new("secret-value-canary"),
                 content_type: Some("text/plain".into()),
                 enabled: Some(false),
                 expires_on: None,
@@ -89,7 +90,7 @@ async fn moves_exact_ciphertext_metadata_and_secret_semantics() {
         .await
         .unwrap();
     assert_eq!(
-        dest.value.as_deref().map(|s| s.as_str()),
+        dest.value.as_ref().map(SecretValue::expose_secret),
         Some("secret-value-canary")
     );
     assert!(!dest.enabled);
@@ -173,7 +174,7 @@ async fn altered_journal_and_source_drift_are_rejected_before_destination_write(
         .await
         .unwrap();
     let mut request = rename_request_from_properties("db", &snapshot).unwrap();
-    request.value = Zeroizing::new("changed".into());
+    request.value = SecretValue::new("changed");
     b.guarded_secrets()
         .set_secret("default", request)
         .await
@@ -448,7 +449,11 @@ async fn cross_key_copy_and_move_authenticate_under_destination_key() {
             .await
             .unwrap();
         let active = match super::super::attachment_key::parse_pointer_value(
-            pointer.value.as_deref().unwrap(),
+            pointer
+                .value
+                .as_ref()
+                .map(SecretValue::expose_secret)
+                .unwrap(),
         ) {
             Some(super::super::attachment_key::PointerKind::V2 { active, .. }) => active,
             _ => panic!("healthy fixture"),
@@ -535,7 +540,11 @@ async fn cross_key_restarts_after_pending_and_lost_upload_responses() {
             .await
             .unwrap();
         let active = match super::super::attachment_key::parse_pointer_value(
-            pointer.value.as_deref().unwrap(),
+            pointer
+                .value
+                .as_ref()
+                .map(SecretValue::expose_secret)
+                .unwrap(),
         ) {
             Some(super::super::attachment_key::PointerKind::V2 { active, .. }) => active,
             _ => panic!("healthy fixture"),
@@ -589,7 +598,11 @@ async fn destination_pointer_republication_blocks_cross_key_resume() {
         .await
         .unwrap();
     let active = match super::super::attachment_key::parse_pointer_value(
-        pointer.value.as_deref().unwrap(),
+        pointer
+            .value
+            .as_ref()
+            .map(SecretValue::expose_secret)
+            .unwrap(),
     ) {
         Some(super::super::attachment_key::PointerKind::V2 { active, .. }) => active,
         _ => panic!("healthy fixture"),
@@ -607,7 +620,7 @@ async fn destination_pointer_republication_blocks_cross_key_resume() {
     let temporary_id =
         super::super::attachment_key::AttachmentKeyId::derive(&temporary.to_public().to_string());
     let mut away = rename_request_from_properties(key, &pointer).unwrap();
-    away.value = Zeroizing::new(super::super::attachment_key::format_v2_pointer(
+    away.value = SecretValue::new(super::super::attachment_key::format_v2_pointer(
         &temporary_id,
         None,
     ));
@@ -1166,7 +1179,11 @@ async fn cross_intent(destination: &LocalBackend, operation: TransferOperation) 
         .await
         .unwrap();
     let active = match super::super::attachment_key::parse_pointer_value(
-        pointer.value.as_deref().unwrap(),
+        pointer
+            .value
+            .as_ref()
+            .map(SecretValue::expose_secret)
+            .unwrap(),
     ) {
         Some(super::super::attachment_key::PointerKind::V2 { active, .. }) => active,
         _ => panic!("healthy fixture"),
@@ -1555,7 +1572,7 @@ mod s3_request_preflight {
                     "a",
                     SecretRequest {
                         name: name.into(),
-                        value: Zeroizing::new(format!("value-{name}")),
+                        value: SecretValue::new(format!("value-{name}")),
                         content_type: None,
                         enabled: Some(true),
                         expires_on: None,
@@ -1669,7 +1686,7 @@ mod s3_request_preflight {
                     .unwrap()
                     .value
                     .unwrap()
-                    .as_str(),
+                    .expose_secret(),
                 format!("value-{name}")
             );
             assert_eq!(source.attachment_names("a", name).await.unwrap().len(), 1);
@@ -1908,7 +1925,7 @@ async fn empty_source_missing_files_refuses_in_read_only_preflight() {
             "default",
             SecretRequest {
                 name: "db".into(),
-                value: Zeroizing::new("plain".into()),
+                value: SecretValue::new("plain"),
                 content_type: None,
                 enabled: None,
                 expires_on: None,

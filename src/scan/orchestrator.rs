@@ -10,6 +10,7 @@ use crate::error::{CrosstacheError, Result};
 use crate::scan::engine::{MatchEngine, SecretRef};
 use crate::scan::finding::Finding;
 use std::path::PathBuf;
+use zeroize::Zeroizing;
 
 /// Maximum size (bytes) of a file the scanner will read into memory.
 ///
@@ -145,7 +146,7 @@ pub async fn fetch_secret_values(
                     Ok(props) => Ok(props.value.map(|v| SecretRef {
                         name: secret_name,
                         vault,
-                        value: v,
+                        value: Zeroizing::new(v.expose_secret().to_owned()),
                     })),
                     Err(e) => Err(format!(
                         "secret '{vault}/{backend_name}' value could not be read: {e}"

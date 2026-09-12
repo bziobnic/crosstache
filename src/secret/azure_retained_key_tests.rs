@@ -1,5 +1,6 @@
 //! Hermetic coverage of the same REST transport used by AzureSecretOperations.
 use super::*;
+use crate::secret::domain::SecretValue;
 use age::secrecy::ExposeSecret;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -125,7 +126,7 @@ async fn azure_retained_key_interleaved_sets_preserve_exact_versions_over_http()
     for (index, value) in values.iter().enumerate() {
         let request = SecretRequest {
             name: name.into(),
-            value: Zeroizing::new(value.clone()),
+            value: SecretValue::new(value.clone()),
             content_type: Some(content_type.into()),
             enabled: Some(true),
             expires_on: None,
@@ -147,7 +148,7 @@ async fn azure_retained_key_interleaved_sets_preserve_exact_versions_over_http()
         .await
         .unwrap();
         assert_eq!(result.version, format!("version-{}", index + 1));
-        assert!(result.value.as_ref().unwrap().as_str() == value);
+        assert!(result.value.as_ref().unwrap().expose_secret() == value);
         committed.push(result);
     }
     for (index, commit) in committed.iter().enumerate() {
@@ -160,7 +161,7 @@ async fn azure_retained_key_interleaved_sets_preserve_exact_versions_over_http()
         assert_eq!(verified.original_name, name);
         assert_eq!(verified.content_type, content_type);
         assert_eq!(verified.tags, commit.tags);
-        assert!(verified.value.as_ref().unwrap().as_str() == values[index]);
+        assert!(verified.value.as_ref().unwrap().expose_secret() == values[index]);
     }
     tokio::time::timeout(std::time::Duration::from_secs(5), server)
         .await

@@ -13,6 +13,7 @@ use crate::records::{
     encode_envelope, find_type, FieldDef, FieldKind, RecordType, FIELD_TAG_PREFIX,
     RECORD_CONTENT_TYPE, TYPE_TAG,
 };
+use crate::secret::domain::SecretValue;
 use crate::utils::format::OutputFormat;
 use crate::utils::output;
 use crate::utils::pagination::Pagination;
@@ -430,7 +431,7 @@ async fn build_record_set_request(
 
     Ok(crate::secret::domain::SecretRequest {
         name: name.to_string(),
-        value: Zeroizing::new(envelope_value),
+        value: SecretValue::new(envelope_value),
         content_type: Some(RECORD_CONTENT_TYPE.to_string()),
         enabled: Some(true),
         expires_on,
@@ -566,7 +567,7 @@ pub(crate) async fn execute_secret_set_direct(
             }
             // Build the request via the shared helper so `set` and `gen --save`
             // construct identical requests from the same metadata flags.
-            let request = meta.to_secret_request(name, Zeroizing::new(secret_value))?;
+            let request = meta.to_secret_request(name, SecretValue::new(secret_value))?;
             let props = backend.secrets().set_secret(&vault_name, request).await?;
             output::success(&format!(
                 "Successfully set secret '{}'",
@@ -643,7 +644,7 @@ pub(crate) async fn execute_secret_set_direct(
                 // the same write-time metadata (--group/--note/--folder/--tag)
                 // as the single-secret path. (--expires/--not-before are rejected
                 // for bulk above, so they're always None here.)
-                let request = meta.to_secret_request(&resolved_key, Zeroizing::new(value))?;
+                let request = meta.to_secret_request(&resolved_key, SecretValue::new(value))?;
                 match backend.secrets().set_secret(&key_vault_name, request).await {
                     Ok(props) => {
                         output::success(&format!("  ✓ {}", props.original_name));
@@ -777,7 +778,11 @@ fn record_field_value(
     types: &[RecordType],
 ) -> Result<Zeroizing<String>> {
     let is_rec = crate::records::is_record(&secret.content_type);
-    let raw_value = secret.value.as_deref().map(|s| s.as_str()).unwrap_or("");
+    let raw_value = secret
+        .value
+        .as_ref()
+        .map(SecretValue::expose_secret)
+        .unwrap_or("");
 
     if let Some(field_name) = field {
         if !is_rec {
@@ -800,7 +805,7 @@ fn record_field_value(
 
     if !is_rec {
         return match &secret.value {
-            Some(v) => Ok(v.clone()),
+            Some(v) => Ok(Zeroizing::new(v.expose_secret().to_owned())),
             None => Err(CrosstacheError::config(format!(
                 "secret '{name}' resolved but has no value"
             ))),
@@ -911,7 +916,11 @@ pub(crate) async fn execute_secret_get_direct(
                     crate::records::RECORD_CONTENT_TYPE
                 )));
             }
-            let value = secret.value.as_deref().map(|s| s.as_str()).unwrap_or("");
+            let value = secret
+                .value
+                .as_ref()
+                .map(SecretValue::expose_secret)
+                .unwrap_or("");
             let envelope = parse_record_envelope_or_fail(name, &secret.content_type, value)?;
             let mut all_fields: std::collections::BTreeMap<String, String> = envelope.clone();
             for (k, v) in &secret.tags {
@@ -966,7 +975,11 @@ pub(crate) async fn execute_secret_get_direct(
             // already validated the field exists, so re-parsing the
             // envelope here is purely for this classification, not for the
             // lookup/error-message logic (which lives in one place now).
-            let value = secret.value.as_deref().map(|s| s.as_str()).unwrap_or("");
+            let value = secret
+                .value
+                .as_ref()
+                .map(SecretValue::expose_secret)
+                .unwrap_or("");
             let envelope = parse_record_envelope_or_fail(name, &secret.content_type, value)?;
             let is_secret_field = envelope.contains_key(&field_name);
 
@@ -1004,7 +1017,9 @@ pub(crate) async fn execute_secret_get_direct(
         let effective_value: Option<Zeroizing<String>> = if is_rec {
             Some(record_field_value(name, &secret, None, &types)?)
         } else {
-            secret.value
+            secret
+                .value
+                .map(|v| Zeroizing::new(v.expose_secret().to_owned()))
         };
 
         if raw {
@@ -2917,7 +2932,15 @@ pub(crate) async fn execute_secret_history_direct(
             )));
         }
 
-        let versions = backend.secrets().list_versions(&vault_name, name).await?;
+        // Version listings are metadata-only output: drop any plaintext the
+        // backend returned before the value reaches a formatter.
+        let versions: Vec<crate::secret::domain::SecretMetadata> = backend
+            .secrets()
+            .list_versions(&vault_name, name)
+            .await?
+            .into_iter()
+            .map(crate::secret::domain::SecretProperties::into_metadata)
+            .collect();
         if versions.is_empty() {
             let fmt = config.runtime_output_format;
             use crate::utils::format::TableFormatter;
@@ -2931,7 +2954,7 @@ pub(crate) async fn execute_secret_history_direct(
                 fmt,
                 OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw
             ) {
-                formatter.validate_columns::<crate::secret::domain::SecretProperties>()?;
+                formatter.validate_columns::<crate::secret::domain::SecretMetadata>()?;
                 output::info(&format!("No version history for '{name}'"));
             } else {
                 // Valid-empty machine output on stdout (e.g. `[]` for JSON).
@@ -3958,14 +3981,18 @@ async fn apply_record_field_changes(
     backend: &dyn crate::backend::Backend,
     backend_name: &str,
 ) -> Result<crate::secret::domain::SecretProperties> {
-    let mut new_value: Option<Zeroizing<String>> = None;
+    let mut new_value: Option<SecretValue> = None;
     if !secret_updates.is_empty() {
-        let raw = secret.value.as_deref().map(|s| s.as_str()).unwrap_or("");
+        let raw = secret
+            .value
+            .as_ref()
+            .map(SecretValue::expose_secret)
+            .unwrap_or("");
         let mut envelope = parse_record_envelope_or_fail(name, &secret.content_type, raw)?;
         for (k, v) in secret_updates {
             envelope.insert(k.clone(), v.clone());
         }
-        new_value = Some(Zeroizing::new(encode_envelope(&envelope)?));
+        new_value = Some(SecretValue::new(encode_envelope(&envelope)?));
     }
 
     let (new_tags, content_type, replace_tags, groups, note, folder, replace_groups) =
@@ -4569,9 +4596,9 @@ pub(crate) async fn execute_secret_update_direct(
             if stdin_value.is_empty() {
                 return Err(CrosstacheError::config("Secret value cannot be empty"));
             }
-            Some(Zeroizing::new(stdin_value))
+            Some(SecretValue::new(stdin_value))
         } else {
-            value.map(Zeroizing::new)
+            value.map(SecretValue::new)
         };
 
         // Tri-state metadata updates: omitted = Unchanged, value = Set, --clear-* = Clear
@@ -4942,8 +4969,8 @@ pub(crate) async fn execute_diff_command(
                 } else {
                     println!("  ~ {:<width$}  (value differs)", name, width = max_len);
                     if show_values {
-                        let a_str = val_a.map(|v| v.as_str()).unwrap_or("<empty>");
-                        let b_str = val_b.map(|v| v.as_str()).unwrap_or("<empty>");
+                        let a_str = val_a.map(|v| v.expose_secret()).unwrap_or("<empty>");
+                        let b_str = val_b.map(|v| v.expose_secret()).unwrap_or("<empty>");
                         println!("      {} : {}", vault1, a_str);
                         println!("      {} : {}", vault2, b_str);
                     }
@@ -5962,7 +5989,7 @@ pub(crate) async fn execute_secret_rotate(
         tags.extend(stamp.clone());
         let set_request = SecretRequest {
             name: name.to_string(),
-            value: new_value.clone(),
+            value: SecretValue::new(new_value.as_str()),
             content_type: if existing_secret.content_type.is_empty() {
                 None
             } else {
@@ -8837,7 +8864,7 @@ mod tests {
                     &vault_name,
                     crate::secret::domain::SecretRequest {
                         name: name.to_string(),
-                        value: zeroize::Zeroizing::new("seed".to_string()),
+                        value: SecretValue::new("seed".to_string()),
                         content_type: None,
                         enabled: None,
                         expires_on: None,

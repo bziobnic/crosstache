@@ -126,6 +126,7 @@ pub(crate) mod stub {
     use crate::backend::error::BackendError;
     use crate::backend::{Backend, BackendCapabilities, BackendKind, SecretBackend};
     use crate::secret::domain::SecretSnapshot;
+    use crate::secret::domain::SecretValue;
     use crate::secret::domain::{
         DeletedSecretSummary, SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest,
     };
@@ -667,7 +668,7 @@ pub(crate) mod stub {
                         name: name.to_string(),
                         suggestion: None,
                     })?;
-                current.value = zeroize::Zeroizing::new(value.to_string());
+                current.value = SecretValue::new(value.to_string());
                 self.revisions
                     .lock()
                     .unwrap()
@@ -701,7 +702,7 @@ pub(crate) mod stub {
                         name: name.to_string(),
                         suggestion: None,
                     })?;
-                current.value = zeroize::Zeroizing::new(value.to_string());
+                current.value = SecretValue::new(value.to_string());
                 self.revisions
                     .lock()
                     .unwrap()

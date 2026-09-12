@@ -225,7 +225,7 @@ mod tests {
     async fn same_leaf_different_parents_refuses_self_target_without_secret_writes() {
         use crate::config::settings::LocalConfig;
         use crate::secret::domain::SecretRequest;
-        use zeroize::Zeroizing;
+        use crate::secret::domain::SecretValue;
         let temp = tempfile::tempdir().unwrap();
         let inner = super::super::LocalBackend::new(Some(&LocalConfig {
             store_path: Some(temp.path().join("store-a").display().to_string()),
@@ -240,7 +240,7 @@ mod tests {
                 "default",
                 SecretRequest {
                     name: "source".into(),
-                    value: Zeroizing::new("keep-me".into()),
+                    value: SecretValue::new("keep-me"),
                     content_type: None,
                     enabled: Some(true),
                     expires_on: None,
@@ -295,7 +295,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(after.version, original.version);
-        assert_eq!(after.value.as_deref().map(|v| v.as_str()), Some("keep-me"));
+        assert_eq!(
+            after.value.as_ref().map(SecretValue::expose_secret),
+            Some("keep-me")
+        );
         assert!(!temp.path().join("store-a/vaults/default/files").exists());
         assert!(fs::read_dir(temp.path().join("store-b/vaults/default"))
             .unwrap()

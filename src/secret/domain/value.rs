@@ -25,11 +25,6 @@ use zeroize::Zeroizing;
 #[derive(Clone, PartialEq, Eq)]
 pub struct SecretValue(Zeroizing<String>);
 
-// Not yet wired into any call site (that lands in Task 3 of this split), so the
-// `xv` binary's own module tree has no caller yet and clippy's dead_code lint
-// fires on the bin target. Remove this allow once Task 3 wires the value type
-// into real call sites.
-#[allow(dead_code)]
 impl SecretValue {
     pub fn new(value: impl Into<String>) -> Self {
         Self(Zeroizing::new(value.into()))
@@ -41,10 +36,15 @@ impl SecretValue {
         self.0.as_str()
     }
 
+    // `len`/`is_empty` exist for callers that must bound or reject a value
+    // without reading it. The `xv` binary's default-feature build has no such
+    // caller yet, so its own module tree lints them as dead.
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.0.len()
     }
 
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }

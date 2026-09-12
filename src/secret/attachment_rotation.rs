@@ -7,6 +7,7 @@ use crate::error::{AttachmentError, CrosstacheError, Result};
 use crate::secret::attachment_key::{
     self as key, AttachmentKeyId, AttachmentKeyRef, KeySlot, PointerKind, SecretVersion,
 };
+use crate::secret::domain::SecretValue;
 use crate::secret::domain::{SecretProperties, SecretRequest};
 use age::secrecy::ExposeSecret;
 use serde::Serialize;
@@ -31,7 +32,7 @@ fn conflict() -> CrosstacheError {
 fn request(name: &str, value: Zeroizing<String>, marked: bool) -> SecretRequest {
     SecretRequest {
         name: name.into(),
-        value,
+        value: SecretValue::new(value.as_str()),
         content_type: marked.then(|| key::KEY_RECORD_CONTENT_TYPE.into()),
         enabled: Some(true),
         expires_on: None,
@@ -82,6 +83,7 @@ async fn exact(
     let identity = props
         .value
         .ok_or(AttachmentError::KeyInvalid)?
+        .expose_secret()
         .trim()
         .parse::<age::x25519::Identity>()
         .map_err(|_| AttachmentError::KeyInvalid)?;
@@ -134,8 +136,9 @@ pub async fn rotate(
     let original = pointer(keys, vault).await?;
     let (active, legacy) = match original
         .value
-        .as_deref()
-        .and_then(|s| key::parse_pointer_value(s))
+        .as_ref()
+        .map(SecretValue::expose_secret)
+        .and_then(key::parse_pointer_value)
     {
         Some(PointerKind::V2 { active, legacy }) if &active == expected => (active, legacy),
         _ => return Err(conflict()),
@@ -213,7 +216,7 @@ pub async fn rotate(
     }
     let confirmed = pointer(keys, vault).await?;
     if confirmed.version != published.version
-        || confirmed.value.as_deref().map(|s| s.as_str()) != Some(value.as_str())
+        || confirmed.value.as_ref().map(SecretValue::expose_secret) != Some(value.as_str())
     {
         return Err(AttachmentError::CommitUnconfirmed.into());
     }

@@ -8,7 +8,6 @@ use crate::error::{CrosstacheError, Result};
 use crate::utils::output;
 use crate::vault::VaultCreateRequest;
 use std::sync::Arc;
-use zeroize::Zeroizing;
 
 /// Materialize the active (or, when the registry failed to build, the
 /// config-requested) backend as an `Arc<dyn Backend>`, so vault/secret
@@ -889,7 +888,7 @@ async fn execute_vault_export(
                             if let Some(value) = secret_props.value {
                                 secret_data.insert(
                                     "value".to_string(),
-                                    serde_json::Value::String(value.to_string()),
+                                    serde_json::Value::String(value.expose_secret().to_string()),
                                 );
                             }
                         }
@@ -935,7 +934,8 @@ async fn execute_vault_export(
                                     .replace("-", "_")
                                     .replace(".", "_");
                                 if is_valid_env_key(&env_name) {
-                                    env_lines.push(format_env_line(&env_name, value.as_str()));
+                                    env_lines
+                                        .push(format_env_line(&env_name, value.expose_secret()));
                                 } else {
                                     eprintln!(
                                         "Warning: Skipping secret '{}' — derived env name '{}' is not a valid shell identifier",
@@ -982,7 +982,7 @@ async fn execute_vault_export(
                     {
                         Ok(secret_props) => {
                             if let Some(value) = secret_props.value {
-                                txt_lines.push(format!("  Value: {}", value.as_str()));
+                                txt_lines.push(format!("  Value: {}", value.expose_secret()));
                             }
                         }
                         Err(e) => {
@@ -1028,7 +1028,7 @@ async fn execute_vault_export(
                         let record = crate::records::keeper::build_keeper_record(
                             &crate::records::keeper::ExportedSecret {
                                 name: &secret.original_name,
-                                value: value.as_str(),
+                                value: value.expose_secret(),
                                 content_type: &props.content_type,
                                 tags: &props.tags,
                             },
@@ -1090,6 +1090,7 @@ async fn execute_vault_import(
     config: &Config,
 ) -> Result<()> {
     use crate::secret::domain::SecretRequest;
+    use crate::secret::domain::SecretValue;
     use std::fs;
     use std::io::{self, Read};
 
@@ -1157,7 +1158,7 @@ async fn execute_vault_import(
 
                 secrets.push(SecretRequest {
                     name: name.to_string(),
-                    value: Zeroizing::new(value.to_string()),
+                    value: SecretValue::new(value.to_string()),
                     content_type,
                     enabled,
                     expires_on: None,
@@ -1185,7 +1186,7 @@ async fn execute_vault_import(
 
                     secrets.push(SecretRequest {
                         name: key,
-                        value: Zeroizing::new(value.to_string()),
+                        value: SecretValue::new(value.to_string()),
                         content_type: Some("text/plain".to_string()),
                         enabled: Some(true),
                         expires_on: None,
@@ -1231,7 +1232,7 @@ async fn execute_vault_import(
 
                 secrets.push(SecretRequest {
                     name: key,
-                    value: Zeroizing::new(value.to_string()),
+                    value: SecretValue::new(value.to_string()),
                     content_type: Some("text/plain".to_string()),
                     enabled: Some(true),
                     expires_on: None,

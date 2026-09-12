@@ -10,13 +10,12 @@ use axum::Json;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::json;
-use zeroize::Zeroizing;
 
 use crate::backend::error::BackendError;
 use crate::backend::secret::SecretBackend;
 use crate::error::CrosstacheError;
 use crate::secret::domain::{
-    FieldUpdate, SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest,
+    FieldUpdate, SecretMetadata, SecretRequest, SecretSummary, SecretUpdateRequest, SecretValue,
 };
 
 use super::WebState;
@@ -156,14 +155,14 @@ pub(crate) async fn get_secret(
     State(state): State<Arc<WebState>>,
     Path(name): Path<String>,
     Query(q): Query<VaultQuery>,
-) -> Result<Json<SecretProperties>, ApiError> {
+) -> Result<Json<SecretMetadata>, ApiError> {
     let target = q.target(&state)?;
     let props = target
         .backend
         .secrets()
         .get_secret(&target.context.vault, &name, false)
         .await?;
-    Ok(Json(props))
+    Ok(Json(props.into_metadata()))
 }
 
 pub(crate) async fn reveal_secret(
@@ -178,7 +177,7 @@ pub(crate) async fn reveal_secret(
         .get_secret(&target.context.vault, &name, true)
         .await?;
     Ok(Json(
-        json!({ "value": props.value.as_ref().map(|v| v.as_str()) }),
+        json!({ "value": props.value.as_ref().map(SecretValue::expose_secret) }),
     ))
 }
 
@@ -202,11 +201,11 @@ pub(crate) async fn put_secret(
     Path(name): Path<String>,
     Query(q): Query<VaultQuery>,
     Json(body): Json<PutSecretBody>,
-) -> Result<Json<SecretProperties>, ApiError> {
+) -> Result<Json<SecretMetadata>, ApiError> {
     reject_reserved_attachment_key(&name)?;
     let request = SecretRequest {
         name: name.clone(),
-        value: Zeroizing::new(body.value),
+        value: SecretValue::new(body.value),
         content_type: body.content_type,
         enabled: Some(body.enabled.unwrap_or(true)),
         expires_on: body.expires_on,
@@ -222,7 +221,7 @@ pub(crate) async fn put_secret(
         .secrets()
         .set_secret(&target.context.vault, request)
         .await?;
-    Ok(Json(props))
+    Ok(Json(props.into_metadata()))
 }
 
 /// Metadata-only update. Optional string fields: absent = unchanged,
@@ -270,7 +269,7 @@ pub(crate) async fn patch_secret(
     Path(name): Path<String>,
     Query(q): Query<VaultQuery>,
     Json(body): Json<PatchSecretBody>,
-) -> Result<Json<SecretProperties>, ApiError> {
+) -> Result<Json<SecretMetadata>, ApiError> {
     reject_reserved_attachment_key(&name)?;
     let request = SecretUpdateRequest {
         name: name.clone(),
@@ -293,7 +292,7 @@ pub(crate) async fn patch_secret(
         .secrets()
         .update_secret(&target.context.vault, &name, request)
         .await?;
-    Ok(Json(props))
+    Ok(Json(props.into_metadata()))
 }
 
 pub(crate) async fn delete_secret(
@@ -337,7 +336,7 @@ pub(crate) async fn move_secret(
     Path(name): Path<String>,
     Query(q): Query<VaultQuery>,
     Json(body): Json<MoveBody>,
-) -> Result<Json<SecretProperties>, ApiError> {
+) -> Result<Json<SecretMetadata>, ApiError> {
     let target = q.target(&state)?;
     let vault = &target.context.vault;
     match (body.new_name, body.folder) {
@@ -348,7 +347,7 @@ pub(crate) async fn move_secret(
                 .secrets()
                 .rename_secret(vault, &name, &new_name)
                 .await?;
-            Ok(Json(props))
+            Ok(Json(props.into_metadata()))
         }
         (None, Some(folder)) => {
             reject_reserved_attachment_key(&name)?;
@@ -372,7 +371,7 @@ pub(crate) async fn move_secret(
                 .secrets()
                 .update_secret(vault, &name, request)
                 .await?;
-            Ok(Json(props))
+            Ok(Json(props.into_metadata()))
         }
         _ => Err(validation_error(
             StatusCode::BAD_REQUEST,
@@ -533,9 +532,9 @@ pub(crate) mod tests {
     use http_body_util::BodyExt;
     use serde_json::json;
     use tower::ServiceExt;
-    use zeroize::Zeroizing;
 
     use crate::secret::domain::SecretRequest;
+    use crate::secret::domain::SecretValue;
     use crate::web::testutil;
 
     pub(crate) async fn get_json(
@@ -959,10 +958,10 @@ pub(crate) mod tests {
         assert_eq!(json_body[0]["folder"], "proj/db");
         assert!(!json_body.to_string().contains("hunter2"));
 
-        // metadata get has null value
+        // metadata get omits the value key entirely
         let (status, json_body) = get_json(app.clone(), "GET", "/api/secrets/db-pass", None).await;
         assert_eq!(status, StatusCode::OK);
-        assert!(json_body["value"].is_null());
+        assert!(json_body.get("value").is_none());
 
         // reveal
         let (status, json_body) =
@@ -1053,7 +1052,7 @@ pub(crate) mod tests {
                 "default",
                 SecretRequest {
                     name: reserved.to_string(),
-                    value: Zeroizing::new("AGE-SECRET-KEY-1...".to_string()),
+                    value: SecretValue::new("AGE-SECRET-KEY-1...".to_string()),
                     content_type: None,
                     enabled: None,
                     expires_on: None,
@@ -1498,7 +1497,7 @@ pub(crate) mod tests {
         assert_eq!(meta["content_type"], "application/vnd.xv.record");
         assert_eq!(meta["tags"]["xv-type"], "login");
         assert_eq!(meta["tags"]["f.username"], "bob");
-        assert!(meta["value"].is_null());
+        assert!(meta.get("value").is_none());
 
         // the list never leaks envelope contents
         let (_, list) = get_json(app.clone(), "GET", "/api/secrets", None).await;

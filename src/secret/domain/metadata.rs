@@ -46,7 +46,8 @@ impl<T> FieldUpdate<T> {
     }
 }
 
-/// Attribute/tag-only update for [`SecretOperations::update_secret_attributes`].
+/// Attribute/tag-only update for
+/// [`crate::secret::manager::SecretOperations::update_secret_attributes`].
 ///
 /// `None` fields are left unchanged by the backend. `tags`, when `Some`,
 /// replaces the entire tag map (Azure `PATCH /secrets/{name}` semantics), so

@@ -728,6 +728,7 @@ fn persisted_attachment_names(
 
 #[cfg(test)]
 mod tests {
+    use crate::secret::domain::SecretValue;
     #[test]
     fn transfer_recovery_path_rejects_store_and_git_overlap_without_creation() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1005,7 +1006,7 @@ mod tests {
         // Create secret
         let request = crate::secret::domain::SecretRequest {
             name: "e2e-test".into(),
-            value: zeroize::Zeroizing::new("my-secret-value".into()),
+            value: SecretValue::new("my-secret-value"),
             content_type: None,
             enabled: None,
             expires_on: None,
@@ -1029,7 +1030,7 @@ mod tests {
             .get_secret("default", "e2e-test", true)
             .await
             .unwrap();
-        assert_eq!(&*props.value.unwrap(), "my-secret-value");
+        assert_eq!(props.value.unwrap().expose_secret(), "my-secret-value");
 
         // List secrets
         let list = backend
@@ -1069,7 +1070,7 @@ mod tests {
                 "default",
                 crate::secret::domain::SecretRequest {
                     name: "source".into(),
-                    value: zeroize::Zeroizing::new("value".into()),
+                    value: SecretValue::new("value"),
                     content_type: None,
                     enabled: None,
                     expires_on: None,

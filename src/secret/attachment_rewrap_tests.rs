@@ -2,10 +2,10 @@ use super::*;
 use crate::backend::{local::LocalBackend, Backend};
 use crate::config::settings::LocalConfig;
 use crate::secret::domain::SecretRequest;
+use crate::secret::domain::SecretValue;
 use crate::secret::{attachment_lifecycle, attachment_rotation, attachments};
 use age::secrecy::ExposeSecret;
 use std::collections::HashMap;
-use zeroize::Zeroizing;
 
 fn request(name: &str, content: Vec<u8>) -> FileUploadRequest {
     FileUploadRequest {
@@ -32,7 +32,7 @@ async fn fixture() -> (tempfile::TempDir, LocalBackend, AttachmentKeyId) {
             "default",
             SecretRequest {
                 name: "db".into(),
-                value: Zeroizing::new("db".into()),
+                value: SecretValue::new("db"),
                 content_type: None,
                 enabled: Some(true),
                 expires_on: None,
@@ -52,7 +52,7 @@ async fn fixture() -> (tempfile::TempDir, LocalBackend, AttachmentKeyId) {
         "default",
         SecretRequest {
             name: key::ACTIVE_POINTER_SECRET.into(),
-            value: Zeroizing::new(identity.to_string().expose_secret().into()),
+            value: SecretValue::new(identity.to_string().expose_secret()),
             content_type: None,
             enabled: Some(true),
             expires_on: None,
@@ -454,18 +454,20 @@ impl AttachmentKeyStore for FaultKeys<'_> {
                 p.enabled = false;
             }
             if self.mode == "v1" {
-                p.value = Some(Zeroizing::new(
+                p.value = Some(SecretValue::new(
                     age::x25519::Identity::generate()
                         .to_string()
-                        .expose_secret()
-                        .into(),
+                        .expose_secret(),
                 ));
             }
             if self.mode == "no-legacy" {
-                if let Some(PointerKind::V2 { active, .. }) =
-                    p.value.as_deref().and_then(|v| key::parse_pointer_value(v))
+                if let Some(PointerKind::V2 { active, .. }) = p
+                    .value
+                    .as_ref()
+                    .map(SecretValue::expose_secret)
+                    .and_then(key::parse_pointer_value)
                 {
-                    p.value = Some(Zeroizing::new(key::format_v2_pointer(&active, None)));
+                    p.value = Some(SecretValue::new(key::format_v2_pointer(&active, None)));
                 }
             }
         } else {
@@ -494,11 +496,10 @@ impl AttachmentKeyStore for FaultKeys<'_> {
             "exact-disabled" => p.enabled = false,
             "exact-unmarked" => p.content_type = "ordinary".into(),
             "exact-wrong-identity" => {
-                p.value = Some(Zeroizing::new(
+                p.value = Some(SecretValue::new(
                     age::x25519::Identity::generate()
                         .to_string()
-                        .expose_secret()
-                        .into(),
+                        .expose_secret(),
                 ))
             }
             _ => {}

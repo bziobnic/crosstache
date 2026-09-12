@@ -13,8 +13,8 @@ use crosstache::backend::Backend;
 use crosstache::config::settings::AwsConfig;
 use crosstache::config::settings::LocalConfig;
 use crosstache::secret::domain::SecretRequest;
+use crosstache::secret::domain::SecretValue;
 use tempfile::TempDir;
-use zeroize::Zeroizing;
 
 /// Returns `true` when the LocalStack integration environment is NOT configured,
 /// meaning the test should silently skip.
@@ -75,7 +75,7 @@ async fn local_to_aws_round_trip() {
     for (n, v) in [("a", "1"), ("b", "2"), ("c", "3")] {
         let request = SecretRequest {
             name: n.into(),
-            value: Zeroizing::new(v.into()),
+            value: SecretValue::new(v),
             content_type: None,
             enabled: None,
             expires_on: None,
@@ -94,11 +94,11 @@ async fn local_to_aws_round_trip() {
         let groups_vec = groups_from_tags(&props.tags);
         let request = SecretRequest {
             name: props.name.clone(),
-            value: Zeroizing::new(
+            value: SecretValue::new(
                 props
                     .value
                     .as_ref()
-                    .map(|v| v.as_str().to_string())
+                    .map(|v| v.expose_secret().to_string())
                     .unwrap_or_default(),
             ),
             content_type: None,
@@ -121,7 +121,7 @@ async fn local_to_aws_round_trip() {
     for (n, expected) in [("a", "1"), ("b", "2"), ("c", "3")] {
         let got = aws.secrets().get_secret(&vault, n, true).await.unwrap();
         assert_eq!(
-            got.value.as_ref().map(|v| v.as_str().to_string()),
+            got.value.as_ref().map(|v| v.expose_secret().to_string()),
             Some(expected.to_string()),
             "value mismatch for secret {n}"
         );

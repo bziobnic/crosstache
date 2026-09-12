@@ -422,9 +422,9 @@ pub(crate) fn transfer_metadata_revision(
 mod tests {
     use super::*;
     use crate::secret::domain::SecretRequest;
+    use crate::secret::domain::SecretValue;
     use std::collections::HashMap;
     use std::sync::Mutex;
-    use zeroize::Zeroizing;
 
     /// In-memory SecretBackend: enough behavior to exercise the provided
     /// `rename_secret` (set/get/delete/exists); everything else Unsupported.
@@ -567,7 +567,7 @@ mod tests {
         tags.insert("custom".to_string(), "kept".to_string());
         SecretRequest {
             name: name.to_string(),
-            value: Zeroizing::new("the-value".to_string()),
+            value: SecretValue::new("the-value".to_string()),
             content_type: Some("text/plain".to_string()),
             enabled: Some(true),
             expires_on: None,
@@ -635,7 +635,7 @@ mod tests {
         let props = SecretProperties {
             name: "old".to_string(),
             original_name: "old".to_string(),
-            value: Some(Zeroizing::new("v".to_string())),
+            value: Some(SecretValue::new("v".to_string())),
             version: "v3".to_string(),
             version_number: Some(3),
             created_timestamp: 0,
@@ -651,7 +651,7 @@ mod tests {
 
         let req = rename_request_from_properties("new", &props).unwrap();
         assert_eq!(req.name, "new");
-        assert_eq!(req.value.as_str(), "v");
+        assert_eq!(req.value.expose_secret(), "v");
         assert_eq!(req.groups, Some(vec!["a".to_string(), "b".to_string()]));
         assert_eq!(req.note.as_deref(), Some("n"));
         assert_eq!(req.folder.as_deref(), Some("f/g"));

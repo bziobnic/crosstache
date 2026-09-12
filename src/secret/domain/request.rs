@@ -1,17 +1,16 @@
 //! Secret creation and update requests. See module docs in `mod.rs`.
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use zeroize::Zeroizing;
 
 use super::metadata::FieldUpdate;
+use super::value::SecretValue;
 
 /// Secret creation/update request
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct SecretRequest {
     pub name: String,
-    pub value: Zeroizing<String>,
+    pub value: SecretValue,
     pub content_type: Option<String>,
     pub enabled: Option<bool>,
     pub expires_on: Option<DateTime<Utc>>,
@@ -23,14 +22,13 @@ pub struct SecretRequest {
 }
 
 /// Secret update request for advanced operations
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct SecretUpdateRequest {
     pub name: String,
     /// Internal compare-and-swap token. This is never accepted from serialized
     /// CLI/API input; only conditional backend entry points populate it.
-    #[serde(skip)]
     pub expected_revision: Option<String>,
-    pub value: Option<Zeroizing<String>>,
+    pub value: Option<SecretValue>,
     pub content_type: Option<String>,
     pub enabled: Option<bool>,
     pub expires_on: FieldUpdate<DateTime<Utc>>,

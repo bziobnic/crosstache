@@ -18,6 +18,7 @@
 mod common;
 
 use common::xv;
+use crosstache::secret::domain::SecretValue;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use tempfile::TempDir;
@@ -891,7 +892,7 @@ fn attachment_upload_failure_keeps_cli_json_free_of_progress_text() {
                 "default",
                 SecretRequest {
                     name: "xv-attachment-key".into(),
-                    value: zeroize::Zeroizing::new("INVALID-POINTER-CONTENT".into()),
+                    value: SecretValue::new("INVALID-POINTER-CONTENT"),
                     content_type: None,
                     enabled: None,
                     expires_on: None,
@@ -1060,7 +1061,7 @@ fn attachment_key_status_reports_broken_pointer_without_exposing_or_replacing_it
             "default",
             SecretRequest {
                 name: "xv-attachment-key".into(),
-                value: zeroize::Zeroizing::new("PRIVATE-BROKEN-POINTER".into()),
+                value: SecretValue::new("PRIVATE-BROKEN-POINTER"),
                 content_type: None,
                 enabled: None,
                 expires_on: None,
@@ -1094,7 +1095,10 @@ fn attachment_key_status_reports_broken_pointer_without_exposing_or_replacing_it
         )
         .unwrap();
     assert_eq!(after.version, original.version);
-    assert_eq!(after.value.unwrap().as_str(), "PRIVATE-BROKEN-POINTER");
+    assert_eq!(
+        after.value.unwrap().expose_secret(),
+        "PRIVATE-BROKEN-POINTER"
+    );
 }
 
 #[test]
@@ -1117,7 +1121,7 @@ fn attachment_key_lifecycle_cli_previews_applies_and_recovers_without_losing_fil
     let id = key::AttachmentKeyId::derive(&identity.to_public().to_string());
     let req = |value: &str| SecretRequest {
         name: key::ACTIVE_POINTER_SECRET.into(),
-        value: zeroize::Zeroizing::new(value.into()),
+        value: SecretValue::new(value),
         content_type: None,
         enabled: Some(true),
         expires_on: None,

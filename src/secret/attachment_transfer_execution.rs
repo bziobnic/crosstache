@@ -239,6 +239,7 @@ use super::domain::SecretProperties;
 use crate::backend::{
     error::BackendError, secret::rename_request_from_properties, TransferLocation,
 };
+use crate::secret::domain::SecretValue;
 use age::secrecy::ExposeSecret;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
@@ -603,7 +604,7 @@ fn request_commitment(
         request.tags.as_ref().into_iter().flatten().collect();
     let canonical = (
         &request.name,
-        request.value.as_str(),
+        request.value.expose_secret(),
         &request.content_type,
         request.enabled,
         request.expires_on,
@@ -962,8 +963,9 @@ async fn load_destination_ring(
         .await?;
     let active = match pointer
         .value
-        .as_deref()
-        .and_then(|v| super::attachment_key::parse_pointer_value(v))
+        .as_ref()
+        .map(SecretValue::expose_secret)
+        .and_then(super::attachment_key::parse_pointer_value)
     {
         Some(super::attachment_key::PointerKind::V2 { active, .. }) => active,
         _ => return Err(conflict()),

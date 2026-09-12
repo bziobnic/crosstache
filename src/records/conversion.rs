@@ -7,10 +7,10 @@ use crate::records::{
     predicted_reserved_tag_count_for_shape, FieldKind, RecordType, FIELD_TAG_PREFIX,
     RECORD_CONTENT_TYPE, TYPE_TAG,
 };
+use crate::secret::domain::SecretValue;
 use crate::secret::domain::{FieldUpdate, SecretProperties, SecretUpdateRequest};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
-use zeroize::Zeroizing;
 
 /// Shape to write after a conversion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,8 +164,8 @@ fn source_fields(secret: &SecretProperties, types: &[RecordType]) -> Result<Sour
     })?;
     let raw = secret
         .value
-        .as_deref()
-        .map(|value| value.as_str())
+        .as_ref()
+        .map(SecretValue::expose_secret)
         .unwrap_or("");
     let envelope = parse_envelope(raw).map_err(|_| {
         CrosstacheError::config(format!(
@@ -293,7 +293,8 @@ fn preview_to_type(
     if !source_is_record {
         let value = secret
             .value
-            .as_deref()
+            .as_ref()
+            .map(SecretValue::expose_secret)
             .filter(|value| !value.is_empty())
             .ok_or_else(|| {
                 CrosstacheError::config(format!(
@@ -304,7 +305,7 @@ fn preview_to_type(
         let mut all_target_fields = request.supplied_fields;
         all_target_fields
             .entry(target.primary().name.clone())
-            .or_insert_with(|| value.as_str().to_string());
+            .or_insert_with(|| value.to_string());
         return finish_typed_preview(
             secret,
             target,
@@ -498,7 +499,7 @@ fn finish_typed_preview(
     let (current_groups, current_note, current_folder) = split_denormalized_tags(&mut current_tags);
     let no_op = same_type_candidate
         && secret.content_type == RECORD_CONTENT_TYPE
-        && secret.value.as_deref().map(|value| value.as_str()) == Some(prepared.value.as_str())
+        && secret.value.as_ref().map(SecretValue::expose_secret) == Some(prepared.value.as_str())
         && current_tags == prepared.tags
         && current_groups == prepared.groups
         && current_note == prepared.note
@@ -691,7 +692,7 @@ fn prepare_conversion_commit(
     Ok(ConversionCommit::Update(SecretUpdateRequest {
         name: name.to_string(),
         expected_revision: None,
-        value: Some(Zeroizing::new(preview.prepared.value)),
+        value: Some(SecretValue::new(preview.prepared.value)),
         content_type: Some(preview.prepared.content_type),
         enabled: caps
             .has_enable_disable
@@ -759,6 +760,7 @@ mod tests {
     use crate::records::{
         builtin_types, FieldDef, RecordType, TypeSource, RECORD_CONTENT_TYPE, TYPE_TAG,
     };
+    use crate::secret::domain::SecretValue;
     use crate::secret::domain::{
         SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest,
     };
@@ -766,7 +768,6 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use std::collections::{BTreeMap, HashMap};
     use std::sync::{Arc, Mutex};
-    use zeroize::Zeroizing;
 
     fn properties(
         value: &str,
@@ -776,7 +777,7 @@ mod tests {
         SecretProperties {
             name: "secret".into(),
             original_name: "secret".into(),
-            value: Some(Zeroizing::new(value.into())),
+            value: Some(SecretValue::new(value)),
             version: "1".into(),
             version_number: Some(1),
             created_timestamp: 0,
@@ -1341,7 +1342,14 @@ mod tests {
         assert_eq!(backend.update_count(), 1);
         let updates = backend.updates.lock().unwrap();
         let request = &updates[0];
-        let envelope = parse_envelope(request.value.as_deref().unwrap()).unwrap();
+        let envelope = parse_envelope(
+            request
+                .value
+                .as_ref()
+                .map(SecretValue::expose_secret)
+                .unwrap(),
+        )
+        .unwrap();
         assert!(!envelope.contains_key("token"));
         assert_eq!(request.tags.as_ref().unwrap()["f.token"], "private-token");
     }
@@ -1365,7 +1373,14 @@ mod tests {
         assert_eq!(backend.update_count(), 1);
         let updates = backend.updates.lock().unwrap();
         let request = &updates[0];
-        let envelope = parse_envelope(request.value.as_deref().unwrap()).unwrap();
+        let envelope = parse_envelope(
+            request
+                .value
+                .as_ref()
+                .map(SecretValue::expose_secret)
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(envelope["token"], "metadata-token");
         assert!(!request.tags.as_ref().unwrap().contains_key("f.token"));
     }

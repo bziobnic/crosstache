@@ -781,13 +781,13 @@ vaults = [
         use std::sync::Arc;
 
         use crate::secret::domain::SecretRequest;
+        use crate::secret::domain::SecretValue;
         use crate::web::testutil::stub::StubBackend;
-        use zeroize::Zeroizing;
 
         fn request(name: &str) -> SecretRequest {
             SecretRequest {
                 name: name.into(),
-                value: Zeroizing::new("protected".into()),
+                value: SecretValue::new("protected"),
                 content_type: None,
                 enabled: Some(true),
                 expires_on: None,

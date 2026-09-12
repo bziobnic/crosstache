@@ -7,6 +7,7 @@ use crate::backend::{attachment_keys::AttachmentKeyStore, file::FileBackend, loc
 use crate::blob::models::FileListRequest;
 use crate::error::{AttachmentError, CrosstacheError, Result};
 use crate::secret::domain::SecretProperties;
+use crate::secret::domain::SecretValue;
 use age::secrecy::ExposeSecret;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
@@ -45,6 +46,7 @@ async fn read_identity(
     }
     let raw = props.value.ok_or(AttachmentError::KeyInvalid)?;
     let identity = raw
+        .expose_secret()
         .trim()
         .parse::<age::x25519::Identity>()
         .map_err(|_| AttachmentError::KeyInvalid)?;
@@ -97,9 +99,10 @@ pub(crate) async fn collect(
         .ok_or(AttachmentError::PointerInvalid)?;
     let mut identities = BTreeMap::new();
     let mut references = Vec::<SourceRef>::new();
-    let (active, legacy) = match key::parse_pointer_value(pointer_value) {
+    let (active, legacy) = match key::parse_pointer_value(pointer_value.expose_secret()) {
         Some(PointerKind::V1RawIdentity) => {
             let identity = pointer_value
+                .expose_secret()
                 .trim()
                 .parse::<age::x25519::Identity>()
                 .map_err(|_| AttachmentError::KeyInvalid)?;
@@ -266,7 +269,8 @@ pub(crate) async fn collect(
         .get_secret(vault, key::ACTIVE_POINTER_SECRET, true)
         .await?;
     if latest.version != pointer.version
-        || latest.value.as_deref() != pointer.value.as_deref()
+        || latest.value.as_ref().map(SecretValue::expose_secret)
+            != pointer.value.as_ref().map(SecretValue::expose_secret)
         || !latest.enabled
     {
         return Err(drift());

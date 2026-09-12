@@ -363,7 +363,7 @@ impl SecretWriteArgs {
     pub fn to_secret_request(
         &self,
         name: &str,
-        value: zeroize::Zeroizing<String>,
+        value: crate::secret::domain::SecretValue,
     ) -> Result<crate::secret::domain::SecretRequest> {
         use crate::utils::datetime::parse_datetime_or_duration;
 
@@ -3248,10 +3248,10 @@ mod tests {
             tag: vec![("owner".into(), "team-data".into())],
         };
         let req = meta
-            .to_secret_request("name", zeroize::Zeroizing::new("val".to_string()))
+            .to_secret_request("name", crate::secret::domain::SecretValue::new("val"))
             .unwrap();
         assert_eq!(req.name, "name");
-        assert_eq!(req.value.as_str(), "val");
+        assert_eq!(req.value.expose_secret(), "val");
         assert_eq!(req.groups, Some(vec!["db".to_string()]));
         assert_eq!(req.note.as_deref(), Some("note"));
         assert_eq!(req.folder.as_deref(), Some("f"));
@@ -3282,7 +3282,7 @@ mod tests {
             expires: Some("not-a-date".into()),
             ..Default::default()
         };
-        let res = meta.to_secret_request("n", zeroize::Zeroizing::new("v".to_string()));
+        let res = meta.to_secret_request("n", crate::secret::domain::SecretValue::new("v"));
         assert!(res.is_err(), "invalid --expires should be rejected");
     }
 

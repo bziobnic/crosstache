@@ -2,6 +2,7 @@
 
 use crate::backend::error::BackendError;
 use crate::backend::SecretBackend;
+use crate::secret::domain::SecretValue;
 use crate::secret::domain::{
     DeletedSecretSummary, FieldUpdate, SecretProperties, SecretRequest, SecretSummary,
     SecretUpdateRequest,
@@ -143,7 +144,7 @@ impl AwsSecretBackend {
             .client
             .put_secret_value()
             .secret_id(aws_full_name)
-            .secret_string(request.value.as_str().to_string())
+            .secret_string(request.value.expose_secret().to_string())
             .send()
             .await
             .map_err(|e| super::errors::from_put_value(&request.name, e))?;
@@ -327,9 +328,7 @@ impl AwsSecretBackend {
     ) -> SecretProperties {
         let mut props = self.props_from_describe(describe, fallback_name);
         props.version = value.version_id().unwrap_or_default().to_string();
-        props.value = value
-            .secret_string()
-            .map(|s| zeroize::Zeroizing::new(s.to_string()));
+        props.value = value.secret_string().map(SecretValue::new);
         // Never label a historical version current or reuse record-level tags
         // as evidence about this version's mutable AWS stage labels.
         props.tags.remove("aws:stages");
@@ -487,7 +486,7 @@ impl AwsSecretBackend {
             .client
             .create_secret()
             .name(&aws_full_name)
-            .secret_string(request.value.as_str().to_string())
+            .secret_string(request.value.expose_secret().to_string())
             .set_tags(if tags.is_empty() { None } else { Some(tags) });
         if let Some(note) = request.note.as_deref().filter(|n| !n.is_empty()) {
             create_builder = create_builder.description(note);
@@ -663,7 +662,7 @@ impl SecretBackend for AwsSecretBackend {
                     "AWS returned a different transfer value version".into(),
                 ));
             }
-            properties.value = Some(zeroize::Zeroizing::new(
+            properties.value = Some(SecretValue::new(
                 value
                     .secret_string()
                     .ok_or_else(|| BackendError::Unsupported("binary AWS transfer secrets".into()))?
@@ -965,7 +964,7 @@ impl SecretBackend for AwsSecretBackend {
             self.client
                 .put_secret_value()
                 .secret_id(&aws_full_name)
-                .secret_string(new_value.as_str().to_string())
+                .secret_string(new_value.expose_secret().to_string())
                 .send()
                 .await
                 .map_err(|e| super::errors::from_put_value(name, e))?;

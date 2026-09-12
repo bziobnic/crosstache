@@ -9,11 +9,11 @@ use chrono::{DateTime, Utc};
 use serde_json;
 use std::collections::HashMap;
 use std::sync::Arc;
-use zeroize::Zeroizing;
 
 use crate::auth::provider::AzureAuthProvider;
 use crate::backend::azure::types::AzureVaultName;
 use crate::error::{CrosstacheError, Result};
+use crate::secret::domain::SecretValue;
 use crate::secret::domain::{
     DeletedSecretSummary, SecretAttributesUpdate, SecretProperties, SecretRequest, SecretSummary,
 };
@@ -411,7 +411,7 @@ fn parse_secret_properties_bundle(
     let value = if include_value {
         json.get("value")
             .and_then(|v| v.as_str())
-            .map(|s| Zeroizing::new(s.to_string()))
+            .map(SecretValue::new)
     } else {
         None
     };
@@ -500,7 +500,7 @@ async fn set_secret_http(
 ) -> Result<SecretProperties> {
     // Create the request body
     let mut body = serde_json::json!({
-        "value": request.value,
+        "value": request.value.expose_secret(),
     });
 
     // Add tags if any
@@ -1534,7 +1534,7 @@ mod tests {
         let ops = test_ops();
         let request = SecretRequest {
             name: "cred".to_string(),
-            value: Zeroizing::new("v".to_string()),
+            value: SecretValue::new("v".to_string()),
             content_type: None,
             enabled: Some(true),
             expires_on: None,
@@ -1566,7 +1566,7 @@ mod tests {
         let ops = test_ops();
         let request = SecretRequest {
             name: "cred".to_string(),
-            value: Zeroizing::new("v".to_string()),
+            value: SecretValue::new("v".to_string()),
             content_type: None,
             enabled: Some(true),
             expires_on: None,

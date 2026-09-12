@@ -1428,6 +1428,7 @@ mod tests {
     use crate::backend::error::BackendError;
     use crate::backend::{Backend, BackendCapabilities, BackendKind, NameCharset, SecretBackend};
     use crate::secret::domain::SecretProperties;
+    use crate::secret::domain::SecretValue;
     use std::sync::{Arc, Mutex};
 
     fn fake_secret_properties(name: &str) -> SecretProperties {
@@ -1842,7 +1843,7 @@ mod tests {
             .collect();
         crate::secret::domain::SecretRequest {
             name: "CREDS".to_string(),
-            value: zeroize::Zeroizing::new("hunter2".to_string()),
+            value: SecretValue::new("hunter2".to_string()),
             content_type: None,
             enabled: None,
             expires_on: None,
@@ -1889,7 +1890,7 @@ mod tests {
             .collect();
         crate::secret::domain::SecretRequest {
             name: "CREDS".to_string(),
-            value: zeroize::Zeroizing::new("hunter2".to_string()),
+            value: SecretValue::new("hunter2".to_string()),
             content_type: None,
             enabled: None,
             expires_on: None,

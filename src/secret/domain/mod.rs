@@ -7,7 +7,8 @@
 //! `SecretSummary`, `DeletedSecretSummary`) are value-free and serializable.
 //! Value-bearing composites (`SecretProperties`, `SecretRequest`,
 //! `SecretUpdateRequest`, `SecretSnapshot`) derive `Debug` (redacted through
-//! `SecretValue`) but never serde.
+//! `SecretValue`) but never serde; `SecretProperties::into_metadata` is the
+//! one way a secret becomes serializable, and it drops the plaintext.
 //!
 //! This module imports nothing from `crate::backend`, `crate::cli`,
 //! `crate::web`, or `crate::secret::manager`; adapters translate provider
@@ -19,19 +20,10 @@ pub mod request;
 pub mod secret;
 pub mod value;
 
-// `ConnectionComponent` and `connection_string_key_description` are reached
-// through `disclosure::` by the only caller today, so the `xv` binary's own
-// module tree sees these re-exports as unused. Remove once Task 3 wires the
-// domain types into the remaining call sites.
-#[allow(unused_imports)]
-pub use disclosure::{
-    connection_string_key_description, parse_connection_components, ConnectionComponent,
-};
+// `ConnectionComponent` and `connection_string_key_description` stay reachable
+// through `disclosure::`; only the parser has a caller worth a short path.
+pub use disclosure::parse_connection_components;
 pub use metadata::{DeletedSecretSummary, FieldUpdate, SecretAttributesUpdate, SecretSummary};
 pub use request::{SecretRequest, SecretUpdateRequest};
-pub use secret::{SecretProperties, SecretSnapshot};
-// See the matching `#[allow(dead_code)]` note in `value.rs`: nothing outside
-// tests calls `SecretValue` yet in the `xv` binary compile. Remove once Task 3
-// wires the value type into real call sites.
-#[allow(unused_imports)]
+pub use secret::{SecretMetadata, SecretProperties, SecretSnapshot};
 pub use value::SecretValue;
