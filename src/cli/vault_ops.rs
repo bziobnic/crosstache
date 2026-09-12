@@ -1267,13 +1267,18 @@ async fn execute_vault_import(
         }
     };
 
-    // Machine mode replaces every per-record line below with the single
+    // Machine mode replaces every PER-RECORD line below with the single
     // `ItemReport` document `main` emits.
     let machine_mode = crate::utils::machine::is_machine_mode(config);
+    // Fidelity-loss advisories (Keeper shared-folder ACLs with no xv
+    // equivalent, dropped fields, ...) are about the file as a whole, so no
+    // item carries them. They stay on stderr in every mode — suppressing them
+    // in machine mode would silently drop information a human run receives.
+    for warning in &import_warnings {
+        output::warn(warning);
+    }
     if !machine_mode {
-        for warning in &import_warnings {
-            output::warn(warning);
-        }
+        // These ARE in the report, as `failed` items with their reason.
         for (title, reason) in &rejected {
             output::error(&format!("Skipping record '{title}': {reason}"));
         }

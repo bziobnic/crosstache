@@ -559,9 +559,13 @@ fn mv_collision_is_one_envelope_and_no_preview_on_stdout() {
 fn vault_import_dry_run_with_a_rejected_record_is_one_envelope_with_a_report() {
     let env = MachineEnv::new();
     let import_path = env.home.join("keeper.json");
+    // One unimportable record, one good one, and a shared folder whose ACL has
+    // no xv equivalent — the last produces a fidelity-loss advisory that no
+    // item can carry, so it must reach stderr even in machine mode.
     std::fs::write(
         &import_path,
-        r#"{"records":[{"title":"Empty"},{"title":"Good","login":"u","password":"p"}]}"#,
+        r#"{"shared_folders":[{"path":"Team","can_edit":true,"permissions":[{"name":"alice@example.com"}]}],
+            "records":[{"title":"Empty"},{"title":"Good","login":"u","password":"p"}]}"#,
     )
     .expect("write keeper file");
 
@@ -608,6 +612,18 @@ fn vault_import_dry_run_with_a_rejected_record_is_one_envelope_with_a_report() {
     // The per-record list never reaches stdout, and no password does either.
     assert!(!stdout.contains("  - "), "stdout:\n{stdout}");
     assert!(!stdout.contains("\"p\""), "stdout:\n{stdout}");
+
+    // The fidelity-loss advisory belongs to the file, not to any item, so it
+    // is still delivered — on stderr, where advisories live.
+    assert!(
+        stderr.contains("permissions were NOT applied"),
+        "the shared-folder advisory must survive machine mode:\nstderr:\n{stderr}"
+    );
+    assert!(stderr.contains("alice@example.com"), "stderr:\n{stderr}");
+    assert!(
+        !stdout.contains("permissions were NOT applied"),
+        "stdout:\n{stdout}"
+    );
 }
 
 #[test]
@@ -634,6 +650,49 @@ fn copy_json_is_one_destination_metadata_document() {
     assert!(!stdout.contains("Copying"), "stdout:\n{stdout}");
     assert!(!stdout.contains("Source:"), "stdout:\n{stdout}");
     assert!(!stdout.contains("a-value"), "stdout:\n{stdout}");
+}
+
+/// A dry run writes nothing, so the plan takes the destination metadata's
+/// place — machine mode still owes stdout exactly one document.
+#[test]
+fn copy_dry_run_json_is_one_plan_document() {
+    let env = seeded_two_secrets();
+    let out = env
+        .xv()
+        .args([
+            "copy",
+            "ALPHA",
+            "--from",
+            "default",
+            "--to",
+            "other",
+            "--dry-run",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let doc = one_json_document(&stdout);
+    assert_eq!(doc["planned"]["from"]["vault"], "default", "{doc}");
+    assert_eq!(doc["planned"]["from"]["name"], "ALPHA", "{doc}");
+    assert_eq!(doc["planned"]["to"]["vault"], "other", "{doc}");
+    assert_eq!(doc["planned"]["to"]["name"], "ALPHA", "{doc}");
+    assert_eq!(doc["planned"]["move"], false, "{doc}");
+    assert!(!stdout.contains("Copying"), "stdout:\n{stdout}");
+    assert!(!stdout.contains("a-value"), "stdout:\n{stdout}");
+
+    // A dry run writes nothing.
+    env.ok(&["context", "use", "other", "--global"]);
+    let listed = env.ok(&["ls", "--format", "json"]);
+    assert!(!listed.contains("ALPHA"), "{listed}");
 }
 
 #[test]

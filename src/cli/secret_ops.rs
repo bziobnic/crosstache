@@ -7517,7 +7517,22 @@ async fn execute_secret_copy(
         .await?;
 
     if dry_run {
-        output::info("Secret transfer preflight passed (dry run)");
+        // A dry run writes nothing, so there is no destination metadata to
+        // report; the plan takes its place, so machine mode still gets exactly
+        // one document (same shape rule as `mv --dry-run`). Names only.
+        crate::utils::machine::report(
+            config,
+            &serde_json::json!({
+                "planned": {
+                    "from": { "vault": from_vault_resolved, "name": name },
+                    "to": { "vault": to_vault_resolved, "name": target_name },
+                    "move": move_source,
+                }
+            }),
+        );
+        if !machine_mode {
+            output::info("Secret transfer preflight passed (dry run)");
+        }
         return Ok(CopyOutcome::Handled);
     }
     let copied_secret = to_backend
@@ -7721,7 +7736,7 @@ async fn execute_secret_share(
         } => {
             let object_id = vault_backend.resolve_principal(&user).await?;
             if object_id != user {
-                println!("Resolved '{}' to object ID '{}'", user, object_id);
+                output::info(&format!("Resolved '{}' to object ID '{}'", user, object_id));
             }
 
             let access_level = match level.to_lowercase().as_str() {
@@ -7739,25 +7754,25 @@ async fn execute_secret_share(
                 .grant_secret_access(vault_name, &secret_name, &object_id, access_level)
                 .await?;
 
-            println!(
+            output::success(&format!(
                 "Successfully granted {} access to secret '{}' for '{}' in vault '{}'",
                 level, secret_name, user, vault_name
-            );
+            ));
         }
         ShareCommands::Revoke { secret_name, user } => {
             let object_id = vault_backend.resolve_principal(&user).await?;
             if object_id != user {
-                println!("Resolved '{}' to object ID '{}'", user, object_id);
+                output::info(&format!("Resolved '{}' to object ID '{}'", user, object_id));
             }
 
             vault_backend
                 .revoke_secret_access(vault_name, &secret_name, &object_id)
                 .await?;
 
-            println!(
+            output::success(&format!(
                 "Successfully revoked access to secret '{}' for '{}' in vault '{}'",
                 secret_name, user, vault_name
-            );
+            ));
         }
         ShareCommands::List {
             secret_name,
