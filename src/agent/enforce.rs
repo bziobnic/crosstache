@@ -1780,6 +1780,66 @@ mod tests {
         assert_eq!(inner.calls.load(Ordering::SeqCst), 1);
     }
 
+    /// Version getters must carry the same disclosure split as the active-
+    /// generation pair: `get_secret_version_metadata` is `Operation::Get`
+    /// *without* raw disclosure (so it is allowed by a rule that grants `get`
+    /// but not `raw_disclosure`, and reaches the inner backend), while
+    /// `get_secret_version` is `Operation::Get` *with* raw disclosure and is
+    /// denied before the inner backend is called.
+    ///
+    /// If the split regressed — e.g. the version metadata getter were wired
+    /// with `raw_disclosure = true`, or the version value getter with `false` —
+    /// one of the two call counts below would move.
+    #[tokio::test]
+    async fn version_metadata_get_is_allowed_but_version_value_get_requires_raw_rule() {
+        let temp = tempfile::tempdir().unwrap();
+        let (inner, wrapped) = scoped_wrapper(&temp.path().join("decisions.jsonl"), false);
+
+        // Authorized: the policy check passes and the inner backend is reached
+        // (the fake answers Unsupported, which is not a PermissionDenied).
+        let error = wrapped
+            .secrets()
+            .get_secret_version_metadata("prod", "existing", "v1")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, BackendError::Unsupported(_)), "{error:?}");
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 1);
+
+        // Refused: raw disclosure is not granted, so the inner backend is never
+        // called.
+        let error = wrapped
+            .secrets()
+            .get_secret_version("prod", "existing", "v1")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, BackendError::PermissionDenied(_)));
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// The mirror of the metadata/value split with raw disclosure *granted*:
+    /// both halves are then allowed, so the deny above is attributable to the
+    /// `raw_disclosure` rule flag and not to some unrelated rule mismatch.
+    #[tokio::test]
+    async fn raw_rule_permits_both_halves_of_the_getter_split() {
+        let temp = tempfile::tempdir().unwrap();
+        let (inner, wrapped) = scoped_wrapper(&temp.path().join("decisions.jsonl"), true);
+
+        wrapped
+            .secrets()
+            .get_secret_metadata("prod", "existing")
+            .await
+            .unwrap();
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 1);
+
+        let secret = wrapped
+            .secrets()
+            .get_secret("prod", "existing")
+            .await
+            .unwrap();
+        assert_eq!(secret.value.expose_secret(), "v");
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 2);
+    }
+
     #[tokio::test]
     async fn backup_is_value_bearing_and_requires_raw_rule_permission() {
         let temp = tempfile::tempdir().unwrap();

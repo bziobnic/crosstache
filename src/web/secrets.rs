@@ -838,6 +838,77 @@ mod tests {
     use super::{attachment_transfer_error, ApiError};
     use std::sync::Arc;
 
+    use super::snapshot_secret;
+    use crate::backend::error::BackendError;
+    use crate::secret::domain::{SecretMetadata, SecretSnapshot, SecretValue};
+    use crate::web::api::ApiError as SnapshotApiError;
+
+    fn snapshot_metadata() -> SecretMetadata {
+        SecretMetadata {
+            name: "api-key".to_string(),
+            original_name: "api-key".to_string(),
+            version: "v1".to_string(),
+            version_number: Some(1),
+            created_timestamp: 0,
+            created_on: String::new(),
+            updated_on: String::new(),
+            enabled: true,
+            expires_on: None,
+            not_before: None,
+            tags: std::collections::HashMap::new(),
+            content_type: "text/plain".to_string(),
+            recovery_level: None,
+        }
+    }
+
+    /// A `SnapshotValue::Include` read that comes back with `value: None` is a
+    /// provider contract break, not a value-free result. `snapshot_secret` is
+    /// the single place the web layer converts a snapshot into the
+    /// always-value-bearing `Secret`, so it must refuse rather than substitute
+    /// an empty `SecretValue`.
+    ///
+    /// If `Secret.value` were ever loosened back to an `Option`, or this
+    /// conversion defaulted a missing value, the `unwrap_err` below would fail.
+    #[test]
+    fn snapshot_secret_rejects_an_include_snapshot_with_no_value() {
+        let snapshot = SecretSnapshot {
+            metadata: snapshot_metadata(),
+            value: None,
+            revision: "rev-1".to_string(),
+        };
+
+        // `ApiError` is deliberately not `Debug` (it can carry backend error
+        // text), so match instead of unwrapping.
+        match snapshot_secret(&snapshot) {
+            Ok(_) => panic!("a value-free Include snapshot must not convert to a Secret"),
+            Err(SnapshotApiError::Backend(BackendError::Internal(message))) => {
+                assert!(
+                    message.contains("provider returned no value"),
+                    "unexpected message: {message}"
+                );
+            }
+            Err(_) => panic!("expected a Backend(Internal) error"),
+        }
+    }
+
+    /// Companion positive case: a snapshot that does carry its value converts
+    /// into a `Secret` with the snapshot's own metadata and value.
+    #[test]
+    fn snapshot_secret_carries_the_snapshot_value_through() {
+        let snapshot = SecretSnapshot {
+            metadata: snapshot_metadata(),
+            value: Some(SecretValue::new("s3cr3t")),
+            revision: "rev-1".to_string(),
+        };
+
+        let Ok(secret) = snapshot_secret(&snapshot) else {
+            panic!("a value-bearing snapshot must convert");
+        };
+        assert_eq!(secret.value.expose_secret(), "s3cr3t");
+        assert_eq!(secret.metadata.name, "api-key");
+        assert_eq!(secret.metadata.version, "v1");
+    }
+
     use axum::body::Body;
     use axum::http::{header, Request, StatusCode};
     use serde_json::json;

@@ -4012,6 +4012,85 @@ mod tests {
             .join(format!("{enc}.meta.json"))
     }
 
+    /// Path to the active `.age` ciphertext for a secret in the default vault.
+    fn age_file_path(tmp: &TempDir, name: &str) -> std::path::PathBuf {
+        let enc = encode_name(name);
+        tmp.path()
+            .join("vaults")
+            .join("default")
+            .join("secrets")
+            .join(format!("{enc}.age"))
+    }
+
+    /// The split's load-bearing local claim: `get_secret_metadata` reads only
+    /// the `.meta.json`, while `get_secret` additionally opens the `.age`
+    /// ciphertext. Deleting the value file after the write makes that
+    /// observable from outside the backend — the metadata getter still returns
+    /// complete metadata, and the value getter cannot.
+    ///
+    /// If `get_secret_metadata` ever regressed into fetching the value (the
+    /// pre-split `include_value` path did both in one function), it would fail
+    /// here instead of succeeding.
+    #[tokio::test]
+    async fn metadata_read_succeeds_with_the_value_file_deleted_and_value_read_fails() {
+        let (backend, tmp) = test_backend();
+
+        backend
+            .set_secret("default", make_request("api-key", "s3cr3t"))
+            .await
+            .unwrap();
+
+        // Both files exist after the write; remove only the ciphertext.
+        let age = age_file_path(&tmp, "api-key");
+        let meta = meta_file_path(&tmp, "api-key");
+        assert!(age.exists(), "value file written");
+        assert!(meta.exists(), "metadata file written");
+        fs::remove_file(&age).unwrap();
+        assert!(!age.exists());
+
+        // Metadata getter: unaffected, and still complete.
+        let metadata = backend
+            .get_secret_metadata("default", "api-key")
+            .await
+            .expect("metadata read must not open the value file");
+        assert_eq!(metadata.name, "api-key");
+        assert_eq!(metadata.content_type, "text/plain");
+        assert_eq!(
+            metadata.tags.get("note").map(String::as_str),
+            Some("test note")
+        );
+        assert_eq!(metadata.tags.get("groups").map(String::as_str), Some("db"));
+
+        // The version-metadata getter resolves the same active generation and
+        // is likewise value-free.
+        backend
+            .get_secret_version_metadata("default", "api-key", &metadata.version)
+            .await
+            .expect("version metadata read must not open the value file");
+
+        // Existence is answered from metadata alone.
+        assert!(backend.secret_exists("default", "api-key").await.unwrap());
+
+        // Value getters: the missing ciphertext is exactly what stops them.
+        let error = backend
+            .get_secret("default", "api-key")
+            .await
+            .expect_err("value read requires the ciphertext that was deleted");
+        assert!(
+            matches!(
+                error,
+                BackendError::NotFound { .. }
+                    | BackendError::Internal(_)
+                    | BackendError::Decryption(_)
+            ),
+            "unexpected error kind: {error:?}"
+        );
+        assert!(backend
+            .get_secret_version("default", "api-key", &metadata.version)
+            .await
+            .is_err());
+    }
+
     #[tokio::test]
     async fn encrypted_metadata_roundtrips_and_is_age_on_disk() {
         let (backend, tmp) = test_backend_opts(true);
