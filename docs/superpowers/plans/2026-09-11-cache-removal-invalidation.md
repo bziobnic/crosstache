@@ -341,7 +341,6 @@ In `tests/e2e_workspaces.rs`, inside `impl WorkspaceEnv` (after `fn ok`), add:
 
 Append to `tests/e2e_workspaces.rs`:
 
-```rust
 The local backend refuses to delete a vault that still holds secrets
 (`src/backend/local/vaults.rs::delete_vault`, `Conflict`), so every test
 deletes an EMPTY vault named `victim`. Empty listings are cached
