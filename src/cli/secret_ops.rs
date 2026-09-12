@@ -4844,14 +4844,18 @@ pub(crate) async fn execute_diff_command(
     let names_b: BTreeSet<String> = secrets_b.iter().map(|s| s.name.clone()).collect();
     let all_names: BTreeSet<String> = names_a.union(&names_b).cloned().collect();
 
-    // Fetch values from both vaults for comparison
+    // Fetch values from both vaults for comparison. The maps hold `Secret`,
+    // not disclosed plaintext: the comparison below runs whether or not
+    // `--show-values` was passed, and only the printing branch is a
+    // disclosure boundary. Keeping `SecretValue` until then also keeps the
+    // plaintext zeroized on drop for the common `xv diff` without values.
     let mut values_a = std::collections::HashMap::new();
     let mut values_b = std::collections::HashMap::new();
 
     for name in &names_a {
         match backend_a.secrets().get_secret(&vault1_resolved, name).await {
             Ok(props) => {
-                values_a.insert(name.clone(), props.value);
+                values_a.insert(name.clone(), props);
             }
             Err(e) => {
                 output::warn(&format!("Failed to get '{}' from {}: {}", name, vault1, e));
@@ -4862,7 +4866,7 @@ pub(crate) async fn execute_diff_command(
     for name in &names_b {
         match backend_b.secrets().get_secret(&vault2_resolved, name).await {
             Ok(props) => {
-                values_b.insert(name.clone(), props.value);
+                values_b.insert(name.clone(), props);
             }
             Err(e) => {
                 output::warn(&format!("Failed to get '{}' from {}: {}", name, vault2, e));
@@ -4908,14 +4912,19 @@ pub(crate) async fn execute_diff_command(
             (true, true) => {
                 let val_a = values_a.get(name);
                 let val_b = values_b.get(name);
-                if val_a == val_b {
+                if val_a.map(|s| &s.value) == val_b.map(|s| &s.value) {
                     println!("  = {:<width$}  (identical)", name, width = max_len);
                     identical += 1;
                 } else {
                     println!("  ~ {:<width$}  (value differs)", name, width = max_len);
                     if show_values {
-                        let a_str = val_a.map(|v| v.expose_secret()).unwrap_or("<empty>");
-                        let b_str = val_b.map(|v| v.expose_secret()).unwrap_or("<empty>");
+                        // Spelled as a closure, not `map(Secret::disclose)`, so
+                        // that `grep -rn "\.disclose(" src` really is the
+                        // complete list of disclosure boundaries.
+                        let a = val_a.cloned().map(|s| s.disclose());
+                        let b = val_b.cloned().map(|s| s.disclose());
+                        let a_str = a.as_ref().map(|d| d.value.as_str()).unwrap_or("<empty>");
+                        let b_str = b.as_ref().map(|d| d.value.as_str()).unwrap_or("<empty>");
                         println!("      {} : {}", vault1, a_str);
                         println!("      {} : {}", vault2, b_str);
                     }

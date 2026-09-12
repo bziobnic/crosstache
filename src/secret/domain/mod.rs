@@ -25,7 +25,7 @@ pub mod value;
 
 // `ConnectionComponent` and `connection_string_key_description` stay reachable
 // through `disclosure::`; only the parser has a caller worth a short path.
-pub use disclosure::parse_connection_components;
+pub use disclosure::{parse_connection_components, DisclosedSecret};
 pub use metadata::{DeletedSecretSummary, FieldUpdate, SecretAttributesUpdate, SecretSummary};
 pub use request::{SecretRequest, SecretUpdateRequest};
 pub use secret::{Secret, SecretMetadata, SecretSnapshot, SnapshotValue};

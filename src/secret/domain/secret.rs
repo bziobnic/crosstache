@@ -111,7 +111,6 @@ impl Secret {
     /// The only way a value becomes a serializable `String`. Every caller is
     /// a reviewed disclosure boundary; `grep -rn "\.disclose(" src` lists
     /// them all.
-    #[allow(dead_code)] // No boundary is routed through it yet; see PR 3 task 2.
     pub fn disclose(self) -> DisclosedSecret {
         DisclosedSecret {
             name: self.metadata.name,

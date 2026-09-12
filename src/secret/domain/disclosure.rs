@@ -15,9 +15,6 @@ use crate::utils::helpers::parse_connection_string;
 /// unlike [`crate::secret::domain::SecretValue`], this type exists to be
 /// shown.
 #[derive(Debug, Clone, Serialize)]
-// Constructed by `Secret::disclose`; the `xv` binary's own module tree has no
-// disclosure boundary wired to it yet, so it lints as dead there.
-#[allow(dead_code)]
 pub struct DisclosedSecret {
     pub name: String,
     pub value: String,

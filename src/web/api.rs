@@ -176,7 +176,12 @@ pub(crate) async fn reveal_secret(
         .secrets()
         .get_secret(&target.context.vault, &name)
         .await?;
-    Ok(Json(json!({ "value": props.value.expose_secret() })))
+    // The one web disclosure boundary. The body stays exactly
+    // `{"value": ..}`: the bundled UI reads only `value`, and the name,
+    // content type, and tags `disclose` also carries are already available
+    // on `GET /secrets/{name}`, so widening this body would duplicate them
+    // onto a reveal response for no reader.
+    Ok(Json(json!({ "value": props.disclose().value })))
 }
 
 #[derive(Deserialize)]
