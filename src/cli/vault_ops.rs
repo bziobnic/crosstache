@@ -1065,11 +1065,11 @@ async fn execute_vault_export(
             .map_err(|e| {
                 CrosstacheError::unknown(format!("Failed to write to output file: {e}"))
             })?;
-            println!(
+            output::success(&format!(
                 "Exported {} secrets to {} (permissions: owner-only)",
                 secrets.len(),
                 file_path
-            );
+            ));
         }
         None => {
             println!("{export_data}");
@@ -1267,21 +1267,38 @@ async fn execute_vault_import(
         }
     };
 
-    for warning in &import_warnings {
-        output::warn(warning);
-    }
-    for (title, reason) in &rejected {
-        output::error(&format!("Skipping record '{title}': {reason}"));
+    // Machine mode replaces every per-record line below with the single
+    // `ItemReport` document `main` emits.
+    let machine_mode = crate::utils::machine::is_machine_mode(config);
+    if !machine_mode {
+        for warning in &import_warnings {
+            output::warn(warning);
+        }
+        for (title, reason) in &rejected {
+            output::error(&format!("Skipping record '{title}': {reason}"));
+        }
     }
 
     if dry_run {
-        output::info(&format!(
-            "Dry run: Would import {} secrets to vault '{}':",
-            secrets_to_import.len(),
-            name
-        ));
+        // A dry run writes nothing, so every importable record is a `skipped`
+        // item and every refused one a `failed` item.
+        let mut item_report = crate::utils::machine::ItemReport::new();
         for secret in &secrets_to_import {
-            println!("  - {}", secret.name);
+            item_report.skipped(&secret.name, Some("would import (dry run)"));
+        }
+        for (title, reason) in &rejected {
+            item_report.failed(title, reason);
+        }
+        crate::utils::machine::report(config, &item_report);
+        if !machine_mode {
+            output::info(&format!(
+                "Dry run: Would import {} secrets to vault '{}':",
+                secrets_to_import.len(),
+                name
+            ));
+            for secret in &secrets_to_import {
+                output::info(&format!("  - {}", secret.name));
+            }
         }
         // A dry run that found unimportable records must fail the same way the
         // real run will, or `--dry-run` can't be used as a gate: the check
@@ -1298,6 +1315,10 @@ async fn execute_vault_import(
     // Import secrets through the active backend's secret trait.
     let secrets_backend = backend.secrets();
 
+    let mut item_report = crate::utils::machine::ItemReport::new();
+    for (title, reason) in &rejected {
+        item_report.failed(title, reason);
+    }
     let mut imported_count = 0;
     let mut skipped_count = 0;
     // Records refused during parsing already count as failures: they will not
@@ -1310,10 +1331,12 @@ async fn execute_vault_import(
         // Never let an imported entry silently clobber the reserved
         // attachment encryption key — same convention as bulk `xv set`.
         if crate::secret::attachment_key::generic_mutation_blocked_canonical(&secret_name) {
-            output::warn(&format!(
-                "Skipping '{secret_name}': protected attachment key custody resource; the key ring \
-                 is managed automatically and cannot be modified through ordinary secret operations"
-            ));
+            let reason = "protected attachment key custody resource; the key ring \
+                 is managed automatically and cannot be modified through ordinary secret operations";
+            if !machine_mode {
+                output::warn(&format!("Skipping '{secret_name}': {reason}"));
+            }
+            item_report.skipped(&secret_name, Some(reason));
             skipped_count += 1;
             continue;
         }
@@ -1322,7 +1345,10 @@ async fn execute_vault_import(
         if !overwrite {
             match secrets_backend.secret_exists(name, &secret_name).await {
                 Ok(true) => {
-                    output::hint(&format!("Skipping existing secret: {secret_name}"));
+                    if !machine_mode {
+                        output::hint(&format!("Skipping existing secret: {secret_name}"));
+                    }
+                    item_report.skipped(&secret_name, Some("already exists"));
                     skipped_count += 1;
                     continue;
                 }
@@ -1338,11 +1364,17 @@ async fn execute_vault_import(
 
         match secrets_backend.set_secret(name, secret_request).await {
             Ok(_) => {
-                output::success(&format!("Imported secret: {secret_name}"));
+                if !machine_mode {
+                    output::success(&format!("Imported secret: {secret_name}"));
+                }
+                item_report.ok(&secret_name, Some("imported"));
                 imported_count += 1;
             }
             Err(e) => {
-                output::error(&format!("Failed to import secret '{secret_name}': {e}"));
+                if !machine_mode {
+                    output::error(&format!("Failed to import secret '{secret_name}': {e}"));
+                }
+                item_report.failed(&secret_name, &e.to_string());
                 failed_count += 1;
             }
         }
@@ -1353,11 +1385,16 @@ async fn execute_vault_import(
     // `[ok]` success line for a fully clean import.
     let summary =
         format!("Import completed: {imported_count} imported, {skipped_count} skipped, {failed_count} failed");
-    if failed_count > 0 {
-        output::warn(&summary);
-    } else {
-        output::success(&summary);
+    if !machine_mode {
+        if failed_count > 0 {
+            output::warn(&summary);
+        } else {
+            output::success(&summary);
+        }
     }
+    // Parked before the failure split so a partial import carries its
+    // per-record detail under the envelope's `report` key.
+    crate::utils::machine::report(config, &item_report);
 
     // Invalidate the secrets list cache for the target vault. Import runs on
     // every backend (see `secrets_only_verb` at the top of this file), so the
@@ -1422,7 +1459,7 @@ async fn execute_vault_update(
         .update_vault(name, Some(&resource_group), update_request)
         .await?;
 
-    println!("Successfully updated vault '{}'", vault.name);
+    output::success(&format!("Successfully updated vault '{}'", vault.name));
 
     Ok(())
 }
@@ -1480,7 +1517,7 @@ async fn execute_vault_share(
 
             let object_id = vault_backend.resolve_principal(&user).await?;
             if object_id != user {
-                println!("Resolved '{}' to object ID '{}'", user, object_id);
+                output::info(&format!("Resolved '{}' to object ID '{}'", user, object_id));
             }
 
             let access_level = match level.to_lowercase().as_str() {
@@ -1518,7 +1555,7 @@ async fn execute_vault_share(
 
             let object_id = vault_backend.resolve_principal(&user).await?;
             if object_id != user {
-                println!("Resolved '{}' to object ID '{}'", user, object_id);
+                output::info(&format!("Resolved '{}' to object ID '{}'", user, object_id));
             }
 
             output::info(&format!(

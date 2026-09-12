@@ -531,8 +531,8 @@ pub(crate) async fn execute_secret_set_direct(
                 props.original_name,
                 type_name.as_deref().unwrap_or("")
             ));
-            println!("   Vault: {vault_name}");
-            println!("   Version: {}", props.version);
+            output::info(&format!("Vault: {vault_name}"));
+            output::info(&format!("Version: {}", props.version));
             output::hint(&format!("Verify with 'xv get {}'", props.original_name));
             invalidate_trait_secret_cache(&config, &backend_name, &vault_name);
             return Ok(());
@@ -573,8 +573,8 @@ pub(crate) async fn execute_secret_set_direct(
                 "Successfully set secret '{}'",
                 props.original_name
             ));
-            println!("   Vault: {vault_name}");
-            println!("   Version: {}", props.version);
+            output::info(&format!("Vault: {vault_name}"));
+            output::info(&format!("Version: {}", props.version));
             output::hint(&format!("Verify with 'xv get {}'", props.original_name));
             invalidate_trait_secret_cache(&config, &backend_name, &vault_name);
             return Ok(());
@@ -591,7 +591,14 @@ pub(crate) async fn execute_secret_set_direct(
                 ));
             }
             let pairs = parse_bulk_set_args(args)?;
-            output::step(&format!("Setting {} secret(s)...", pairs.len()));
+            // In machine mode the per-item narration is replaced by the single
+            // `ItemReport` document `main` emits; in human mode every line is
+            // printed exactly as before, on stderr.
+            let machine_mode = crate::utils::machine::is_machine_mode(&config);
+            if !machine_mode {
+                output::step(&format!("Setting {} secret(s)...", pairs.len()));
+            }
+            let mut item_report = crate::utils::machine::ItemReport::new();
             let mut success_count = 0usize;
             let mut error_count = 0usize;
             // (backend, vault) pairs actually written to, for cache
@@ -624,7 +631,10 @@ pub(crate) async fn execute_secret_set_direct(
                     {
                         Ok(resolved) => resolved,
                         Err(e) => {
-                            output::warn(&format!("  ✗ {key}: {e}"));
+                            if !machine_mode {
+                                output::warn(&format!("  ✗ {key}: {e}"));
+                            }
+                            item_report.failed(&key, &e.to_string());
                             error_count += 1;
                             continue;
                         }
@@ -633,10 +643,12 @@ pub(crate) async fn execute_secret_set_direct(
                 // single-secret path above), so the reserved attachment key
                 // is refused outright rather than prompted for.
                 if is_reserved_attachment_key(&resolved_key) {
-                    output::warn(&format!(
-                        "  ✗ {resolved_key}: protected attachment key custody resource; the key ring \
-                         is managed automatically and cannot be modified through ordinary secret operations"
-                    ));
+                    let reason = "protected attachment key custody resource; the key ring \
+                         is managed automatically and cannot be modified through ordinary secret operations";
+                    if !machine_mode {
+                        output::warn(&format!("  ✗ {resolved_key}: {reason}"));
+                    }
+                    item_report.failed(&resolved_key, reason);
                     error_count += 1;
                     continue;
                 }
@@ -647,12 +659,18 @@ pub(crate) async fn execute_secret_set_direct(
                 let request = meta.to_secret_request(&resolved_key, SecretValue::new(value))?;
                 match backend.secrets().set_secret(&key_vault_name, request).await {
                     Ok(props) => {
-                        output::success(&format!("  ✓ {}", props.original_name));
+                        if !machine_mode {
+                            output::success(&format!("  ✓ {}", props.original_name));
+                        }
+                        item_report.ok(&props.original_name, None);
                         success_count += 1;
                         touched_vaults.insert((backend_name, key_vault_name));
                     }
                     Err(e) => {
-                        output::warn(&format!("  ✗ {key}: {e}"));
+                        if !machine_mode {
+                            output::warn(&format!("  ✗ {key}: {e}"));
+                        }
+                        item_report.failed(&key, &e.to_string());
                         error_count += 1;
                     }
                 }
@@ -660,10 +678,15 @@ pub(crate) async fn execute_secret_set_direct(
             for (backend_name, v) in &touched_vaults {
                 invalidate_trait_secret_cache(&config, backend_name, v);
             }
+            // Parked before the failure split so a partial failure carries the
+            // per-item detail under the envelope's `report` key.
+            crate::utils::machine::report(&config, &item_report);
             if error_count > 0 {
-                output::warn(&format!(
-                    "Bulk set complete: {success_count} succeeded, {error_count} failed"
-                ));
+                if !machine_mode {
+                    output::warn(&format!(
+                        "Bulk set complete: {success_count} succeeded, {error_count} failed"
+                    ));
+                }
                 // Any failed write must surface as a non-zero exit so scripts
                 // and CI don't treat a partial failure as success.
                 return Err(CrosstacheError::unknown(format!(
@@ -671,9 +694,11 @@ pub(crate) async fn execute_secret_set_direct(
                     success_count + error_count
                 )));
             }
-            output::success(&format!(
-                "Bulk set complete: {success_count} succeeded, {error_count} failed"
-            ));
+            if !machine_mode {
+                output::success(&format!(
+                    "Bulk set complete: {success_count} succeeded, {error_count} failed"
+                ));
+            }
             return Ok(());
         }
     }
@@ -3491,6 +3516,8 @@ async fn execute_rotate_due(
         vault_name: vault_name.clone(),
         force,
         stage: DueRotationStage::Planned,
+        machine_mode: crate::utils::machine::is_machine_mode(&config),
+        rotated: Vec::new(),
         failures: Vec::new(),
     };
 
@@ -3511,7 +3538,7 @@ async fn execute_rotate_due(
     )
     .await?;
 
-    observer.finish(&summary)
+    observer.finish(&summary, &config)
 }
 
 /// Where a `--due` run stopped, so the tail message matches what was printed.
@@ -3528,6 +3555,12 @@ struct CliDueRotationObserver {
     vault_name: String,
     force: bool,
     stage: DueRotationStage,
+    /// Machine mode replaces every line below with the single `ItemReport`
+    /// document `main` emits.
+    machine_mode: bool,
+    /// Names of the secrets that rotated, in rotation order — the `ok` items
+    /// of the machine report.
+    rotated: Vec<String>,
     /// `(secret name, error text)` for the end-of-run report. Local to the
     /// terminal adapter — none of this reaches the service's summary.
     failures: Vec<(String, String)>,
@@ -3557,19 +3590,23 @@ impl crate::secret::scheduled_rotation::DueRotationObserver for CliDueRotationOb
         }
 
         if plan.due.is_empty() {
-            output::success(&format!(
-                "Nothing due in '{vault_name}' ({} policy-managed secret(s)).",
-                plan.policy_managed
-            ));
+            if !self.machine_mode {
+                output::success(&format!(
+                    "Nothing due in '{vault_name}' ({} policy-managed secret(s)).",
+                    plan.policy_managed
+                ));
+            }
             self.stage = DueRotationStage::Aborted;
             return Ok(PlanDecision::Abort);
         }
 
-        output::info(&format!(
-            "{} secret(s) due for rotation in '{vault_name}': {}",
-            plan.due.len(),
-            plan.due.join(", ")
-        ));
+        if !self.machine_mode {
+            output::info(&format!(
+                "{} secret(s) due for rotation in '{vault_name}': {}",
+                plan.due.len(),
+                plan.due.join(", ")
+            ));
+        }
 
         // One confirmation for the batch, rather than per secret.
         if !self.force {
@@ -3590,6 +3627,10 @@ impl crate::secret::scheduled_rotation::DueRotationObserver for CliDueRotationOb
         Ok(PlanDecision::Proceed)
     }
 
+    fn on_rotated(&mut self, name: &str) {
+        self.rotated.push(name.to_string());
+    }
+
     fn on_failure(
         &mut self,
         name: &str,
@@ -3605,23 +3646,34 @@ impl CliDueRotationObserver {
     fn finish(
         &self,
         summary: &crate::secret::scheduled_rotation::DueRotationSummary,
+        config: &Config,
     ) -> Result<()> {
         if matches!(self.stage, DueRotationStage::Aborted) {
+            // Nothing due, or the person declined: machine mode still owes
+            // stdout exactly one document, so it is an empty report.
+            crate::utils::machine::report(config, &self.item_report());
             return Ok(());
         }
 
         let vault_name = &self.vault_name;
+        // Parked before the failure split so a partial batch carries its
+        // per-secret detail under the envelope's `report` key.
+        crate::utils::machine::report(config, &self.item_report());
         if self.failures.is_empty() {
-            output::success(&format!(
-                "Rotated {} secret(s) in '{vault_name}'.",
-                summary.rotated
-            ));
+            if !self.machine_mode {
+                output::success(&format!(
+                    "Rotated {} secret(s) in '{vault_name}'.",
+                    summary.rotated
+                ));
+            }
             return Ok(());
         }
 
         // Report every failure — a partial batch must not look like a success.
-        for (name, err) in &self.failures {
-            output::error(&format!("  {name}: {err}"));
+        if !self.machine_mode {
+            for (name, err) in &self.failures {
+                output::error(&format!("  {name}: {err}"));
+            }
         }
         Err(CrosstacheError::config(format!(
             "rotated {} of {} due secret(s) in '{vault_name}'; {} failed (listed above)",
@@ -3629,6 +3681,18 @@ impl CliDueRotationObserver {
             summary.due,
             self.failures.len()
         )))
+    }
+
+    /// Per-secret outcomes of the run. Names only, never values.
+    fn item_report(&self) -> crate::utils::machine::ItemReport {
+        let mut report = crate::utils::machine::ItemReport::new();
+        for name in &self.rotated {
+            report.ok(name, Some("rotated"));
+        }
+        for (name, err) in &self.failures {
+            report.failed(name, err);
+        }
+        report
     }
 }
 
@@ -3703,7 +3767,7 @@ async fn execute_secret_rotate_native(
         )?;
 
         if !confirm {
-            println!("Rotation cancelled.");
+            output::info("Rotation cancelled.");
             return Ok(());
         }
     }
@@ -3712,9 +3776,9 @@ async fn execute_secret_rotate_native(
     backend.secrets().native_rotate(&vault_name, name).await?;
 
     output::success(&format!("Rotation request accepted for secret '{name}'"));
-    println!(
+    output::info(
         "Rotation runs asynchronously — the backend's rotation function creates the new \
-         version once it completes."
+         version once it completes.",
     );
     output::hint(&format!(
         "Use 'xv history {name}' to check for the new version"
@@ -5883,10 +5947,10 @@ pub(crate) async fn execute_secret_rotate(
 
     // Show generation parameters
     if let Some(ref script) = custom_generator {
-        println!("  Generator: {} (length: {})", script, length);
+        output::info(&format!("Generator: {} (length: {})", script, length));
     } else {
-        println!("  Character set: {:?}", charset);
-        println!("  Length: {}", length);
+        output::info(&format!("Character set: {:?}", charset));
+        output::info(&format!("Length: {}", length));
     }
 
     // Confirm rotation unless force flag is used
@@ -5901,7 +5965,7 @@ pub(crate) async fn execute_secret_rotate(
         )?;
 
         if !confirm {
-            println!("Rotation cancelled.");
+            output::info("Rotation cancelled.");
             return Ok(());
         }
     }
@@ -6013,12 +6077,15 @@ pub(crate) async fn execute_secret_rotate(
     }
 
     output::success(&format!("Successfully rotated secret '{}'", name));
-    println!("New version: {}", new_version);
+    output::info(&format!("New version: {}", new_version));
 
     if show_value {
+        // Disclosure boundary: `--show-value` asks for the plaintext, so the
+        // value itself stays on stdout (it is the requested data, not
+        // narration). The "hidden" placeholder is narration and moves.
         println!("Generated value: {}", new_value.as_str());
     } else {
-        println!("Generated value: [hidden] (use --show-value to display)");
+        output::info("Generated value: [hidden] (use --show-value to display)");
     }
 
     output::hint(&format!("Use 'xv history {}' to see version history", name));
@@ -6914,7 +6981,7 @@ async fn execute_secret_inject(
 
     if required_secrets.is_empty() && cross_vault_refs.is_empty() && fetch_failures.is_empty() {
         output::warn("No secret references found in template");
-        println!("    Use {{ secret:name }} syntax or xv://[backend:]vault/secret URIs");
+        output::info("Use { secret:name } syntax or xv://[backend:]vault/secret URIs");
 
         // Still write the template content as-is to output
         match output_file {
@@ -6929,7 +6996,7 @@ async fn execute_secret_inject(
                         path, e
                     ))
                 })?;
-                println!("Template written to '{}'", path);
+                output::info(&format!("Template written to '{}'", path));
             }
             None => {
                 print!("{}", template_content);
@@ -6945,17 +7012,17 @@ async fn execute_secret_inject(
     ));
 
     if !required_secrets.is_empty() {
-        println!(
-            "  Current vault ({}): {} secret(s)",
+        output::info(&format!(
+            "Current vault ({}): {} secret(s)",
             vault_name,
             required_secrets.len()
-        );
+        ));
     }
     if !cross_vault_refs.is_empty() {
-        println!(
-            "  Cross-vault/backend: {} secret(s)",
+        output::info(&format!(
+            "Cross-vault/backend: {} secret(s)",
             cross_vault_refs.len()
-        );
+        ));
     }
 
     // Get all secrets from the active backend (trait path — works for azure,
@@ -7312,10 +7379,13 @@ async fn execute_secret_copy(
         return Ok(CopyOutcome::Aborted);
     }
 
-    println!(
-        "Copying secret '{}' from vault '{}' to vault '{}' as '{}'...",
-        name, from_vault, to_vault, target_name
-    );
+    let machine_mode = crate::utils::machine::is_machine_mode(config);
+    if !machine_mode {
+        output::info(&format!(
+            "Copying secret '{}' from vault '{}' to vault '{}' as '{}'...",
+            name, from_vault, to_vault, target_name
+        ));
+    }
 
     // Workspace-aware: `from_vault`/`to_vault` resolve against attached
     // aliases FIRST, falling back to raw-vault-name meaning on the
@@ -7456,18 +7526,23 @@ async fn execute_secret_copy(
         .await?;
     invalidate_trait_secret_cache(config, &to_backend_name, &to_vault_resolved);
 
-    output::success(&format!(
-        "Successfully copied secret '{}' to vault '{}'",
-        copied_secret.original_name, to_vault
-    ));
-    println!("   Source: {}/{}", from_vault, name);
-    println!("   Target: {}/{}", to_vault, target_name);
-    println!("   Version: {}", copied_secret.version);
-    println!("   Enabled: {}", copied_secret.enabled);
+    // The destination metadata IS the machine document for `copy` and for the
+    // `move` that wraps it — names and properties only, never a value.
+    crate::utils::machine::report(config, &copied_secret);
+    if !machine_mode {
+        output::success(&format!(
+            "Successfully copied secret '{}' to vault '{}'",
+            copied_secret.original_name, to_vault
+        ));
+        output::info(&format!("Source: {}/{}", from_vault, name));
+        output::info(&format!("Target: {}/{}", to_vault, target_name));
+        output::info(&format!("Version: {}", copied_secret.version));
+        output::info(&format!("Enabled: {}", copied_secret.enabled));
 
-    if let Some(expires_on) = copied_secret.expires_on {
-        use crate::utils::datetime::format_datetime;
-        println!("   Expires: {}", format_datetime(Some(expires_on)));
+        if let Some(expires_on) = copied_secret.expires_on {
+            use crate::utils::datetime::format_datetime;
+            output::info(&format!("Expires: {}", format_datetime(Some(expires_on))));
+        }
     }
 
     Ok(CopyOutcome::Copied)
@@ -7490,10 +7565,12 @@ async fn execute_secret_move(
     // Determine target name (use new_name if provided, otherwise use original)
     let target_name = new_name.as_deref().unwrap_or(name);
 
-    println!(
-        "Moving secret '{}' from vault '{}' to vault '{}' as '{}'...",
-        name, from_vault, to_vault, target_name
-    );
+    if !crate::utils::machine::is_machine_mode(config) {
+        output::info(&format!(
+            "Moving secret '{}' from vault '{}' to vault '{}' as '{}'...",
+            name, from_vault, to_vault, target_name
+        ));
+    }
 
     // Check if target secret already exists and fail fast with a move-specific
     // message when not forced, *before* prompting for confirmation — there is
@@ -7532,7 +7609,7 @@ async fn execute_secret_move(
             name, from_vault, to_vault
         );
         if !prompt.confirm(&message, false)? {
-            println!("Move operation cancelled.");
+            output::info("Move operation cancelled.");
             return Ok(());
         }
     }
@@ -7557,10 +7634,12 @@ async fn execute_secret_move(
     }
 
     // Then delete from source
-    println!(
-        "Deleting source secret '{}' from vault '{}'...",
-        name, from_vault
-    );
+    if !crate::utils::machine::is_machine_mode(config) {
+        output::info(&format!(
+            "Deleting source secret '{}' from vault '{}'...",
+            name, from_vault
+        ));
+    }
     {
         let (ws, ws_registry) = crate::cli::helpers::resolve_workspace_and_registry(config).await?;
         let (from_backend, from_backend_name, from_vault_resolved) =
@@ -7579,10 +7658,12 @@ async fn execute_secret_move(
         invalidate_trait_secret_cache(config, &from_backend_name, &from_vault_resolved);
     }
 
-    output::success(&format!(
-        "Successfully moved secret '{}' from '{}' to '{}'",
-        name, from_vault, to_vault
-    ));
+    if !crate::utils::machine::is_machine_mode(config) {
+        output::success(&format!(
+            "Successfully moved secret '{}' from '{}' to '{}'",
+            name, from_vault, to_vault
+        ));
+    }
 
     Ok(())
 }

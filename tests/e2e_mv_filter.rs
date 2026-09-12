@@ -191,18 +191,25 @@ fn mv_filter_dry_run_previews_without_moving() {
         .output()
         .expect("execute xv mv --filter --dry-run");
     assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+    // The preview is human narration: stderr, never stdout (machine-output
+    // contract — stdout holds machine documents only).
     let stdout = common::stdout_str(&out);
     assert!(
-        stdout.contains("test-a -> archive/test-a"),
-        "stdout: {stdout}"
+        stdout.trim().is_empty(),
+        "a human dry run must leave stdout empty: {stdout}"
+    );
+    let stderr = common::stderr_str(&out);
+    assert!(
+        stderr.contains("test-a -> archive/test-a"),
+        "stderr: {stderr}"
     );
     assert!(
-        stdout.contains("test-b -> archive/test-b"),
-        "stdout: {stdout}"
+        stderr.contains("test-b -> archive/test-b"),
+        "stderr: {stderr}"
     );
     assert!(
-        !stdout.contains("latest-x"),
-        "dry-run must not list non-matches: {stdout}"
+        !stderr.contains("latest-x"),
+        "dry-run must not list non-matches: {stderr}"
     );
 
     let json = ls_json(temp.path());

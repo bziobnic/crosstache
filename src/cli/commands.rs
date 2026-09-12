@@ -2544,7 +2544,7 @@ impl Cli {
                 )
                 .await
             }
-            Commands::Version => crate::cli::system_ops::execute_version_command().await,
+            Commands::Version => crate::cli::system_ops::execute_version_command(&config).await,
             Commands::Completion { shell } => {
                 crate::cli::system_ops::execute_completion_command(shell).await
             }

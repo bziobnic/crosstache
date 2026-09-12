@@ -356,3 +356,397 @@ fn migrate_dry_run_json_is_one_plan_document() {
     let listed = env.ok(&["ls", "--format", "json"]);
     assert!(!listed.contains("ALPHA"), "{listed}");
 }
+
+// ---------------------------------------------------------------------------
+// Task 4 — bulk and narrated commands
+// ---------------------------------------------------------------------------
+
+/// The reserved attachment-key custody name. A bulk `set` refuses it outright,
+/// which is the one deterministic per-item failure the local backend offers.
+const RESERVED_KEY: &str = "xv-attachment-key";
+
+#[test]
+fn bulk_set_json_is_one_item_report() {
+    let env = MachineEnv::new();
+    let out = env
+        .xv()
+        .args(["set", "ALPHA=a-value", "BETA=b-value", "--format", "json"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let doc = one_json_document(&stdout);
+    assert_eq!(doc["summary"]["total"], 2, "{doc}");
+    assert_eq!(doc["summary"]["succeeded"], 2, "{doc}");
+    assert_eq!(doc["summary"]["failed"], 0, "{doc}");
+    let mut names: Vec<&str> = doc["items"]
+        .as_array()
+        .expect("items array")
+        .iter()
+        .map(|i| i["name"].as_str().unwrap())
+        .collect();
+    names.sort_unstable();
+    assert_eq!(names, ["ALPHA", "BETA"], "{doc}");
+    assert!(!stdout.contains("Setting"), "stdout:\n{stdout}");
+}
+
+#[test]
+fn bulk_set_partial_failure_is_one_envelope_with_a_report() {
+    let env = MachineEnv::new();
+    let out = env
+        .xv()
+        .args([
+            "set",
+            &format!("{RESERVED_KEY}=nope"),
+            "GOOD=fine",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let doc = one_json_document(&stdout);
+    assert!(doc["error"]["code"].is_string(), "{doc}");
+    assert_eq!(
+        doc["error"]["exit_code"].as_i64(),
+        out.status.code().map(i64::from),
+        "{doc}"
+    );
+    assert_eq!(doc["report"]["summary"]["failed"], 1, "{doc}");
+    assert_eq!(doc["report"]["summary"]["succeeded"], 1, "{doc}");
+    let items = doc["report"]["items"].as_array().expect("items array");
+    assert_eq!(items.len(), 2, "{doc}");
+    assert!(
+        items
+            .iter()
+            .any(|i| i["status"] == "failed" && i["name"] == RESERVED_KEY),
+        "{doc}"
+    );
+    // Never a value.
+    assert!(!stdout.contains("fine"), "stdout:\n{stdout}");
+}
+
+/// Human mode keeps every word of the bulk summary, on stderr, with nothing
+/// on stdout.
+#[test]
+fn bulk_set_human_mode_keeps_the_summary_on_stderr() {
+    let env = MachineEnv::new();
+    let out = env
+        .xv()
+        .args(["set", "ALPHA=a-value", "BETA=b-value"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert_eq!(out.status.code(), Some(0), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("Setting 2 secret(s)..."),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("Bulk set complete: 2 succeeded, 0 failed"),
+        "stderr:\n{stderr}"
+    );
+    assert!(stdout.trim().is_empty(), "stdout:\n{stdout}");
+}
+
+/// A single `set` no longer writes its Vault/Version detail to stdout.
+#[test]
+fn single_set_detail_lines_are_on_stderr() {
+    let env = MachineEnv::new();
+    let out = env
+        .xv()
+        .args(["set", "ALPHA", "--value", "a-value"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert_eq!(out.status.code(), Some(0), "stderr:\n{stderr}");
+    assert!(stderr.contains("Vault: default"), "stderr:\n{stderr}");
+    assert!(stderr.contains("Version:"), "stderr:\n{stderr}");
+    assert!(stdout.trim().is_empty(), "stdout:\n{stdout}");
+}
+
+#[test]
+fn mv_dry_run_json_is_one_plan_document() {
+    let env = MachineEnv::new();
+    env.ok(&["set", "ALPHA", "--value", "a-value"]);
+    let out = env
+        .xv()
+        .args(["mv", "ALPHA", "RENAMED", "--dry-run", "--format", "json"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let doc = one_json_document(&stdout);
+    let planned = doc["planned"].as_array().expect("planned array");
+    assert_eq!(planned.len(), 1, "{doc}");
+    assert_eq!(planned[0]["from"], "ALPHA", "{doc}");
+    assert_eq!(planned[0]["to"], "RENAMED", "{doc}");
+    assert!(!stdout.contains("->"), "stdout:\n{stdout}");
+}
+
+/// Human mode: the preview moves to stderr and stdout stays empty.
+#[test]
+fn mv_dry_run_human_preview_is_on_stderr() {
+    let env = MachineEnv::new();
+    env.ok(&["set", "ALPHA", "--value", "a-value"]);
+    let out = env
+        .xv()
+        .args(["mv", "ALPHA", "RENAMED", "--dry-run"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert_eq!(out.status.code(), Some(0), "stderr:\n{stderr}");
+    assert!(stderr.contains("ALPHA -> RENAMED"), "stderr:\n{stderr}");
+    assert!(stdout.trim().is_empty(), "stdout:\n{stdout}");
+}
+
+/// A destination collision is refused before any write, so the single document
+/// is the bare envelope — the same rule `migrate --on-conflict fail` follows.
+#[test]
+fn mv_collision_is_one_envelope_and_no_preview_on_stdout() {
+    let env = MachineEnv::new();
+    env.ok(&["set", "ALPHA", "--value", "a-value"]);
+    env.ok(&["set", "BETA", "--value", "b-value"]);
+    let out = env
+        .xv()
+        .args(["mv", "ALPHA", "BETA", "--format", "json"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let doc = one_json_document(&stdout);
+    assert!(doc["error"]["code"].is_string(), "{doc}");
+    assert_eq!(
+        doc["error"]["exit_code"].as_i64(),
+        out.status.code().map(i64::from),
+        "{doc}"
+    );
+    assert!(!stdout.contains("->"), "stdout:\n{stdout}");
+}
+
+#[test]
+fn vault_import_dry_run_with_a_rejected_record_is_one_envelope_with_a_report() {
+    let env = MachineEnv::new();
+    let import_path = env.home.join("keeper.json");
+    std::fs::write(
+        &import_path,
+        r#"{"records":[{"title":"Empty"},{"title":"Good","login":"u","password":"p"}]}"#,
+    )
+    .expect("write keeper file");
+
+    let out = env
+        .xv()
+        .args([
+            "vault",
+            "import",
+            "default",
+            "--fmt",
+            "keeper",
+            "--input",
+            import_path.to_str().unwrap(),
+            "--dry-run",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let doc = one_json_document(&stdout);
+    assert!(doc["error"]["code"].is_string(), "{doc}");
+    assert_eq!(doc["report"]["summary"]["failed"], 1, "{doc}");
+    let items = doc["report"]["items"].as_array().expect("items array");
+    assert!(
+        items
+            .iter()
+            .any(|i| i["name"] == "Empty" && i["status"] == "failed"),
+        "{doc}"
+    );
+    assert!(
+        items
+            .iter()
+            .any(|i| i["name"] == "Good" && i["status"] == "skipped"),
+        "{doc}"
+    );
+    // The per-record list never reaches stdout, and no password does either.
+    assert!(!stdout.contains("  - "), "stdout:\n{stdout}");
+    assert!(!stdout.contains("\"p\""), "stdout:\n{stdout}");
+}
+
+#[test]
+fn copy_json_is_one_destination_metadata_document() {
+    let env = seeded_two_secrets();
+    let out = env
+        .xv()
+        .args([
+            "copy", "ALPHA", "--from", "default", "--to", "other", "--format", "json",
+        ])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let doc = one_json_document(&stdout);
+    assert_eq!(doc["original_name"], "ALPHA", "{doc}");
+    assert!(doc["version"].is_string(), "{doc}");
+    assert!(!stdout.contains("Copying"), "stdout:\n{stdout}");
+    assert!(!stdout.contains("Source:"), "stdout:\n{stdout}");
+    assert!(!stdout.contains("a-value"), "stdout:\n{stdout}");
+}
+
+#[test]
+fn copy_human_mode_keeps_the_narration_on_stderr() {
+    let env = seeded_two_secrets();
+    let out = env
+        .xv()
+        .args(["copy", "ALPHA", "--from", "default", "--to", "other"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert_eq!(out.status.code(), Some(0), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("Copying secret 'ALPHA'"),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("Source: default/ALPHA"),
+        "stderr:\n{stderr}"
+    );
+    assert!(stderr.contains("Target: other/ALPHA"), "stderr:\n{stderr}");
+    assert!(stdout.trim().is_empty(), "stdout:\n{stdout}");
+}
+
+#[test]
+fn move_json_is_one_destination_metadata_document() {
+    let env = seeded_two_secrets();
+    let out = env
+        .xv()
+        .args([
+            "move", "ALPHA", "--from", "default", "--to", "other", "--force", "--format", "json",
+        ])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let doc = one_json_document(&stdout);
+    assert_eq!(doc["original_name"], "ALPHA", "{doc}");
+    assert!(!stdout.contains("Moving"), "stdout:\n{stdout}");
+    assert!(!stdout.contains("Deleting source"), "stdout:\n{stdout}");
+    assert!(!stdout.contains("a-value"), "stdout:\n{stdout}");
+}
+
+#[test]
+fn rotate_due_json_is_one_item_report() {
+    let env = MachineEnv::new();
+    env.ok(&["set", "STALE", "--value", "old-value"]);
+    env.ok(&[
+        "update",
+        "STALE",
+        "--tag",
+        "xv:rotate_every=30d",
+        "--tag",
+        "xv:rotated_at=2020-01-01T00:00:00Z",
+    ]);
+
+    let out = env
+        .xv()
+        .args(["rotate", "--due", "--force", "--format", "json"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let doc = one_json_document(&stdout);
+    assert_eq!(doc["summary"]["total"], 1, "{doc}");
+    assert_eq!(doc["summary"]["succeeded"], 1, "{doc}");
+    assert_eq!(doc["items"][0]["name"], "STALE", "{doc}");
+    assert_eq!(doc["items"][0]["status"], "ok", "{doc}");
+    assert!(!stdout.contains("old-value"), "stdout:\n{stdout}");
+}
+
+#[test]
+fn version_json_is_one_object() {
+    let env = MachineEnv::new();
+    let out = env
+        .xv()
+        .args(["version", "--format", "json"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert_eq!(out.status.code(), Some(0), "stdout:\n{stdout}");
+    let doc = one_json_document(&stdout);
+    assert!(doc["version"].is_string(), "{doc}");
+    assert!(doc["git_hash"].is_string(), "{doc}");
+    assert!(doc["git_ref"].is_string(), "{doc}");
+    assert!(doc["backends"].is_array(), "{doc}");
+    assert!(!stdout.contains("crosstache Rust CLI"), "stdout:\n{stdout}");
+}
+
+/// Human mode keeps `version` exactly as it was: plain text on stdout.
+#[test]
+fn version_human_mode_is_unchanged_text_on_stdout() {
+    let env = MachineEnv::new();
+    let out = env.xv().args(["version"]).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert_eq!(out.status.code(), Some(0), "stdout:\n{stdout}");
+    assert!(stdout.contains("crosstache Rust CLI"), "stdout:\n{stdout}");
+    assert!(stdout.contains("Version:"), "stdout:\n{stdout}");
+    assert!(stdout.contains("Backends:"), "stdout:\n{stdout}");
+}
