@@ -7,7 +7,9 @@
 //!
 //! The enumeration below mirrors the `build_router` route table. When a
 //! route is added there, add it here too: an unlisted route is an untested
-//! disclosure surface.
+//! disclosure surface. The `/{*path}` asset wildcard is a single handler
+//! serving the bundled UI, so it is swept through one representative path
+//! (`/app.js`) rather than every asset name.
 
 use std::sync::Arc;
 
@@ -203,6 +205,63 @@ async fn every_mutating_route_is_value_free() {
         // `REC` is now in the trash, so restore has a real record to act on.
         ("POST", "/api/secrets/REC/restore".into(), None),
     ];
+
+    // The `file-ops` half of the write side. `POST /api/files` (multipart
+    // upload) is the one registered route not driven here: its handler is
+    // reached only through a well-formed multipart envelope behind an
+    // `enforce_upload_envelope` middleware layer, so a JSON probe is
+    // rejected before any secret-bearing code runs and would prove nothing.
+    // Its response body is a `FileUploadResponse` of names and sizes with
+    // no `SecretValue` anywhere in its construction, and it is exercised by
+    // `src/web/files.rs`'s own tests.
+    #[cfg(feature = "file-ops")]
+    let cases = {
+        let mut cases = cases;
+        cases.extend::<Vec<(&str, String, Option<serde_json::Value>)>>(vec![
+            (
+                "POST",
+                "/api/secrets/RENAMED/attachment-rename/preview".into(),
+                Some(json!({ "new_name": "RENAMED2" })),
+            ),
+            // `apply` and `resume` reach their handlers but cannot complete
+            // against the stub, which declares no physical transfer
+            // location (the preview above says so in its `limitation`), so
+            // what is swept here is their error envelope rather than a
+            // success body. The success paths are covered by
+            // `src/web/secrets.rs`'s own attachment-rename tests.
+            (
+                "POST",
+                "/api/secrets/RENAMED/attachment-rename/apply".into(),
+                Some(json!({ "new_name": "RENAMED2", "offline": true })),
+            ),
+            (
+                "POST",
+                "/api/secrets/RENAMED/attachment-rename/no-such-id/resume".into(),
+                Some(json!({ "new_name": "RENAMED2", "offline": true })),
+            ),
+            (
+                "POST",
+                "/api/files/preflight".into(),
+                Some(json!({ "files": [{
+                    "client_id": "c1",
+                    "name": "notes.txt",
+                    "size": 4u64,
+                    "content_type": "text/plain",
+                    "destination": ""
+                }] })),
+            ),
+            (
+                "POST",
+                "/api/files/archive".into(),
+                Some(json!({ "files": ["notes.txt"] })),
+            ),
+            // No file is literally named `archive`, so this answers 404 —
+            // an error envelope, still a body that must stay canary-free.
+            ("DELETE", "/api/files/archive".into(), None),
+            ("DELETE", "/api/files/notes.txt".into(), None),
+        ]);
+        cases
+    };
     for (method, path, body) in cases {
         let (_status, response) = raw(&state, method, &path, body).await;
         assert_no_canary(&format!("{method} {path}"), &response);

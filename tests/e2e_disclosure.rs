@@ -147,14 +147,21 @@ audit = true
         String::from_utf8_lossy(&out.stdout).into_owned()
     }
 
+    /// Run with extra environment variables applied on top of the hermetic
+    /// base set.
+    fn run_with_env(&self, args: &[&str], extra: &[(&str, &str)]) -> Output {
+        let mut cmd = self.xv();
+        cmd.args(args);
+        for (k, v) in extra {
+            cmd.env(k, v);
+        }
+        cmd.output().expect("execute xv binary")
+    }
+
     /// stdout and stderr of a run, concatenated — the full byte surface a
     /// human or a pipe sees.
     fn output_of(&self, args: &[&str]) -> String {
-        let out = self.run(args);
-        let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
-        combined.push('\n');
-        combined.push_str(&String::from_utf8_lossy(&out.stderr));
-        combined
+        combined(&self.run(args))
     }
 
     /// The local audit log for the default vault (`[local].audit = true`).
@@ -195,11 +202,61 @@ fn assert_no_canary(label: &str, haystack: &str) {
     }
 }
 
-/// Assert the command's stdout+stderr carry no canary.
+/// stdout and stderr of one run, concatenated.
+fn combined(out: &Output) -> String {
+    let mut all = String::from_utf8_lossy(&out.stdout).into_owned();
+    all.push('\n');
+    all.push_str(&String::from_utf8_lossy(&out.stderr));
+    all
+}
+
+/// Assert the command **succeeded** and that its stdout+stderr carry no
+/// canary.
+///
+/// The success check is what keeps this suite non-vacuous: a clap usage
+/// error, a config-load failure, or a renamed flag all produce a
+/// canary-free stderr, so an assertion that only looked at the text would
+/// pass while testing nothing. Every negative surface below therefore has
+/// to actually run.
 #[track_caller]
 fn assert_silent(env: &DisclosureEnv, args: &[&str]) {
-    let combined = env.output_of(args);
-    assert_no_canary(&format!("`xv {}`", args.join(" ")), &combined);
+    assert_silent_with_env(env, args, &[]);
+}
+
+/// [`assert_silent`] with extra environment variables (e.g. `RUST_LOG`).
+#[track_caller]
+fn assert_silent_with_env(env: &DisclosureEnv, args: &[&str], extra: &[(&str, &str)]) {
+    let out = env.run_with_env(args, extra);
+    let all = combined(&out);
+    assert!(
+        out.status.success(),
+        "`xv {}` did not run (exit {:?}); a failed command proves nothing about disclosure:\n{all}",
+        args.join(" "),
+        out.status.code(),
+    );
+    assert_no_canary(&format!("`xv {}`", args.join(" ")), &all);
+}
+
+/// Assert the command **failed for the intended reason** — non-zero exit
+/// plus a stderr substring naming the cause — and that neither stream
+/// carries a canary. Without the cause check, any unrelated failure (a
+/// typo'd flag) would satisfy the test.
+#[track_caller]
+fn assert_fails_silently(env: &DisclosureEnv, args: &[&str], cause: &str) {
+    let out = env.run(args);
+    let all = combined(&out);
+    assert!(
+        !out.status.success(),
+        "`xv {}` unexpectedly succeeded; this test needs a real failure:\n{all}",
+        args.join(" ")
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(cause),
+        "`xv {}` failed for the wrong reason (expected {cause:?}):\n{all}",
+        args.join(" ")
+    );
+    assert_no_canary(&format!("`xv {}`", args.join(" ")), &all);
 }
 
 // ─── listing / search / metadata surfaces ──────────────────────────────────
@@ -261,13 +318,70 @@ fn info_and_group_views_never_print_a_value() {
 
 // ─── the clipboard path: `get` with no `--raw` ─────────────────────────────
 
+/// Restores whatever was on the clipboard when the test started, even if
+/// the test panics.
+struct ClipboardRestore {
+    clipboard: arboard::Clipboard,
+    previous: Option<String>,
+}
+
+impl Drop for ClipboardRestore {
+    fn drop(&mut self) {
+        let _ = match self.previous.take() {
+            Some(text) => self.clipboard.set_text(text),
+            // Nothing readable was there to begin with; leave it empty
+            // rather than leaving the canary behind.
+            None => self.clipboard.set_text(String::new()),
+        };
+    }
+}
+
+/// A clipboard handle whose round-trip actually works on this host, with the
+/// prior contents captured for restore — or `None` on a headless CI box, a
+/// sandbox, or any host where `get_text` cannot read back what was written.
+///
+/// The guard matters: without it the test still *passes* on such a host, but
+/// for the wrong reason — `copy_to_clipboard` only warns when the clipboard
+/// is unavailable, so stdout would be canary-free because nothing happened.
+fn clipboard_restore_if_available() -> Option<ClipboardRestore> {
+    let mut clipboard = arboard::Clipboard::new().ok()?;
+    let previous = clipboard.get_text().ok();
+    let sentinel = format!("xv-disclosure-probe-{}", std::process::id());
+    clipboard.set_text(sentinel.clone()).ok()?;
+    // A few bounded retries: some hosts report `ContentNotAvailable` for a
+    // moment after a write. This is a capability probe, not synchronization
+    // with the code under test.
+    for _ in 0..40 {
+        match clipboard.get_text() {
+            Ok(read) if read == sentinel => {
+                return Some(ClipboardRestore {
+                    clipboard,
+                    previous,
+                })
+            }
+            _ => std::thread::sleep(std::time::Duration::from_millis(25)),
+        }
+    }
+    // Put back what we found before giving up.
+    let _ = clipboard.set_text(previous.unwrap_or_default());
+    None
+}
+
 #[test]
 fn get_without_raw_never_prints_the_value() {
+    // The copy really has to happen for this test to mean anything, so the
+    // clipboard round-trip is verified first and the host's clipboard is
+    // restored on the way out (including on panic).
+    let Some(_restore) = clipboard_restore_if_available() else {
+        eprintln!(
+            "skipping get_without_raw_never_prints_the_value: no clipboard round-trip on this host"
+        );
+        return;
+    };
     let env = DisclosureEnv::seeded();
-    // NOTE: this writes the canary to the real system clipboard, which is
-    // the whole point — the clipboard is a sanctioned boundary, stdout is
-    // not. Only stdout/stderr are asserted on; the clipboard itself is
-    // covered by `tests/clipboard_tests.rs`.
+    // The clipboard is a sanctioned boundary; stdout is not. Only
+    // stdout/stderr are asserted on here — the clipboard contents
+    // themselves are `tests/clipboard_tests.rs`'s subject.
     assert_silent(&env, &["get", "LEAKY"]);
     assert_silent(&env, &["get", "REC", "--field", "password"]);
 }
@@ -306,8 +420,11 @@ fn cache_status_and_cache_bytes_never_carry_a_value() {
     env.ok(&["list"]);
     let cached = files_under(&env.cache_dir);
     assert!(
-        !cached.is_empty(),
-        "cache stayed empty; this test cannot prove anything about cache bytes"
+        cached
+            .iter()
+            .any(|p| p.file_name().is_some_and(|n| n == "secrets-list-v5.json")),
+        "no secrets-list cache entry was written ({cached:?}); this test cannot \
+         prove anything about cache bytes"
     );
     for path in &cached {
         let bytes = std::fs::read(path).expect("read cache file");
@@ -324,21 +441,47 @@ fn cache_status_and_cache_bytes_never_carry_a_value() {
 #[test]
 fn failing_commands_never_leak_a_value_on_stderr() {
     let env = DisclosureEnv::seeded();
-    // Point the context at a vault that does not exist, then drive reads
-    // through it: the failure text must carry no plaintext.
+
+    // A vault that does not exist.
+    assert_fails_silently(
+        &env,
+        &["info", "nosuchvault", "--type", "vault"],
+        "xv-vault-not-found",
+    );
+    // A secret that does not exist, on a vault that does.
+    assert_fails_silently(
+        &env,
+        &["get", "NOSUCHSECRET", "--raw"],
+        "xv-secret-not-found",
+    );
+    // A field that the record does not declare — the error lists the known
+    // field NAMES, which is exactly the boundary it must not cross into
+    // listing their values.
+    assert_fails_silently(
+        &env,
+        &["get", "REC", "--field", "nosuchfield", "--raw"],
+        "has no field",
+    );
+    // Reads driven through a context pointing at a vault that was never
+    // created. The local backend surfaces this as a store-open failure
+    // rather than a typed vault-not-found, so the cause assertion pins the
+    // error CODE prefix; the typed case is covered by `info` above.
     env.ok(&["context", "use", "nosuchvault", "--global"]);
-    assert_silent(&env, &["get", "LEAKY"]);
-    assert_silent(&env, &["get", "LEAKY", "--raw"]);
-    assert_silent(&env, &["get", "REC", "--field", "password", "--raw"]);
+    assert_fails_silently(&env, &["get", "LEAKY"], "error[xv-");
+    assert_fails_silently(&env, &["get", "LEAKY", "--raw"], "error[xv-");
+    assert_fails_silently(
+        &env,
+        &["get", "REC", "--field", "password", "--raw"],
+        "error[xv-",
+    );
+    // These two *succeed* against a nonexistent vault (an empty listing and
+    // an empty export), so they belong in the success-asserting helper —
+    // they are still a disclosure surface worth sweeping.
     assert_silent(&env, &["list"]);
     assert_silent(
         &env,
         &["vault", "export", "nosuchvault", "--include-values"],
     );
-    env.ok(&["context", "use", "default", "--global"]);
-    // A missing secret and a missing field on a real vault.
-    assert_silent(&env, &["get", "NOSUCHSECRET", "--raw"]);
-    assert_silent(&env, &["get", "REC", "--field", "nosuchfield", "--raw"]);
 }
 
 // ─── tracing / debug output ────────────────────────────────────────────────
@@ -346,28 +489,21 @@ fn failing_commands_never_leak_a_value_on_stderr() {
 #[test]
 fn debug_logging_never_prints_a_value() {
     let env = DisclosureEnv::seeded();
+    // `--debug` alone only raises xv's own level; `RUST_LOG=trace` turns
+    // every span and event in the process on, which is the state a user
+    // debugging a failure actually runs in.
     for args in [
-        vec!["--debug", "list"],
-        vec!["--debug", "get", "LEAKY", "--record"],
-        vec!["--debug", "history", "LEAKY"],
-        vec!["--debug", "vault", "export", "default"],
+        ["--debug", "list"].as_slice(),
+        ["--debug", "history", "LEAKY"].as_slice(),
+        ["--debug", "find", "leak"].as_slice(),
+        ["--debug", "info", "REC"].as_slice(),
+        ["--debug", "vault", "export", "default"].as_slice(),
+        // Reads and decrypts the record envelope, then prints only a
+        // metadata field: the value passes through the process under full
+        // tracing without ever being the thing that is printed.
+        ["--debug", "get", "REC", "--field", "username", "--raw"].as_slice(),
     ] {
-        let mut cmd = env.xv();
-        // `--debug` alone only raises xv's own level; RUST_LOG=trace turns
-        // every span and event in the process on, which is the state a user
-        // debugging a failure actually runs in.
-        let out = cmd
-            .args(&args)
-            .env("RUST_LOG", "trace")
-            .output()
-            .expect("execute xv binary");
-        let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
-        combined.push('\n');
-        combined.push_str(&String::from_utf8_lossy(&out.stderr));
-        assert_no_canary(
-            &format!("`xv {}` under RUST_LOG=trace", args.join(" ")),
-            &combined,
-        );
+        assert_silent_with_env(&env, args, &[("RUST_LOG", "trace")]);
     }
 }
 
