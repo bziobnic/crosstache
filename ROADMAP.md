@@ -89,12 +89,16 @@ cover both built-in and named backends.
 
 ### P1 — Split secret-domain types from provider/legacy manager types
 
-Backend-neutral traits still exchange request/property models owned by
-`secret::manager`, which preserves Azure-era coupling in otherwise generic code.
-Move value-bearing requests, summaries, properties, updates, and deleted/version
-models into a dedicated secret-domain module with explicit redaction/zeroization
-contracts. Keep provider adapters responsible for translation and avoid another
-flag-day rewrite.
+The module split has shipped: request/property/summary/metadata models now
+live in `secret::domain`, separate from the Azure-era `secret::manager`
+implementation. Plaintext is wrapped in a dedicated `SecretValue` type with no
+serde impls, a redacted `Debug`, and read access only through
+`expose_secret()`; web metadata responses return a value-free `SecretMetadata`
+body. What remains: split the backend traits themselves into metadata-only vs.
+value-returning methods (retire the `include_value: bool` parameter in favor
+of separate calls), and introduce explicit disclosure DTOs for the handful of
+routes that legitimately return plaintext, with canary-test coverage proving
+every other route stays value-free.
 
 ## Product and platform work
 

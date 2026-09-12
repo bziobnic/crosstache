@@ -2071,6 +2071,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rename_response_never_carries_the_canary_value() {
+        const CANARY: &str = "super-secret-value-canary";
+        let app = crate::web::build_router(testutil::test_state());
+        put_plain_secret(app.clone(), "leaky-source", CANARY).await;
+
+        let (status, renamed) = get_json(
+            app,
+            "POST",
+            "/api/secrets/leaky-source/rename",
+            Some(json!({"new_name":"leaky-destination"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = renamed.to_string();
+        assert!(!text.contains(CANARY), "rename leaked: {text}");
+        assert!(
+            renamed.get("value").is_none(),
+            "rename carries a value key: {text}"
+        );
+    }
+
+    #[tokio::test]
     async fn rename_rejects_collision_noop_and_unrelated_metadata_on_name_field() {
         let app = crate::web::build_router(testutil::test_state());
         put_plain_secret(app.clone(), "source", "source-value").await;
@@ -2258,6 +2280,25 @@ mod tests {
 
         let (status, _) = get_json(app, "DELETE", "/api/secrets/recover-me/purge", None).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn restore_response_never_carries_the_canary_value() {
+        const CANARY: &str = "super-secret-value-canary";
+        let app = crate::web::build_router(testutil::test_state());
+        put_plain_secret(app.clone(), "leaky-restore", CANARY).await;
+        let (status, _) = get_json(app.clone(), "DELETE", "/api/secrets/leaky-restore", None).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, restored) =
+            get_json(app, "POST", "/api/secrets/leaky-restore/restore", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let text = restored.to_string();
+        assert!(!text.contains(CANARY), "restore leaked: {text}");
+        assert!(
+            restored.get("value").is_none(),
+            "restore carries a value key: {text}"
+        );
     }
 
     #[tokio::test]

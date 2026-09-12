@@ -1028,6 +1028,43 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn metadata_responses_never_carry_the_value_but_reveal_does() {
+        const CANARY: &str = "super-secret-value-canary";
+        let app = crate::web::build_router(testutil::test_state());
+        let (status, _) = get_json(
+            app.clone(),
+            "PUT",
+            "/api/secrets/leaky",
+            Some(json!({ "value": CANARY })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        for (method, path, body) in [
+            ("GET", "/api/secrets/leaky", None),
+            (
+                "PUT",
+                "/api/secrets/leaky",
+                Some(json!({ "value": CANARY })),
+            ),
+            ("PATCH", "/api/secrets/leaky", Some(json!({ "note": "n" }))),
+        ] {
+            let (status, json) = get_json(app.clone(), method, path, body).await;
+            assert_eq!(status, StatusCode::OK, "{method} {path}");
+            let text = json.to_string();
+            assert!(!text.contains(CANARY), "{method} {path} leaked: {text}");
+            assert!(
+                json.get("value").is_none(),
+                "{method} {path} carries a value key: {text}"
+            );
+        }
+
+        let (status, json) = get_json(app, "POST", "/api/secrets/leaky/value", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["value"], CANARY);
+    }
+
+    #[tokio::test]
     async fn missing_secret_has_stable_error() {
         let app = crate::web::build_router(testutil::test_state());
         let (status, json) = get_json(app, "GET", "/api/secrets/missing", None).await;
