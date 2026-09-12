@@ -4361,3 +4361,59 @@ fn backend_rm_drops_that_backends_listing_cache() {
         "named backend local-a must keep its cache"
     );
 }
+
+/// A04-03: migrate writes into the destination vault under the backend
+/// KIND name (it builds backends by kind), so that is the cache identity it
+/// must invalidate. A pre-populated destination listing must not survive.
+#[test]
+fn migrate_drops_destination_listing_cache() {
+    let env = WorkspaceEnv::with_cache_enabled(300);
+    env.ok(&["set", "MIGRATE_ME", "--value", "v"]);
+    env.ok(&["vault", "create", "other"]);
+    env.ok(&["context", "use", "other", "--global"]);
+    env.ok(&["ls"]); // populate (empty) destination listing
+    env.ok(&["context", "use", "default", "--global"]);
+    env.ok(&["ls"]); // populate source listing
+    let dest = env.cache_entry("local", "other", "secrets-list-v5.json");
+    let src = env.cache_entry("local", "default", "secrets-list-v5.json");
+    assert!(dest.exists(), "precondition: destination listing cached");
+    assert!(src.exists());
+
+    let out = env.run(&["migrate", "--from", "local:default", "--to", "local:other"]);
+    assert!(
+        out.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(
+        !dest.exists(),
+        "destination listing must be dropped after migrate"
+    );
+    env.ok(&["context", "use", "other", "--global"]);
+    let after = env.ok(&["ls"]);
+    assert!(after.contains("MIGRATE_ME"), "{after}");
+    env.ok(&["context", "use", "default", "--global"]);
+}
+
+#[test]
+fn migrate_dry_run_leaves_cache_intact() {
+    let env = WorkspaceEnv::with_cache_enabled(300);
+    env.ok(&["set", "MIGRATE_ME", "--value", "v"]);
+    env.ok(&["vault", "create", "other"]);
+    env.ok(&["context", "use", "other", "--global"]);
+    env.ok(&["ls"]);
+    env.ok(&["context", "use", "default", "--global"]);
+    let dest = env.cache_entry("local", "other", "secrets-list-v5.json");
+    assert!(dest.exists());
+    env.ok(&[
+        "migrate",
+        "--from",
+        "local:default",
+        "--to",
+        "local:other",
+        "--dry-run",
+    ]);
+    assert!(dest.exists(), "dry run must not invalidate");
+}
