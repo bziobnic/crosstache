@@ -248,3 +248,20 @@ async fn conversion_apply_is_value_free() {
     assert_eq!(status, StatusCode::OK, "{applied}");
     assert_no_canary("POST /api/secrets/LEAKY/conversion", &applied);
 }
+
+// ═══ POSITIVE DIRECTION ═════════════════════════════════════════════════════
+
+/// Boundary: `POST /api/secrets/{name}/value` — the single web route that
+/// may return a plaintext, and the only caller of `Secret::disclose` in
+/// `src/web`.
+#[tokio::test]
+async fn boundary_web_reveal_returns_value() {
+    let state = seeded_state();
+    let (status, body) = raw(&state, "POST", "/api/secrets/LEAKY/value", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["value"], CANARY);
+    // The body is exactly `{"value": ..}` — no metadata rides along on a
+    // reveal response.
+    assert_eq!(json.as_object().map(|o| o.len()), Some(1));
+}

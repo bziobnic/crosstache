@@ -415,3 +415,136 @@ fn on_disk_store_never_contains_plaintext() {
         );
     }
 }
+
+// ═══ POSITIVE DIRECTION ═════════════════════════════════════════════════════
+//
+// One `boundary_*` test per sanctioned disclosure boundary. Together they are
+// the complete CLI list: `cargo test --test e2e_disclosure boundary_`
+// enumerates it, and everything above proves the complement stays silent. The
+// remaining boundaries live next to their code —
+// `web::disclosure_tests::boundary_web_reveal_returns_value` for
+// `POST /api/secrets/{name}/value`, and
+// `tui_view_tests::boundary_tui_reveal_renders_value` for the reveal
+// keystroke.
+
+/// Boundary: `xv get <name> --raw`.
+#[test]
+fn boundary_get_raw_prints_value() {
+    let env = DisclosureEnv::seeded();
+    let stdout = env.ok(&["get", "LEAKY", "--raw"]);
+    // Exactly the value: `--raw` is the scripting contract, so nothing —
+    // not a trailing newline, not a label — may ride along.
+    assert_eq!(stdout, CANARY);
+}
+
+/// Boundary: `xv get <name> --field <f> --raw` on a typed record.
+#[test]
+fn boundary_get_field_raw_prints_record_field() {
+    let env = DisclosureEnv::seeded();
+    let stdout = env.ok(&["get", "REC", "--field", "password", "--raw"]);
+    assert_eq!(stdout, RECORD_CANARY);
+}
+
+/// Boundary: `xv get <name> --record` — the sanctioned field-level
+/// exception, where the envelope's secret fields are serialized by name.
+#[test]
+fn boundary_get_record_prints_envelope_fields() {
+    let env = DisclosureEnv::seeded();
+    let stdout = env.ok(&["--format", "json", "get", "REC", "--record"]);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("record json");
+    assert_eq!(json["fields"]["password"], RECORD_CANARY);
+    assert_eq!(json["type"], "login");
+}
+
+/// Boundary: `xv vault export --include-values`, in each format that carries
+/// values (`keeper` is covered by `tests/e2e_record_types.rs`).
+#[test]
+fn boundary_vault_export_include_values_prints_value() {
+    let env = DisclosureEnv::seeded();
+    for format in ["json", "env", "txt"] {
+        let stdout = env.ok(&[
+            "vault",
+            "export",
+            "default",
+            "--fmt",
+            format,
+            "--include-values",
+        ]);
+        assert!(
+            stdout.contains(CANARY),
+            "`vault export --fmt {format} --include-values` dropped the value:\n{stdout}"
+        );
+        assert!(
+            stdout.contains(RECORD_CANARY),
+            "`vault export --fmt {format} --include-values` dropped the record value:\n{stdout}"
+        );
+    }
+}
+
+/// Boundary: `xv env pull` — the whole-vault plaintext export.
+#[test]
+fn boundary_env_pull_prints_value() {
+    let env = DisclosureEnv::seeded();
+    let stdout = env.ok(&["env", "pull", "--fmt", "json"]);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("pull json");
+    let leaky = json
+        .as_array()
+        .expect("pull emits an array")
+        .iter()
+        .find(|e| e["name"] == "LEAKY")
+        .expect("LEAKY in the pull output");
+    assert_eq!(leaky["value"], CANARY);
+    // ...and the dotenv rendering the default `--fmt plain` produces.
+    let dotenv = env.ok(&["env", "pull", "--fmt", "plain"]);
+    assert!(
+        dotenv.contains(CANARY),
+        "dotenv pull dropped the value:\n{dotenv}"
+    );
+}
+
+/// Boundary: `xv diff --show-values` for a secret whose value differs
+/// between the two vaults.
+#[test]
+fn boundary_diff_show_values_prints_value() {
+    let env = DisclosureEnv::seeded();
+    env.ok(&["vault", "create", "other"]);
+    env.ok(&["context", "use", "other", "--global"]);
+    env.ok(&["set", "LEAKY", "--value", "a-different-value"]);
+    env.ok(&["context", "use", "default", "--global"]);
+
+    // Without the flag, a differing value is reported but never shown.
+    let quiet = env.ok(&["diff", "default", "other"]);
+    assert!(quiet.contains("LEAKY"), "diff lost the secret:\n{quiet}");
+    assert_no_canary("`xv diff` without --show-values", &quiet);
+
+    let shown = env.ok(&["diff", "default", "other", "--show-values"]);
+    assert!(
+        shown.contains(CANARY),
+        "`diff --show-values` dropped the value:\n{shown}"
+    );
+    assert!(
+        shown.contains("a-different-value"),
+        "`diff --show-values` dropped the other side:\n{shown}"
+    );
+}
+
+/// Boundary: the scan orchestrator reads plaintext to match against files.
+/// It must really match (proving it holds the value) while never echoing
+/// the value into a finding — only the secret's NAME.
+#[test]
+fn boundary_scan_matches_the_value_without_printing_it() {
+    let env = DisclosureEnv::seeded();
+    let target = env.home.join("leaky");
+    std::fs::create_dir_all(&target).expect("create scan dir");
+    std::fs::write(target.join("app.conf"), format!("password = {CANARY}\n"))
+        .expect("write scan input");
+    let target = target.display().to_string();
+    let combined = env.output_of(&["--format", "json", "scan", &target]);
+    assert!(
+        combined.contains("\"secret_name\": \"LEAKY\""),
+        "scan failed to match the planted value:\n{combined}"
+    );
+    // The finding names the secret and the file/line; it never echoes what
+    // it matched with.
+    assert_no_canary("`xv scan` finding", &combined);
+}
