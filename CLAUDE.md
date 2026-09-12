@@ -219,7 +219,6 @@ Use `ROADMAP.md` as the authoritative backlog. Important current themes include:
 
 - remaining cloud attachment-transfer routes (Azure destinations, AWS/Azure moves)
 - scheduled-rotation target pinning
-- cache invalidation on vault removal (v5 filesystem hardening shipped)
 - provider compare-and-swap guarantees
 - AWS file sync/streaming parity
 - off-box local-audit durability

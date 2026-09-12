@@ -355,6 +355,32 @@ impl CacheManager {
         }
     }
 
+    /// Delete every cache entry under `<entry_root>/<backend>/` — all vaults
+    /// of one backend registry name. Used when a backend is removed from the
+    /// configuration (`xv backend rm`): every listing under it is
+    /// unreachable afterwards. Both `SecretsList` and `FileList` are
+    /// backend-nested in the v5 layout, so this cannot touch another
+    /// backend's entries. The vault list lives at the entry root and is not
+    /// touched here; callers drop it through the invalidation seam.
+    pub fn invalidate_backend(&self, backend: &str) {
+        if let Err(reason) = validate_cache_vault_name(backend) {
+            debug!("invalidate_backend({backend}): rejected — {reason}");
+            return;
+        }
+        let root = self.entry_root();
+        let backend_dir = root.join(backend);
+        if !backend_dir.starts_with(&root) || !backend_dir.is_dir() {
+            return;
+        }
+        match std::fs::remove_dir_all(&backend_dir) {
+            Ok(()) => debug!(
+                "invalidate_backend({backend}): removed {}",
+                backend_dir.display()
+            ),
+            Err(e) => debug!("invalidate_backend({backend}): {e}"),
+        }
+    }
+
     /// Clear cached data.
     ///
     /// * `vault = Some(name)` — clears only that vault's directory, scoped to
@@ -1335,5 +1361,58 @@ mod tests {
             unenforced.get::<Vec<String>>(&key).unwrap(),
             vec!["restricted/admin".to_string()]
         );
+    }
+
+    #[test]
+    fn test_invalidate_backend_removes_only_that_backend_directory() {
+        let dir = tempdir().unwrap();
+        let mgr = make_manager(dir.path(), true, 300);
+        let a_secrets = CacheKey::SecretsList {
+            backend: "local-a".into(),
+            vault_name: "default".into(),
+        };
+        let a_files = CacheKey::FileList {
+            backend: "local-a".into(),
+            vault_name: "default".into(),
+            recursive: true,
+        };
+        let b_secrets = CacheKey::SecretsList {
+            backend: "local-b".into(),
+            vault_name: "default".into(),
+        };
+        mgr.set(&a_secrets, &vec!["x".to_string()]);
+        mgr.set(&a_files, &vec!["f".to_string()]);
+        mgr.set(&b_secrets, &vec!["y".to_string()]);
+        mgr.set(&CacheKey::VaultList, &vec!["default".to_string()]);
+
+        mgr.invalidate_backend("local-a");
+
+        assert!(
+            !dir.path().join("local-a").exists(),
+            "backend dir must be gone"
+        );
+        assert!(mgr.get::<Vec<String>>(&a_secrets).is_none());
+        assert!(mgr.get::<Vec<String>>(&a_files).is_none());
+        assert_eq!(
+            mgr.get::<Vec<String>>(&b_secrets),
+            Some(vec!["y".to_string()])
+        );
+        // The vault list is the caller's job (the seam drops it), not this method's.
+        assert!(mgr.get::<Vec<String>>(&CacheKey::VaultList).is_some());
+    }
+
+    #[test]
+    fn test_invalidate_backend_rejects_traversal_and_missing() {
+        let dir = tempdir().unwrap();
+        let mgr = make_manager(dir.path(), true, 300);
+        let key = CacheKey::SecretsList {
+            backend: "local-a".into(),
+            vault_name: "default".into(),
+        };
+        mgr.set(&key, &vec!["x".to_string()]);
+        mgr.invalidate_backend("../local-a");
+        mgr.invalidate_backend("");
+        mgr.invalidate_backend("never-existed");
+        assert!(mgr.get::<Vec<String>>(&key).is_some());
     }
 }

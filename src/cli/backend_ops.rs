@@ -404,6 +404,12 @@ pub(crate) async fn execute_backend_rm(
         purge_local_store(resolved)?;
     }
 
+    // The config on disk no longer claims this backend; every listing cached
+    // under its registry name is unreachable now. Use the PRE-removal
+    // `config` so the identity fingerprint still resolves to the directory
+    // those entries were written under.
+    crate::cache::invalidation::on_backend_removed(&config, backend.as_str());
+
     if purge {
         output::success(&format!(
             "Removed backend '{backend}' and deleted its store and key"

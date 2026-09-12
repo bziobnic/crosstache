@@ -262,6 +262,25 @@ default_vault = "default"
         String::from_utf8_lossy(&out.stdout).to_string()
     }
 
+    /// The on-disk cache entry for `(backend, vault, file)` under this
+    /// environment's single identity fingerprint. Panics if the cache dir
+    /// holds anything other than exactly one fingerprint directory, which
+    /// would mean the test ran commands under two config identities.
+    fn cache_entry(&self, backend: &str, vault: &str, file: &str) -> PathBuf {
+        let mut dirs: Vec<PathBuf> = std::fs::read_dir(&self.cache_dir)
+            .expect("read cache dir")
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect();
+        assert_eq!(
+            dirs.len(),
+            1,
+            "expected one fingerprint dir, found {dirs:?}"
+        );
+        dirs.remove(0).join(backend).join(vault).join(file)
+    }
+
     fn err(&self, args: &[&str]) -> std::process::Output {
         let out = self.run(args);
         assert!(
@@ -4105,4 +4124,359 @@ fn mv_filter_targets_workspace_default_not_config_vault() {
     ]);
     let rendered = std::fs::read_to_string(&out_path).expect("read output");
     assert!(rendered.contains("config-vault-value"), "{rendered}");
+}
+
+// ---------------------------------------------------------------------------
+// Task 2: vault delete/purge cache invalidation
+// ---------------------------------------------------------------------------
+//
+// NOTE: `--vault` is not a flag on `ls`/`set`/`file list` (only a handful of
+// commands like `rotate`/`gen --save`/`run` carry it). Scoping an unqualified
+// command at a NON-default vault with no workspace attached goes through
+// `xv context use <vault> --global`, which persists the target vault to the
+// shared global context file (`ContextManager::current_vault()` — see
+// `Config::resolve_vault_name`) and is picked up by every subsequent
+// unqualified command regardless of which named backend is active. Likewise
+// `xv vault list` never populates the on-disk cache for the local backend (no
+// `CacheManager` call on that trait-path arm) — the vault list is only ever
+// written by the internal `xv cache refresh --key vaults` path (used for
+// stale-while-revalidate background refresh), so that is what these tests use
+// to seed `vaults-list.json`.
+
+/// A04-01/02: deleting a vault on a named backend drops that vault's cached
+/// secret and file listings (both recursive variants) and the vault list,
+/// while a same-named vault on the other backend keeps its cache.
+#[test]
+fn vault_delete_drops_only_that_backends_vault_cache() {
+    let env = WorkspaceEnv::with_cache_enabled(300);
+    env.ok_with_backend("local-a", &["vault", "create", "victim"]);
+    env.ok_with_backend("local-b", &["vault", "create", "victim"]);
+    env.ok_with_backend("local-a", &["set", "KEEP_A", "--value", "va"]); // in default, stays
+
+    // Populate secret, file (both variants), and vault-list caches.
+    env.ok_with_backend("local-a", &["context", "use", "victim", "--global"]);
+    env.ok_with_backend("local-a", &["ls"]);
+    env.ok_with_backend("local-a", &["file", "list"]);
+    env.ok_with_backend("local-a", &["file", "list", "--recursive"]);
+    env.ok_with_backend("local-a", &["context", "use", "default", "--global"]);
+    env.ok_with_backend("local-a", &["ls"]);
+    env.ok_with_backend("local-a", &["cache", "refresh", "--key", "vaults"]);
+    env.ok_with_backend("local-b", &["context", "use", "victim", "--global"]);
+    env.ok_with_backend("local-b", &["ls"]);
+    env.ok_with_backend("local-b", &["file", "list"]);
+
+    let a_secrets = env.cache_entry("local-a", "victim", "secrets-list-v5.json");
+    let a_files = env.cache_entry("local-a", "victim", "files-list-v5.json");
+    let a_files_rec = env.cache_entry("local-a", "victim", "files-list-recursive-v5.json");
+    let a_default = env.cache_entry("local-a", "default", "secrets-list-v5.json");
+    let b_secrets = env.cache_entry("local-b", "victim", "secrets-list-v5.json");
+    let b_files = env.cache_entry("local-b", "victim", "files-list-v5.json");
+    let vault_list = a_secrets
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("vaults-list.json");
+    for p in [
+        &a_secrets,
+        &a_files,
+        &a_files_rec,
+        &a_default,
+        &b_secrets,
+        &b_files,
+        &vault_list,
+    ] {
+        assert!(p.exists(), "precondition: {} must be cached", p.display());
+    }
+
+    env.ok_with_backend("local-a", &["vault", "delete", "victim", "--force"]);
+
+    assert!(
+        !a_secrets.exists(),
+        "deleted vault's secret listing must be dropped"
+    );
+    assert!(
+        !a_files.exists(),
+        "deleted vault's file listing must be dropped"
+    );
+    assert!(
+        !a_files_rec.exists(),
+        "deleted vault's recursive file listing must be dropped"
+    );
+    assert!(!vault_list.exists(), "vault list must be dropped");
+    assert!(
+        a_default.exists(),
+        "another vault on the same backend must keep its cache"
+    );
+    assert!(
+        b_secrets.exists(),
+        "same-named vault on local-b must keep its cache"
+    );
+    assert!(
+        b_files.exists(),
+        "same-named vault on local-b must keep its file cache"
+    );
+
+    // Functional check beyond the on-disk cache file: the local backend's
+    // `list_secrets` treats a missing vault directory as an empty listing
+    // rather than an error, so a post-delete `ls` on "victim" cannot be
+    // distinguished from a stale cache hit by success/failure alone (both
+    // return an empty list). The vault list, however, is a real signal:
+    // "victim" must no longer be reported for local-a while local-b (never
+    // touched) still reports it.
+    // Context is still "victim" from the setup above; `ls` must still
+    // succeed (empty, freshly fetched — not an error) now that the cache
+    // entry is gone.
+    let out = env.ok_with_backend("local-a", &["ls"]);
+    assert_eq!(
+        out.trim(),
+        "[]",
+        "deleted vault must list empty, not error: {out}"
+    );
+    let list_a = env.ok_with_backend("local-a", &["vault", "list", "--names-only"]);
+    assert!(
+        !list_a.lines().any(|l| l == "victim"),
+        "local-a must no longer report the deleted vault: {list_a}"
+    );
+    let list_b = env.ok_with_backend("local-b", &["vault", "list", "--names-only"]);
+    assert!(
+        list_b.lines().any(|l| l == "victim"),
+        "local-b's untouched vault must still be reported: {list_b}"
+    );
+    let b = env.ok_with_backend("local-b", &["ls"]);
+    let _ = b; // local-b's victim still lists (empty) without error
+}
+
+/// A failed removal (unknown vault) must leave every cache entry alone.
+#[test]
+fn vault_delete_failure_leaves_cache_intact() {
+    let env = WorkspaceEnv::with_cache_enabled(300);
+    env.ok_with_backend("local-a", &["vault", "create", "victim"]);
+    env.ok_with_backend("local-a", &["context", "use", "victim", "--global"]);
+    env.ok_with_backend("local-a", &["ls"]);
+    let a_secrets = env.cache_entry("local-a", "victim", "secrets-list-v5.json");
+    assert!(a_secrets.exists());
+
+    let out = env.run_with_backend("local-a", &["vault", "delete", "no-such-vault", "--force"]);
+    assert!(!out.status.success());
+    assert!(a_secrets.exists(), "failed delete must not invalidate");
+
+    // A refused delete (vault still holds a secret) must not invalidate either.
+    env.ok_with_backend("local-a", &["set", "IN_VICTIM", "--value", "v"]);
+    env.ok_with_backend("local-a", &["ls"]);
+    assert!(a_secrets.exists());
+    let out = env.run_with_backend("local-a", &["vault", "delete", "victim", "--force"]);
+    assert!(
+        !out.status.success(),
+        "local refuses to delete a non-empty vault"
+    );
+    assert!(a_secrets.exists(), "refused delete must not invalidate");
+}
+
+/// Non-TTY delete without --force refuses before touching the backend and
+/// must not invalidate either.
+#[test]
+fn vault_delete_unconfirmed_leaves_cache_intact() {
+    let env = WorkspaceEnv::with_cache_enabled(300);
+    env.ok_with_backend("local-a", &["vault", "create", "victim"]);
+    env.ok_with_backend("local-a", &["context", "use", "victim", "--global"]);
+    env.ok_with_backend("local-a", &["ls"]);
+    let a_secrets = env.cache_entry("local-a", "victim", "secrets-list-v5.json");
+
+    let out = env.run_with_backend("local-a", &["vault", "delete", "victim"]);
+    assert!(
+        !out.status.success(),
+        "non-interactive delete must refuse without --force"
+    );
+    assert!(a_secrets.exists(), "refused delete must not invalidate");
+    env.ok_with_backend("local-a", &["ls"]);
+}
+
+/// Repeated cleanup: a second delete of the same vault is a clean error and
+/// the cache stays empty for it.
+#[test]
+fn vault_delete_twice_is_clean() {
+    let env = WorkspaceEnv::with_cache_enabled(300);
+    env.ok_with_backend("local-a", &["vault", "create", "victim"]);
+    env.ok_with_backend("local-a", &["context", "use", "victim", "--global"]);
+    env.ok_with_backend("local-a", &["ls"]);
+    let a_secrets = env.cache_entry("local-a", "victim", "secrets-list-v5.json");
+
+    env.ok_with_backend("local-a", &["vault", "delete", "victim", "--force"]);
+    assert!(!a_secrets.exists());
+    let out = env.run_with_backend("local-a", &["vault", "delete", "victim", "--force"]);
+    assert!(
+        !out.status.success(),
+        "second delete of a removed vault must fail"
+    );
+    assert!(!a_secrets.exists());
+}
+
+/// A04-01: removing a backend from the config drops every listing cached
+/// under its registry name and the vault list, leaving named backends alone.
+#[test]
+fn backend_rm_drops_that_backends_listing_cache() {
+    let env = WorkspaceEnv::with_cache_enabled(300);
+    env.ok(&["set", "DEFAULT_SECRET", "--value", "v"]);
+    env.ok(&["ls"]);
+    env.ok(&["cache", "refresh", "--key", "vaults"]);
+    env.ok_with_backend("local-a", &["set", "A_SECRET", "--value", "va"]);
+    env.ok_with_backend("local-a", &["ls"]);
+
+    let local_secrets = env.cache_entry("local", "default", "secrets-list-v5.json");
+    let a_secrets = env.cache_entry("local-a", "default", "secrets-list-v5.json");
+    let vault_list = local_secrets
+        .parent()
+        .unwrap() // <fp>/local/default
+        .parent()
+        .unwrap() // <fp>/local
+        .parent()
+        .unwrap() // <fp>
+        .join("vaults-list.json");
+    assert!(local_secrets.exists());
+    assert!(a_secrets.exists());
+    assert!(vault_list.exists());
+
+    let out = env.run(&["backend", "rm", "local", "--yes"]);
+    assert!(
+        out.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(
+        !local_secrets.exists(),
+        "removed backend's listings must be dropped"
+    );
+    assert!(
+        !local_secrets.parent().unwrap().parent().unwrap().exists(),
+        "backend dir must be gone"
+    );
+    assert!(!vault_list.exists(), "vault list must be dropped");
+    assert!(
+        a_secrets.exists(),
+        "named backend local-a must keep its cache"
+    );
+}
+
+/// A04-03: migrate writes into the destination vault under the backend
+/// KIND name (it builds backends by kind), so that is the cache identity it
+/// must invalidate. A pre-populated destination listing must not survive.
+#[test]
+fn migrate_drops_destination_listing_cache() {
+    let env = WorkspaceEnv::with_cache_enabled(300);
+    env.ok(&["set", "MIGRATE_ME", "--value", "v"]);
+    env.ok(&["vault", "create", "other"]);
+    env.ok(&["context", "use", "other", "--global"]);
+    env.ok(&["ls"]); // populate (empty) destination listing
+    env.ok(&["context", "use", "default", "--global"]);
+    env.ok(&["ls"]); // populate source listing
+    let dest = env.cache_entry("local", "other", "secrets-list-v5.json");
+    let src = env.cache_entry("local", "default", "secrets-list-v5.json");
+    assert!(dest.exists(), "precondition: destination listing cached");
+    assert!(src.exists());
+
+    let out = env.run(&["migrate", "--from", "local:default", "--to", "local:other"]);
+    assert!(
+        out.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(
+        !dest.exists(),
+        "destination listing must be dropped after migrate"
+    );
+    env.ok(&["context", "use", "other", "--global"]);
+    let after = env.ok(&["ls"]);
+    assert!(after.contains("MIGRATE_ME"), "{after}");
+    env.ok(&["context", "use", "default", "--global"]);
+}
+
+#[test]
+fn migrate_dry_run_leaves_cache_intact() {
+    let env = WorkspaceEnv::with_cache_enabled(300);
+    env.ok(&["set", "MIGRATE_ME", "--value", "v"]);
+    env.ok(&["vault", "create", "other"]);
+    env.ok(&["context", "use", "other", "--global"]);
+    env.ok(&["ls"]);
+    env.ok(&["context", "use", "default", "--global"]);
+    let dest = env.cache_entry("local", "other", "secrets-list-v5.json");
+    assert!(dest.exists());
+    env.ok(&[
+        "migrate",
+        "--from",
+        "local:default",
+        "--to",
+        "local:other",
+        "--dry-run",
+    ]);
+    assert!(dest.exists(), "dry run must not invalidate");
+}
+
+/// A04-03: an applied transfer rewrites the destination (and, for a move,
+/// the source) so both listing caches must be dropped; a preview must not.
+#[test]
+fn transfer_apply_drops_endpoint_listing_caches_but_preview_does_not() {
+    let env = WorkspaceEnv::with_cache_enabled(300);
+    env.ok(&["set", "cert", "--value", "private-secret-value"]);
+    let proof = env.home.join("proof.txt");
+    std::fs::write(&proof, b"private-attachment-content").unwrap();
+    env.ok(&["attach", "cert", proof.to_str().unwrap()]);
+    env.ok(&["ls"]);
+    env.ok(&["file", "list"]);
+    let secrets = env.cache_entry("local", "default", "secrets-list-v5.json");
+    let files = env.cache_entry("local", "default", "files-list-v5.json");
+    assert!(secrets.exists() && files.exists());
+
+    let recovery = env.home.join("recovery");
+    let base = [
+        "transfer",
+        "cert",
+        "--from",
+        "default",
+        "--to",
+        "default",
+        "--new-name",
+        "renamed",
+        "--move",
+    ];
+    // Preview: no invalidation.
+    env.ok(&base);
+    assert!(
+        secrets.exists() && files.exists(),
+        "preview must not invalidate"
+    );
+
+    let out = env
+        .xv()
+        .args(base)
+        .args(["--apply", "--offline", "--recovery-dir"])
+        .arg(&recovery)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !secrets.exists(),
+        "applied transfer must drop the secret listing"
+    );
+    assert!(
+        !files.exists(),
+        "applied transfer must drop the file listing"
+    );
+
+    let after = env.ok(&["ls"]);
+    assert!(
+        after.contains("renamed") && !after.contains("cert"),
+        "{after}"
+    );
 }

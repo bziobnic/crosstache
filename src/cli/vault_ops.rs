@@ -177,6 +177,11 @@ pub(crate) async fn execute_vault_command(
                     return Ok(());
                 }
                 vaults_backend.delete_vault(&name, None).await?;
+                crate::cache::invalidation::on_vault_removed(
+                    &config,
+                    config.effective_backend_name(),
+                    &name,
+                );
                 output::success(&format!("Successfully deleted vault '{name}'"));
             }
             VaultCommands::Info { name, .. } => {
@@ -274,7 +279,11 @@ pub(crate) async fn execute_vault_command(
                 &config,
             )
             .await?;
-            crate::cache::invalidation::on_vault_mutation(&config);
+            crate::cache::invalidation::on_vault_removed(
+                &config,
+                config.effective_backend_name(),
+                &name,
+            );
         }
         VaultCommands::Info {
             name,
@@ -300,7 +309,11 @@ pub(crate) async fn execute_vault_command(
                 &config,
             )
             .await?;
-            crate::cache::invalidation::on_vault_mutation(&config);
+            crate::cache::invalidation::on_vault_removed(
+                &config,
+                config.effective_backend_name(),
+                &name,
+            );
         }
         VaultCommands::Export {
             name,

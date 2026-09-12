@@ -76,6 +76,9 @@ pub(crate) async fn execute(
             &config,
         )
         .await?;
+    let cache_source = (source_backend.clone(), source_vault.clone());
+    let cache_destination = (destination_backend.clone(), destination_vault.clone());
+    let is_move = options.move_source;
     let intent = TransferIntent {
         source: TransferEndpoint {
             identity: source_backend,
@@ -126,6 +129,14 @@ pub(crate) async fn execute(
             .await?
         };
         println!("{}", serde_json::to_string_pretty(&report)?);
+        let (dest_backend, dest_vault) = &cache_destination;
+        crate::cache::invalidation::on_secret_mutation(&config, dest_backend, dest_vault);
+        crate::cache::invalidation::on_file_mutation(&config, dest_backend, dest_vault);
+        if is_move {
+            let (src_backend, src_vault) = &cache_source;
+            crate::cache::invalidation::on_secret_mutation(&config, src_backend, src_vault);
+            crate::cache::invalidation::on_file_mutation(&config, src_backend, src_vault);
+        }
     } else {
         let preview = execution::preview(source.as_ref(), destination.as_ref(), intent).await?;
         println!("{}", serde_json::to_string_pretty(&preview)?);

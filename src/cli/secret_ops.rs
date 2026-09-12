@@ -5029,6 +5029,8 @@ pub(crate) async fn execute_secret_copy_direct(
         &from_vault_resolved,
     );
     crate::cache::invalidation::on_secret_mutation(&config, &to_backend_name, &to_vault_resolved);
+    crate::cache::invalidation::on_file_mutation(&config, &from_backend_name, &from_vault_resolved);
+    crate::cache::invalidation::on_file_mutation(&config, &to_backend_name, &to_vault_resolved);
 
     Ok(())
 }
@@ -5092,6 +5094,8 @@ pub(crate) async fn execute_secret_move_direct(
         &from_vault_resolved,
     );
     crate::cache::invalidation::on_secret_mutation(&config, &to_backend_name, &to_vault_resolved);
+    crate::cache::invalidation::on_file_mutation(&config, &from_backend_name, &from_vault_resolved);
+    crate::cache::invalidation::on_file_mutation(&config, &to_backend_name, &to_vault_resolved);
 
     Ok(())
 }
