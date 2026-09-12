@@ -94,11 +94,17 @@ live in `secret::domain`, separate from the Azure-era `secret::manager`
 implementation. Plaintext is wrapped in a dedicated `SecretValue` type with no
 serde impls, a redacted `Debug`, and read access only through
 `expose_secret()`; web metadata responses return a value-free `SecretMetadata`
-body. What remains: split the backend traits themselves into metadata-only vs.
-value-returning methods (retire the `include_value: bool` parameter in favor
-of separate calls), and introduce explicit disclosure DTOs for the handful of
-routes that legitimately return plaintext, with canary-test coverage proving
-every other route stays value-free.
+body. The backend traits have also shipped their split: `SecretBackend`/
+`SecretOperations` lost their single boolean disclosure flag in favor of
+separate metadata-only and value-returning getters (`get_secret_metadata`/
+`get_secret_version_metadata` return `SecretMetadata`; `get_secret`/
+`get_secret_version` return `Secret`; `get_secret_snapshot` takes
+`SnapshotValue::{Omit, Include}`), and the old combined value/metadata struct
+is gone. What remains (PR 3): introduce explicit disclosure DTOs
+(`DisclosedSecret`) for
+the handful of export routes that legitimately return plaintext, with a
+both-direction canary suite across CLI, web, cache, and errors proving every
+other route stays value-free.
 
 ## Product and platform work
 
