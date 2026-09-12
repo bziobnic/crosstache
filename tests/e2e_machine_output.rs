@@ -1454,3 +1454,66 @@ fn every_machine_mode_run_writes_exactly_one_document() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Empty-array CSV: a clean run must not print even a lone newline. These are
+// separate targeted tests, not part of `SCENARIOS` — the `expect_empty_csv`
+// matrix flag above covers only the two refusal cells, which are a different
+// case (refused before any row exists, not a genuinely empty result set).
+// ---------------------------------------------------------------------------
+
+/// `scan --format csv` on a clean working directory has no findings, so
+/// stdout must be completely empty (no header, no newline), exit 0.
+#[test]
+fn scan_clean_csv_is_completely_empty_stdout() {
+    let env = empty_env();
+
+    let out = env
+        .xv()
+        .args(["scan"])
+        .args(["--format", "csv"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        stdout.as_ref(),
+        "",
+        "stdout:\n{stdout:?}\nstderr:\n{stderr}"
+    );
+}
+
+/// `attachments --format csv` on a secret with no attached files renders an
+/// empty array, so stdout must be completely empty, exit 0.
+#[test]
+fn attachments_empty_csv_is_completely_empty_stdout() {
+    let env = empty_env();
+    env.ok(&["set", "cert", "--value", CANARY]);
+
+    let out = env
+        .xv()
+        .args(["attachments", "cert"])
+        .args(["--format", "csv"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        stdout.as_ref(),
+        "",
+        "stdout:\n{stdout:?}\nstderr:\n{stderr}"
+    );
+    assert!(!stderr.contains(CANARY), "stderr:\n{stderr}");
+}

@@ -154,8 +154,11 @@ report
 ```
 
 An `ItemReport` renders as `name,status,detail,error` rows, and a flat array of
-objects renders as the union of its keys; only those two shapes produce real
-columns.
+objects renders as the union of its keys, in a deterministic order (the widest
+object's own key order, with any keys it lacks appended sorted) so the header
+does not shift across runs depending on which row happens to come first; only
+those two shapes produce real columns. An empty array renders as completely
+empty stdout — no header, no newline — rather than a lone blank line.
 
 ### What machine mode does not change
 

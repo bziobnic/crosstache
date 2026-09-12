@@ -114,14 +114,7 @@ fn render_csv(report: &Value) -> String {
 
     if let Some(array) = report.as_array() {
         if !array.is_empty() && array.iter().all(|item| item.is_object()) {
-            let mut headers: Vec<String> = Vec::new();
-            for item in array {
-                for key in item.as_object().expect("checked above").keys() {
-                    if !headers.iter().any(|existing| existing == key) {
-                        headers.push(key.clone());
-                    }
-                }
-            }
+            let headers = csv_header_order(array);
             let rows: Vec<Vec<String>> = array
                 .iter()
                 .map(|item| {
@@ -140,6 +133,42 @@ fn render_csv(report: &Value) -> String {
 
     let json = serde_json::to_string(report).unwrap_or_default();
     write_csv(&["report".to_string()], &[vec![json]])
+}
+
+/// Deterministic header order for a flat array of objects: the key order of
+/// the object with the most keys (ties broken by first occurrence in the
+/// array), followed by any remaining keys not on that object, sorted.
+///
+/// This keeps the header stable across runs regardless of row order: a
+/// `Finding` array header is `file,line,col,secret_name,vault,kind,severity`
+/// whether or not the first finding happens to have `secret_name`/`vault`
+/// (both are `skip_serializing_if`-omitted when absent).
+fn csv_header_order(array: &[Value]) -> Vec<String> {
+    // `Iterator::max_by_key` returns the LAST maximum on ties, but the rule
+    // is "ties broken by first occurrence" — so track the widest by hand.
+    let mut widest: Option<&serde_json::Map<String, Value>> = None;
+    for obj in array.iter().filter_map(Value::as_object) {
+        if widest.is_none_or(|current| obj.len() > current.len()) {
+            widest = Some(obj);
+        }
+    }
+    let mut headers: Vec<String> = Vec::new();
+    if let Some(widest) = widest {
+        headers.extend(widest.keys().cloned());
+    }
+    let mut leftovers: Vec<String> = Vec::new();
+    for item in array {
+        if let Some(obj) = item.as_object() {
+            for key in obj.keys() {
+                if !headers.contains(key) && !leftovers.contains(key) {
+                    leftovers.push(key.clone());
+                }
+            }
+        }
+    }
+    leftovers.sort();
+    headers.extend(leftovers);
+    headers
 }
 
 /// Render one scalar cell. Nested values keep their JSON text so no data is
@@ -378,12 +407,49 @@ mod tests {
     }
 
     #[test]
+    fn render_success_csv_header_order_is_independent_of_row_order() {
+        let a = serde_json::json!({ "file": "f", "line": 1, "secret_name": "s", "vault": "v", "kind": "k", "severity": "high" });
+        let b = serde_json::json!({ "file": "f2", "line": 2, "kind": "k2", "severity": "low" });
+
+        let forward = serde_json::json!([a.clone(), b.clone()]);
+        let reversed = serde_json::json!([b, a]);
+
+        let forward_csv = render_success(OutputFormat::Csv, &forward);
+        let reversed_csv = render_success(OutputFormat::Csv, &reversed);
+
+        let forward_header = forward_csv.lines().next().unwrap();
+        let reversed_header = reversed_csv.lines().next().unwrap();
+        assert_eq!(forward_header, reversed_header);
+        assert_eq!(forward_header, "file,line,secret_name,vault,kind,severity");
+    }
+
+    #[test]
+    fn render_success_csv_header_follows_widest_object_key_order() {
+        let value = serde_json::json!([
+            { "name": "a", "count": 1 },
+            { "name": "b", "count": 2, "extra": true, "note": "x" },
+        ]);
+        let csv = render_success(OutputFormat::Csv, &value);
+        let header = csv.lines().next().unwrap();
+        // Second object is widest (4 keys); its own key order is kept as-is,
+        // with no leftovers from the narrower first object.
+        assert_eq!(header, "name,count,extra,note");
+    }
+
+    #[test]
     fn render_success_csv_falls_back_to_one_report_column() {
         let value = serde_json::json!({ "due": 2 });
         let csv = render_success(OutputFormat::Csv, &value);
         let lines: Vec<&str> = csv.lines().collect();
         assert_eq!(lines[0], "report");
         assert_eq!(lines[1], "\"{\"\"due\"\":2}\"");
+    }
+
+    #[test]
+    fn render_success_csv_empty_array_is_empty_string() {
+        let value = serde_json::json!([]);
+        let csv = render_success(OutputFormat::Csv, &value);
+        assert_eq!(csv, "");
     }
 
     #[test]

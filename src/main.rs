@@ -79,10 +79,13 @@ async fn main() {
     // printing it, so `main` owns the emission. Nothing is pending outside
     // machine mode, which leaves every other command's stdout untouched.
     if let Some(report) = crate::utils::machine::take_pending() {
-        println!(
-            "{}",
-            crate::utils::machine::render_success(format.resolve_for_stdout(), &report)
-        );
+        let rendered = crate::utils::machine::render_success(format.resolve_for_stdout(), &report);
+        // An empty array (e.g. a clean `scan --format csv`) renders to an
+        // empty string; printing it would still emit a lone newline, so skip
+        // entirely rather than `println!` nothing.
+        if !rendered.is_empty() {
+            println!("{rendered}");
+        }
     }
 }
 
@@ -513,10 +516,10 @@ fn print_user_friendly_error(error: &CrosstacheError, format: crate::utils::form
     // rows the command produced (if any) and report the error on stderr below.
     if matches!(format, OutputFormat::Csv) {
         if let Some(report) = crate::utils::machine::take_pending() {
-            println!(
-                "{}",
-                crate::utils::machine::render_success(OutputFormat::Csv, &report)
-            );
+            let rendered = crate::utils::machine::render_success(OutputFormat::Csv, &report);
+            if !rendered.is_empty() {
+                println!("{rendered}");
+            }
         }
     }
 

@@ -536,9 +536,13 @@ are sanitized and length-bounded. In CSV the item rows render as
 
 CSV is rows-only, so only two shapes produce real columns: an `ItemReport`
 (`name,status,detail,error`) and a flat array of objects (the union of its
-keys). Anything else — a single object such as `version`, `copy`, `move`, or
-the `file sync` summary — degrades to a single-column fallback: a `report`
-header and one cell holding the document's JSON text.
+keys, ordered by the widest object's own key order with any leftover keys
+appended sorted, so the header stays the same regardless of row order).
+Anything else — a single object such as `version`, `copy`, `move`, or the
+`file sync` summary — degrades to a single-column fallback: a `report` header
+and one cell holding the document's JSON text. An empty array (e.g. a clean
+`scan --format csv`) renders as completely empty stdout — no header row, no
+newline.
 
 Dry runs emit a plan document instead of a result: `migrate --dry-run`
 (`source`, `target`, `dry_run`, `on_conflict`, `to_migrate`, `to_skip`,
