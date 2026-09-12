@@ -64,7 +64,6 @@ pub fn on_vault_mutation(config: &Config) {
 /// name so a same-named vault on another backend keeps its cache. Callers
 /// invoke this only after the backend reported success; an aborted
 /// confirmation or a failed delete must leave the cache untouched.
-#[allow(dead_code)] // wired in vault_ops/backend_ops
 pub fn on_vault_removed(config: &Config, backend: &str, vault: &str) {
     let manager = CacheManager::from_config(config);
     remove_vault_entries(&manager, backend, vault);
