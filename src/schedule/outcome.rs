@@ -844,6 +844,26 @@ mod tests {
 
     // -- run.lock -----------------------------------------------------------
 
+    /// `flock` locks belong to the open file description, not the process, so
+    /// a `fork` on a sibling thread between `drop(first)` and the re-acquire
+    /// below can leave a child holding the fd (inherited until it `exec`s)
+    /// just long enough to make an immediate re-acquire see it as held. The
+    /// test binary runs hundreds of tests concurrently, some of which spawn
+    /// child processes, so poll briefly instead of assuming the lock is free
+    /// on the very next instruction.
+    fn acquire_when_released(paths: &ScheduleStatePaths) -> RunGuard {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            match RunGuard::try_acquire(paths).expect("reacquire") {
+                Some(guard) => return guard,
+                None if std::time::Instant::now() >= deadline => {
+                    panic!("the lock must be free once the guard drops");
+                }
+                None => std::thread::sleep(std::time::Duration::from_millis(10)),
+            }
+        }
+    }
+
     #[test]
     fn the_run_lock_excludes_a_second_holder_and_is_released_on_drop() {
         let dir = tempdir();
@@ -859,10 +879,7 @@ mod tests {
         assert_eq!(RunGuard::probe_existing(&paths).expect("probe"), Some(true));
 
         drop(first);
-        assert!(
-            RunGuard::try_acquire(&paths).expect("reacquire").is_some(),
-            "the lock must be free once the guard drops"
-        );
+        acquire_when_released(&paths);
         assert_eq!(
             RunGuard::probe_existing(&paths).expect("probe"),
             Some(false)
