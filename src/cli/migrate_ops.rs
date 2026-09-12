@@ -10,6 +10,7 @@ use crate::error::{CrosstacheError, Result};
 use crate::secret::domain::SecretMetadata;
 use crate::secret::domain::SecretRequest;
 use crate::secret::domain::SecretValue;
+use crate::utils::machine::{self, ItemReport};
 use crate::utils::output;
 use futures::stream::{self, StreamExt};
 use std::sync::Arc;
@@ -111,28 +112,91 @@ async fn compute_diff(
     })
 }
 
-fn print_diff_summary(
-    diff: &MigrationDiff,
-    source_name: &str,
-    target_name: &str,
-    source_vault: &str,
-    target_vault: &str,
-    on_conflict: &crate::cli::commands::OnConflict,
+/// The migration plan: what the run intends to do, names only, never values.
+///
+/// In human mode it is narrated to stderr by [`narrate_plan`]. In machine mode
+/// the narration is suppressed and the plan itself is the single stdout
+/// document of a `--dry-run`.
+#[derive(Debug, serde::Serialize)]
+struct MigratePlan {
+    /// `backend:vault` of the source endpoint.
+    source: String,
+    /// `backend:vault` of the target endpoint.
+    target: String,
+    /// Secrets that will be written to the target.
+    to_migrate: Vec<String>,
+    /// Secrets the conflict policy leaves untouched.
+    to_skip: Vec<String>,
+    /// Secrets whose name already exists in the target.
+    conflicts: Vec<String>,
+    /// The `--on-conflict` policy in effect.
+    on_conflict: String,
     dry_run: bool,
+    /// Attachment-transfer previews produced by the dry-run preflight.
+    attachment_previews: Vec<serde_json::Value>,
+}
+
+impl MigratePlan {
+    fn new(
+        diff: &MigrationDiff,
+        source_name: &str,
+        target_name: &str,
+        source_vault: &str,
+        target_vault: &str,
+        on_conflict: &crate::cli::commands::OnConflict,
+        dry_run: bool,
+    ) -> Self {
+        use crate::cli::commands::OnConflict;
+        let names = |items: &[MigrationName]| -> Vec<String> {
+            items.iter().map(|n| n.source.clone()).collect()
+        };
+        let mut to_migrate = names(&diff.to_migrate);
+        let mut to_skip = Vec::new();
+        match on_conflict {
+            // Conflicts are overwritten, so they join the work list.
+            OnConflict::Replace => to_migrate.extend(names(&diff.conflicts)),
+            // Conflicts are left alone. (`Fail` never reaches the run, but its
+            // plan still describes what the policy would leave untouched.)
+            OnConflict::Skip | OnConflict::Fail => to_skip = names(&diff.conflicts),
+        }
+        Self {
+            source: format!("{source_name}:{source_vault}"),
+            target: format!("{target_name}:{target_vault}"),
+            to_migrate,
+            to_skip,
+            conflicts: names(&diff.conflicts),
+            on_conflict: format!("{on_conflict:?}").to_lowercase(),
+            dry_run,
+            attachment_previews: Vec::new(),
+        }
+    }
+}
+
+/// Narrate the plan to stderr, word for word as it was printed before.
+///
+/// The counts come from `diff`, not from the plan: the banner has always shown
+/// the non-conflicting work and the conflicts as two separate numbers, while
+/// `MigratePlan::to_migrate` folds replaced conflicts into the work list.
+fn narrate_plan(
+    plan: &MigratePlan,
+    diff: &MigrationDiff,
+    on_conflict: &crate::cli::commands::OnConflict,
 ) {
-    println!();
-    println!("Source: {}:{}", source_name, source_vault);
-    println!("Target: {}:{}", target_name, target_vault);
-    println!();
-    println!("  to migrate:    {} secret(s)", diff.to_migrate.len());
-    println!(
+    output::info(&format!("Source: {}", plan.source));
+    output::info(&format!("Target: {}", plan.target));
+    output::info(&format!(
+        "  to migrate:    {} secret(s)",
+        diff.to_migrate.len()
+    ));
+    output::info(&format!(
         "  conflict:      {} secret(s) (target already has same name)",
-        diff.conflicts.len()
-    );
-    println!();
-    println!("On conflict: {:?}", on_conflict);
-    println!("Dry run? {}", if dry_run { "yes" } else { "no" });
-    println!();
+        plan.conflicts.len()
+    ));
+    output::info(&format!("On conflict: {:?}", on_conflict));
+    output::info(&format!(
+        "Dry run? {}",
+        if plan.dry_run { "yes" } else { "no" }
+    ));
 }
 
 fn build_request_from_props(
@@ -419,7 +483,8 @@ pub(crate) async fn execute_migrate(
         target_missing,
     )
     .await?;
-    print_diff_summary(
+    let machine_mode = machine::is_machine_mode(&config);
+    let mut plan = MigratePlan::new(
         &diff,
         source.name(),
         target.name(),
@@ -428,6 +493,9 @@ pub(crate) async fn execute_migrate(
         &on_conflict,
         dry_run,
     );
+    if !machine_mode {
+        narrate_plan(&plan, &diff, &on_conflict);
+    }
 
     if !diff.conflicts.is_empty() && on_conflict == crate::cli::commands::OnConflict::Fail {
         return Err(CrosstacheError::conflict(format!(
@@ -440,7 +508,9 @@ pub(crate) async fn execute_migrate(
         selected.extend(diff.conflicts.clone());
     }
     let mut names_to_process = Vec::new();
-    let mut preflight_skipped = 0usize;
+    // (name, reason) for every secret the preflight drops: the reasons feed
+    // the machine report's `detail`, the length the human summary's count.
+    let mut preflight_skipped: Vec<(String, &'static str)> = Vec::new();
     let mut destination_names: Vec<String> = Vec::new();
     #[cfg(feature = "file-ops")]
     let mut attached_intents = Vec::new();
@@ -452,8 +522,10 @@ pub(crate) async fn execute_migrate(
         if crate::secret::attachment_key::is_strict_retained_record_name(&name)
             && crate::secret::attachment_key::is_marked_key_record(&props.content_type)
         {
-            output::warn(&format!("skipping '{name}': attachment key custody record"));
-            preflight_skipped += 1;
+            if !machine_mode {
+                output::warn(&format!("skipping '{name}': attachment key custody record"));
+            }
+            preflight_skipped.push((name, "attachment key custody record"));
             continue;
         }
         let request = build_request_from_props(&props, source.name(), &source_vault);
@@ -479,10 +551,12 @@ pub(crate) async fn execute_migrate(
         if destination_name == crate::secret::attachments::ATTACHMENT_KEY_SECRET
             && existing.is_some()
         {
-            output::warn(&format!(
-                "skipping '{name}': preserving target attachment key"
-            ));
-            preflight_skipped += 1;
+            if !machine_mode {
+                output::warn(&format!(
+                    "skipping '{name}': preserving target attachment key"
+                ));
+            }
+            preflight_skipped.push((name, "preserving target attachment key"));
             continue;
         }
         if !force_replace
@@ -496,7 +570,7 @@ pub(crate) async fn execute_migrate(
                     ))
             })
         {
-            preflight_skipped += 1;
+            preflight_skipped.push((name, "already migrated (same source version)"));
             continue;
         }
         for previous in &destination_names {
@@ -587,11 +661,21 @@ pub(crate) async fn execute_migrate(
         .await?;
         if dry_run {
             for preview in previews {
-                println!("{}", serde_json::to_string_pretty(&preview)?);
+                if machine_mode {
+                    // One document per preview would break the contract; they
+                    // ride along inside the plan instead.
+                    plan.attachment_previews
+                        .push(serde_json::to_value(&preview)?);
+                } else {
+                    println!("{}", serde_json::to_string_pretty(&preview)?);
+                }
             }
         }
     }
     if dry_run {
+        // The plan is the dry run's single machine document; a no-op in human
+        // mode, where the banner already narrated it.
+        machine::report(&config, &plan);
         return Ok(());
     }
 
@@ -647,8 +731,15 @@ pub(crate) async fn execute_migrate(
     let attached_count = attached_intents.len();
     #[cfg(not(feature = "file-ops"))]
     let attached_count = 0;
+    // Attachment-carrying secrets are transferred by the engine rather than by
+    // `migrate_one`, so their names are collected here for the item report.
+    #[cfg(feature = "file-ops")]
+    let mut attached_names: Vec<String> = Vec::new();
+    #[cfg(not(feature = "file-ops"))]
+    let attached_names: Vec<String> = Vec::new();
     #[cfg(feature = "file-ops")]
     for intent in attached_intents {
+        let name = intent.source_name.clone();
         if let Err(e) = crate::cli::transfer_support::run_attached(
             source.as_ref(),
             target.as_ref(),
@@ -661,6 +752,7 @@ pub(crate) async fn execute_migrate(
             invalidate_destination();
             return Err(e);
         }
+        attached_names.push(name);
     }
 
     // 6. Migrate secrets concurrently with backoff retry
@@ -697,43 +789,68 @@ pub(crate) async fn execute_migrate(
     .await;
 
     let mut migrated = attached_count;
-    let mut skipped = preflight_skipped;
-    let mut errors: Vec<(String, String)> = Vec::new();
+    let mut skipped = preflight_skipped.len();
+    let mut errors = 0usize;
+
+    // Every item the run touched, recorded once: the human sees the same
+    // `[ok]`/`[skip]`/`[error]` lines (on stderr), the machine consumer gets
+    // this as the run's single stdout document.
+    let mut item_report = ItemReport::new();
+    for (name, reason) in preflight_skipped {
+        item_report.skipped(&name, Some(reason));
+    }
+    for name in attached_names {
+        item_report.ok(&name, Some("attachment transfer"));
+    }
 
     for r in results {
         match r {
             Ok(MigrateOutcome::Migrated(name)) => {
-                println!("  [ok] {}", name);
+                if !machine_mode {
+                    output::success(&format!("  [ok] {}", name));
+                }
+                item_report.ok(&name, None);
                 migrated += 1;
             }
             Ok(MigrateOutcome::Skipped(name)) => {
-                println!("  [skip] {} — already migrated (same source version)", name);
+                if !machine_mode {
+                    output::info(&format!(
+                        "  [skip] {} — already migrated (same source version)",
+                        name
+                    ));
+                }
+                item_report.skipped(&name, Some("already migrated (same source version)"));
                 skipped += 1;
             }
             Err((name, msg)) => {
-                println!("  [error] {} — {}", name, msg);
-                errors.push((name, msg));
+                if !machine_mode {
+                    output::warn(&format!("  [error] {} — {}", name, msg));
+                }
+                item_report.failed(&name, &msg);
+                errors += 1;
             }
         }
     }
 
-    // 7. Print summary
-    println!();
+    // 7. Summary
     if migrated > 0 {
         invalidate_destination();
     }
-    if !errors.is_empty() {
-        output::warn(&format!(
-            "Migrated {} secret(s), {} skipped, {} error(s)",
-            migrated,
-            skipped,
-            errors.len()
-        ));
+    // Parked before the failure split so the partial-failure `Err` carries the
+    // per-item detail under the envelope's `report` key.
+    machine::report(&config, &item_report);
+    if item_report.has_failures() {
+        if !machine_mode {
+            output::warn(&format!(
+                "Migrated {} secret(s), {} skipped, {} error(s)",
+                migrated, skipped, errors
+            ));
+        }
         return Err(CrosstacheError::Unknown(format!(
             "Migration failed for {} secret(s)",
-            errors.len()
+            errors
         )));
-    } else {
+    } else if !machine_mode {
         output::success(&format!(
             "Migrated {} secret(s) ({} skipped)",
             migrated, skipped

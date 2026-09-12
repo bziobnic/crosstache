@@ -184,16 +184,12 @@ fn sanitize_diagnostic(input: &str) -> String {
 
 /// Per-item outcome of a batch command (migrate, bulk `set`, `mv`, imports,
 /// file batches, `rotate --due`). Names only, never values.
-// Callers land in Task 2+.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ItemReport {
     pub summary: ItemSummary,
     pub items: Vec<ItemOutcome>,
 }
 
-// Callers land in Task 2+.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
 pub struct ItemSummary {
     pub total: usize,
@@ -202,8 +198,6 @@ pub struct ItemSummary {
     pub failed: usize,
 }
 
-// Callers land in Task 2+.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ItemOutcome {
     pub name: String,
@@ -214,8 +208,6 @@ pub struct ItemOutcome {
     pub error: Option<String>,
 }
 
-// Callers land in Task 2+.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum ItemStatus {
@@ -224,8 +216,6 @@ pub enum ItemStatus {
     Failed,
 }
 
-// Callers land in Task 2+.
-#[allow(dead_code)]
 impl ItemReport {
     pub fn new() -> Self {
         Self {
