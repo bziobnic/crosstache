@@ -78,6 +78,25 @@ pub trait SecretBackend: Send + Sync {
     ) -> Result<SecretMetadata, BackendError>;
 
     /// Get a secret by name, including the plaintext value.
+    ///
+    /// The pre-split signature took a third `include_value: bool` argument, so
+    /// a caller chose disclosure with a literal at the call site. That boolean
+    /// is gone: disclosure is now the choice of *which method* to call, and the
+    /// old three-argument form no longer type-checks.
+    ///
+    /// ```compile_fail,E0061
+    /// fn value_read(backend: &dyn crosstache::backend::SecretBackend) {
+    ///     let _ = backend.get_secret("vault", "name", true);
+    /// }
+    /// ```
+    ///
+    /// The two-argument form is the only one that compiles:
+    ///
+    /// ```
+    /// fn value_read(backend: &dyn crosstache::backend::SecretBackend) {
+    ///     let _ = backend.get_secret("vault", "name");
+    /// }
+    /// ```
     async fn get_secret(&self, vault: &str, name: &str) -> Result<Secret, BackendError>;
 
     /// Get a specific version's metadata. The provider value is not fetched.
@@ -692,5 +711,180 @@ mod tests {
         assert_eq!(t.get("custom").map(String::as_str), Some("kept"));
         assert!(!t.contains_key("original_name") && !t.contains_key("created_by"));
         assert!(!t.contains_key("groups") && !t.contains_key("note") && !t.contains_key("folder"));
+    }
+
+    /// A backend that *cannot* produce a value: its only storage is a
+    /// `SecretMetadata` map, so no `SecretValue` is reachable from any field.
+    /// The metadata half of the split trait must be fully implementable from
+    /// that — which is the type-level statement that `get_secret_metadata`
+    /// never needs to touch a value.
+    ///
+    /// `set_secret` receives a `SecretRequest` (which carries the value the
+    /// caller is writing), derives metadata, and drops the request — nothing
+    /// value-bearing survives the call.
+    struct MetadataOnlyBackend {
+        metadata: Mutex<HashMap<String, SecretMetadata>>,
+    }
+
+    #[async_trait]
+    impl SecretBackend for MetadataOnlyBackend {
+        async fn set_secret(
+            &self,
+            _vault: &str,
+            request: SecretRequest,
+        ) -> Result<SecretMetadata, BackendError> {
+            // The value never leaves this statement: only metadata is stored.
+            let metadata = metadata_from_request(&request);
+            drop(request);
+            self.metadata
+                .lock()
+                .unwrap()
+                .insert(metadata.name.clone(), metadata.clone());
+            Ok(metadata)
+        }
+
+        async fn get_secret_metadata(
+            &self,
+            _vault: &str,
+            name: &str,
+        ) -> Result<SecretMetadata, BackendError> {
+            self.metadata
+                .lock()
+                .unwrap()
+                .get(name)
+                .cloned()
+                .ok_or_else(|| BackendError::NotFound {
+                    name: name.to_string(),
+                    suggestion: None,
+                })
+        }
+
+        async fn get_secret(&self, _vault: &str, _name: &str) -> Result<Secret, BackendError> {
+            // There is no value to return; this backend has none to hold.
+            Err(BackendError::Unsupported("value disclosure".into()))
+        }
+
+        async fn get_secret_version_metadata(
+            &self,
+            _vault: &str,
+            name: &str,
+            version: &str,
+        ) -> Result<SecretMetadata, BackendError> {
+            let metadata = self
+                .metadata
+                .lock()
+                .unwrap()
+                .get(name)
+                .cloned()
+                .ok_or_else(|| BackendError::NotFound {
+                    name: name.to_string(),
+                    suggestion: None,
+                })?;
+            if metadata.version == version {
+                Ok(metadata)
+            } else {
+                Err(BackendError::NotFound {
+                    name: format!("{name}@{version}"),
+                    suggestion: None,
+                })
+            }
+        }
+
+        async fn get_secret_version(
+            &self,
+            _vault: &str,
+            _name: &str,
+            _version: &str,
+        ) -> Result<Secret, BackendError> {
+            Err(BackendError::Unsupported("value disclosure".into()))
+        }
+
+        async fn list_secrets(
+            &self,
+            _vault: &str,
+            _group_filter: Option<&str>,
+        ) -> Result<Vec<SecretSummary>, BackendError> {
+            Ok(vec![])
+        }
+
+        async fn delete_secret(&self, _vault: &str, name: &str) -> Result<(), BackendError> {
+            self.metadata
+                .lock()
+                .unwrap()
+                .remove(name)
+                .map(|_| ())
+                .ok_or_else(|| BackendError::NotFound {
+                    name: name.to_string(),
+                    suggestion: None,
+                })
+        }
+
+        async fn update_secret(
+            &self,
+            _vault: &str,
+            _name: &str,
+            _request: SecretUpdateRequest,
+        ) -> Result<SecretMetadata, BackendError> {
+            Err(BackendError::Unsupported("update".into()))
+        }
+    }
+
+    /// Pins the split at the trait level: the whole metadata surface
+    /// (`set_secret`'s return, `get_secret_metadata`,
+    /// `get_secret_version_metadata`, and the provided `secret_exists`) is
+    /// satisfiable by a backend with no value storage whatsoever. If any of
+    /// those were re-widened to hand back a value, `MetadataOnlyBackend` would
+    /// stop compiling — it has nothing to hand back.
+    #[tokio::test]
+    async fn metadata_surface_is_satisfiable_without_any_value_storage() {
+        let backend = MetadataOnlyBackend {
+            metadata: Mutex::new(HashMap::new()),
+        };
+
+        let written = backend
+            .set_secret("v", seeded_request("only-metadata"))
+            .await
+            .unwrap();
+        assert_eq!(written.name, "only-metadata");
+        assert_eq!(written.version, "v1");
+        assert_eq!(
+            written.tags.get("note").map(String::as_str),
+            Some("ride along")
+        );
+
+        let metadata = backend
+            .get_secret_metadata("v", "only-metadata")
+            .await
+            .expect("metadata read succeeds on a backend that stores no values");
+        assert_eq!(metadata.name, "only-metadata");
+        assert_eq!(
+            metadata.tags.get("groups").map(String::as_str),
+            Some("team-a,team-b")
+        );
+
+        assert_eq!(
+            backend
+                .get_secret_version_metadata("v", "only-metadata", "v1")
+                .await
+                .unwrap()
+                .version,
+            "v1"
+        );
+
+        // The provided `secret_exists` routes through the metadata getter, so a
+        // value-free backend can answer existence for both the hit and the miss.
+        assert!(backend.secret_exists("v", "only-metadata").await.unwrap());
+        assert!(!backend.secret_exists("v", "absent").await.unwrap());
+
+        // The value getters are the only place a value could ever appear, and
+        // this backend has none.
+        assert!(matches!(
+            backend.get_secret("v", "only-metadata").await,
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            backend.get_secret_version("v", "only-metadata", "v1").await,
+            Err(BackendError::Unsupported(_))
+        ));
     }
 }

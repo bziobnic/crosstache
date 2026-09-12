@@ -1806,6 +1806,62 @@ mod tests {
         assert_eq!(props.tags.get("groups").map(String::as_str), Some("alpha"));
     }
 
+    /// The Azure adapter's "provider returned no value" branch. One parsed
+    /// bundle feeds both halves of the split: the metadata getters take
+    /// `.map(|(metadata, _)| metadata)` and succeed on a value-free bundle,
+    /// while the value getters run it through `require_bundle_value`, which
+    /// must refuse rather than invent an empty `SecretValue`.
+    ///
+    /// A regression that made `Secret.value` optional again, or that defaulted
+    /// a missing value to `""`, would turn this `unwrap_err` into an `Ok`.
+    #[test]
+    fn require_bundle_value_refuses_a_value_free_bundle_the_metadata_path_accepts() {
+        let json = serde_json::json!({
+            "id": "https://myvault.vault.azure.net/secrets/no-value/abc123",
+            "contentType": "text/plain",
+            "attributes": { "enabled": true, "created": 1_700_000_000 },
+            "tags": { "original_name": "No Value" }
+        });
+
+        // The metadata getters' exact expression, on the exact same input.
+        let metadata = parse_secret_properties_bundle(&json, "", "")
+            .map(|(metadata, _)| metadata)
+            .unwrap();
+        assert_eq!(metadata.name, "no-value");
+        assert_eq!(metadata.original_name, "No Value");
+        assert_eq!(metadata.version, "abc123");
+
+        // The value getters' exact expression: hard error, naming the secret.
+        let error = require_bundle_value(parse_secret_properties_bundle(&json, "", "").unwrap())
+            .unwrap_err();
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("provider returned no value") && rendered.contains("no-value"),
+            "{rendered}"
+        );
+    }
+
+    /// Companion positive case: when Azure does return the value (which it does
+    /// on every successful secret GET/PUT), `require_bundle_value` pairs it with
+    /// the same metadata the metadata path produced.
+    #[test]
+    fn require_bundle_value_pairs_the_value_with_the_same_metadata() {
+        let json = serde_json::json!({
+            "id": "https://myvault.vault.azure.net/secrets/with-value/abc123",
+            "value": "s3cr3t",
+            "attributes": { "enabled": true }
+        });
+
+        let metadata = parse_secret_properties_bundle(&json, "", "")
+            .map(|(metadata, _)| metadata)
+            .unwrap();
+        let secret =
+            require_bundle_value(parse_secret_properties_bundle(&json, "", "").unwrap()).unwrap();
+        assert_eq!(secret.value.expose_secret(), "s3cr3t");
+        assert_eq!(secret.metadata.name, metadata.name);
+        assert_eq!(secret.metadata.version, metadata.version);
+    }
+
     #[test]
     fn test_parse_secret_properties_bundle_minimal_without_value() {
         let json = serde_json::json!({

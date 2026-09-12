@@ -260,3 +260,67 @@ async fn aws_transfer_metadata_preflight_rejects_invalid_generated_tags_before_i
         .await
         .unwrap();
 }
+
+/// The AWS adapter's "provider returned no value" branch. `DescribeSecret` and
+/// `GetSecretValue` are two calls: the metadata getters use the first alone,
+/// while the value getters combine both through `secret_from_value`. A
+/// `GetSecretValue` response with no `SecretString` (an AWS secret stored as
+/// `SecretBinary` reaches exactly this shape) must be a hard error rather than
+/// a `Secret` carrying an empty value.
+///
+/// The same `describe` drives `metadata_from_describe` in the same test, so the
+/// assertion is specifically about the *value* half: if the split regressed and
+/// the metadata getter routed through `secret_from_value`, metadata reads of a
+/// binary secret would start failing too.
+#[test]
+fn aws_value_read_refuses_a_describe_plus_value_pair_with_no_secret_string() {
+    use aws_sdk_secretsmanager::types::Tag;
+
+    let backend = backend(false);
+    let describe = DescribeSecretOutput::builder()
+        .arn("arn:aws:secretsmanager:us-east-1:123456789012:secret:prod/binary-abcdef")
+        .name("prod/binary")
+        .description("a note")
+        .tags(Tag::builder().key("xv:folder").value("infra").build())
+        .build();
+
+    // Metadata half: succeeds on this input, value-free by construction.
+    let metadata = backend.metadata_from_describe(&describe, "binary");
+    assert_eq!(metadata.name, "binary");
+    assert_eq!(
+        metadata.tags.get("folder").map(String::as_str),
+        Some("infra")
+    );
+    assert_eq!(
+        metadata.tags.get("note").map(String::as_str),
+        Some("a note")
+    );
+
+    // Value half: no SecretString, so no Secret.
+    let value = GetSecretValueOutput::builder()
+        .version_id("version-one")
+        .version_stages("AWSCURRENT")
+        .build();
+    let error = backend
+        .secret_from_value(&describe, &value, "binary")
+        .unwrap_err();
+    assert!(
+        matches!(&error, BackendError::Internal(message)
+            if message.contains("provider returned no value") && message.contains("binary")),
+        "{error:?}"
+    );
+
+    // Companion positive case: with a SecretString, the value getter pairs it
+    // with the version actually returned by GetSecretValue.
+    let value = GetSecretValueOutput::builder()
+        .version_id("version-one")
+        .version_stages("AWSCURRENT")
+        .secret_string("s3cr3t")
+        .build();
+    let secret = backend
+        .secret_from_value(&describe, &value, "binary")
+        .unwrap();
+    assert_eq!(secret.value.expose_secret(), "s3cr3t");
+    assert_eq!(secret.metadata.version, "version-one");
+    assert_eq!(secret.metadata.name, metadata.name);
+}
