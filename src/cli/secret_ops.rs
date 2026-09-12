@@ -656,7 +656,20 @@ pub(crate) async fn execute_secret_set_direct(
                 // the same write-time metadata (--group/--note/--folder/--tag)
                 // as the single-secret path. (--expires/--not-before are rejected
                 // for bulk above, so they're always None here.)
-                let request = meta.to_secret_request(&resolved_key, SecretValue::new(value))?;
+                // A malformed write-time metadata combination aborts the run,
+                // so record it and park the in-progress report first —
+                // otherwise the error envelope would carry no document at all.
+                let request = match meta.to_secret_request(&resolved_key, SecretValue::new(value)) {
+                    Ok(request) => request,
+                    Err(e) => {
+                        if !machine_mode {
+                            output::warn(&format!("  ✗ {resolved_key}: {e}"));
+                        }
+                        item_report.failed(&resolved_key, &e.to_string());
+                        crate::utils::machine::report(&config, &item_report);
+                        return Err(e);
+                    }
+                };
                 match backend.secrets().set_secret(&key_vault_name, request).await {
                     Ok(props) => {
                         if !machine_mode {
@@ -7457,7 +7470,10 @@ async fn execute_secret_copy(
                 destination_key_id: attachments.to_key_id.clone(),
                 destination_folder: None,
             };
-            crate::cli::transfer_support::run_attached(
+            // The transfer preview/report stands in for the destination
+            // metadata document `copy`/`move` would otherwise park.
+            let document = crate::cli::transfer_support::run_attached(
+                config,
                 from_backend.as_ref(),
                 to_backend.as_ref(),
                 intent,
@@ -7465,6 +7481,7 @@ async fn execute_secret_copy(
                 dry_run,
             )
             .await?;
+            crate::utils::machine::report(config, &document);
             return Ok(CopyOutcome::Handled);
         }
         #[cfg(not(feature = "file-ops"))]

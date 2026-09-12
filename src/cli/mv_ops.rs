@@ -586,7 +586,10 @@ async fn execute_cross_vault_alias_mv(
                     dest_folder.as_deref().unwrap_or("/"),
                 )?),
             };
-            crate::cli::transfer_support::run_attached(
+            // The transfer preview/report is this run's single machine
+            // document; in human mode `run_attached` already printed it.
+            let document = crate::cli::transfer_support::run_attached(
+                config,
                 src_backend.as_ref(),
                 dst_backend.as_ref(),
                 intent,
@@ -594,6 +597,7 @@ async fn execute_cross_vault_alias_mv(
                 dry_run,
             )
             .await?;
+            machine::report(config, &document);
             if dry_run {
                 return Ok(());
             }
@@ -780,7 +784,9 @@ async fn execute_secret_mv(
                     dest_folder.as_deref().unwrap_or("/"),
                 )?),
             };
-            crate::cli::transfer_support::run_attached(
+            // As in the cross-vault path: one document per run, parked here.
+            let document = crate::cli::transfer_support::run_attached(
+                config,
                 backend.as_ref(),
                 backend.as_ref(),
                 intent,
@@ -788,6 +794,7 @@ async fn execute_secret_mv(
                 dry_run,
             )
             .await?;
+            machine::report(config, &document);
             if dry_run {
                 return Ok(());
             }

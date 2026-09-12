@@ -190,25 +190,49 @@ identity recovery, and operational ownership before implementation.
 ### P3 — Machine-output follow-ups
 
 The machine-output contract (`--format json|yaml|csv` given explicitly writes
-exactly one document to stdout) ships with four known gaps, each pinned by the
-contract suite `tests/e2e_machine_output.rs` only insofar as it does not
+**at most one** document to stdout) ships with the known gaps below, each pinned
+by the contract suite `tests/e2e_machine_output.rs` only insofar as it does not
 regress:
 
-- **`migrate` can fail after partial writes without a `report`.** A failure in
-  the attachment-transfer loop or anywhere in the preflight returns before the
-  `ItemReport` is parked, so the envelope carries no `report` even though the
+- **Commands that emit no document at all.** The one-document rule is an upper
+  bound, not a guarantee of a document: single `set`/`update`/`delete`, single
+  `file upload`, `vault create`, `audit --verify`, `schedule run`, group
+  `delete`, `rotate NAME`, `inject`, and `vault export --output` all leave
+  stdout empty in machine mode, because their narration moved to stderr and no
+  result document replaced it. A script that parses stdout unconditionally must
+  handle the empty case. Giving each one a small result object is the fix.
+- **`migrate` can still fail after partial writes without a `report`.** The
+  attachment-transfer loop now parks a partial `ItemReport` before returning,
+  but a failure anywhere in the preflight above it still returns before any
+  report is constructed, so the envelope carries no `report` even though the
   target may already have been written. Fixing it means constructing the report
   above the preflight and parking it on every error path.
+- **`xv doctor --format csv` is treated as machine mode but prints its human
+  report.** Only `json` and `yaml` are refused with exit `2` (`src/main.rs`);
+  `csv` falls through to the ordinary doctor path, so a caller in machine mode
+  gets free-form text on stdout. `csv` should be refused alongside the others.
+- **`rotate NAME --show-value` prefixes the value even in machine mode.** The
+  plaintext is written as `Generated value: <value>`
+  (`src/cli/secret_ops.rs:6099`), so a machine consumer must strip the prefix.
+  The run deliberately emits no enclosing document, but the prefix should be
+  dropped when the format is explicit.
+- **`file download`/`file delete --continue-on-error` exit 0 despite failed
+  items.** Both park their `ItemReport` and then only return an error when
+  `!continue_on_error` (`src/cli/file_ops.rs:~1501` and `~1813`), so a partial
+  failure under that flag is reported inside the document but not in the exit
+  code. The report's `summary.failed` is the only signal.
 - **Recursive `file upload` double-counts an over-long blob name.** The
   validation pass counts such a file as `failed` and then the main loop still
   uploads it, so one file can appear twice in the report. The same function
   reads each file with `?`, so an unreadable file aborts the whole run even
   under `--continue-on-error`, and nothing is parked at all.
-- **Three commands still narrate on stdout.** `vault create`'s detail block
-  (`Resource Group:`, `Location:`, `URI:`), `whoami`'s identity block, and
-  `xv diff`'s comparison listing were outside the OUT04 inventory and still
-  use `println!`. They are single-operation commands with no `report`, so they
-  do not break the one-document rule today, but they should move to `output::*`
+- **Four commands still narrate on stdout.** `vault create`'s detail block
+  (`Resource Group:`, `Location:`, `URI:`), `whoami`'s identity block, `xv
+  diff`'s comparison listing, and `file info`'s `File Information:` block
+  (`src/cli/file_ops.rs:980-1004`, which also has its own pre-contract
+  `--json`/pretty-print split) were outside the OUT04 inventory and still use
+  `println!`. They are single-operation commands with no `report`, so they do
+  not break the one-document rule today, but they should move to `output::*`
   for consistency.
 - **Per-file narration inside machine-mode batches still reaches stderr.**
   `execute_file_upload`/`execute_file_download`, called by the batch paths,

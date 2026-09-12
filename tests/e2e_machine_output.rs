@@ -221,7 +221,13 @@ fn due_secret() -> MachineEnv {
 /// `xv scan` deterministically finds a leak and exits 50.
 fn leaking_workdir() -> MachineEnv {
     let env = MachineEnv::new();
-    write_home_file(&env, "leak.txt", b"aws=AKIAIOSFODNN7EXAMPLE\n");
+    // The canary rides alongside the AKIA token so the scanner still fires and
+    // the no-leak assertion has something real to catch.
+    write_home_file(
+        &env,
+        "leak.txt",
+        format!("aws=AKIAIOSFODNN7EXAMPLE\npassword={CANARY}\n").as_bytes(),
+    );
     env
 }
 
@@ -232,8 +238,11 @@ fn keeper_import_env() -> MachineEnv {
     write_home_file(
         &env,
         "keeper.json",
-        br#"{"shared_folders":[{"path":"Team","can_edit":true,"permissions":[{"name":"alice@example.com"}]}],
-            "records":[{"title":"Empty"},{"title":"Good","login":"u","password":"p"}]}"#,
+        format!(
+            r#"{{"shared_folders":[{{"path":"Team","can_edit":true,"permissions":[{{"name":"alice@example.com"}}]}}],
+            "records":[{{"title":"Empty"}},{{"title":"Good","login":"u","password":"{CANARY}"}}]}}"#
+        )
+        .as_bytes(),
     );
     env
 }
@@ -241,15 +250,15 @@ fn keeper_import_env() -> MachineEnv {
 /// One readable upload path; the batch's second path never exists.
 fn upload_batch_env() -> MachineEnv {
     let env = MachineEnv::new();
-    write_home_file(&env, "good.txt", b"good");
+    write_home_file(&env, "good.txt", CANARY.as_bytes());
     env
 }
 
 /// A local directory for `file sync` to walk.
 fn sync_env() -> MachineEnv {
     let env = MachineEnv::new();
-    write_home_file(&env, "data/a.txt", b"alpha");
-    write_home_file(&env, "data/b.txt", b"beta");
+    write_home_file(&env, "data/a.txt", CANARY.as_bytes());
+    write_home_file(&env, "data/b.txt", CANARY.as_bytes());
     env
 }
 
@@ -1051,6 +1060,140 @@ fn transfer_preview_yaml_is_yaml_not_json() {
     assert!(!stdout.contains("proof-content"), "stdout:\n{stdout}");
 }
 
+/// A same-vault `mv` that carries attachments runs the transfer engine. Its
+/// report used to be pretty-printed JSON unconditionally, so `--format yaml`
+/// produced JSON on stdout regardless. It must now be the run's single
+/// document, rendered in the resolved format.
+#[test]
+fn mv_with_attachments_yaml_is_one_yaml_document() {
+    let env = MachineEnv::new();
+    env.ok(&["set", "cert", "--value", CANARY]);
+    write_home_file(&env, "proof.txt", b"proof-content");
+    env.ok(&["attach", "cert", "proof.txt"]);
+
+    let out = env
+        .xv()
+        .args([
+            "mv",
+            "cert",
+            "certificate",
+            "--with-attachments",
+            "--offline",
+        ])
+        .args(["--format", "yaml"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&stdout).is_err(),
+        "mv must not print JSON when --format yaml was asked for:\n{stdout}"
+    );
+    let doc = one_yaml_document(&stdout);
+    assert_eq!(doc["complete"], true, "{doc}");
+    assert!(doc["id"].is_string(), "{doc}");
+    assert!(!stdout.contains(CANARY), "stdout:\n{stdout}");
+    assert!(!stderr.contains(CANARY), "stderr:\n{stderr}");
+}
+
+/// `migrate` calls the transfer engine once per attachment-carrying secret
+/// inside a loop. Each call used to print its own JSON report; the run must
+/// instead park exactly one `ItemReport` whose item carries the transfer id.
+#[test]
+fn migrate_with_attachments_json_is_one_item_report_carrying_the_transfer() {
+    let env = MachineEnv::new();
+    env.ok(&["set", "cert", "--value", CANARY]);
+    write_home_file(&env, "proof.txt", b"proof-content");
+    env.ok(&["attach", "cert", "proof.txt"]);
+    env.ok(&["vault", "create", "other"]);
+    // Attaching in the destination materializes its attachment key ring, which
+    // a cross-vault transfer requires be named explicitly via --to-key-id.
+    env.ok(&["context", "use", "other", "--global"]);
+    env.ok(&["set", "seed", "--value", CANARY]);
+    env.ok(&["attach", "seed", "proof.txt"]);
+    let status: serde_json::Value =
+        serde_json::from_str(&env.ok(&["attachment-key", "status", "--format", "json"]))
+            .expect("attachment-key status is one JSON document");
+    let to_key_id = status["report"]["active_key_id"]
+        .as_str()
+        .expect("destination ring has an active key")
+        .to_string();
+    env.ok(&["context", "use", "default", "--global"]);
+
+    let out = env
+        .xv()
+        .args(MIGRATE)
+        .args(["--with-attachments", "--offline", "--to-key-id", &to_key_id])
+        .args(["--format", "json"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let doc = one_json_document(&stdout);
+    let items = doc["items"].as_array().expect("items array");
+    let cert = items
+        .iter()
+        .find(|item| item["name"] == "cert")
+        .unwrap_or_else(|| panic!("no item for the attached secret:\n{doc}"));
+    assert_eq!(cert["status"], "ok", "{doc}");
+    let detail = cert["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.starts_with("attachment transfer ") && detail.len() > "attachment transfer ".len(),
+        "the item must carry the engine's transfer id, got {detail:?}:\n{doc}"
+    );
+    assert!(!stdout.contains(CANARY), "stdout:\n{stdout}");
+    assert!(!stderr.contains(CANARY), "stderr:\n{stderr}");
+}
+
+/// `xv attachments` used to print TSV rows plus a count line on stdout and
+/// ignore `--format`. In machine mode it is one array and nothing else.
+#[test]
+fn attachments_json_is_one_array() {
+    let env = MachineEnv::new();
+    env.ok(&["set", "cert", "--value", CANARY]);
+    write_home_file(&env, "proof.txt", b"proof-content");
+    env.ok(&["attach", "cert", "proof.txt"]);
+
+    let out = env
+        .xv()
+        .args(["attachments", "cert"])
+        .args(["--format", "json"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let doc = one_json_document(&stdout);
+    let rows = doc
+        .as_array()
+        .unwrap_or_else(|| panic!("not an array:\n{doc}"));
+    assert_eq!(rows.len(), 1, "{doc}");
+    assert_eq!(rows[0]["name"], "proof.txt", "{doc}");
+    assert!(
+        !stdout.contains("attachment(s) on"),
+        "the count line is status chrome and belongs on stderr:\n{stdout}"
+    );
+    assert!(!stdout.contains(CANARY), "stdout:\n{stdout}");
+    assert!(!stderr.contains(CANARY), "stderr:\n{stderr}");
+}
+
 /// `--format auto` is not machine mode. Piped (as every test is), auto resolves
 /// to JSON, and `file sync` keeps printing its summary on stdout exactly as it
 /// did before the machine-output contract.
@@ -1089,6 +1232,10 @@ struct Scenario {
     name: &'static str,
     setup: fn() -> MachineEnv,
     args: &'static [&'static str],
+    /// True only where the run refuses before producing a single row, so CSV
+    /// stdout is legitimately empty. Every other cell must emit a header row —
+    /// accepting empty stdout everywhere would let a silent regression pass.
+    expect_empty_csv: bool,
 }
 
 /// The command list from the design doc's Verification section. Each one is
@@ -1098,11 +1245,13 @@ const SCENARIOS: &[Scenario] = &[
         name: "scan with findings",
         setup: leaking_workdir,
         args: &["scan"],
+        expect_empty_csv: false,
     },
     Scenario {
         name: "rotate --check with a due secret",
         setup: due_secret,
         args: &["rotate", "--check"],
+        expect_empty_csv: false,
     },
     Scenario {
         name: "vault import --dry-run with a rejected record",
@@ -1117,6 +1266,7 @@ const SCENARIOS: &[Scenario] = &[
             "keeper.json",
             "--dry-run",
         ],
+        expect_empty_csv: false,
     },
     Scenario {
         name: "bulk set with an invalid name",
@@ -1126,16 +1276,20 @@ const SCENARIOS: &[Scenario] = &[
             "xv-attachment-key=machine-canary-2b6f",
             "GOOD=machine-canary-2b6f",
         ],
+        expect_empty_csv: false,
     },
     Scenario {
         name: "mv with a collision",
         setup: two_secrets_one_vault,
         args: &["mv", "ALPHA", "BETA"],
+        // Refused on the collision before any row exists.
+        expect_empty_csv: true,
     },
     Scenario {
         name: "migrate clean",
         setup: seeded_two_secrets,
         args: &["migrate", "--from", "local:default", "--to", "local:other"],
+        expect_empty_csv: false,
     },
     Scenario {
         name: "migrate conflict",
@@ -1149,16 +1303,20 @@ const SCENARIOS: &[Scenario] = &[
             "--on-conflict",
             "fail",
         ],
+        // `--on-conflict fail` aborts before any item is recorded.
+        expect_empty_csv: true,
     },
     Scenario {
         name: "file upload batch with a missing path",
         setup: upload_batch_env,
         args: &["file", "upload", "good.txt", "missing.txt"],
+        expect_empty_csv: false,
     },
     Scenario {
         name: "copy",
         setup: seeded_two_secrets,
         args: &["copy", "ALPHA", "--from", "default", "--to", "other"],
+        expect_empty_csv: false,
     },
     Scenario {
         name: "move",
@@ -1166,16 +1324,19 @@ const SCENARIOS: &[Scenario] = &[
         args: &[
             "move", "ALPHA", "--from", "default", "--to", "other", "--force",
         ],
+        expect_empty_csv: false,
     },
     Scenario {
         name: "file sync --dry-run",
         setup: sync_env,
         args: &["file", "sync", "data", "--direction", "up", "--dry-run"],
+        expect_empty_csv: false,
     },
     Scenario {
         name: "version",
         setup: empty_env,
         args: &["version"],
+        expect_empty_csv: false,
     },
 ];
 
@@ -1195,12 +1356,17 @@ fn stderr_line_is_a_document(line: &str) -> bool {
         .any(|prefix| line.starts_with(prefix))
 }
 
-/// Assert stdout parses as exactly one CSV document: either it is empty (the
-/// command failed before writing a row) or it has a header row and every
-/// record has the same field count.
+/// Assert stdout parses as exactly one CSV document: a header row plus records
+/// that all have the same field count. Empty stdout is accepted only for the
+/// scenarios that refuse before a row exists (`expect_empty_csv`); everywhere
+/// else an empty stdout is the regression this suite exists to catch.
 #[track_caller]
-fn one_csv_document(stdout: &str, label: &str) {
+fn one_csv_document(stdout: &str, label: &str, expect_empty: bool) {
     if stdout.trim().is_empty() {
+        assert!(
+            expect_empty,
+            "{label}: CSV stdout is empty but this command must emit a header row"
+        );
         return;
     }
     let mut reader = csv::ReaderBuilder::new()
@@ -1267,7 +1433,7 @@ fn every_machine_mode_run_writes_exactly_one_document() {
                         );
                     }
                 }
-                _ => one_csv_document(&stdout, &label),
+                _ => one_csv_document(&stdout, &label, scenario.expect_empty_csv),
             }
 
             for line in stderr.lines() {

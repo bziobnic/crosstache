@@ -499,8 +499,9 @@ including stderr chrome).
 ### Machine mode and the one-document rule
 
 An explicit `--format json|yaml|csv` puts the run in **machine mode**: stdout
-holds exactly one document for the whole run and every human line goes to
-stderr. `--format auto` (including when piped) is *not* machine mode and keeps
+never holds more than one document for the whole run — one for the commands
+that produce a result, none for those that do not — and every human line goes
+to stderr. `--format auto` (including when piped) is *not* machine mode and keeps
 its previous behaviour. See [exit-codes.md](exit-codes.md#machine-mode-exactly-one-document-on-stdout)
 for the envelope and the CSV rule.
 
@@ -513,7 +514,8 @@ Stream rules per command family:
 | Batch commands (`migrate`, bulk `set`, `mv`, `vault import`, `file upload/download/delete`, `rotate --due`) | one `ItemReport` (attached under `report` when the run also fails) | plan banners, per-item lines, summaries — suppressed in machine mode |
 | Dry-run planners (`migrate --dry-run`, `mv --dry-run`, `copy`/`move --dry-run`) | one plan document | the human preview |
 | Policy checks (`scan`, `rotate --check`) | findings / due rows, attached under `report` of the exit-50/51 envelope | the human listing and the plain error |
-| Narrated single operations (`copy`, `move`, single `set`, `rotate NAME`, `inject`, `vault export --output`, `share grant|revoke`) | the result object | `Copying…`, `Vault:`/`Version:`, confirmations |
+| Narrated single operations — `copy`, `move`, `share grant\|revoke` | the result object | `Copying…`, confirmations |
+| Zero-document operations — single `set`/`update`/`delete`, single `file upload`, `vault create`, `audit --verify`, `schedule run`, group `delete`, `rotate NAME`, `inject`, `vault export --output` | **nothing**; these commands have no result document | `Vault:`/`Version:`, confirmations, summaries |
 | `file sync` | the sync summary | per-file lines and the summary block |
 | `transfer` | the preview or `TransferReport`, in the requested format | narration |
 
@@ -531,6 +533,12 @@ Batch commands share one shape, `ItemReport` — names only, never values:
 `status` is `ok`, `skipped`, or `failed`; `detail` and `error` are optional and
 are sanitized and length-bounded. In CSV the item rows render as
 `name,status,detail,error`.
+
+CSV is rows-only, so only two shapes produce real columns: an `ItemReport`
+(`name,status,detail,error`) and a flat array of objects (the union of its
+keys). Anything else — a single object such as `version`, `copy`, `move`, or
+the `file sync` summary — degrades to a single-column fallback: a `report`
+header and one cell holding the document's JSON text.
 
 Dry runs emit a plan document instead of a result: `migrate --dry-run`
 (`source`, `target`, `dry_run`, `on_conflict`, `to_migrate`, `to_skip`,

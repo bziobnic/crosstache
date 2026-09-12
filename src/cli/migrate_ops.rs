@@ -15,6 +15,16 @@ use crate::utils::output;
 use futures::stream::{self, StreamExt};
 use std::sync::Arc;
 
+/// Item detail for an attachment-carrying secret the transfer engine moved.
+/// Carries the engine's transfer id when it reported one, so a machine
+/// consumer can join the item back to the recovery record.
+fn attachment_detail(id: Option<&str>) -> String {
+    match id {
+        Some(id) => format!("attachment transfer {id}"),
+        None => "attachment transfer".to_string(),
+    }
+}
+
 const TAG_MIGRATED_FROM: &str = "xv:migrated_from";
 const TAG_MIGRATED_AT: &str = "xv:migrated_at";
 
@@ -177,11 +187,10 @@ impl MigratePlan {
 /// The counts come from `diff`, not from the plan: the banner has always shown
 /// the non-conflicting work and the conflicts as two separate numbers, while
 /// `MigratePlan::to_migrate` folds replaced conflicts into the work list.
-fn narrate_plan(
-    plan: &MigratePlan,
-    diff: &MigrationDiff,
-    on_conflict: &crate::cli::commands::OnConflict,
-) {
+/// The conflict policy is read from `plan.on_conflict` — the same string the
+/// machine document carries — so narration and document cannot drift. The
+/// banner's original `{:?}` casing is restored here; the words are unchanged.
+fn narrate_plan(plan: &MigratePlan, diff: &MigrationDiff) {
     output::info(&format!("Source: {}", plan.source));
     output::info(&format!("Target: {}", plan.target));
     output::info(&format!(
@@ -192,7 +201,12 @@ fn narrate_plan(
         "  conflict:      {} secret(s) (target already has same name)",
         plan.conflicts.len()
     ));
-    output::info(&format!("On conflict: {:?}", on_conflict));
+    let mut chars = plan.on_conflict.chars();
+    let on_conflict = match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    };
+    output::info(&format!("On conflict: {}", on_conflict));
     output::info(&format!(
         "Dry run? {}",
         if plan.dry_run { "yes" } else { "no" }
@@ -494,7 +508,7 @@ pub(crate) async fn execute_migrate(
         dry_run,
     );
     if !machine_mode {
-        narrate_plan(&plan, &diff, &on_conflict);
+        narrate_plan(&plan, &diff);
     }
 
     if !diff.conflicts.is_empty() && on_conflict == crate::cli::commands::OnConflict::Fail {
@@ -732,15 +746,18 @@ pub(crate) async fn execute_migrate(
     #[cfg(not(feature = "file-ops"))]
     let attached_count = 0;
     // Attachment-carrying secrets are transferred by the engine rather than by
-    // `migrate_one`, so their names are collected here for the item report.
+    // `migrate_one`, so their names — and the transfer id the engine returned —
+    // are collected here for the item report. `run_attached` no longer prints:
+    // the run parks exactly one document, the `ItemReport` built below.
     #[cfg(feature = "file-ops")]
-    let mut attached_names: Vec<String> = Vec::new();
+    let mut attached_names: Vec<(String, Option<String>)> = Vec::new();
     #[cfg(not(feature = "file-ops"))]
-    let attached_names: Vec<String> = Vec::new();
+    let attached_names: Vec<(String, Option<String>)> = Vec::new();
     #[cfg(feature = "file-ops")]
     for intent in attached_intents {
         let name = intent.source_name.clone();
-        if let Err(e) = crate::cli::transfer_support::run_attached(
+        match crate::cli::transfer_support::run_attached(
+            &config,
             source.as_ref(),
             target.as_ref(),
             intent,
@@ -749,10 +766,29 @@ pub(crate) async fn execute_migrate(
         )
         .await
         {
-            invalidate_destination();
-            return Err(e);
+            Ok(document) => {
+                let id = document
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string);
+                attached_names.push((name, id));
+            }
+            Err(e) => {
+                // Abort as before, but park the partial per-item outcome so the
+                // error envelope still carries this run's single document.
+                let mut item_report = ItemReport::new();
+                for (skipped_name, reason) in &preflight_skipped {
+                    item_report.skipped(skipped_name, Some(reason));
+                }
+                for (done, id) in &attached_names {
+                    item_report.ok(done, Some(&attachment_detail(id.as_deref())));
+                }
+                item_report.failed(&name, &e.to_string());
+                machine::report(&config, &item_report);
+                invalidate_destination();
+                return Err(e);
+            }
         }
-        attached_names.push(name);
     }
 
     // 6. Migrate secrets concurrently with backoff retry
@@ -799,8 +835,8 @@ pub(crate) async fn execute_migrate(
     for (name, reason) in preflight_skipped {
         item_report.skipped(&name, Some(reason));
     }
-    for name in attached_names {
-        item_report.ok(&name, Some("attachment transfer"));
+    for (name, id) in &attached_names {
+        item_report.ok(name, Some(&attachment_detail(id.as_deref())));
     }
 
     for r in results {

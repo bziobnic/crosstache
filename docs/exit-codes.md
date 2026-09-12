@@ -88,8 +88,13 @@ The `hint` line is TTY-only.
 ## Machine mode: exactly one document on stdout
 
 A run is in **machine mode** when `--format` is given explicitly and resolves
-to `json`, `yaml`, or `csv`. In machine mode stdout holds **exactly one
-document for the whole run** — nothing else is ever written there:
+to `json`, `yaml`, or `csv`. In machine mode **stdout never holds more than one
+document**: commands that produce a result document emit exactly one, and
+commands that produce none — single `set`/`update`/`delete`, single `file
+upload`, `vault create`, `audit --verify`, `schedule run`, group `delete`,
+`rotate NAME`, `inject`, `vault export --output` — leave stdout empty. See
+[ROADMAP.md](../ROADMAP.md) for that zero-document class and the other known
+gaps. Nothing else is ever written to stdout:
 
 - **Success:** the command's data document, in the requested format.
 - **Failure before any result:** the error envelope above, unchanged.
@@ -134,6 +139,21 @@ CSV cannot carry an error object, so in `--format csv`:
   (`error[xv-scan-leak-detected]: …`);
 - therefore **check the exit code**, not stdout, to detect failure. A
   successful-looking header row is not proof the run succeeded.
+
+A document that is not row-shaped has no CSV form, so it degrades to a
+single-column fallback: a `report` header and one cell holding the document's
+JSON text. `version`, `copy`, `move`, and `file sync` all take this path —
+their documents are single objects, not lists of records:
+
+```console
+$ xv version --format csv
+report
+"{""name"":""xv"",""version"":""0.39.0""}"
+```
+
+An `ItemReport` renders as `name,status,detail,error` rows, and a flat array of
+objects renders as the union of its keys; only those two shapes produce real
+columns.
 
 ### What machine mode does not change
 
