@@ -10,8 +10,11 @@ use crate::utils::helpers::parse_connection_string;
 /// `String` for serialization at a reviewed boundary.
 ///
 /// Constructed only by [`crate::secret::domain::Secret::disclose`], so
-/// `grep -rn "\.disclose(" src` is the complete list of serializing
-/// disclosure boundaries. `Debug` and `Serialize` are derived on purpose:
+/// `grep -rn "\.disclose(" src` is the complete list of boundaries that
+/// serialize a *whole secret value*. The one field-level exception is
+/// `xv get --record --format json|yaml`, which serializes decoded envelope
+/// fields via `expose_secret` rather than `disclose`; both are listed in
+/// `docs/security.md`. `Debug` and `Serialize` are derived on purpose:
 /// unlike [`crate::secret::domain::SecretValue`], this type exists to be
 /// shown.
 #[derive(Debug, Clone, Serialize)]

@@ -106,7 +106,13 @@ the shared resolvers; do not reproduce precedence locally in a command handler.
   provider-call parity: local's metadata path never decrypts, AWS's metadata
   path is `DescribeSecret` only, Azure's HTTP calls are unchanged. Web
   `GET /secrets/{name}` is served by the metadata getter; only
-  `POST /secrets/{name}/value` can return a value.
+  `POST /secrets/{name}/value` can return a value. See `docs/security.md`
+  for the disclosure boundary table: `grep -rn "\.disclose(" src` lists
+  every boundary that serializes a whole secret value, `grep expose_secret`
+  (filtered to `SecretValue` receivers — age's `secrecy::ExposeSecret`
+  shares the method name) lists every printing boundary, and
+  `xv get --record --format json|yaml` is the one sanctioned field-level
+  exception to the `.disclose(` claim.
 - `src/records/` — type definitions, encrypted envelopes, conversions, Keeper
   import/export
 - `src/totp.rs` and `src/cli/totp_ops.rs` — RFC 6238 code generation
