@@ -21,6 +21,7 @@ pub(crate) mod attachment_rewrap;
 #[cfg(feature = "file-ops")]
 pub(crate) mod attachment_rotation;
 pub mod attachments;
+pub mod domain;
 pub mod manager;
 pub mod models;
 pub mod name_manager;
