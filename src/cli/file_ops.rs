@@ -582,10 +582,10 @@ async fn execute_file_upload(
             .await?
     };
     output::success(&format!("Successfully uploaded file '{}'", file_info.name));
-    println!("   Size: {} bytes", file_info.size);
-    println!("   Content-Type: {}", file_info.content_type);
+    output::info(&format!("Size: {} bytes", file_info.size));
+    output::info(&format!("Content-Type: {}", file_info.content_type));
     if !file_info.groups.is_empty() {
-        println!("   Groups: {:?}", file_info.groups);
+        output::info(&format!("Groups: {:?}", file_info.groups));
     }
 
     Ok(())
@@ -933,13 +933,13 @@ async fn execute_file_delete(
             &format!("Are you sure you want to delete file '{name}' from file storage?"),
             false,
         )? {
-            println!("Delete operation cancelled.");
+            output::info("Delete operation cancelled.");
             return Ok(());
         }
     }
 
     // Delete file
-    println!("Deleting file '{name}'...");
+    output::info(&format!("Deleting file '{name}'..."));
     blob_manager.delete_file(name).await?;
     output::success(&format!("Successfully deleted file '{name}'"));
     // Recovery hint depends on the backend's delete semantics.
@@ -1197,8 +1197,14 @@ async fn execute_file_upload_recursive(
         return Ok(());
     }
 
-    println!("Found {} file(s) to upload", all_files.len());
+    // Machine mode replaces every narration line below with the single
+    // `ItemReport` document `main` emits; human mode keeps them word for word.
+    let machine_mode = crate::utils::machine::is_machine_mode(config);
+    if !machine_mode {
+        output::info(&format!("Found {} file(s) to upload", all_files.len()));
+    }
 
+    let mut item_report = crate::utils::machine::ItemReport::new();
     let mut success_count = 0;
     let mut failure_count = 0;
     let threshold = progress_threshold_bytes(config);
@@ -1214,7 +1220,10 @@ async fn execute_file_upload_recursive(
                 file_info.blob_name
             );
             if continue_on_error {
-                output::error(&error_msg);
+                if !machine_mode {
+                    output::error(&error_msg);
+                }
+                item_report.failed(&file_info.blob_name, &error_msg);
                 failure_count += 1;
                 continue;
             } else {
@@ -1226,11 +1235,14 @@ async fn execute_file_upload_recursive(
     for file_info in &all_files {
         let local_path_str = file_info.local_path.to_string_lossy();
 
-        if !tty {
+        if !tty && !machine_mode {
             if !flatten {
-                println!("Uploading: {} → {}", local_path_str, file_info.blob_name);
+                output::info(&format!(
+                    "Uploading: {} → {}",
+                    local_path_str, file_info.blob_name
+                ));
             } else {
-                println!("Uploading: {}", local_path_str);
+                output::info(&format!("Uploading: {local_path_str}"));
             }
         }
 
@@ -1262,14 +1274,19 @@ async fn execute_file_upload_recursive(
         match result {
             Ok(_) => {
                 success_count += 1;
+                item_report.ok(&local_path_str, Some(&file_info.blob_name));
                 mp.log(&format!("Uploaded: {}", file_info.blob_name));
                 mp.advance_overall(&file_info.blob_name);
             }
             Err(e) => {
-                output::error(&format!("Failed to upload '{}': {}", local_path_str, e));
+                if !machine_mode {
+                    output::error(&format!("Failed to upload '{}': {}", local_path_str, e));
+                }
+                item_report.failed(&local_path_str, &e.to_string());
                 failure_count += 1;
                 mp.advance_overall(&file_info.blob_name);
                 if !continue_on_error {
+                    crate::utils::machine::report(config, &item_report);
                     return Err(e);
                 }
             }
@@ -1279,26 +1296,17 @@ async fn execute_file_upload_recursive(
     mp.finish();
 
     // Print summary
-    println!();
-    output::info("Upload Summary:");
-    println!(
-        "  {}",
-        output::format_line(
-            output::Level::Success,
-            &format!("Successful: {success_count}"),
-            output::should_use_rich_stdout()
-        )
-    );
-    if failure_count > 0 {
-        println!(
-            "  {}",
-            output::format_line(
-                output::Level::Error,
-                &format!("Failed: {failure_count}"),
-                output::should_use_rich_stdout()
-            )
-        );
+    if !machine_mode {
+        output::info("Upload Summary:");
+        output::success(&format!("Successful: {success_count}"));
+        if failure_count > 0 {
+            output::error(&format!("Failed: {failure_count}"));
+        }
     }
+
+    // Parked before the failure split so a partial failure carries the
+    // per-file detail under the envelope's `report` key.
+    crate::utils::machine::report(config, &item_report);
 
     if failure_count > 0 && continue_on_error {
         return Err(CrosstacheError::azure_api(format!(
@@ -1319,8 +1327,12 @@ async fn execute_file_upload_multiple(
     continue_on_error: bool,
     config: &Config,
 ) -> Result<()> {
-    println!("Uploading {} file(s)...", files.len());
+    let machine_mode = crate::utils::machine::is_machine_mode(config);
+    if !machine_mode {
+        output::info(&format!("Uploading {} file(s)...", files.len()));
+    }
 
+    let mut item_report = crate::utils::machine::ItemReport::new();
     let mut success_count = 0;
     let mut error_count = 0;
 
@@ -1339,34 +1351,33 @@ async fn execute_file_upload_multiple(
         .await
         {
             Ok(_) => {
-                println!(
-                    "  {}",
-                    output::format_line(
-                        output::Level::Success,
-                        &file_path,
-                        output::should_use_rich_stdout()
-                    )
-                );
+                if !machine_mode {
+                    output::success(&file_path);
+                }
+                item_report.ok(&file_path, None);
                 success_count += 1;
             }
             Err(e) => {
-                eprintln!(
-                    "  {}",
-                    output::format_line(
-                        output::Level::Error,
-                        &format!("{file_path}: {e}"),
-                        output::should_use_rich_stderr(),
-                    )
-                );
+                if !machine_mode {
+                    output::error(&format!("{file_path}: {e}"));
+                }
+                item_report.failed(&file_path, &e.to_string());
                 error_count += 1;
                 if !continue_on_error {
+                    crate::utils::machine::report(config, &item_report);
                     return Err(e);
                 }
             }
         }
     }
 
-    println!("\nUpload completed: {success_count} succeeded, {error_count} failed");
+    if !machine_mode {
+        output::info(&format!(
+            "Upload completed: {success_count} succeeded, {error_count} failed"
+        ));
+    }
+
+    crate::utils::machine::report(config, &item_report);
 
     if error_count > 0 && !continue_on_error {
         return Err(CrosstacheError::azure_api(format!(
@@ -1418,8 +1429,12 @@ async fn execute_file_download_multiple(
 
     let output_dir = resolve_multi_download_dir(output.as_deref())?;
 
-    println!("Downloading {} file(s)...", files.len());
+    let machine_mode = crate::utils::machine::is_machine_mode(config);
+    if !machine_mode {
+        output::info(&format!("Downloading {} file(s)...", files.len()));
+    }
 
+    let mut item_report = crate::utils::machine::ItemReport::new();
     let mut success_count = 0;
     let mut error_count = 0;
 
@@ -1428,16 +1443,13 @@ async fn execute_file_download_multiple(
         let per_file_output = match safe_join(&output_dir, &file_name) {
             Ok(p) => p.to_string_lossy().into_owned(),
             Err(e) => {
-                eprintln!(
-                    "  {}",
-                    output::format_line(
-                        output::Level::Error,
-                        &format!("{file_name}: {e}"),
-                        output::should_use_rich_stderr(),
-                    )
-                );
+                if !machine_mode {
+                    output::error(&format!("{file_name}: {e}"));
+                }
+                item_report.failed(&file_name, &e.to_string());
                 error_count += 1;
                 if !continue_on_error {
+                    crate::utils::machine::report(config, &item_report);
                     return Err(e);
                 }
                 continue;
@@ -1453,34 +1465,33 @@ async fn execute_file_download_multiple(
         .await
         {
             Ok(_) => {
-                println!(
-                    "  {}",
-                    output::format_line(
-                        output::Level::Success,
-                        &file_name,
-                        output::should_use_rich_stdout()
-                    )
-                );
+                if !machine_mode {
+                    output::success(&file_name);
+                }
+                item_report.ok(&file_name, None);
                 success_count += 1;
             }
             Err(e) => {
-                eprintln!(
-                    "  {}",
-                    output::format_line(
-                        output::Level::Error,
-                        &format!("{file_name}: {e}"),
-                        output::should_use_rich_stderr(),
-                    )
-                );
+                if !machine_mode {
+                    output::error(&format!("{file_name}: {e}"));
+                }
+                item_report.failed(&file_name, &e.to_string());
                 error_count += 1;
                 if !continue_on_error {
+                    crate::utils::machine::report(config, &item_report);
                     return Err(e);
                 }
             }
         }
     }
 
-    println!("\nDownload completed: {success_count} succeeded, {error_count} failed");
+    if !machine_mode {
+        output::info(&format!(
+            "Download completed: {success_count} succeeded, {error_count} failed"
+        ));
+    }
+
+    crate::utils::machine::report(config, &item_report);
 
     if error_count > 0 && !continue_on_error {
         return Err(CrosstacheError::azure_api(format!(
@@ -1558,8 +1569,17 @@ async fn execute_file_download_recursive(
         return Ok(());
     }
 
-    println!("Found {} file(s) to download", all_files_to_download.len());
+    // Machine mode replaces every narration line below with the single
+    // `ItemReport` document `main` emits; human mode keeps them word for word.
+    let machine_mode = crate::utils::machine::is_machine_mode(config);
+    if !machine_mode {
+        output::info(&format!(
+            "Found {} file(s) to download",
+            all_files_to_download.len()
+        ));
+    }
 
+    let mut item_report = crate::utils::machine::ItemReport::new();
     let mut success_count = 0;
     let mut failure_count = 0;
     let threshold = progress_threshold_bytes(config);
@@ -1590,12 +1610,16 @@ async fn execute_file_download_recursive(
         let local_path = match joined {
             Ok(path) => path,
             Err(e) => {
-                output::warn(&format!("Skipping '{blob_name}': {e}"));
+                if !machine_mode {
+                    output::warn(&format!("Skipping '{blob_name}': {e}"));
+                }
+                item_report.failed(blob_name, &e.to_string());
                 failure_count += 1;
                 if continue_on_error {
                     mp.advance_overall(blob_name);
                     continue;
                 } else {
+                    crate::utils::machine::report(config, &item_report);
                     return Err(CrosstacheError::config(format!(
                         "Unsafe blob name '{blob_name}': {e}"
                     )));
@@ -1622,12 +1646,15 @@ async fn execute_file_download_recursive(
 
         // Check if file exists and handle force flag
         if local_path.exists() && !force {
-            output::warn(&format!(
-                "File already exists: {} (use --force to overwrite)",
-                local_path_str
-            ));
+            let reason =
+                format!("File already exists: {local_path_str} (use --force to overwrite)");
+            if !machine_mode {
+                output::warn(&reason);
+            }
+            item_report.failed(blob_name, &reason);
             failure_count += 1;
             if !continue_on_error {
+                crate::utils::machine::report(config, &item_report);
                 return Err(CrosstacheError::config(format!(
                     "File already exists: {}",
                     local_path_str
@@ -1636,11 +1663,11 @@ async fn execute_file_download_recursive(
             continue;
         }
 
-        if !tty {
+        if !tty && !machine_mode {
             if !flatten {
-                println!("Downloading: {} → {}", blob_name, local_path_str);
+                output::info(&format!("Downloading: {} → {}", blob_name, local_path_str));
             } else {
-                println!("Downloading: {}", blob_name);
+                output::info(&format!("Downloading: {}", blob_name));
             }
         }
 
@@ -1664,14 +1691,19 @@ async fn execute_file_download_recursive(
         match result {
             Ok(_) => {
                 success_count += 1;
+                item_report.ok(blob_name, Some(&local_path_str));
                 mp.log(&format!("Downloaded: {}", blob_name));
                 mp.advance_overall(blob_name);
             }
             Err(e) => {
-                output::error(&format!("Failed to download '{}': {}", blob_name, e));
+                if !machine_mode {
+                    output::error(&format!("Failed to download '{}': {}", blob_name, e));
+                }
+                item_report.failed(blob_name, &e.to_string());
                 failure_count += 1;
                 mp.advance_overall(blob_name);
                 if !continue_on_error {
+                    crate::utils::machine::report(config, &item_report);
                     return Err(e);
                 }
             }
@@ -1681,26 +1713,17 @@ async fn execute_file_download_recursive(
     mp.finish();
 
     // Print summary
-    println!();
-    output::info("Download Summary:");
-    println!(
-        "  {}",
-        output::format_line(
-            output::Level::Success,
-            &format!("Successful: {}", success_count),
-            output::should_use_rich_stdout()
-        )
-    );
-    if failure_count > 0 {
-        println!(
-            "  {}",
-            output::format_line(
-                output::Level::Error,
-                &format!("Failed: {}", failure_count),
-                output::should_use_rich_stdout()
-            )
-        );
+    if !machine_mode {
+        output::info("Download Summary:");
+        output::success(&format!("Successful: {}", success_count));
+        if failure_count > 0 {
+            output::error(&format!("Failed: {}", failure_count));
+        }
     }
+
+    // Parked before the failure split so a partial failure carries the
+    // per-file detail under the envelope's `report` key.
+    crate::utils::machine::report(config, &item_report);
 
     if failure_count > 0 && continue_on_error {
         return Err(CrosstacheError::azure_api(format!(
@@ -1720,13 +1743,15 @@ async fn execute_file_delete_multiple(
     config: &Config,
 ) -> Result<()> {
     // Confirmation prompt for multiple files without --force
+    let machine_mode = crate::utils::machine::is_machine_mode(config);
+
     if !force && files.len() > 1 {
-        println!("You are about to delete {} files:", files.len());
+        output::info(&format!("You are about to delete {} files:", files.len()));
         for (i, file) in files.iter().enumerate() {
             if i < 5 {
-                println!("  - {file}");
+                output::info(&format!("- {file}"));
             } else if i == 5 {
-                println!("  ... and {} more", files.len() - 5);
+                output::info(&format!("... and {} more", files.len() - 5));
                 break;
             }
         }
@@ -1734,47 +1759,49 @@ async fn execute_file_delete_multiple(
         use crate::utils::interactive::InteractivePrompt;
         let prompt = InteractivePrompt::new();
         if !prompt.confirm("Are you sure you want to delete these files?", false)? {
-            println!("Delete operation cancelled");
+            output::info("Delete operation cancelled");
             return Ok(());
         }
     }
 
-    println!("Deleting {} file(s)...", files.len());
+    if !machine_mode {
+        output::info(&format!("Deleting {} file(s)...", files.len()));
+    }
 
+    let mut item_report = crate::utils::machine::ItemReport::new();
     let mut success_count = 0;
     let mut error_count = 0;
 
     for file_name in files {
         match execute_file_delete(blob_manager, &file_name, force, config).await {
             Ok(_) => {
-                println!(
-                    "  {}",
-                    output::format_line(
-                        output::Level::Success,
-                        &file_name,
-                        output::should_use_rich_stdout()
-                    )
-                );
+                if !machine_mode {
+                    output::success(&file_name);
+                }
+                item_report.ok(&file_name, None);
                 success_count += 1;
             }
             Err(e) => {
-                eprintln!(
-                    "  {}",
-                    output::format_line(
-                        output::Level::Error,
-                        &format!("{file_name}: {e}"),
-                        output::should_use_rich_stderr(),
-                    )
-                );
+                if !machine_mode {
+                    output::error(&format!("{file_name}: {e}"));
+                }
+                item_report.failed(&file_name, &e.to_string());
                 error_count += 1;
                 if !continue_on_error {
+                    crate::utils::machine::report(config, &item_report);
                     return Err(e);
                 }
             }
         }
     }
 
-    println!("\nDelete completed: {success_count} succeeded, {error_count} failed");
+    if !machine_mode {
+        output::info(&format!(
+            "Delete completed: {success_count} succeeded, {error_count} failed"
+        ));
+    }
+
+    crate::utils::machine::report(config, &item_report);
 
     if error_count > 0 && !continue_on_error {
         return Err(CrosstacheError::azure_api(format!(
@@ -1873,7 +1900,7 @@ async fn file_sync_delete_remote_not_local(
     local_set: &std::collections::HashSet<String>,
     dry_run: bool,
     delete_requested: bool,
-    quiet_stdout: bool,
+    machine_mode: bool,
     summary: &mut FileSyncSummary,
     mutated: &mut bool,
 ) -> Result<()> {
@@ -1916,9 +1943,9 @@ async fn file_sync_delete_remote_not_local(
     }
 
     if dry_run {
-        if !quiet_stdout {
+        if !machine_mode {
             for n in &to_delete {
-                println!("delete (dry-run): {n}");
+                output::info(&format!("delete (dry-run): {n}"));
             }
         }
         summary.deleted += to_delete.len();
@@ -1940,8 +1967,8 @@ async fn file_sync_delete_remote_not_local(
     }
 
     for n in to_delete {
-        if !quiet_stdout {
-            println!("Deleting remote: {n}");
+        if !machine_mode {
+            output::info(&format!("Deleting remote: {n}"));
         }
         blob_manager.delete_file(&n).await?;
         summary.deleted += 1;
@@ -1955,7 +1982,7 @@ async fn file_sync_perform_upload(
     blob_manager: &FileOps<'_>,
     info: &FileUploadInfo,
     blob_name: &str,
-    output_json: bool,
+    machine_mode: bool,
     reporter: &dyn crate::utils::progress::ProgressReporter,
 ) -> Result<()> {
     use crate::blob::models::FileUploadRequest;
@@ -1973,8 +2000,11 @@ async fn file_sync_perform_upload(
         metadata: HashMap::new(),
         tags: HashMap::new(),
     };
-    if !output_json && !is_tty() {
-        println!("upload: {} → {blob_name}", info.local_path.display());
+    if !machine_mode && !is_tty() {
+        output::info(&format!(
+            "upload: {} → {blob_name}",
+            info.local_path.display()
+        ));
     }
     let uploaded_info = blob_manager.upload_file(upload_request, reporter).await?;
     sync::set_file_mtime_utc(&info.local_path, uploaded_info.last_modified)?;
@@ -1988,15 +2018,15 @@ async fn file_sync_perform_download(
     prefix_ref: Option<&str>,
     blob_name: &str,
     remote_info: &crate::blob::models::FileInfo,
-    output_json: bool,
+    machine_mode: bool,
     reporter: &dyn crate::utils::progress::ProgressReporter,
 ) -> Result<()> {
     use crate::blob::models::FileDownloadRequest;
     use crate::blob::sync;
     let target = sync::local_path_from_blob(base_path, prefix_ref, blob_name)?;
     sync_assert_safe_local_path(base_path, &target, blob_name)?;
-    if !output_json && !is_tty() {
-        println!("download: {blob_name} → {}", target.display());
+    if !machine_mode && !is_tty() {
+        output::info(&format!("download: {blob_name} → {}", target.display()));
     }
     let download_request = FileDownloadRequest {
         name: blob_name.to_string(),
@@ -2038,12 +2068,16 @@ async fn execute_file_sync(
         );
     }
 
+    // Machine mode replaces every narration line below (and the human summary)
+    // with the single document `main` emits from `machine::report`.
+    let machine_mode = crate::utils::machine::is_machine_mode(config);
+
     let base_path = path.parent().unwrap_or(path);
     let prefix_ref = prefix.as_deref().map(str::trim).filter(|s| !s.is_empty());
 
     let local_files = collect_files_with_structure(path, base_path, prefix_ref, false)?;
 
-    if local_files.is_empty() && !config.output_json {
+    if local_files.is_empty() && !machine_mode {
         output::info("No local files found to sync");
     }
 
@@ -2126,20 +2160,20 @@ async fn execute_file_sync(
                 };
                 if !need {
                     summary.skipped += 1;
-                    if tty && !config.output_json {
+                    if tty && !machine_mode {
                         mp.log(&format!("skip (up to date): {blob_name}"));
-                    } else if !config.output_json {
-                        println!("skip (up to date): {blob_name}");
+                    } else if !machine_mode {
+                        output::info(&format!("skip (up to date): {blob_name}"));
                     }
                     mp.advance_overall(blob_name);
                     continue;
                 }
                 if dry_run {
-                    if !config.output_json {
-                        println!(
+                    if !machine_mode {
+                        output::info(&format!(
                             "upload (dry-run): {} → {blob_name}",
                             info.local_path.display()
-                        );
+                        ));
                     }
                     summary.uploaded += 1;
                     mp.advance_overall(blob_name);
@@ -2149,12 +2183,12 @@ async fn execute_file_sync(
                     blob_manager,
                     info,
                     blob_name,
-                    config.output_json,
+                    machine_mode,
                     &NoopReporter,
                 )
                 .await?;
                 summary.uploaded += 1;
-                if tty && !config.output_json {
+                if tty && !machine_mode {
                     mp.log(&format!(
                         "upload: {} → {blob_name}",
                         info.local_path.display()
@@ -2172,7 +2206,7 @@ async fn execute_file_sync(
                 &local_names,
                 dry_run,
                 delete,
-                config.output_json,
+                machine_mode,
                 &mut summary,
                 &mut mutated,
             )
@@ -2210,10 +2244,10 @@ async fn execute_file_sync(
                 };
 
                 if !need {
-                    if tty && !config.output_json {
+                    if tty && !machine_mode {
                         mp.log(&format!("skip (up to date): {blob_name}"));
-                    } else if !config.output_json {
-                        println!("skip (up to date): {blob_name}");
+                    } else if !machine_mode {
+                        output::info(&format!("skip (up to date): {blob_name}"));
                     }
                     summary.skipped += 1;
                     mp.advance_overall(blob_name);
@@ -2221,8 +2255,11 @@ async fn execute_file_sync(
                 }
 
                 if dry_run {
-                    if !config.output_json {
-                        println!("download (dry-run): {blob_name} → {}", target.display());
+                    if !machine_mode {
+                        output::info(&format!(
+                            "download (dry-run): {blob_name} → {}",
+                            target.display()
+                        ));
                     }
                     summary.downloaded += 1;
                     mp.advance_overall(blob_name);
@@ -2235,12 +2272,12 @@ async fn execute_file_sync(
                     prefix_ref,
                     blob_name,
                     remote_info,
-                    config.output_json,
+                    machine_mode,
                     &NoopReporter,
                 )
                 .await?;
                 summary.downloaded += 1;
-                if tty && !config.output_json {
+                if tty && !machine_mode {
                     mp.log(&format!("download: {blob_name} → {}", target.display()));
                 }
                 mp.advance_overall(blob_name);
@@ -2263,11 +2300,11 @@ async fn execute_file_sync(
                     (true, false) => {
                         let info = local_by_blob.get(blob_name).unwrap();
                         if dry_run {
-                            if !config.output_json {
-                                println!(
+                            if !machine_mode {
+                                output::info(&format!(
                                     "upload (dry-run): {} → {blob_name}",
                                     info.local_path.display()
-                                );
+                                ));
                             }
                             summary.uploaded += 1;
                             mp.advance_overall(blob_name);
@@ -2277,12 +2314,12 @@ async fn execute_file_sync(
                             blob_manager,
                             info,
                             blob_name,
-                            config.output_json,
+                            machine_mode,
                             &NoopReporter,
                         )
                         .await?;
                         summary.uploaded += 1;
-                        if tty && !config.output_json {
+                        if tty && !machine_mode {
                             mp.log(&format!(
                                 "upload: {} → {blob_name}",
                                 info.local_path.display()
@@ -2296,8 +2333,11 @@ async fn execute_file_sync(
                         let target = sync::local_path_from_blob(base_path, prefix_ref, blob_name)?;
                         sync_assert_safe_local_path(base_path, &target, blob_name)?;
                         if dry_run {
-                            if !config.output_json {
-                                println!("download (dry-run): {blob_name} → {}", target.display());
+                            if !machine_mode {
+                                output::info(&format!(
+                                    "download (dry-run): {blob_name} → {}",
+                                    target.display()
+                                ));
                             }
                             summary.downloaded += 1;
                             mp.advance_overall(blob_name);
@@ -2309,12 +2349,12 @@ async fn execute_file_sync(
                             prefix_ref,
                             blob_name,
                             remote_info,
-                            config.output_json,
+                            machine_mode,
                             &NoopReporter,
                         )
                         .await?;
                         summary.downloaded += 1;
-                        if tty && !config.output_json {
+                        if tty && !machine_mode {
                             mp.log(&format!("download: {blob_name} → {}", target.display()));
                         }
                         mp.advance_overall(blob_name);
@@ -2326,21 +2366,21 @@ async fn execute_file_sync(
                         let remote_info = remote_by_name.get(blob_name).unwrap();
                         match sync::resolve_both(size, mtime, remote_info) {
                             BothAction::Skip => {
-                                if tty && !config.output_json {
+                                if tty && !machine_mode {
                                     mp.log(&format!("skip: {blob_name}"));
-                                } else if !config.output_json {
-                                    println!("skip: {blob_name}");
+                                } else if !machine_mode {
+                                    output::info(&format!("skip: {blob_name}"));
                                 }
                                 summary.skipped += 1;
                                 mp.advance_overall(blob_name);
                             }
                             BothAction::Upload => {
                                 if dry_run {
-                                    if !config.output_json {
-                                        println!(
+                                    if !machine_mode {
+                                        output::info(&format!(
                                             "upload (dry-run): {} → {blob_name}",
                                             info.local_path.display()
-                                        );
+                                        ));
                                     }
                                     summary.uploaded += 1;
                                     mp.advance_overall(blob_name);
@@ -2350,12 +2390,12 @@ async fn execute_file_sync(
                                     blob_manager,
                                     info,
                                     blob_name,
-                                    config.output_json,
+                                    machine_mode,
                                     &NoopReporter,
                                 )
                                 .await?;
                                 summary.uploaded += 1;
-                                if tty && !config.output_json {
+                                if tty && !machine_mode {
                                     mp.log(&format!(
                                         "upload: {} → {blob_name}",
                                         info.local_path.display()
@@ -2369,11 +2409,11 @@ async fn execute_file_sync(
                                     sync::local_path_from_blob(base_path, prefix_ref, blob_name)?;
                                 sync_assert_safe_local_path(base_path, &target, blob_name)?;
                                 if dry_run {
-                                    if !config.output_json {
-                                        println!(
+                                    if !machine_mode {
+                                        output::info(&format!(
                                             "download (dry-run): {blob_name} → {}",
                                             target.display()
-                                        );
+                                        ));
                                     }
                                     summary.downloaded += 1;
                                     mp.advance_overall(blob_name);
@@ -2385,12 +2425,12 @@ async fn execute_file_sync(
                                     prefix_ref,
                                     blob_name,
                                     remote_info,
-                                    config.output_json,
+                                    machine_mode,
                                     &NoopReporter,
                                 )
                                 .await?;
                                 summary.downloaded += 1;
-                                if tty && !config.output_json {
+                                if tty && !machine_mode {
                                     mp.log(&format!(
                                         "download: {blob_name} → {}",
                                         target.display()
@@ -2439,7 +2479,7 @@ async fn execute_file_sync(
                     &local_names_after,
                     dry_run,
                     delete,
-                    config.output_json,
+                    machine_mode,
                     &mut summary,
                     &mut mutated,
                 )
@@ -2456,46 +2496,16 @@ async fn execute_file_sync(
         );
     }
 
-    if config.output_json {
-        let json_output = serde_json::to_string_pretty(&summary).map_err(|e| {
-            CrosstacheError::serialization(format!("Failed to serialize sync summary: {e}"))
-        })?;
-        println!("{json_output}");
+    if machine_mode {
+        // The summary IS the run's single stdout document; `main` renders it
+        // in the resolved format (json/yaml, or CSV rows).
+        crate::utils::machine::report(config, &summary);
     } else {
-        println!();
         output::info("Sync summary:");
-        println!(
-            "  {}",
-            output::format_line(
-                output::Level::Info,
-                &format!("Uploaded: {}", summary.uploaded),
-                output::should_use_rich_stdout()
-            )
-        );
-        println!(
-            "  {}",
-            output::format_line(
-                output::Level::Info,
-                &format!("Downloaded: {}", summary.downloaded),
-                output::should_use_rich_stdout()
-            )
-        );
-        println!(
-            "  {}",
-            output::format_line(
-                output::Level::Info,
-                &format!("Deleted (remote): {}", summary.deleted),
-                output::should_use_rich_stdout()
-            )
-        );
-        println!(
-            "  {}",
-            output::format_line(
-                output::Level::Info,
-                &format!("Skipped: {}", summary.skipped),
-                output::should_use_rich_stdout()
-            )
-        );
+        output::info(&format!("Uploaded: {}", summary.uploaded));
+        output::info(&format!("Downloaded: {}", summary.downloaded));
+        output::info(&format!("Deleted (remote): {}", summary.deleted));
+        output::info(&format!("Skipped: {}", summary.skipped));
         if dry_run {
             output::hint("Dry run: no changes were applied.");
         }

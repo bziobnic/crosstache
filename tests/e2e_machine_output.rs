@@ -809,3 +809,180 @@ fn version_human_mode_is_unchanged_text_on_stdout() {
     assert!(stdout.contains("Version:"), "stdout:\n{stdout}");
     assert!(stdout.contains("Backends:"), "stdout:\n{stdout}");
 }
+
+// ---------------------------------------------------------------------------
+// File batches, `file sync`, and `transfer`
+// ---------------------------------------------------------------------------
+
+/// Write `contents` at `relative` under the environment's HOME (the cwd every
+/// `xv` invocation runs in) and return the path as the CLI sees it.
+fn write_home_file(env: &MachineEnv, relative: &str, contents: &[u8]) -> PathBuf {
+    let path = env.home.join(relative);
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("create parent dir");
+    std::fs::write(&path, contents).expect("write file");
+    path
+}
+
+/// A multi-file `file upload` where the second path does not exist: stdout
+/// holds exactly one document — the error envelope with the per-file
+/// `ItemReport` attached under `report` — and the run exits non-zero.
+#[test]
+fn file_upload_batch_partial_failure_json_is_one_envelope_with_report() {
+    let env = MachineEnv::new();
+    write_home_file(&env, "good.txt", b"good");
+
+    let out = env
+        .xv()
+        .args(["file", "upload", "good.txt", "missing.txt"])
+        .args(["--format", "json"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "a missing upload path must fail\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let doc = one_json_document(&stdout);
+    assert!(doc["error"]["message"].is_string(), "{doc}");
+    let report = &doc["report"];
+    assert_eq!(report["summary"]["total"], 2, "{doc}");
+    assert_eq!(report["summary"]["succeeded"], 1, "{doc}");
+    assert_eq!(report["summary"]["failed"], 1, "{doc}");
+    let items = report["items"].as_array().expect("items array");
+    assert_eq!(items[0]["name"], "good.txt", "{doc}");
+    assert_eq!(items[0]["status"], "ok", "{doc}");
+    assert_eq!(items[1]["name"], "missing.txt", "{doc}");
+    assert_eq!(items[1]["status"], "failed", "{doc}");
+    assert!(!stdout.contains("Uploading"), "stdout:\n{stdout}");
+}
+
+/// A clean multi-file `file upload`: one `ItemReport` document, exit 0.
+#[test]
+fn file_upload_batch_clean_json_is_one_item_report() {
+    let env = MachineEnv::new();
+    write_home_file(&env, "one.txt", b"one");
+    write_home_file(&env, "two.txt", b"two");
+
+    let out = env
+        .xv()
+        .args(["file", "upload", "one.txt", "two.txt"])
+        .args(["--format", "json"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let doc = one_json_document(&stdout);
+    assert_eq!(doc["summary"]["total"], 2, "{doc}");
+    assert_eq!(doc["summary"]["succeeded"], 2, "{doc}");
+    assert_eq!(doc["summary"]["failed"], 0, "{doc}");
+    assert!(doc["error"].is_null(), "{doc}");
+    assert!(!stdout.contains("Upload completed"), "stdout:\n{stdout}");
+}
+
+/// `file sync --dry-run --format yaml`: the plan lines stay off stdout and the
+/// sync summary is the run's single YAML document.
+#[test]
+fn file_sync_dry_run_yaml_is_one_document() {
+    let env = MachineEnv::new();
+    write_home_file(&env, "data/a.txt", b"alpha");
+    write_home_file(&env, "data/b.txt", b"beta");
+
+    let out = env
+        .xv()
+        .args(["file", "sync", "data", "--direction", "up", "--dry-run"])
+        .args(["--format", "yaml"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let doc = one_yaml_document(&stdout);
+    assert_eq!(doc["dry_run"], true, "{doc}");
+    assert_eq!(doc["uploaded"], 2, "{doc}");
+    assert!(!stdout.contains("upload (dry-run):"), "stdout:\n{stdout}");
+    assert!(!stdout.contains("Sync summary"), "stdout:\n{stdout}");
+}
+
+/// `file sync --format csv`: stdout is CSV rows only, with no narration.
+#[test]
+fn file_sync_csv_is_rows_only() {
+    let env = MachineEnv::new();
+    write_home_file(&env, "data/a.txt", b"alpha");
+
+    let out = env
+        .xv()
+        .args(["file", "sync", "data", "--direction", "up"])
+        .args(["--format", "csv"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let lines: Vec<&str> = stdout.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(lines[0], "report", "stdout:\n{stdout}");
+    assert_eq!(lines.len(), 2, "stdout:\n{stdout}");
+    assert!(!stdout.contains("upload:"), "stdout:\n{stdout}");
+    assert!(!stdout.contains("Sync summary"), "stdout:\n{stdout}");
+}
+
+/// `transfer` honours the resolved format: a preview asked for as YAML is one
+/// YAML document, not the pretty JSON the human path prints.
+#[test]
+fn transfer_preview_yaml_is_yaml_not_json() {
+    let env = MachineEnv::new();
+    env.ok(&["set", "cert", "--value", "cert-value"]);
+    write_home_file(&env, "proof.txt", b"proof-content");
+    env.ok(&["attach", "cert", "proof.txt"]);
+
+    let out = env
+        .xv()
+        .args([
+            "transfer",
+            "cert",
+            "--from",
+            "default",
+            "--to",
+            "default",
+            "--new-name",
+            "certificate",
+            "--move",
+        ])
+        .args(["--format", "yaml"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&stdout).is_err(),
+        "transfer must not print JSON when --format yaml was asked for:\n{stdout}"
+    );
+    let doc = one_yaml_document(&stdout);
+    assert_eq!(doc["attachment_count"], 1, "{doc}");
+    assert_eq!(doc["intent"]["destination_name"], "certificate", "{doc}");
+    assert!(!stdout.contains("proof-content"), "stdout:\n{stdout}");
+}
