@@ -160,9 +160,9 @@ pub(crate) async fn get_secret(
     let props = target
         .backend
         .secrets()
-        .get_secret(&target.context.vault, &name, false)
+        .get_secret_metadata(&target.context.vault, &name)
         .await?;
-    Ok(Json(props.into_metadata()))
+    Ok(Json(props))
 }
 
 pub(crate) async fn reveal_secret(
@@ -174,11 +174,9 @@ pub(crate) async fn reveal_secret(
     let props = target
         .backend
         .secrets()
-        .get_secret(&target.context.vault, &name, true)
+        .get_secret(&target.context.vault, &name)
         .await?;
-    Ok(Json(
-        json!({ "value": props.value.as_ref().map(SecretValue::expose_secret) }),
-    ))
+    Ok(Json(json!({ "value": props.value.expose_secret() })))
 }
 
 #[derive(Deserialize)]
@@ -221,7 +219,7 @@ pub(crate) async fn put_secret(
         .secrets()
         .set_secret(&target.context.vault, request)
         .await?;
-    Ok(Json(props.into_metadata()))
+    Ok(Json(props))
 }
 
 /// Metadata-only update. Optional string fields: absent = unchanged,
@@ -292,7 +290,7 @@ pub(crate) async fn patch_secret(
         .secrets()
         .update_secret(&target.context.vault, &name, request)
         .await?;
-    Ok(Json(props.into_metadata()))
+    Ok(Json(props))
 }
 
 pub(crate) async fn delete_secret(
@@ -347,7 +345,7 @@ pub(crate) async fn move_secret(
                 .secrets()
                 .rename_secret(vault, &name, &new_name)
                 .await?;
-            Ok(Json(props.into_metadata()))
+            Ok(Json(props))
         }
         (None, Some(folder)) => {
             reject_reserved_attachment_key(&name)?;
@@ -371,7 +369,7 @@ pub(crate) async fn move_secret(
                 .secrets()
                 .update_secret(vault, &name, request)
                 .await?;
-            Ok(Json(props.into_metadata()))
+            Ok(Json(props))
         }
         _ => Err(validation_error(
             StatusCode::BAD_REQUEST,

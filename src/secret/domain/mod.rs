@@ -5,9 +5,9 @@
 //! [`SecretValue::expose_secret`], so `grep expose_secret` lists every
 //! plaintext read in the crate. Metadata types (`SecretMetadata`,
 //! `SecretSummary`, `DeletedSecretSummary`) are value-free and serializable.
-//! Value-bearing composites (`SecretProperties`, `SecretRequest`,
+//! Value-bearing composites (`Secret`, `SecretRequest`,
 //! `SecretUpdateRequest`, `SecretSnapshot`) derive `Debug` (redacted through
-//! `SecretValue`) but never serde; `SecretProperties::into_metadata` is the
+//! `SecretValue`) but never serde; `Secret::into_metadata` is the
 //! one way a secret becomes serializable, and it drops the plaintext.
 //!
 //! This module imports nothing from `crate::backend`, `crate::cli`,
@@ -25,5 +25,5 @@ pub mod value;
 pub use disclosure::parse_connection_components;
 pub use metadata::{DeletedSecretSummary, FieldUpdate, SecretAttributesUpdate, SecretSummary};
 pub use request::{SecretRequest, SecretUpdateRequest};
-pub use secret::{SecretMetadata, SecretProperties, SecretSnapshot};
+pub use secret::{Secret, SecretMetadata, SecretSnapshot, SnapshotValue};
 pub use value::SecretValue;

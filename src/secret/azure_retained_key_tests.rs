@@ -148,20 +148,20 @@ async fn azure_retained_key_interleaved_sets_preserve_exact_versions_over_http()
         .await
         .unwrap();
         assert_eq!(result.version, format!("version-{}", index + 1));
-        assert!(result.value.as_ref().unwrap().expose_secret() == value);
         committed.push(result);
     }
     for (index, commit) in committed.iter().enumerate() {
         let url = loopback_url(&ops, address, &["secrets", name, &commit.version]);
-        let verified = get_secret_version_http(client.get(&url), &url, name, &commit.version, true)
-            .await
-            .unwrap();
+        let (verified, verified_value) =
+            get_secret_version_http(client.get(&url), &url, name, &commit.version)
+                .await
+                .unwrap();
         assert_eq!(verified.version, commit.version);
         assert_eq!(verified.name, name);
         assert_eq!(verified.original_name, name);
         assert_eq!(verified.content_type, content_type);
         assert_eq!(verified.tags, commit.tags);
-        assert!(verified.value.as_ref().unwrap().expose_secret() == values[index]);
+        assert!(verified_value.unwrap().expose_secret() == values[index]);
     }
     tokio::time::timeout(std::time::Duration::from_secs(5), server)
         .await
@@ -200,7 +200,7 @@ async fn azure_retained_key_missing_exact_version_maps_to_backend_not_found() {
         .build()
         .unwrap();
     let url = loopback_url(&ops, address, &["secrets", name, version]);
-    let error = get_secret_version_http(client.get(&url), &url, name, version, true)
+    let error = get_secret_version_http(client.get(&url), &url, name, version)
         .await
         .unwrap_err();
     let backend_error = crate::backend::azure::map_error(error);

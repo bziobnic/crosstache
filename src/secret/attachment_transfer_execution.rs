@@ -235,11 +235,11 @@ fn resolve_configured_path(
 }
 
 use super::attachment_rewrap as rewrap;
-use super::domain::SecretProperties;
+use super::domain::Secret;
 use crate::backend::{
     error::BackendError, secret::rename_request_from_properties, TransferLocation,
 };
-use crate::secret::domain::SecretValue;
+use crate::secret::domain::{SecretSnapshot, SnapshotValue};
 use age::secrecy::ExposeSecret;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
@@ -586,12 +586,8 @@ fn mac(identity: &age::x25519::Identity, purpose: &[u8]) -> Hmac<Sha256> {
     mac.update(purpose);
     mac
 }
-fn commitment(
-    identity: &age::x25519::Identity,
-    secret: &SecretProperties,
-    name: &str,
-) -> Result<String> {
-    let request = rename_request_from_properties(name, secret).map_err(|_| conflict())?;
+fn commitment(identity: &age::x25519::Identity, secret: &Secret, name: &str) -> Result<String> {
+    let request = rename_request_from_properties(name, secret);
     request_commitment(identity, &request)
 }
 fn request_commitment(
@@ -820,11 +816,20 @@ async fn supported_route(
     }
     Ok((a, b))
 }
+/// A snapshot read with [`SnapshotValue::Include`] always carries its value; a
+/// missing one is provider drift, not a value-free result.
+fn snapshot_secret(snapshot: &SecretSnapshot) -> Result<Secret> {
+    Ok(Secret {
+        metadata: snapshot.metadata.clone(),
+        value: snapshot.value.clone().ok_or_else(conflict)?,
+    })
+}
+
 fn destination_request(
-    source: &SecretProperties,
+    source: &Secret,
     intent: &TransferIntent,
 ) -> Result<super::domain::SecretRequest> {
-    let mut request = rename_request_from_properties(&intent.destination_name, source)?;
+    let mut request = rename_request_from_properties(&intent.destination_name, source);
     if let Some(folder) = &intent.destination_folder {
         request.folder = if folder == "/" {
             None
@@ -881,20 +886,28 @@ async fn checked_plan(
 ) -> Result<TransferPlan> {
     let before = source
         .guarded_secrets()
-        .get_transfer_snapshot(&intent.source.vault, &intent.source_name, true)
+        .get_transfer_snapshot(
+            &intent.source.vault,
+            &intent.source_name,
+            SnapshotValue::Include,
+        )
         .await?;
     let plan = transfer::plan(source, destination, intent).await?;
     let after = source
         .guarded_secrets()
-        .get_transfer_snapshot(&plan.intent.source.vault, &plan.intent.source_name, true)
+        .get_transfer_snapshot(
+            &plan.intent.source.vault,
+            &plan.intent.source_name,
+            SnapshotValue::Include,
+        )
         .await?;
     if before.revision != after.revision
-        || after.properties.version != plan.source_version
-        || after.properties.name != plan.intent.source_name
+        || after.metadata.version != plan.source_version
+        || after.metadata.name != plan.intent.source_name
     {
         return Err(conflict());
     }
-    let request = destination_request(&after.properties, &plan.intent)?;
+    let request = destination_request(&snapshot_secret(&after)?, &plan.intent)?;
     crate::backend::secret::validate_transfer_request(destination, &request)?;
     destination
         .guarded_secrets()
@@ -958,15 +971,9 @@ async fn load_destination_ring(
         .get_secret(
             &plan.intent.destination.vault,
             super::attachment_key::ACTIVE_POINTER_SECRET,
-            true,
         )
         .await?;
-    let active = match pointer
-        .value
-        .as_ref()
-        .map(SecretValue::expose_secret)
-        .and_then(super::attachment_key::parse_pointer_value)
-    {
+    let active = match super::attachment_key::parse_pointer_value(pointer.value.expose_secret()) {
         Some(super::attachment_key::PointerKind::V2 { active, .. }) => active,
         _ => return Err(conflict()),
     };
@@ -1089,7 +1096,11 @@ async fn preflight_plan(
     // Authorize that exact route now instead of discovering denial after create.
     match destination
         .guarded_secrets()
-        .get_transfer_snapshot(&intent.destination.vault, &intent.destination_name, true)
+        .get_transfer_snapshot(
+            &intent.destination.vault,
+            &intent.destination_name,
+            SnapshotValue::Include,
+        )
         .await
     {
         Err(BackendError::NotFound { .. }) => {}
@@ -1106,7 +1117,11 @@ async fn preflight_plan(
     let ring = load_destination_ring(destination, &plan).await?;
     let secret = source
         .guarded_secrets()
-        .get_transfer_snapshot(&plan.intent.source.vault, &plan.intent.source_name, true)
+        .get_transfer_snapshot(
+            &plan.intent.source.vault,
+            &plan.intent.source_name,
+            SnapshotValue::Include,
+        )
         .await?;
     validate_journal_budget(destination, &plan, &locations, &ring, &secret.revision)?;
     let preview = owned_preview(&plan, Ok(locations));
@@ -1162,7 +1177,11 @@ pub async fn apply(
     let (source_location, destination_location) = supported(source, destination, &intent).await?;
     let initial_secret = source
         .guarded_secrets()
-        .get_transfer_snapshot(&intent.source.vault, &intent.source_name, true)
+        .get_transfer_snapshot(
+            &intent.source.vault,
+            &intent.source_name,
+            SnapshotValue::Include,
+        )
         .await?;
     let plan = checked_plan(source, destination, intent).await?;
     source
@@ -1175,10 +1194,14 @@ pub async fn apply(
     let session = storage::Session::open(&root, true)?;
     let secret = source
         .guarded_secrets()
-        .get_transfer_snapshot(&plan.intent.source.vault, &plan.intent.source_name, true)
+        .get_transfer_snapshot(
+            &plan.intent.source.vault,
+            &plan.intent.source_name,
+            SnapshotValue::Include,
+        )
         .await?;
-    if secret.properties.version != plan.source_version
-        || secret.revision != initial_secret.revision
+    let secret_value = snapshot_secret(&secret)?;
+    if secret.metadata.version != plan.source_version || secret.revision != initial_secret.revision
     {
         return Err(conflict());
     }
@@ -1189,12 +1212,12 @@ pub async fn apply(
         source_revision: secret.revision,
         source_commitment: commitment(
             &session.identity,
-            &secret.properties,
+            &secret_value,
             &plan.intent.destination_name,
         )?,
         secret_commitment: request_commitment(
             &session.identity,
-            &destination_request(&secret.properties, &plan.intent)?,
+            &destination_request(&secret_value, &plan.intent)?,
         )?,
         files: plan.files.iter().map(|_| FileState::Prepared).collect(),
         destination_files: plan.files.iter().map(|_| None).collect(),
@@ -1297,7 +1320,7 @@ async fn authenticate_saved(
         key::KeySlot::Legacy => key::ACTIVE_POINTER_SECRET.to_owned(),
         key::KeySlot::Retained => key::retained_record_name(&reference.key_id),
     };
-    let current = keys.get_secret(vault, &name, false).await?;
+    let current = keys.get_secret_metadata(vault, &name).await?;
     if !current.enabled
         || (reference.slot == key::KeySlot::Retained
             && (!key::is_marked_key_record(&current.content_type)
@@ -1344,7 +1367,7 @@ async fn verify(
     destination: &dyn Backend,
     session: &storage::Session,
     journal: &Journal,
-) -> Result<Option<SecretProperties>> {
+) -> Result<Option<Secret>> {
     journal.validate()?;
     session.check_location()?;
     let i = &journal.plan.intent;
@@ -1363,7 +1386,7 @@ async fn verify(
     }
     let source_secret = match source
         .guarded_secrets()
-        .get_transfer_snapshot(&i.source.vault, &i.source_name, true)
+        .get_transfer_snapshot(&i.source.vault, &i.source_name, SnapshotValue::Include)
         .await
     {
         Ok(s) => {
@@ -1372,17 +1395,18 @@ async fn verify(
             {
                 return Err(invalid());
             }
+            let secret = snapshot_secret(&s)?;
             if journal.phase == Phase::Complete && i.operation == TransferOperation::Move
                 || s.revision != journal.source_revision
-                || s.properties.name != i.source_name
-                || commitment(&session.identity, &s.properties, &i.destination_name)?
+                || s.metadata.name != i.source_name
+                || commitment(&session.identity, &secret, &i.destination_name)?
                     != journal.source_commitment
-                || request_commitment(&session.identity, &destination_request(&s.properties, i)?)?
+                || request_commitment(&session.identity, &destination_request(&secret, i)?)?
                     != journal.secret_commitment
             {
                 return Err(conflict());
             }
-            Some(s.properties)
+            Some(secret)
         }
         Err(BackendError::NotFound { .. })
             if i.operation == TransferOperation::Move
@@ -1394,7 +1418,11 @@ async fn verify(
     };
     match destination
         .guarded_secrets()
-        .get_transfer_snapshot(&i.destination.vault, &i.destination_name, true)
+        .get_transfer_snapshot(
+            &i.destination.vault,
+            &i.destination_name,
+            SnapshotValue::Include,
+        )
         .await
     {
         Ok(s) => {
@@ -1406,9 +1434,12 @@ async fn verify(
             if matches!(
                 journal.phase,
                 Phase::DestinationNamespacePending | Phase::Prepared
-            ) || s.properties.name != i.destination_name
-                || commitment(&session.identity, &s.properties, &i.destination_name)?
-                    != journal.secret_commitment
+            ) || s.metadata.name != i.destination_name
+                || commitment(
+                    &session.identity,
+                    &snapshot_secret(&s)?,
+                    &i.destination_name,
+                )? != journal.secret_commitment
                 || journal
                     .destination_revision
                     .as_ref()
@@ -1601,7 +1632,11 @@ async fn execute(
         let i = &journal.plan.intent;
         match destination
             .guarded_secrets()
-            .get_transfer_snapshot(&i.destination.vault, &i.destination_name, true)
+            .get_transfer_snapshot(
+                &i.destination.vault,
+                &i.destination_name,
+                SnapshotValue::Include,
+            )
             .await
         {
             Err(BackendError::NotFound { .. }) => {
@@ -1624,10 +1659,17 @@ async fn execute(
         verify(source, destination, session, journal).await?;
         let snapshot = destination
             .guarded_secrets()
-            .get_transfer_snapshot(&i.destination.vault, &i.destination_name, true)
+            .get_transfer_snapshot(
+                &i.destination.vault,
+                &i.destination_name,
+                SnapshotValue::Include,
+            )
             .await?;
-        if commitment(&session.identity, &snapshot.properties, &i.destination_name)?
-            != journal.secret_commitment
+        if commitment(
+            &session.identity,
+            &snapshot_secret(&snapshot)?,
+            &i.destination_name,
+        )? != journal.secret_commitment
         {
             return Err(conflict());
         }

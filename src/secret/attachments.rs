@@ -92,11 +92,9 @@ pub async fn get_identity(
     secrets: &dyn AttachmentKeyStore,
     vault: &str,
 ) -> Result<age::x25519::Identity> {
-    match secrets.get_secret(vault, ATTACHMENT_KEY_SECRET, true).await {
+    match secrets.get_secret(vault, ATTACHMENT_KEY_SECRET).await {
         Ok(props) => {
-            let value = props
-                .value
-                .ok_or(CrosstacheError::from(AttachmentError::KeyInvalid))?;
+            let value = props.value;
             parse_identity(value.expose_secret())
         }
         Err(BackendError::NotFound { .. }) => {
@@ -132,12 +130,10 @@ async fn resolve_upload_material(
     secrets: &dyn AttachmentKeyStore,
     vault: &str,
 ) -> Result<AttachmentKeyMaterial> {
-    match secrets.get_secret(vault, ATTACHMENT_KEY_SECRET, true).await {
+    match secrets.get_secret(vault, ATTACHMENT_KEY_SECRET).await {
         Ok(props) => {
             let version = props.version.clone();
-            let value = props
-                .value
-                .ok_or(CrosstacheError::from(AttachmentError::PointerInvalid))?;
+            let value = props.value;
             match attachment_key::parse_pointer_value(value.expose_secret()) {
                 Some(PointerKind::V1RawIdentity) => material_from_identity_value(
                     KeySlot::Legacy,
@@ -187,16 +183,14 @@ async fn resolve_active_retained(
 ) -> Result<AttachmentKeyMaterial> {
     let name = attachment_key::retained_record_name(active_id);
     let props = secrets
-        .get_secret(vault, &name, true)
+        .get_secret(vault, &name)
         .await
         .map_err(|e| match e {
             BackendError::NotFound { .. } => CrosstacheError::from(AttachmentError::KeyMissing),
             other => other.into(),
         })?;
     let version = props.version.clone();
-    let value = props
-        .value
-        .ok_or(CrosstacheError::from(AttachmentError::KeyInvalid))?;
+    let value = props.value;
     let material = material_from_identity_value(
         KeySlot::Retained,
         Zeroizing::new(value.expose_secret().to_owned()),
@@ -230,7 +224,7 @@ async fn publish_v2_pointer(
     };
     secrets.set_secret(vault, request).await?;
     let props = secrets
-        .get_secret(vault, ATTACHMENT_KEY_SECRET, true)
+        .get_secret(vault, ATTACHMENT_KEY_SECRET)
         .await
         .map_err(|error| match error {
             BackendError::NotFound { .. } => {
@@ -238,10 +232,7 @@ async fn publish_v2_pointer(
             }
             other => other.into(),
         })?;
-    let value = props
-        .value
-        .unwrap_or_else(|| SecretValue::new(String::new()));
-    match attachment_key::parse_pointer_value(value.expose_secret()) {
+    match attachment_key::parse_pointer_value(props.value.expose_secret()) {
         Some(PointerKind::V2 { .. }) => Ok(()),
         _ => Err(CrosstacheError::from(AttachmentError::CommitUnconfirmed)),
     }
@@ -269,7 +260,7 @@ pub(crate) async fn initialize_v2(
         let retained_name = attachment_key::retained_record_name(&key_id);
 
         // Inspect the exact record name WITHOUT requesting its value.
-        match secrets.get_secret(vault, &retained_name, false).await {
+        match secrets.get_secret_metadata(vault, &retained_name).await {
             Ok(props) => {
                 if attachment_key::is_marked_key_record(&props.content_type) {
                     // A marked record already exists (a concurrent initializer,
@@ -308,7 +299,7 @@ pub(crate) async fn initialize_v2(
                 }
                 // Re-read the exact committed version and verify the derived ID.
                 let reread = secrets
-                    .get_secret_version(vault, &retained_name, &committed.version, true)
+                    .get_secret_version(vault, &retained_name, &committed.version)
                     .await
                     .map_err(|error| match error {
                         BackendError::NotFound { .. } => {
@@ -319,9 +310,7 @@ pub(crate) async fn initialize_v2(
                 if reread.version != committed.version {
                     return Err(CrosstacheError::from(AttachmentError::KeyVersionInvalid));
                 }
-                let value = reread
-                    .value
-                    .ok_or(CrosstacheError::from(AttachmentError::KeyInvalid))?;
+                let value = reread.value;
                 let material = material_from_identity_value(
                     KeySlot::Retained,
                     Zeroizing::new(value.expose_secret().to_owned()),
@@ -356,15 +345,13 @@ async fn resolve_referenced_material(
         KeySlot::Retained => attachment_key::retained_record_name(&key_ref.key_id),
     };
     let props = secrets
-        .get_secret_version(vault, &record_name, key_ref.provider_version.as_str(), true)
+        .get_secret_version(vault, &record_name, key_ref.provider_version.as_str())
         .await
         .map_err(|e| match e {
             BackendError::NotFound { .. } => CrosstacheError::from(AttachmentError::KeyMissing),
             other => other.into(),
         })?;
-    let value = props
-        .value
-        .ok_or(CrosstacheError::from(AttachmentError::KeyInvalid))?;
+    let value = props.value;
     let material = AttachmentKeyMaterial::from_identity(
         key_ref.slot,
         key_ref.provider_version.clone(),
@@ -385,13 +372,13 @@ async fn legacy_download_identity(
     vault: &str,
 ) -> Result<age::x25519::Identity> {
     let props = secrets
-        .get_secret(vault, ATTACHMENT_KEY_SECRET, true)
+        .get_secret(vault, ATTACHMENT_KEY_SECRET)
         .await
         .map_err(|error| match error {
             BackendError::NotFound { .. } => CrosstacheError::from(AttachmentError::KeyMissing),
             other => other.into(),
         })?;
-    let value = props.value.ok_or(AttachmentError::PointerInvalid)?;
+    let value = props.value;
     match attachment_key::parse_pointer_value(value.expose_secret()) {
         Some(PointerKind::V1RawIdentity) => parse_identity(value.expose_secret()),
         Some(PointerKind::V2 {
@@ -530,7 +517,7 @@ mod tests {
     #[cfg(feature = "file-ops")]
     use crate::blob::models::{FileInfo, FileListRequest, FileUploadRequest};
     use crate::secret::domain::{
-        SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest,
+        Secret, SecretMetadata, SecretRequest, SecretSummary, SecretUpdateRequest,
     };
     #[cfg(feature = "file-ops")]
     use crate::utils::progress::ProgressReporter;
@@ -582,16 +569,10 @@ mod tests {
         }
     }
 
-    fn props(
-        name: &str,
-        value: Option<&str>,
-        version: &str,
-        content_type: &str,
-    ) -> SecretProperties {
-        SecretProperties {
+    fn meta(name: &str, version: &str, content_type: &str) -> SecretMetadata {
+        SecretMetadata {
             name: name.to_string(),
             original_name: name.to_string(),
-            value: value.map(SecretValue::new),
             version: version.to_string(),
             version_number: version.parse().ok(),
             created_timestamp: 0,
@@ -606,27 +587,34 @@ mod tests {
         }
     }
 
+    fn props(name: &str, value: &str, version: &str, content_type: &str) -> Secret {
+        Secret {
+            metadata: meta(name, version, content_type),
+            value: SecretValue::new(value),
+        }
+    }
+
     #[async_trait]
     impl SecretBackend for StubSecrets {
         async fn set_secret(
             &self,
             _vault: &str,
             request: SecretRequest,
-        ) -> std::result::Result<SecretProperties, BackendError> {
+        ) -> std::result::Result<SecretMetadata, BackendError> {
             *self.set_count.lock().unwrap() += 1;
             let mut map = self.secrets.lock().unwrap();
             let versions = map.entry(request.name.clone()).or_default();
             let ct = request.content_type.clone().unwrap_or_default();
             versions.push((request.value.expose_secret().to_string(), ct.clone()));
             let version = versions.len().to_string();
-            Ok(props(&request.name, None, &version, &ct))
+            Ok(meta(&request.name, &version, &ct))
         }
 
         async fn create_secret_if_absent(
             &self,
             _vault: &str,
             request: SecretRequest,
-        ) -> std::result::Result<SecretProperties, BackendError> {
+        ) -> std::result::Result<SecretMetadata, BackendError> {
             let mut count = self.set_count.lock().unwrap();
             let mut map = self.secrets.lock().unwrap();
             if let Some((name, value)) = self.create_collision.lock().unwrap().take() {
@@ -641,15 +629,39 @@ mod tests {
                 vec![(request.value.expose_secret().to_string(), ct.clone())],
             );
             *count += 1;
-            Ok(props(&request.name, None, "1", &ct))
+            Ok(meta(&request.name, "1", &ct))
+        }
+
+        async fn get_secret_metadata(
+            &self,
+            _vault: &str,
+            name: &str,
+        ) -> std::result::Result<SecretMetadata, BackendError> {
+            if self.missing_pointer && name == ATTACHMENT_KEY_SECRET {
+                return Err(BackendError::NotFound {
+                    name: name.into(),
+                    suggestion: None,
+                });
+            }
+            let map = self.secrets.lock().unwrap();
+            match map.get(name) {
+                Some(v) if !v.is_empty() => {
+                    let version = v.len().to_string();
+                    let (_val, ct) = v.last().unwrap();
+                    Ok(meta(name, &version, ct))
+                }
+                _ => Err(BackendError::NotFound {
+                    name: name.to_string(),
+                    suggestion: None,
+                }),
+            }
         }
 
         async fn get_secret(
             &self,
             _vault: &str,
             name: &str,
-            include_value: bool,
-        ) -> std::result::Result<SecretProperties, BackendError> {
+        ) -> std::result::Result<Secret, BackendError> {
             if self.missing_pointer && name == ATTACHMENT_KEY_SECRET {
                 return Err(BackendError::NotFound {
                     name: name.into(),
@@ -661,12 +673,7 @@ mod tests {
                 Some(v) if !v.is_empty() => {
                     let version = v.len().to_string();
                     let (val, ct) = v.last().unwrap();
-                    Ok(props(
-                        name,
-                        include_value.then_some(val.as_str()),
-                        &version,
-                        ct,
-                    ))
+                    Ok(props(name, val.as_str(), &version, ct))
                 }
                 _ => Err(BackendError::NotFound {
                     name: name.to_string(),
@@ -675,13 +682,51 @@ mod tests {
             }
         }
 
+        async fn get_secret_version_metadata(
+            &self,
+            _vault: &str,
+            name: &str,
+            version: &str,
+        ) -> std::result::Result<SecretMetadata, BackendError> {
+            if self.missing_version {
+                return Err(BackendError::NotFound {
+                    name: name.into(),
+                    suggestion: None,
+                });
+            }
+            let map = self.secrets.lock().unwrap();
+            let versions = map.get(name).ok_or_else(|| BackendError::NotFound {
+                name: name.to_string(),
+                suggestion: None,
+            })?;
+            let idx: usize = version.parse().map_err(|_| BackendError::NotFound {
+                name: name.to_string(),
+                suggestion: None,
+            })?;
+            if idx == 0 || idx > versions.len() {
+                return Err(BackendError::NotFound {
+                    name: name.to_string(),
+                    suggestion: None,
+                });
+            }
+            let (_val, ct) = &versions[idx - 1];
+            Ok(meta(
+                name,
+                self.read_version_override
+                    .lock()
+                    .unwrap()
+                    .as_deref()
+                    .unwrap_or(version),
+                ct,
+            ))
+        }
+
         async fn get_secret_version(
             &self,
             _vault: &str,
             name: &str,
             version: &str,
-            include_value: bool,
-        ) -> std::result::Result<SecretProperties, BackendError> {
+        ) -> std::result::Result<Secret, BackendError> {
             if self.missing_version {
                 return Err(BackendError::NotFound {
                     name: name.into(),
@@ -706,7 +751,7 @@ mod tests {
             let (val, ct) = &versions[idx - 1];
             Ok(props(
                 name,
-                include_value.then_some(val.as_str()),
+                val.as_str(),
                 self.read_version_override
                     .lock()
                     .unwrap()
@@ -737,7 +782,7 @@ mod tests {
             _vault: &str,
             _name: &str,
             _request: SecretUpdateRequest,
-        ) -> std::result::Result<SecretProperties, BackendError> {
+        ) -> std::result::Result<SecretMetadata, BackendError> {
             Err(BackendError::Unsupported("update".into()))
         }
     }
@@ -1309,7 +1354,7 @@ mod tests {
 
         // The retained record exists, is marked, and derives the active ID.
         let retained = retained_record_name(&active);
-        let props = secrets.get_secret("v", &retained, true).await.unwrap();
+        let props = secrets.get_secret("v", &retained).await.unwrap();
         assert!(
             is_marked_key_record(&props.content_type),
             "record must be marked"
@@ -1317,7 +1362,6 @@ mod tests {
         let stored_id = AttachmentKeyId::derive(
             &props
                 .value
-                .unwrap()
                 .expose_secret()
                 .trim()
                 .parse::<age::x25519::Identity>()

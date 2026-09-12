@@ -1,6 +1,6 @@
 use crate::backend::Backend;
 use crate::config::Config;
-use crate::secret::domain::{SecretProperties, SecretSummary};
+use crate::secret::domain::{SecretMetadata, SecretSummary};
 use crate::vault::models::VaultSummary;
 use ratatui::widgets::ListState;
 use std::collections::HashMap;
@@ -98,7 +98,7 @@ pub struct App {
     pub value_debounce: Option<(String, String, u32)>,
 
     pub overlay: Overlay,
-    pub history: HashMap<(String, String), Vec<SecretProperties>>,
+    pub history: HashMap<(String, String), Vec<SecretMetadata>>,
     pub audit: HashMap<(String, Option<String>), Vec<String>>,
 
     pub toast: Option<Toast>,
@@ -275,7 +275,7 @@ mod tests {
     use super::*;
     use crate::backend::error::BackendError;
     use crate::backend::{BackendCapabilities, BackendKind, SecretBackend};
-    use crate::secret::domain::{SecretProperties, SecretRequest, SecretUpdateRequest};
+    use crate::secret::domain::{Secret, SecretRequest, SecretUpdateRequest};
 
     /// Minimal fake `Backend` distinguishable by its `name()` — enough to
     /// prove `workspace_target_for` returns the RIGHT entry's backend, not
@@ -288,24 +288,39 @@ mod tests {
             &self,
             _vault: &str,
             _request: SecretRequest,
-        ) -> std::result::Result<SecretProperties, BackendError> {
+        ) -> std::result::Result<SecretMetadata, BackendError> {
             Err(BackendError::Unsupported("fake".into()))
         }
+        async fn get_secret_metadata(
+            &self,
+            _vault: &str,
+            _name: &str,
+        ) -> std::result::Result<SecretMetadata, BackendError> {
+            Err(BackendError::Unsupported("fake".into()))
+        }
+
         async fn get_secret(
             &self,
             _vault: &str,
             _name: &str,
-            _include_value: bool,
-        ) -> std::result::Result<SecretProperties, BackendError> {
+        ) -> std::result::Result<Secret, BackendError> {
             Err(BackendError::Unsupported("fake".into()))
         }
+        async fn get_secret_version_metadata(
+            &self,
+            _vault: &str,
+            _name: &str,
+            _version: &str,
+        ) -> std::result::Result<SecretMetadata, BackendError> {
+            Err(BackendError::Unsupported("fake".into()))
+        }
+
         async fn get_secret_version(
             &self,
             _vault: &str,
             _name: &str,
             _version: &str,
-            _include_value: bool,
-        ) -> std::result::Result<SecretProperties, BackendError> {
+        ) -> std::result::Result<Secret, BackendError> {
             Err(BackendError::Unsupported("fake".into()))
         }
         async fn list_secrets(
@@ -327,7 +342,7 @@ mod tests {
             _vault: &str,
             _name: &str,
             _request: SecretUpdateRequest,
-        ) -> std::result::Result<SecretProperties, BackendError> {
+        ) -> std::result::Result<SecretMetadata, BackendError> {
             Err(BackendError::Unsupported("fake".into()))
         }
     }

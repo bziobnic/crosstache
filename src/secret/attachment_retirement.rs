@@ -20,8 +20,7 @@ use crate::secret::attachment_key::{
     self as key, AttachmentKeyRef, KeySlot, PointerKind, SecretVersion,
 };
 use crate::secret::attachment_rewrap::{self as maintenance, Ring};
-use crate::secret::domain::SecretProperties;
-use crate::secret::domain::SecretValue;
+use crate::secret::domain::SecretMetadata;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
@@ -29,9 +28,9 @@ async fn candidate_record(
     keys: &dyn AttachmentKeyStore,
     vault: &str,
     id: &AttachmentKeyId,
-) -> Result<(AttachmentKeyRef, SecretProperties)> {
+) -> Result<(AttachmentKeyRef, SecretMetadata)> {
     let name = key::retained_record_name(id);
-    let p = keys.get_secret(vault, &name, false).await?;
+    let p = keys.get_secret_metadata(vault, &name).await?;
     if p.name != name || !p.enabled || !key::is_marked_key_record(&p.content_type) {
         return Err(conflict());
     }
@@ -47,7 +46,7 @@ async fn recheck_candidate(
     keys: &dyn AttachmentKeyStore,
     vault: &str,
     reference: &AttachmentKeyRef,
-    original: &SecretProperties,
+    original: &SecretMetadata,
     retired: bool,
 ) -> Result<()> {
     let (actual_ref, p) = candidate_record(keys, vault, &reference.key_id).await?;
@@ -108,15 +107,8 @@ pub async fn retire(
     apply: bool,
 ) -> Result<RetirementReport> {
     keys.assert_complete_visibility(vault).await?;
-    let pointer = keys
-        .get_secret(vault, key::ACTIVE_POINTER_SECRET, true)
-        .await?;
-    let active = match pointer
-        .value
-        .as_ref()
-        .map(SecretValue::expose_secret)
-        .and_then(key::parse_pointer_value)
-    {
+    let pointer = keys.get_secret(vault, key::ACTIVE_POINTER_SECRET).await?;
+    let active = match key::parse_pointer_value(pointer.value.expose_secret()) {
         Some(PointerKind::V2 { active, .. }) => active,
         _ => return Err(conflict()),
     };

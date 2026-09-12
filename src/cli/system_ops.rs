@@ -378,7 +378,7 @@ async fn execute_secret_info_from_root(
     let backend = crate::cli::vault_ops::active_or_construct_backend(registry, config).await?;
     let props = backend
         .secrets()
-        .get_secret(&vault_name, secret_name, false)
+        .get_secret_metadata(&vault_name, secret_name)
         .await
         .map_err(CrosstacheError::from)?;
 
@@ -911,7 +911,7 @@ mod tests {
         BackendRegistry, NameCharset, SecretBackend,
     };
     use crate::secret::domain::{
-        SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest,
+        Secret, SecretMetadata, SecretRequest, SecretSummary, SecretUpdateRequest,
     };
 
     struct StubSecretBackend;
@@ -922,7 +922,15 @@ mod tests {
             &self,
             _vault: &str,
             _request: SecretRequest,
-        ) -> std::result::Result<SecretProperties, BackendError> {
+        ) -> std::result::Result<SecretMetadata, BackendError> {
+            unreachable!("audit routing must not call secret operations")
+        }
+
+        async fn get_secret_metadata(
+            &self,
+            _vault: &str,
+            _name: &str,
+        ) -> std::result::Result<SecretMetadata, BackendError> {
             unreachable!("audit routing must not call secret operations")
         }
 
@@ -930,8 +938,16 @@ mod tests {
             &self,
             _vault: &str,
             _name: &str,
-            _include_value: bool,
-        ) -> std::result::Result<SecretProperties, BackendError> {
+        ) -> std::result::Result<Secret, BackendError> {
+            unreachable!("audit routing must not call secret operations")
+        }
+
+        async fn get_secret_version_metadata(
+            &self,
+            _vault: &str,
+            _name: &str,
+            _version: &str,
+        ) -> std::result::Result<SecretMetadata, BackendError> {
             unreachable!("audit routing must not call secret operations")
         }
 
@@ -940,8 +956,7 @@ mod tests {
             _vault: &str,
             _name: &str,
             _version: &str,
-            _include_value: bool,
-        ) -> std::result::Result<SecretProperties, BackendError> {
+        ) -> std::result::Result<Secret, BackendError> {
             unreachable!("audit routing must not call secret operations")
         }
 
@@ -966,7 +981,7 @@ mod tests {
             _vault: &str,
             _name: &str,
             _request: SecretUpdateRequest,
-        ) -> std::result::Result<SecretProperties, BackendError> {
+        ) -> std::result::Result<SecretMetadata, BackendError> {
             unreachable!("audit routing must not call secret operations")
         }
     }

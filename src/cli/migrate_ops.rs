@@ -6,6 +6,8 @@
 use crate::backend::{Backend, BackendError, BackendRef, BackendRegistry};
 use crate::config::settings::Config;
 use crate::error::{CrosstacheError, Result};
+#[cfg(test)]
+use crate::secret::domain::SecretMetadata;
 use crate::secret::domain::SecretRequest;
 use crate::secret::domain::SecretValue;
 use crate::utils::output;
@@ -76,11 +78,13 @@ async fn compute_diff(
     for name in filtered {
         let props = source
             .secrets()
-            .get_secret(source_vault, &name, false)
+            .get_secret_metadata(source_vault, &name)
             .await?;
         let name = MigrationName {
             source: name,
-            destination: build_request_from_props(&props, source.name(), source_vault).name,
+            // `build_request_from_props` derives the destination name from
+            // `original_name` alone; planning needs the name, not the value.
+            destination: props.original_name.clone(),
         };
         if target_missing {
             to_migrate.push(name);
@@ -132,7 +136,7 @@ fn print_diff_summary(
 }
 
 fn build_request_from_props(
-    props: &crate::secret::domain::SecretProperties,
+    props: &crate::secret::domain::Secret,
     source_name: &str,
     vault: &str,
 ) -> SecretRequest {
@@ -155,13 +159,7 @@ fn build_request_from_props(
 
     SecretRequest {
         name: props.original_name.clone(),
-        value: SecretValue::new(
-            props
-                .value
-                .as_ref()
-                .map(|v| v.expose_secret().to_string())
-                .unwrap_or_default(),
-        ),
+        value: SecretValue::new(props.value.expose_secret().to_string()),
         content_type: if props.content_type.is_empty() {
             None
         } else {
@@ -191,7 +189,7 @@ async fn migrate_one(
     // Fetch full props with value
     let props = source
         .secrets()
-        .get_secret(source_vault, name, true)
+        .get_secret(source_vault, name)
         .await
         .map_err(|e| (name.to_string(), format!("get_secret: {e}")))?;
 
@@ -222,7 +220,7 @@ async fn migrate_one(
     if !force_replace {
         match target
             .secrets()
-            .get_secret(target_vault, &request.name, false)
+            .get_secret_metadata(target_vault, &request.name)
             .await
         {
             Ok(existing) => {
@@ -253,7 +251,7 @@ async fn migrate_one(
     if request.name == crate::secret::attachments::ATTACHMENT_KEY_SECRET {
         match target
             .secrets()
-            .get_secret(target_vault, &request.name, false)
+            .get_secret_metadata(target_vault, &request.name)
             .await
         {
             Ok(_) => {
@@ -450,10 +448,7 @@ pub(crate) async fn execute_migrate(
     // precedes vault creation, recovery directories, and the first secret write.
     for selected_name in selected {
         let name = selected_name.source;
-        let props = source
-            .secrets()
-            .get_secret(&source_vault, &name, true)
-            .await?;
+        let props = source.secrets().get_secret(&source_vault, &name).await?;
         if crate::secret::attachment_key::is_strict_retained_record_name(&name)
             && crate::secret::attachment_key::is_marked_key_record(&props.content_type)
         {
@@ -473,7 +468,7 @@ pub(crate) async fn execute_migrate(
         } else {
             match target
                 .secrets()
-                .get_secret(&target_vault, destination_name, false)
+                .get_secret_metadata(&target_vault, destination_name)
                 .await
             {
                 Ok(props) => Some(props),
@@ -846,21 +841,23 @@ mod tests {
         tags.insert("folder".to_string(), "infra/database".to_string());
         tags.insert("owner".to_string(), "platform".to_string());
 
-        let props = crate::secret::domain::SecretProperties {
-            name: "db-password".to_string(),
-            original_name: "db-password".to_string(),
-            value: Some(SecretValue::new("secret-value".to_string())),
-            version: "v7".to_string(),
-            version_number: Some(7),
-            created_timestamp: 0,
-            created_on: String::new(),
-            updated_on: String::new(),
-            enabled: true,
-            expires_on: None,
-            not_before: None,
-            tags,
-            content_type: "text/plain".to_string(),
-            recovery_level: None,
+        let props = crate::secret::domain::Secret {
+            metadata: SecretMetadata {
+                name: "db-password".to_string(),
+                original_name: "db-password".to_string(),
+                version: "v7".to_string(),
+                version_number: Some(7),
+                created_timestamp: 0,
+                created_on: String::new(),
+                updated_on: String::new(),
+                enabled: true,
+                expires_on: None,
+                not_before: None,
+                tags,
+                content_type: "text/plain".to_string(),
+                recovery_level: None,
+            },
+            value: SecretValue::new("secret-value".to_string()),
         };
 
         let request = build_request_from_props(&props, "local", "default");
@@ -1064,14 +1061,13 @@ mod tests {
         for summary in &secrets {
             let props = source_arc
                 .secrets()
-                .get_secret("default", &summary.name, true)
+                .get_secret("default", &summary.name)
                 .await
                 .unwrap();
+            let (props, value) = props.into_parts();
             let req = SecretRequest {
                 name: props.original_name.clone(),
-                value: props
-                    .value
-                    .unwrap_or_else(|| SecretValue::new(String::new())),
+                value,
                 content_type: None,
                 enabled: Some(props.enabled),
                 expires_on: None,
@@ -1100,12 +1096,12 @@ mod tests {
         for name in ["db-password", "api-key", "cache-token"] {
             let src = source_arc
                 .secrets()
-                .get_secret("default", name, true)
+                .get_secret("default", name)
                 .await
                 .unwrap();
             let tgt = target_arc
                 .secrets()
-                .get_secret("default", name, true)
+                .get_secret("default", name)
                 .await
                 .unwrap();
             assert_eq!(src.value, tgt.value);
@@ -1240,7 +1236,7 @@ mod tests {
             for name in ["a", "A"] {
                 assert!(target
                     .secrets()
-                    .get_secret("target", name, false)
+                    .get_secret_metadata("target", name)
                     .await
                     .is_err());
             }
@@ -1267,11 +1263,10 @@ mod tests {
             assert_eq!(
                 target
                     .secrets()
-                    .get_secret("source", lookup, true)
+                    .get_secret("source", lookup)
                     .await
                     .unwrap()
                     .value
-                    .unwrap()
                     .expose_secret(),
                 format!("value-{lookup}")
             );
@@ -1380,25 +1375,15 @@ mod tests {
             {
                 let actual = target
                     .secrets()
-                    .get_secret("target", destination, true)
+                    .get_secret("target", destination)
                     .await
                     .unwrap();
-                assert_eq!(
-                    actual.value.unwrap().expose_secret(),
-                    format!("value-{lookup}")
-                );
+                assert_eq!(actual.value.expose_secret(), format!("value-{lookup}"));
             }
         }
         for lookup in ["provider-one", "provider-two"] {
-            let actual = source
-                .secrets()
-                .get_secret("source", lookup, true)
-                .await
-                .unwrap();
-            assert_eq!(
-                actual.value.unwrap().expose_secret(),
-                format!("value-{lookup}")
-            );
+            let actual = source.secrets().get_secret("source", lookup).await.unwrap();
+            assert_eq!(actual.value.expose_secret(), format!("value-{lookup}"));
         }
     }
 
@@ -1567,10 +1552,10 @@ mod tests {
 
         let tgt = target_arc
             .secrets()
-            .get_secret("default", reserved, true)
+            .get_secret("default", reserved)
             .await
             .unwrap();
-        assert_eq!(tgt.value.unwrap().expose_secret(), "target-key");
+        assert_eq!(tgt.value.expose_secret(), "target-key");
 
         // force_replace=false should also skip and preserve the target's key.
         let outcome = migrate_one(
@@ -1589,10 +1574,10 @@ mod tests {
 
         let tgt = target_arc
             .secrets()
-            .get_secret("default", reserved, true)
+            .get_secret("default", reserved)
             .await
             .unwrap();
-        assert_eq!(tgt.value.unwrap().expose_secret(), "target-key");
+        assert_eq!(tgt.value.expose_secret(), "target-key");
     }
 
     #[test]

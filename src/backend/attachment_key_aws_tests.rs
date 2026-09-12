@@ -221,7 +221,7 @@ async fn retained_commit_returns_create_secret_version_and_reads_exact_material(
     assert_eq!(committed.version, format!("{:032}", 1));
     state.lock().unwrap().describe_current = Some("newer-current-version".into());
     let read = keys
-        .get_secret_version(VAULT, &request.name, &committed.version, true)
+        .get_secret_version(VAULT, &request.name, &committed.version)
         .await
         .unwrap();
     assert_eq!(read.version, committed.version);
@@ -230,10 +230,7 @@ async fn retained_commit_returns_create_secret_version_and_reads_exact_material(
     assert_eq!(read.tags["owner"], "custody");
     assert_eq!(read.tags["note"], "retained note");
     assert_eq!(read.tags["aws:stages"], "AWSPREVIOUS");
-    assert_eq!(
-        read.value.unwrap().expose_secret(),
-        request.value.expose_secret()
-    );
+    assert_eq!(read.value.expose_secret(), request.value.expose_secret());
     assert_eq!(
         state.lock().unwrap().operations,
         ["CreateSecret", "DescribeSecret", "GetSecretValue"]
@@ -255,13 +252,10 @@ async fn concurrent_same_name_retained_commits_conflict_without_mutating_winner(
         other => panic!("expected one commit and one Conflict, got {other:?}"),
     };
     let read = keys
-        .get_secret_version(VAULT, &request.name, &winner.version, true)
+        .get_secret_version(VAULT, &request.name, &winner.version)
         .await
         .unwrap();
-    assert_eq!(
-        read.value.unwrap().expose_secret(),
-        request.value.expose_secret()
-    );
+    assert_eq!(read.value.expose_secret(), request.value.expose_secret());
     assert_eq!(winner.version, format!("{:032}", 1));
     let state = state.lock().unwrap();
     assert_eq!(state.records.len(), 1);
@@ -292,15 +286,12 @@ async fn concurrent_distinct_retained_keys_remain_independently_exact_version_re
     assert_ne!(first_commit.version, second_commit.version);
     for (request, committed) in [(&first, first_commit), (&second, second_commit)] {
         let read = keys
-            .get_secret_version(VAULT, &request.name, &committed.version, true)
+            .get_secret_version(VAULT, &request.name, &committed.version)
             .await
             .unwrap();
         assert_eq!(read.name, request.name);
         assert_eq!(read.version, committed.version);
-        assert_eq!(
-            read.value.unwrap().expose_secret(),
-            request.value.expose_secret()
-        );
+        assert_eq!(read.value.expose_secret(), request.value.expose_secret());
     }
     let state = state.lock().unwrap();
     assert_eq!(state.records.len(), 2);
@@ -410,15 +401,9 @@ async fn aws_current_value_version_comes_from_value_response_not_describe() {
         .await
         .unwrap();
     state.lock().unwrap().describe_current = Some("different-described-version".into());
-    let read = backend
-        .get_secret(VAULT, &request.name, true)
-        .await
-        .unwrap();
+    let read = backend.get_secret(VAULT, &request.name).await.unwrap();
     assert_eq!(read.version, committed.version);
-    assert_eq!(
-        read.value.unwrap().expose_secret(),
-        request.value.expose_secret()
-    );
+    assert_eq!(read.value.expose_secret(), request.value.expose_secret());
     assert_eq!(read.content_type, KEY_RECORD_CONTENT_TYPE);
     assert_eq!(read.tags["aws:stages"], "AWSPREVIOUS");
 }
@@ -434,7 +419,7 @@ async fn aws_exact_value_read_fails_if_custody_metadata_cannot_be_read() {
         .unwrap();
     state.lock().unwrap().deny_describe = true;
     assert!(keys
-        .get_secret_version(VAULT, &request.name, &committed.version, true)
+        .get_secret_version(VAULT, &request.name, &committed.version)
         .await
         .is_err());
     assert_eq!(
@@ -467,22 +452,21 @@ async fn retirement_aws_transport_only_adds_one_tag_without_value_or_version_wri
         slot: KeySlot::Retained,
         provider_version: SecretVersion::new(committed.version.clone()),
     };
-    let before = keys.get_secret(VAULT, &request.name, true).await.unwrap();
+    let before = keys.get_secret(VAULT, &request.name).await.unwrap();
     state.lock().unwrap().operations.clear();
     let after = keys.mark_retired(VAULT, &reference).await.unwrap();
     assert_eq!(after.version, committed.version);
-    assert_eq!(after.value, before.value);
     assert!(after.enabled);
     assert_eq!(after.tags[KEY_RETIRED_TAG], "true");
-    for (key, value) in before.tags {
+    for (key, value) in before.tags.clone() {
         assert_eq!(after.tags.get(&key), Some(&value));
     }
     let original = keys
-        .get_secret_version(VAULT, &request.name, &committed.version, true)
+        .get_secret_version(VAULT, &request.name, &committed.version)
         .await
         .unwrap();
     assert_eq!(
-        original.value.unwrap().expose_secret(),
+        original.value.expose_secret(),
         request.value.expose_secret()
     );
     keys.mark_retired(VAULT, &reference).await.unwrap();

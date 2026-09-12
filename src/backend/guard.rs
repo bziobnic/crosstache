@@ -32,8 +32,8 @@ use crate::secret::attachment_key::{
     generic_mutation_blocked_canonical, hidden_from_generic_listing_canonical,
 };
 use crate::secret::domain::{
-    DeletedSecretSummary, SecretProperties, SecretRequest, SecretSnapshot, SecretSummary,
-    SecretUpdateRequest,
+    DeletedSecretSummary, Secret, SecretMetadata, SecretRequest, SecretSnapshot, SecretSummary,
+    SecretUpdateRequest, SnapshotValue,
 };
 
 use super::error::BackendError;
@@ -233,7 +233,7 @@ impl SecretBackend for GuardedSecretBackend<'_> {
         &self,
         vault: &str,
         request: SecretRequest,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         self.ensure_mutable(&request.name)?;
         self.inner.secrets().set_secret(vault, request).await
     }
@@ -248,7 +248,7 @@ impl SecretBackend for GuardedSecretBackend<'_> {
         vault: &str,
         name: &str,
         request: SecretUpdateRequest,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         self.ensure_mutable(name)?;
         self.inner
             .secrets()
@@ -260,7 +260,7 @@ impl SecretBackend for GuardedSecretBackend<'_> {
         &self,
         vault: &str,
         request: SecretRequest,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         self.ensure_mutable(&request.name)?;
         self.inner
             .secrets()
@@ -274,7 +274,7 @@ impl SecretBackend for GuardedSecretBackend<'_> {
         name: &str,
         expected_revision: &str,
         request: SecretUpdateRequest,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         self.ensure_mutable(name)?;
         self.inner
             .secrets()
@@ -287,7 +287,7 @@ impl SecretBackend for GuardedSecretBackend<'_> {
         vault: &str,
         name: &str,
         new_name: &str,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         self.ensure_mutable(name)?;
         self.ensure_mutable(new_name)?;
         self.inner
@@ -302,7 +302,7 @@ impl SecretBackend for GuardedSecretBackend<'_> {
         name: &str,
         new_name: &str,
         expected_revision: &str,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         self.ensure_mutable(name)?;
         self.ensure_mutable(new_name)?;
         self.inner
@@ -316,7 +316,7 @@ impl SecretBackend for GuardedSecretBackend<'_> {
         vault: &str,
         name: &str,
         version: &str,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         self.ensure_mutable(name)?;
         self.inner.secrets().rollback(vault, name, version).await
     }
@@ -325,7 +325,7 @@ impl SecretBackend for GuardedSecretBackend<'_> {
         &self,
         vault: &str,
         name: &str,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         self.ensure_mutable(name)?;
         self.inner.secrets().restore_secret(vault, name).await
     }
@@ -347,7 +347,7 @@ impl SecretBackend for GuardedSecretBackend<'_> {
         &self,
         _vault: &str,
         _backup: &[u8],
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         Err(BackendError::Unsupported(
             "generic restore-from-backup is disabled: the destination cannot be verified before \
              the provider mutation"
@@ -373,15 +373,27 @@ impl SecretBackend for GuardedSecretBackend<'_> {
 
     // -- Reads and metadata: delegated (read-hiding deferred) ---------------
 
-    async fn get_secret(
+    async fn get_secret_metadata(
         &self,
         vault: &str,
         name: &str,
-        include_value: bool,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
+        self.inner.secrets().get_secret_metadata(vault, name).await
+    }
+
+    async fn get_secret(&self, vault: &str, name: &str) -> Result<Secret, BackendError> {
+        self.inner.secrets().get_secret(vault, name).await
+    }
+
+    async fn get_secret_version_metadata(
+        &self,
+        vault: &str,
+        name: &str,
+        version: &str,
+    ) -> Result<SecretMetadata, BackendError> {
         self.inner
             .secrets()
-            .get_secret(vault, name, include_value)
+            .get_secret_version_metadata(vault, name, version)
             .await
     }
 
@@ -390,11 +402,10 @@ impl SecretBackend for GuardedSecretBackend<'_> {
         vault: &str,
         name: &str,
         version: &str,
-        include_value: bool,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<Secret, BackendError> {
         self.inner
             .secrets()
-            .get_secret_version(vault, name, version, include_value)
+            .get_secret_version(vault, name, version)
             .await
     }
 
@@ -402,11 +413,11 @@ impl SecretBackend for GuardedSecretBackend<'_> {
         &self,
         vault: &str,
         name: &str,
-        include_value: bool,
+        with_value: SnapshotValue,
     ) -> Result<SecretSnapshot, BackendError> {
         self.inner
             .secrets()
-            .get_secret_snapshot(vault, name, include_value)
+            .get_secret_snapshot(vault, name, with_value)
             .await
     }
 
@@ -414,11 +425,11 @@ impl SecretBackend for GuardedSecretBackend<'_> {
         &self,
         vault: &str,
         name: &str,
-        include_value: bool,
+        with_value: SnapshotValue,
     ) -> Result<SecretSnapshot, BackendError> {
         self.inner
             .secrets()
-            .get_transfer_snapshot(vault, name, include_value)
+            .get_transfer_snapshot(vault, name, with_value)
             .await
     }
 
@@ -427,7 +438,7 @@ impl SecretBackend for GuardedSecretBackend<'_> {
         vault: &str,
         name: &str,
         expected_revision: &str,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         self.inner
             .secrets()
             .validate_secret_revision(vault, name, expected_revision)
@@ -438,7 +449,7 @@ impl SecretBackend for GuardedSecretBackend<'_> {
         &self,
         vault: &str,
         name: &str,
-    ) -> Result<Vec<SecretProperties>, BackendError> {
+    ) -> Result<Vec<SecretMetadata>, BackendError> {
         self.inner.secrets().list_versions(vault, name).await
     }
 
@@ -505,11 +516,10 @@ mod tests {
         }
     }
 
-    fn props(name: &str) -> SecretProperties {
-        SecretProperties {
+    fn props(name: &str) -> SecretMetadata {
+        SecretMetadata {
             name: name.to_string(),
             original_name: name.to_string(),
-            value: None,
             version: "v1".to_string(),
             version_number: Some(1),
             created_timestamp: 0,
@@ -545,17 +555,32 @@ mod tests {
             &self,
             _vault: &str,
             request: SecretRequest,
-        ) -> Result<SecretProperties, BackendError> {
+        ) -> Result<SecretMetadata, BackendError> {
             self.record(&format!("set_secret:{}", request.name));
             Ok(props(&request.name))
         }
-        async fn get_secret(
+        async fn get_secret_metadata(
             &self,
             _vault: &str,
             name: &str,
-            _include_value: bool,
-        ) -> Result<SecretProperties, BackendError> {
+        ) -> Result<SecretMetadata, BackendError> {
             self.record(&format!("get_secret:{name}"));
+            Ok(props(name))
+        }
+        async fn get_secret(&self, _vault: &str, name: &str) -> Result<Secret, BackendError> {
+            self.record(&format!("get_secret:{name}"));
+            Ok(Secret {
+                metadata: props(name),
+                value: SecretValue::new("v"),
+            })
+        }
+        async fn get_secret_version_metadata(
+            &self,
+            _vault: &str,
+            name: &str,
+            _version: &str,
+        ) -> Result<SecretMetadata, BackendError> {
+            self.record(&format!("get_secret_version:{name}"));
             Ok(props(name))
         }
         async fn get_secret_version(
@@ -563,10 +588,12 @@ mod tests {
             _vault: &str,
             name: &str,
             _version: &str,
-            _include_value: bool,
-        ) -> Result<SecretProperties, BackendError> {
+        ) -> Result<Secret, BackendError> {
             self.record(&format!("get_secret_version:{name}"));
-            Ok(props(name))
+            Ok(Secret {
+                metadata: props(name),
+                value: SecretValue::new("v"),
+            })
         }
         async fn list_secrets(
             &self,
@@ -585,7 +612,7 @@ mod tests {
             _vault: &str,
             name: &str,
             _request: SecretUpdateRequest,
-        ) -> Result<SecretProperties, BackendError> {
+        ) -> Result<SecretMetadata, BackendError> {
             self.record(&format!("update_secret:{name}"));
             Ok(props(name))
         }
@@ -593,7 +620,7 @@ mod tests {
             &self,
             _vault: &str,
             _backup: &[u8],
-        ) -> Result<SecretProperties, BackendError> {
+        ) -> Result<SecretMetadata, BackendError> {
             // A "working" inner restore: the guard must never reach this.
             self.record("restore_from_backup");
             Ok(props("restored"))
@@ -768,10 +795,10 @@ mod tests {
         // Reads (including of reserved names) currently delegate — read-hiding
         // is deferred; this locks the current behavior.
         guard
-            .get_secret("v", "xv-attachment-key", false)
+            .get_secret_metadata("v", "xv-attachment-key")
             .await
             .unwrap();
-        guard.get_secret("v", "normal", false).await.unwrap();
+        guard.get_secret_metadata("v", "normal").await.unwrap();
         assert_eq!(
             spy.calls(),
             vec![

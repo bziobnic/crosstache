@@ -17,7 +17,8 @@ use crate::backend::{
     VaultBackend,
 };
 use crate::secret::domain::{
-    DeletedSecretSummary, SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest,
+    DeletedSecretSummary, Secret, SecretMetadata, SecretRequest, SecretSummary,
+    SecretUpdateRequest, SnapshotValue,
 };
 
 const DENIED_MESSAGE: &str = "agent policy denied this secret operation";
@@ -312,7 +313,7 @@ impl crate::backend::attachment_keys::AttachmentKeyStore for &PolicyEnforcedBack
         &self,
         vault: &str,
         reference: &crate::secret::attachment_key::AttachmentKeyRef,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         crate::backend::attachment_keys::validate_retirement_ref(reference)?;
         let name = crate::secret::attachment_key::retained_record_name(&reference.key_id);
         let context = self.authorize(vault, &name, Operation::Update, false)?;
@@ -361,19 +362,47 @@ impl crate::backend::attachment_keys::AttachmentKeyStore for &PolicyEnforcedBack
         Ok(visible)
     }
 
-    async fn get_secret(
+    async fn get_secret_metadata(
         &self,
         vault: &str,
         name: &str,
-        include_value: bool,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         crate::backend::attachment_keys::validate_name(name)?;
-        let context = self.authorize(vault, name, Operation::Get, include_value)?;
+        // The pre-split value-free path asked for Get without raw
+        // disclosure; a metadata read keeps exactly that permission.
+        let context = self.authorize(vault, name, Operation::Get, false)?;
         AUDIT_CONTEXT
             .scope(context, async {
                 self.inner
                     .attachment_keys()
-                    .get_secret(vault, name, include_value)
+                    .get_secret_metadata(vault, name)
+                    .await
+            })
+            .await
+    }
+    async fn get_secret(&self, vault: &str, name: &str) -> Result<Secret, BackendError> {
+        crate::backend::attachment_keys::validate_name(name)?;
+        // The pre-split value-bearing path requested raw disclosure.
+        let context = self.authorize(vault, name, Operation::Get, true)?;
+        AUDIT_CONTEXT
+            .scope(context, async {
+                self.inner.attachment_keys().get_secret(vault, name).await
+            })
+            .await
+    }
+    async fn get_secret_version_metadata(
+        &self,
+        vault: &str,
+        name: &str,
+        version: &str,
+    ) -> Result<SecretMetadata, BackendError> {
+        crate::backend::attachment_keys::validate_name(name)?;
+        let context = self.authorize(vault, name, Operation::Get, false)?;
+        AUDIT_CONTEXT
+            .scope(context, async {
+                self.inner
+                    .attachment_keys()
+                    .get_secret_version_metadata(vault, name, version)
                     .await
             })
             .await
@@ -383,15 +412,14 @@ impl crate::backend::attachment_keys::AttachmentKeyStore for &PolicyEnforcedBack
         vault: &str,
         name: &str,
         version: &str,
-        include_value: bool,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<Secret, BackendError> {
         crate::backend::attachment_keys::validate_name(name)?;
-        let context = self.authorize(vault, name, Operation::Get, include_value)?;
+        let context = self.authorize(vault, name, Operation::Get, true)?;
         AUDIT_CONTEXT
             .scope(context, async {
                 self.inner
                     .attachment_keys()
-                    .get_secret_version(vault, name, version, include_value)
+                    .get_secret_version(vault, name, version)
                     .await
             })
             .await
@@ -400,7 +428,7 @@ impl crate::backend::attachment_keys::AttachmentKeyStore for &PolicyEnforcedBack
         &self,
         vault: &str,
         request: SecretRequest,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         crate::backend::attachment_keys::validate_retained_request(&request)?;
         let context = self.authorize(vault, &request.name, Operation::Set, false)?;
         AUDIT_CONTEXT
@@ -416,7 +444,7 @@ impl crate::backend::attachment_keys::AttachmentKeyStore for &PolicyEnforcedBack
         &self,
         vault: &str,
         request: SecretRequest,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         crate::backend::attachment_keys::validate_name(&request.name)?;
         let context = self.authorize(vault, &request.name, Operation::Set, false)?;
         AUDIT_CONTEXT
@@ -488,7 +516,7 @@ impl SecretBackend for PolicyEnforcedBackend {
         &self,
         vault: &str,
         request: SecretRequest,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         let name = request.name.clone();
         self.checked(
             vault,
@@ -500,18 +528,50 @@ impl SecretBackend for PolicyEnforcedBackend {
         .await
     }
 
-    async fn get_secret(
+    /// Metadata read: `Operation::Get` without raw disclosure — exactly the
+    /// permission the pre-split `get_secret(.., false)` path checked.
+    async fn get_secret_metadata(
         &self,
         vault: &str,
         name: &str,
-        include_value: bool,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         self.checked(
             vault,
             name,
             Operation::Get,
-            include_value,
-            self.inner.secrets().get_secret(vault, name, include_value),
+            false,
+            self.inner.secrets().get_secret_metadata(vault, name),
+        )
+        .await
+    }
+
+    /// Value read: `Operation::Get` **with** raw disclosure — exactly the
+    /// permission the pre-split `get_secret(.., true)` path checked.
+    async fn get_secret(&self, vault: &str, name: &str) -> Result<Secret, BackendError> {
+        self.checked(
+            vault,
+            name,
+            Operation::Get,
+            true,
+            self.inner.secrets().get_secret(vault, name),
+        )
+        .await
+    }
+
+    async fn get_secret_version_metadata(
+        &self,
+        vault: &str,
+        name: &str,
+        version: &str,
+    ) -> Result<SecretMetadata, BackendError> {
+        self.checked(
+            vault,
+            name,
+            Operation::Get,
+            false,
+            self.inner
+                .secrets()
+                .get_secret_version_metadata(vault, name, version),
         )
         .await
     }
@@ -521,16 +581,15 @@ impl SecretBackend for PolicyEnforcedBackend {
         vault: &str,
         name: &str,
         version: &str,
-        include_value: bool,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<Secret, BackendError> {
         self.checked(
             vault,
             name,
             Operation::Get,
-            include_value,
+            true,
             self.inner
                 .secrets()
-                .get_secret_version(vault, name, version, include_value),
+                .get_secret_version(vault, name, version),
         )
         .await
     }
@@ -573,7 +632,7 @@ impl SecretBackend for PolicyEnforcedBackend {
         vault: &str,
         name: &str,
         request: SecretUpdateRequest,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         self.checked(
             vault,
             name,
@@ -596,16 +655,16 @@ impl SecretBackend for PolicyEnforcedBackend {
         &self,
         vault: &str,
         name: &str,
-        include_value: bool,
+        with_value: SnapshotValue,
     ) -> Result<crate::secret::domain::SecretSnapshot, BackendError> {
         self.checked(
             vault,
             name,
             Operation::Get,
-            include_value,
+            with_value == SnapshotValue::Include,
             self.inner
                 .secrets()
-                .get_secret_snapshot(vault, name, include_value),
+                .get_secret_snapshot(vault, name, with_value),
         )
         .await
     }
@@ -614,16 +673,16 @@ impl SecretBackend for PolicyEnforcedBackend {
         &self,
         vault: &str,
         name: &str,
-        include_value: bool,
+        with_value: SnapshotValue,
     ) -> Result<crate::secret::domain::SecretSnapshot, BackendError> {
         self.checked(
             vault,
             name,
             Operation::Get,
-            include_value,
+            with_value == SnapshotValue::Include,
             self.inner
                 .secrets()
-                .get_transfer_snapshot(vault, name, include_value),
+                .get_transfer_snapshot(vault, name, with_value),
         )
         .await
     }
@@ -634,7 +693,7 @@ impl SecretBackend for PolicyEnforcedBackend {
         name: &str,
         expected_revision: &str,
         request: SecretUpdateRequest,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         self.checked(
             vault,
             name,
@@ -652,7 +711,7 @@ impl SecretBackend for PolicyEnforcedBackend {
         vault: &str,
         name: &str,
         expected_revision: &str,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         self.checked(
             vault,
             name,
@@ -669,7 +728,7 @@ impl SecretBackend for PolicyEnforcedBackend {
         &self,
         vault: &str,
         request: SecretRequest,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         let name = request.name.clone();
         self.checked(
             vault,
@@ -691,7 +750,7 @@ impl SecretBackend for PolicyEnforcedBackend {
         name: &str,
         new_name: &str,
         expected_revision: &str,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         let source_context = self.authorize(vault, name, Operation::Rename, false)?;
         self.authorize(vault, new_name, Operation::Rename, false)?;
         AUDIT_CONTEXT
@@ -712,7 +771,7 @@ impl SecretBackend for PolicyEnforcedBackend {
         vault: &str,
         name: &str,
         new_name: &str,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         let source_context = self.authorize(vault, name, Operation::Rename, false)?;
         self.authorize(vault, new_name, Operation::Rename, false)?;
         AUDIT_CONTEXT
@@ -727,7 +786,7 @@ impl SecretBackend for PolicyEnforcedBackend {
         &self,
         vault: &str,
         name: &str,
-    ) -> Result<Vec<SecretProperties>, BackendError> {
+    ) -> Result<Vec<SecretMetadata>, BackendError> {
         self.checked(
             vault,
             name,
@@ -743,7 +802,7 @@ impl SecretBackend for PolicyEnforcedBackend {
         vault: &str,
         name: &str,
         version: &str,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         self.checked(
             vault,
             name,
@@ -758,7 +817,7 @@ impl SecretBackend for PolicyEnforcedBackend {
         &self,
         vault: &str,
         name: &str,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         self.checked(
             vault,
             name,
@@ -826,7 +885,7 @@ impl SecretBackend for PolicyEnforcedBackend {
         &self,
         vault: &str,
         backup: &[u8],
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         let _ = backup;
         validate_audit_text("workspace", vault, MAX_WORKSPACE_BYTES)?;
         let decision = Decision::Deny {
@@ -953,16 +1012,15 @@ mod tests {
             &self,
             _: &str,
             _: SecretRequest,
-        ) -> Result<SecretProperties, BackendError> {
+        ) -> Result<SecretMetadata, BackendError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Err(BackendError::Unsupported("test".into()))
         }
-        async fn get_secret(
+        async fn get_secret_metadata(
             &self,
             _: &str,
             name: &str,
-            _: bool,
-        ) -> Result<SecretProperties, BackendError> {
+        ) -> Result<SecretMetadata, BackendError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             if name == "existing" || name.starts_with("allowed/") {
                 Ok(test_properties(name))
@@ -973,13 +1031,35 @@ mod tests {
                 })
             }
         }
+        async fn get_secret(&self, _: &str, name: &str) -> Result<Secret, BackendError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if name == "existing" || name.starts_with("allowed/") {
+                Ok(Secret {
+                    metadata: test_properties(name),
+                    value: crate::secret::domain::SecretValue::new("v"),
+                })
+            } else {
+                Err(BackendError::NotFound {
+                    name: name.into(),
+                    suggestion: None,
+                })
+            }
+        }
+        async fn get_secret_version_metadata(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<SecretMetadata, BackendError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(BackendError::Unsupported("test".into()))
+        }
         async fn get_secret_version(
             &self,
             _: &str,
             _: &str,
             _: &str,
-            _: bool,
-        ) -> Result<SecretProperties, BackendError> {
+        ) -> Result<Secret, BackendError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Err(BackendError::Unsupported("test".into()))
         }
@@ -1007,7 +1087,7 @@ mod tests {
             _: &str,
             _: &str,
             _: SecretUpdateRequest,
-        ) -> Result<SecretProperties, BackendError> {
+        ) -> Result<SecretMetadata, BackendError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Err(BackendError::Unsupported("test".into()))
         }
@@ -1017,7 +1097,7 @@ mod tests {
             _: &str,
             new_name: &str,
             _: &str,
-        ) -> Result<SecretProperties, BackendError> {
+        ) -> Result<SecretMetadata, BackendError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(test_properties(new_name))
         }
@@ -1026,7 +1106,7 @@ mod tests {
             _: &str,
             _: &str,
             new_name: &str,
-        ) -> Result<SecretProperties, BackendError> {
+        ) -> Result<SecretMetadata, BackendError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(test_properties(new_name))
         }
@@ -1038,7 +1118,7 @@ mod tests {
             &self,
             _: &str,
             _: &[u8],
-        ) -> Result<SecretProperties, BackendError> {
+        ) -> Result<SecretMetadata, BackendError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(test_properties("restored"))
         }
@@ -1062,11 +1142,11 @@ mod tests {
     async fn transfer_snapshot_denials_precede_provider_access_for_value_and_metadata() {
         let tmp = tempfile::tempdir().unwrap();
         let (inner, wrapped) = denied_wrapper(&tmp.path().join("decisions.jsonl"));
-        for include_value in [false, true] {
+        for with_value in [SnapshotValue::Omit, SnapshotValue::Include] {
             assert!(matches!(
                 wrapped
                     .secrets()
-                    .get_transfer_snapshot("prod", "secret", include_value)
+                    .get_transfer_snapshot("prod", "secret", with_value)
                     .await,
                 Err(BackendError::PermissionDenied(_))
             ));
@@ -1080,15 +1160,16 @@ mod tests {
         let path = tmp.path().join("decisions.jsonl");
         let (inner, wrapped) = denied_wrapper(&path);
         let keys = wrapped.attachment_keys();
-        for include_value in [false, true] {
-            assert!(matches!(
-                keys.get_secret("prod", "xv-attachment-key", include_value)
-                    .await,
-                Err(BackendError::PermissionDenied(_))
-            ));
-        }
         assert!(matches!(
-            keys.get_secret_version("prod", "xv-attachment-key", "v1", true)
+            keys.get_secret_metadata("prod", "xv-attachment-key").await,
+            Err(BackendError::PermissionDenied(_))
+        ));
+        assert!(matches!(
+            keys.get_secret("prod", "xv-attachment-key").await,
+            Err(BackendError::PermissionDenied(_))
+        ));
+        assert!(matches!(
+            keys.get_secret_version("prod", "xv-attachment-key", "v1")
                 .await,
             Err(BackendError::PermissionDenied(_))
         ));
@@ -1252,11 +1333,10 @@ mod tests {
         ));
     }
 
-    fn test_properties(name: &str) -> SecretProperties {
-        SecretProperties {
+    fn test_properties(name: &str) -> SecretMetadata {
+        SecretMetadata {
             name: name.into(),
             original_name: name.into(),
-            value: None,
             version: "v1".into(),
             version_number: Some(1),
             created_timestamp: 0,
@@ -1459,7 +1539,7 @@ mod tests {
         let (inner, wrapped) = denied_wrapper(&temp.path().join("decisions.jsonl"));
         let error = wrapped
             .secrets()
-            .get_secret("prod", "existing", true)
+            .get_secret("prod", "existing")
             .await
             .unwrap_err();
         assert!(matches!(error, BackendError::PermissionDenied(_)));
@@ -1477,13 +1557,13 @@ mod tests {
         let (inner, wrapped) = denied_wrapper(&temp.path().join("decisions.jsonl"));
         let existing = wrapped
             .secrets()
-            .get_secret("prod", "existing", true)
+            .get_secret("prod", "existing")
             .await
             .unwrap_err()
             .to_string();
         let missing = wrapped
             .secrets()
-            .get_secret("prod", "does-not-exist", true)
+            .get_secret("prod", "does-not-exist")
             .await
             .unwrap_err()
             .to_string();
@@ -1687,17 +1767,77 @@ mod tests {
         let (inner, wrapped) = scoped_wrapper(&temp.path().join("decisions.jsonl"), false);
         wrapped
             .secrets()
-            .get_secret("prod", "existing", false)
+            .get_secret_metadata("prod", "existing")
             .await
             .unwrap();
         assert_eq!(inner.calls.load(Ordering::SeqCst), 1);
         let error = wrapped
             .secrets()
-            .get_secret("prod", "existing", true)
+            .get_secret("prod", "existing")
             .await
             .unwrap_err();
         assert!(matches!(error, BackendError::PermissionDenied(_)));
         assert_eq!(inner.calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// Version getters must carry the same disclosure split as the active-
+    /// generation pair: `get_secret_version_metadata` is `Operation::Get`
+    /// *without* raw disclosure (so it is allowed by a rule that grants `get`
+    /// but not `raw_disclosure`, and reaches the inner backend), while
+    /// `get_secret_version` is `Operation::Get` *with* raw disclosure and is
+    /// denied before the inner backend is called.
+    ///
+    /// If the split regressed — e.g. the version metadata getter were wired
+    /// with `raw_disclosure = true`, or the version value getter with `false` —
+    /// one of the two call counts below would move.
+    #[tokio::test]
+    async fn version_metadata_get_is_allowed_but_version_value_get_requires_raw_rule() {
+        let temp = tempfile::tempdir().unwrap();
+        let (inner, wrapped) = scoped_wrapper(&temp.path().join("decisions.jsonl"), false);
+
+        // Authorized: the policy check passes and the inner backend is reached
+        // (the fake answers Unsupported, which is not a PermissionDenied).
+        let error = wrapped
+            .secrets()
+            .get_secret_version_metadata("prod", "existing", "v1")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, BackendError::Unsupported(_)), "{error:?}");
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 1);
+
+        // Refused: raw disclosure is not granted, so the inner backend is never
+        // called.
+        let error = wrapped
+            .secrets()
+            .get_secret_version("prod", "existing", "v1")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, BackendError::PermissionDenied(_)));
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// The mirror of the metadata/value split with raw disclosure *granted*:
+    /// both halves are then allowed, so the deny above is attributable to the
+    /// `raw_disclosure` rule flag and not to some unrelated rule mismatch.
+    #[tokio::test]
+    async fn raw_rule_permits_both_halves_of_the_getter_split() {
+        let temp = tempfile::tempdir().unwrap();
+        let (inner, wrapped) = scoped_wrapper(&temp.path().join("decisions.jsonl"), true);
+
+        wrapped
+            .secrets()
+            .get_secret_metadata("prod", "existing")
+            .await
+            .unwrap();
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 1);
+
+        let secret = wrapped
+            .secrets()
+            .get_secret("prod", "existing")
+            .await
+            .unwrap();
+        assert_eq!(secret.value.expose_secret(), "v");
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -1774,7 +1914,7 @@ mod tests {
         ] {
             let error = wrapped
                 .secrets()
-                .get_secret("prod", &name, true)
+                .get_secret("prod", &name)
                 .await
                 .unwrap_err();
             assert!(matches!(error, BackendError::InvalidArgument(_)));

@@ -894,16 +894,16 @@ async fn execute_vault_export(
                 if include_values {
                     // Get actual secret value
                     match secrets_backend
-                        .get_secret(name, &secret.original_name, true)
+                        .get_secret(name, &secret.original_name)
                         .await
                     {
                         Ok(secret_props) => {
-                            if let Some(value) = secret_props.value {
-                                secret_data.insert(
-                                    "value".to_string(),
-                                    serde_json::Value::String(value.expose_secret().to_string()),
-                                );
-                            }
+                            secret_data.insert(
+                                "value".to_string(),
+                                serde_json::Value::String(
+                                    secret_props.value.expose_secret().to_string(),
+                                ),
+                            );
                         }
                         Err(e) => {
                             eprintln!(
@@ -936,25 +936,23 @@ async fn execute_vault_export(
             for secret in &secrets {
                 if include_values {
                     match secrets_backend
-                        .get_secret(name, &secret.original_name, true)
+                        .get_secret(name, &secret.original_name)
                         .await
                     {
                         Ok(secret_props) => {
-                            if let Some(value) = secret_props.value {
-                                let env_name = secret
-                                    .original_name
-                                    .to_uppercase()
-                                    .replace("-", "_")
-                                    .replace(".", "_");
-                                if is_valid_env_key(&env_name) {
-                                    env_lines
-                                        .push(format_env_line(&env_name, value.expose_secret()));
-                                } else {
-                                    eprintln!(
+                            let value = secret_props.value;
+                            let env_name = secret
+                                .original_name
+                                .to_uppercase()
+                                .replace("-", "_")
+                                .replace(".", "_");
+                            if is_valid_env_key(&env_name) {
+                                env_lines.push(format_env_line(&env_name, value.expose_secret()));
+                            } else {
+                                eprintln!(
                                         "Warning: Skipping secret '{}' — derived env name '{}' is not a valid shell identifier",
                                         secret.original_name, env_name
                                     );
-                                }
                             }
                         }
                         Err(e) => {
@@ -990,13 +988,12 @@ async fn execute_vault_export(
 
                 if include_values {
                     match secrets_backend
-                        .get_secret(name, &secret.original_name, true)
+                        .get_secret(name, &secret.original_name)
                         .await
                     {
                         Ok(secret_props) => {
-                            if let Some(value) = secret_props.value {
-                                txt_lines.push(format!("  Value: {}", value.expose_secret()));
-                            }
+                            txt_lines
+                                .push(format!("  Value: {}", secret_props.value.expose_secret()));
                         }
                         Err(e) => {
                             eprintln!(
@@ -1027,17 +1024,11 @@ async fn execute_vault_export(
 
             for secret in &secrets {
                 match secrets_backend
-                    .get_secret(name, &secret.original_name, true)
+                    .get_secret(name, &secret.original_name)
                     .await
                 {
                     Ok(props) => {
-                        let Some(value) = props.value else {
-                            eprintln!(
-                                "Warning: Skipping secret '{}' — backend returned no value",
-                                secret.original_name
-                            );
-                            continue;
-                        };
+                        let (props, value) = props.into_parts();
                         let record = crate::records::keeper::build_keeper_record(
                             &crate::records::keeper::ExportedSecret {
                                 name: &secret.original_name,

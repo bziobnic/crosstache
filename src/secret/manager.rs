@@ -15,7 +15,8 @@ use crate::backend::azure::types::AzureVaultName;
 use crate::error::{CrosstacheError, Result};
 use crate::secret::domain::SecretValue;
 use crate::secret::domain::{
-    DeletedSecretSummary, SecretAttributesUpdate, SecretProperties, SecretRequest, SecretSummary,
+    DeletedSecretSummary, Secret, SecretAttributesUpdate, SecretMetadata, SecretRequest,
+    SecretSummary,
 };
 use crate::utils::helpers::validate_folder_path;
 use crate::utils::network::{classify_network_error, create_http_client, NetworkConfig};
@@ -24,29 +25,35 @@ use crate::utils::sanitizer::sanitize_secret_name;
 /// Trait for secret operations
 #[async_trait]
 pub trait SecretOperations: Send + Sync {
-    /// Set a secret value
-    async fn set_secret(
-        &self,
-        vault_name: &str,
-        request: &SecretRequest,
-    ) -> Result<SecretProperties>;
+    /// Set a secret value. Returns the new version's metadata.
+    async fn set_secret(&self, vault_name: &str, request: &SecretRequest)
+        -> Result<SecretMetadata>;
 
-    /// Get a secret value
-    async fn get_secret(
+    /// Get a secret's metadata without disclosing the value
+    async fn get_secret_metadata(
         &self,
         vault_name: &str,
         secret_name: &str,
-        include_value: bool,
-    ) -> Result<SecretProperties>;
+    ) -> Result<SecretMetadata>;
 
-    /// Get a specific version of a secret
+    /// Get a secret, including its value
+    async fn get_secret(&self, vault_name: &str, secret_name: &str) -> Result<Secret>;
+
+    /// Get a specific version's metadata without disclosing the value
+    async fn get_secret_version_metadata(
+        &self,
+        vault_name: &str,
+        secret_name: &str,
+        version: &str,
+    ) -> Result<SecretMetadata>;
+
+    /// Get a specific version of a secret, including its value
     async fn get_secret_version(
         &self,
         vault_name: &str,
         secret_name: &str,
         version: &str,
-        include_value: bool,
-    ) -> Result<SecretProperties>;
+    ) -> Result<Secret>;
 
     /// List secrets in a vault
     async fn list_secrets(
@@ -64,7 +71,7 @@ pub trait SecretOperations: Send + Sync {
         vault_name: &str,
         _secret_name: &str,
         request: &SecretRequest,
-    ) -> Result<SecretProperties>;
+    ) -> Result<SecretMetadata>;
 
     /// Update only the attributes/tags of an existing secret — no new
     /// version, no value read or write.
@@ -80,15 +87,14 @@ pub trait SecretOperations: Send + Sync {
         _vault_name: &str,
         _secret_name: &str,
         _update: &SecretAttributesUpdate,
-    ) -> Result<SecretProperties> {
+    ) -> Result<SecretMetadata> {
         Err(CrosstacheError::azure_api(
             "attribute-only secret updates are not supported by this backend",
         ))
     }
 
     /// Restore a deleted secret
-    async fn restore_secret(&self, vault_name: &str, secret_name: &str)
-        -> Result<SecretProperties>;
+    async fn restore_secret(&self, vault_name: &str, secret_name: &str) -> Result<SecretMetadata>;
 
     /// Permanently purge a deleted secret
     async fn purge_secret(&self, vault_name: &str, secret_name: &str) -> Result<()>;
@@ -104,7 +110,7 @@ pub trait SecretOperations: Send + Sync {
         &self,
         vault_name: &str,
         secret_name: &str,
-    ) -> Result<Vec<SecretProperties>>;
+    ) -> Result<Vec<SecretMetadata>>;
 
     /// Rollback secret to a specific version
     async fn rollback_secret(
@@ -112,7 +118,7 @@ pub trait SecretOperations: Send + Sync {
         vault_name: &str,
         secret_name: &str,
         version: &str,
-    ) -> Result<SecretProperties>;
+    ) -> Result<SecretMetadata>;
 
     /// Backup secret
     #[allow(dead_code)]
@@ -124,7 +130,7 @@ pub trait SecretOperations: Send + Sync {
         &self,
         vault_name: &str,
         backup_data: &[u8],
-    ) -> Result<SecretProperties>;
+    ) -> Result<SecretMetadata>;
 }
 
 /// Deserialize a JSON response body while enforcing a hard size limit.
@@ -379,12 +385,14 @@ fn optional_timestamp(attributes: &serde_json::Value, field: &str) -> Option<Dat
         .and_then(|ts| DateTime::from_timestamp(ts, 0))
 }
 
+/// Parse an Azure secret bundle into value-free metadata plus the plaintext
+/// the bundle carried, if any. A metadata read simply discards the second
+/// half; a value read requires it.
 fn parse_secret_properties_bundle(
     json: &serde_json::Value,
     fallback_name: &str,
-    include_value: bool,
     default_version: &str,
-) -> Result<SecretProperties> {
+) -> Result<(SecretMetadata, Option<SecretValue>)> {
     let id = json.get("id").and_then(|v| v.as_str());
     let name = id
         .and_then(|id| id.rsplit('/').nth(1))
@@ -408,37 +416,50 @@ fn parse_secret_properties_bundle(
         .unwrap_or(0);
     let tags = json_string_tags(json);
     let original_name = original_name_from_tags(&name, &tags);
-    let value = if include_value {
-        json.get("value")
-            .and_then(|v| v.as_str())
-            .map(SecretValue::new)
-    } else {
-        None
-    };
+    let value = json
+        .get("value")
+        .and_then(|v| v.as_str())
+        .map(SecretValue::new);
 
-    Ok(SecretProperties {
-        name,
-        original_name,
+    Ok((
+        SecretMetadata {
+            name,
+            original_name,
+            version,
+            created_on: timestamp_string(attributes, "created"),
+            updated_on: timestamp_string(attributes, "updated"),
+            enabled,
+            expires_on: optional_timestamp(attributes, "exp"),
+            not_before: optional_timestamp(attributes, "nbf"),
+            tags,
+            content_type: json
+                .get("contentType")
+                .and_then(|v| v.as_str())
+                .unwrap_or("text/plain")
+                .to_string(),
+            version_number: None,
+            created_timestamp: created_ts,
+            recovery_level: attributes
+                .get("recoveryLevel")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+        },
         value,
-        version,
-        created_on: timestamp_string(attributes, "created"),
-        updated_on: timestamp_string(attributes, "updated"),
-        enabled,
-        expires_on: optional_timestamp(attributes, "exp"),
-        not_before: optional_timestamp(attributes, "nbf"),
-        tags,
-        content_type: json
-            .get("contentType")
-            .and_then(|v| v.as_str())
-            .unwrap_or("text/plain")
-            .to_string(),
-        version_number: None,
-        created_timestamp: created_ts,
-        recovery_level: attributes
-            .get("recoveryLevel")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-    })
+    ))
+}
+
+/// The bundle half a value read needs, or a hard internal error. Azure returns
+/// the value on every secret GET/PUT that succeeds; a missing one means the
+/// provider contract changed, never a silently value-free result.
+fn require_bundle_value(parsed: (SecretMetadata, Option<SecretValue>)) -> Result<Secret> {
+    let (metadata, value) = parsed;
+    let value = value.ok_or_else(|| {
+        CrosstacheError::azure_api(format!(
+            "provider returned no value for '{}'",
+            metadata.name
+        ))
+    })?;
+    Ok(Secret { metadata, value })
 }
 
 // These codecs are macros rather than private functions because backup and
@@ -473,7 +494,7 @@ macro_rules! build_restore_request_body {
 macro_rules! parse_restored_secret_properties {
     ($json:expr) => {{
         let json: &serde_json::Value = $json;
-        (|| -> Result<SecretProperties> {
+        (|| -> Result<SecretMetadata> {
             let id = json
                 .get("id")
                 .and_then(|value| value.as_str())
@@ -485,7 +506,7 @@ macro_rules! parse_restored_secret_properties {
                     "Restore response contained unexpected secret id '{id}'"
                 )));
             }
-            parse_secret_properties_bundle(json, "", false, "")
+            parse_secret_properties_bundle(json, "", "").map(|(metadata, _)| metadata)
         })()
     }};
 }
@@ -497,7 +518,7 @@ async fn set_secret_http(
     sanitized_name: &str,
     request: &SecretRequest,
     tags: HashMap<String, String>,
-) -> Result<SecretProperties> {
+) -> Result<SecretMetadata> {
     // Create the request body
     let mut body = serde_json::json!({
         "value": request.value.expose_secret(),
@@ -543,7 +564,7 @@ async fn set_secret_http(
         )));
     }
 
-    // Parse the response and convert to SecretProperties. The PUT
+    // Parse the response and convert to Secret. The PUT
     // response is a full secret bundle (id, value, attributes, tags), so
     // build the result from it directly instead of a confirmation GET —
     // a follow-up GET would return HTTP 403 `SecretDisabled` when this
@@ -551,7 +572,7 @@ async fn set_secret_http(
     // operation *after* the write succeeded.
     let json: serde_json::Value =
         read_json_body(response, crate::utils::MAX_RESPONSE_BYTES).await?;
-    parse_secret_properties_bundle(&json, sanitized_name, true, "")
+    parse_secret_properties_bundle(&json, sanitized_name, "").map(|(metadata, _)| metadata)
 }
 
 async fn get_secret_version_http(
@@ -559,8 +580,7 @@ async fn get_secret_version_http(
     secret_url: &str,
     secret_name: &str,
     version: &str,
-    include_value: bool,
-) -> Result<SecretProperties> {
+) -> Result<(SecretMetadata, Option<SecretValue>)> {
     let response = http_request
         .send()
         .await
@@ -582,7 +602,7 @@ async fn get_secret_version_http(
     let json: serde_json::Value =
         read_json_body(response, crate::utils::MAX_RESPONSE_BYTES).await?;
 
-    parse_secret_properties_bundle(&json, secret_name, include_value, version)
+    parse_secret_properties_bundle(&json, secret_name, version)
 }
 
 #[async_trait]
@@ -591,7 +611,7 @@ impl SecretOperations for AzureSecretOperations {
         &self,
         vault_name: &str,
         request: &SecretRequest,
-    ) -> Result<SecretProperties> {
+    ) -> Result<SecretMetadata> {
         let vault_name = self.validated_vault_name(vault_name)?;
         let (sanitized_name, tags) = self.prepare_secret_request(request)?;
 
@@ -630,63 +650,29 @@ impl SecretOperations for AzureSecretOperations {
         .await
     }
 
-    async fn get_secret(
+    async fn get_secret_metadata(
         &self,
         vault_name: &str,
         secret_name: &str,
-        include_value: bool,
-    ) -> Result<SecretProperties> {
-        let vault_name = self.validated_vault_name(vault_name)?;
-        let sanitized_name = sanitize_secret_name(secret_name)?;
-
-        // The Azure Key Vault SDK crate does not expose all tags consistently here,
-        // so use REST directly to get full secret details including tags
-        let secret_url = self.key_vault_api_url(&vault_name, &["secrets", &sanitized_name])?;
-
-        // Get an access token for Key Vault
-        let token = self
-            .auth_provider
-            .get_token(&["https://vault.azure.net/.default"])
-            .await?;
-
-        // Create HTTP client with proper timeout configuration
-        let network_config = NetworkConfig::default();
-        let client = create_http_client(&network_config)?;
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            reqwest::header::AUTHORIZATION,
-            format!("Bearer {}", token.token.secret())
-                .parse()
-                .map_err(|e| CrosstacheError::azure_api(format!("Invalid token format: {e}")))?,
-        );
-
-        // Make the REST API call
-        let response = client
-            .get(&secret_url)
-            .headers(headers)
-            .send()
+    ) -> Result<SecretMetadata> {
+        self.get_secret_bundle(vault_name, secret_name)
             .await
-            .map_err(|e| classify_network_error(&e, &secret_url))?;
+            .map(|(metadata, _)| metadata)
+    }
 
-        if !response.status().is_success() {
-            let status = response.status();
-            if status == 404 {
-                return Err(CrosstacheError::SecretNotFound {
-                    name: secret_name.to_string(),
-                    suggestion: None,
-                });
-            }
-            let error_text = read_error_body(response).await;
-            return Err(CrosstacheError::azure_api(format!(
-                "Failed to get secret: HTTP {status} - {error_text}"
-            )));
-        }
+    async fn get_secret(&self, vault_name: &str, secret_name: &str) -> Result<Secret> {
+        require_bundle_value(self.get_secret_bundle(vault_name, secret_name).await?)
+    }
 
-        // Parse the response
-        let json: serde_json::Value =
-            read_json_body(response, crate::utils::MAX_RESPONSE_BYTES).await?;
-
-        parse_secret_properties_bundle(&json, &sanitized_name, include_value, "")
+    async fn get_secret_version_metadata(
+        &self,
+        vault_name: &str,
+        secret_name: &str,
+        version: &str,
+    ) -> Result<SecretMetadata> {
+        self.get_secret_version_bundle(vault_name, secret_name, version)
+            .await
+            .map(|(metadata, _)| metadata)
     }
 
     async fn get_secret_version(
@@ -694,228 +680,19 @@ impl SecretOperations for AzureSecretOperations {
         vault_name: &str,
         secret_name: &str,
         version: &str,
-        include_value: bool,
-    ) -> Result<SecretProperties> {
-        let vault_name = self.validated_vault_name(vault_name)?;
-        let sanitized_name = sanitize_secret_name(secret_name)?;
-        let secret_url =
-            self.key_vault_api_url(&vault_name, &["secrets", &sanitized_name, version])?;
-
-        // Get an access token for Key Vault
-        let token = self
-            .auth_provider
-            .get_token(&["https://vault.azure.net/.default"])
-            .await?;
-
-        // Create HTTP client with proper timeout configuration
-        let network_config = NetworkConfig::default();
-        let http_client = create_http_client(&network_config)?;
-
-        // Make the REST API call
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            reqwest::header::AUTHORIZATION,
-            format!("Bearer {}", token.token.secret())
-                .parse()
-                .map_err(|e| CrosstacheError::azure_api(format!("Invalid token format: {e}")))?,
-        );
-
-        get_secret_version_http(
-            http_client.get(&secret_url).headers(headers),
-            &secret_url,
-            secret_name,
-            version,
-            include_value,
+    ) -> Result<Secret> {
+        require_bundle_value(
+            self.get_secret_version_bundle(vault_name, secret_name, version)
+                .await?,
         )
-        .await
     }
-
     async fn list_secrets(
         &self,
         vault_name: &str,
         group_filter: Option<&str>,
     ) -> Result<Vec<SecretSummary>> {
-        let vault_name = self.validated_vault_name(vault_name)?;
-        // The Azure Key Vault SDK crate list shape omits the tag details this CLI
-        // displays, so use REST directly
-        let list_url = self.key_vault_api_url(&vault_name, &["secrets"])?;
-
-        // Get an access token for Key Vault
-        let token = self
-            .auth_provider
-            .get_token(&["https://vault.azure.net/.default"])
-            .await?;
-
-        // Create HTTP client with proper timeout configuration
-        let network_config = NetworkConfig::default();
-        let client = create_http_client(&network_config)?;
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            reqwest::header::AUTHORIZATION,
-            format!("Bearer {}", token.token.secret())
-                .parse()
-                .map_err(|e| CrosstacheError::azure_api(format!("Invalid token format: {e}")))?,
-        );
-
-        // Bounded concurrency for the per-secret detail fetch below. Azure Key
-        // Vault's list response does NOT include tags, so the original_name /
-        // groups / folder / note (all stored in tags) require a per-secret GET.
-        // We collect the lightweight per-item fields during pagination, then
-        // fetch the tag-bearing details concurrently instead of serially — the
-        // old code awaited get_secret once per secret in sequence (N+1 latency).
-        const LIST_DETAIL_CONCURRENCY: usize = 10;
-
-        // (name, enabled, updated_on) gathered cheaply from the list response.
-        let mut pending: Vec<(String, bool, String)> = Vec::new();
-        let mut next_url: Option<String> = Some(list_url);
-        let mut page_count: usize = 0;
-
-        while let Some(current_url) = next_url.take() {
-            page_count += 1;
-            if page_count > crate::utils::MAX_PAGES {
-                return Err(CrosstacheError::azure_api(format!(
-                    "Pagination exceeded maximum of {} pages",
-                    crate::utils::MAX_PAGES
-                )));
-            }
-
-            let response = client
-                .get(&current_url)
-                .headers(headers.clone())
-                .send()
-                .await
-                .map_err(|e| classify_network_error(&e, &current_url))?;
-
-            if !response.status().is_success() {
-                let status = response.status();
-                let error_text = read_error_body(response).await;
-                return Err(CrosstacheError::azure_api(format!(
-                    "Failed to list secrets: HTTP {status} - {error_text}"
-                )));
-            }
-
-            let json: serde_json::Value =
-                read_json_body(response, crate::utils::MAX_RESPONSE_BYTES).await?;
-
-            if let Some(values) = json.get("value").and_then(|v| v.as_array()) {
-                for secret_value in values {
-                    if let Some(id) = secret_value.get("id").and_then(|v| v.as_str()) {
-                        let name = id.rsplit('/').next().unwrap_or(id).to_string();
-
-                        let attributes = secret_value
-                            .get("attributes")
-                            .unwrap_or(&serde_json::Value::Null);
-                        let enabled = attributes
-                            .get("enabled")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(true);
-                        let updated = attributes
-                            .get("updated")
-                            .and_then(|v| v.as_i64())
-                            .map(|ts| {
-                                chrono::DateTime::from_timestamp(ts, 0)
-                                    .map(|dt| dt.to_string())
-                                    .unwrap_or_else(|| "Unknown".to_string())
-                            })
-                            .unwrap_or_else(|| "Unknown".to_string());
-
-                        // Defer the tag-bearing get_secret to a bounded-concurrency
-                        // pass after pagination, instead of awaiting it serially here.
-                        pending.push((name, enabled, updated));
-                    }
-                }
-            }
-
-            // Follow pagination nextLink if present
-            next_url = json
-                .get("nextLink")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-        }
-
-        // Fetch per-secret details (tags → original_name/groups/folder/note)
-        // concurrently with a bounded number of in-flight requests, preserving
-        // the original per-secret error degradation (a failed detail fetch
-        // falls back to the bare list fields with a warning).
-        use futures::stream::StreamExt;
-        let vault_for_fetch = vault_name.clone();
-        let mut secret_summaries: Vec<SecretSummary> = futures::stream::iter(pending)
-            .map(|(name, enabled, updated)| {
-                let vault = vault_for_fetch.clone();
-                async move {
-                    match self.get_secret(vault.as_str(), &name, false).await {
-                        Ok(secret_details) => {
-                            let original_name = self.get_original_name(&name, &secret_details.tags);
-                            let folder = self.get_folder(&secret_details.tags);
-                            let group = self.get_group_name(&original_name, &secret_details.tags);
-                            let note = self.get_note(&secret_details.tags);
-
-                            SecretSummary {
-                                name: original_name.clone(),
-                                original_name,
-                                note,
-                                folder,
-                                groups: group,
-                                updated_on: updated,
-                                enabled,
-                                expires_on: secret_details.expires_on,
-                                content_type: secret_details.content_type,
-                                tags: secret_details.tags,
-                            }
-                        }
-                        Err(e) => {
-                            crate::utils::output::warn(&format!(
-                                "Failed to get details for secret '{name}': {e}"
-                            ));
-                            SecretSummary {
-                                name: name.clone(),
-                                original_name: name,
-                                note: None,
-                                folder: None,
-                                groups: None,
-                                updated_on: updated,
-                                enabled,
-                                expires_on: None,
-                                content_type: "text/plain".to_string(),
-                                tags: HashMap::new(),
-                            }
-                        }
-                    }
-                }
-            })
-            .buffer_unordered(LIST_DETAIL_CONCURRENCY)
-            .collect()
-            .await;
-        // buffer_unordered yields completion-order; restore a stable name order
-        // so output is deterministic regardless of network timing.
-        secret_summaries.sort_by(|a, b| a.name.cmp(&b.name));
-
-        // Apply group filter if specified
-        let filtered_summaries: Vec<SecretSummary> = if let Some(filter) = group_filter {
-            secret_summaries
-                .into_iter()
-                .filter(|secret| {
-                    match &secret.groups {
-                        Some(groups) => {
-                            // Check if the filter matches any of the groups in the comma-separated list
-                            groups.split(',').any(|g| g.trim() == filter)
-                        }
-                        None if filter.is_empty() => true,
-                        _ => false,
-                    }
-                })
-                .collect()
-        } else {
-            secret_summaries
-        };
-
-        // Sort by name for consistent output
-        let mut result = filtered_summaries;
-        result.sort_by(|a, b| a.original_name.cmp(&b.original_name));
-
-        Ok(result)
+        self.list_secrets_impl(vault_name, group_filter).await
     }
-
     async fn delete_secret(&self, vault_name: &str, secret_name: &str) -> Result<()> {
         let client = self.create_secret_client(vault_name).await?;
         let sanitized_name = sanitize_secret_name(secret_name)?;
@@ -933,7 +710,7 @@ impl SecretOperations for AzureSecretOperations {
         vault_name: &str,
         _secret_name: &str,
         request: &SecretRequest,
-    ) -> Result<SecretProperties> {
+    ) -> Result<SecretMetadata> {
         // For update operations, Azure Key Vault doesn't have a separate update operation
         // Setting a secret with the same name creates a new version
         // We'll use the same implementation as set_secret
@@ -945,7 +722,7 @@ impl SecretOperations for AzureSecretOperations {
         vault_name: &str,
         secret_name: &str,
         update: &SecretAttributesUpdate,
-    ) -> Result<SecretProperties> {
+    ) -> Result<SecretMetadata> {
         let vault_name = self.validated_vault_name(vault_name)?;
         let sanitized_name = sanitize_secret_name(secret_name)?;
 
@@ -1027,14 +804,10 @@ impl SecretOperations for AzureSecretOperations {
         // The PATCH response is a secret bundle without the value.
         let json: serde_json::Value =
             read_json_body(response, crate::utils::MAX_RESPONSE_BYTES).await?;
-        parse_secret_properties_bundle(&json, &sanitized_name, false, "")
+        parse_secret_properties_bundle(&json, &sanitized_name, "").map(|(metadata, _)| metadata)
     }
 
-    async fn restore_secret(
-        &self,
-        vault_name: &str,
-        secret_name: &str,
-    ) -> Result<SecretProperties> {
+    async fn restore_secret(&self, vault_name: &str, secret_name: &str) -> Result<SecretMetadata> {
         let vault_name = self.validated_vault_name(vault_name)?;
         let sanitized_name = sanitize_secret_name(secret_name)?;
 
@@ -1089,7 +862,7 @@ impl SecretOperations for AzureSecretOperations {
         let json: serde_json::Value =
             read_json_body(response, crate::utils::MAX_RESPONSE_BYTES).await?;
 
-        parse_secret_properties_bundle(&json, &sanitized_name, false, "")
+        parse_secret_properties_bundle(&json, &sanitized_name, "").map(|(metadata, _)| metadata)
     }
 
     async fn purge_secret(&self, vault_name: &str, secret_name: &str) -> Result<()> {
@@ -1220,7 +993,7 @@ impl SecretOperations for AzureSecretOperations {
     }
 
     async fn secret_exists(&self, vault_name: &str, secret_name: &str) -> Result<bool> {
-        match self.get_secret(vault_name, secret_name, false).await {
+        match self.get_secret_metadata(vault_name, secret_name).await {
             Ok(_) => Ok(true),
             Err(CrosstacheError::SecretNotFound { .. }) => Ok(false),
             Err(e) => Err(e),
@@ -1231,7 +1004,7 @@ impl SecretOperations for AzureSecretOperations {
         &self,
         vault_name: &str,
         secret_name: &str,
-    ) -> Result<Vec<SecretProperties>> {
+    ) -> Result<Vec<SecretMetadata>> {
         let vault_name = self.validated_vault_name(vault_name)?;
         let sanitized_name = sanitize_secret_name(secret_name)?;
         let versions_url =
@@ -1328,10 +1101,9 @@ impl SecretOperations for AzureSecretOperations {
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string());
 
-                    versions.push(SecretProperties {
+                    versions.push(SecretMetadata {
                         name: secret_name.to_string(),
                         original_name: secret_name.to_string(),
-                        value: None,
                         version,
                         version_number: None,
                         created_on,
@@ -1368,16 +1140,12 @@ impl SecretOperations for AzureSecretOperations {
         vault_name: &str,
         secret_name: &str,
         version: &str,
-    ) -> Result<SecretProperties> {
+    ) -> Result<SecretMetadata> {
         // First, get the specific version with its value
-        let old_version = self
-            .get_secret_version(vault_name, secret_name, version, true)
-            .await?;
-
-        // Extract the value - we need it to create the new version
-        let value = old_version.value.ok_or_else(|| {
-            CrosstacheError::azure_api("Failed to retrieve value from old version")
-        })?;
+        let (old_version, value) = self
+            .get_secret_version(vault_name, secret_name, version)
+            .await?
+            .into_parts();
 
         // Create a new secret version with the old value (this is how "rollback" works in Key Vault)
         let request = SecretRequest {
@@ -1458,7 +1226,7 @@ impl SecretOperations for AzureSecretOperations {
         &self,
         vault_name: &str,
         backup_data: &[u8],
-    ) -> Result<SecretProperties> {
+    ) -> Result<SecretMetadata> {
         let vault_name = self.validated_vault_name(vault_name)?;
 
         // Use REST API to restore a secret from a protected backup blob
@@ -1507,6 +1275,295 @@ impl SecretOperations for AzureSecretOperations {
         let json: serde_json::Value =
             read_json_body(response, crate::utils::MAX_RESPONSE_BYTES).await?;
         parse_restored_secret_properties!(&json)
+    }
+}
+
+/// The provider reads behind the metadata/value method pairs. Each is one
+/// provider call, shared verbatim by both halves of its pair, so a metadata
+/// read makes exactly the request a value read makes and then drops the
+/// plaintext.
+impl AzureSecretOperations {
+    async fn get_secret_bundle(
+        &self,
+        vault_name: &str,
+        secret_name: &str,
+    ) -> Result<(SecretMetadata, Option<SecretValue>)> {
+        let vault_name = self.validated_vault_name(vault_name)?;
+        let sanitized_name = sanitize_secret_name(secret_name)?;
+
+        // The Azure Key Vault SDK crate does not expose all tags consistently here,
+        // so use REST directly to get full secret details including tags
+        let secret_url = self.key_vault_api_url(&vault_name, &["secrets", &sanitized_name])?;
+
+        // Get an access token for Key Vault
+        let token = self
+            .auth_provider
+            .get_token(&["https://vault.azure.net/.default"])
+            .await?;
+
+        // Create HTTP client with proper timeout configuration
+        let network_config = NetworkConfig::default();
+        let client = create_http_client(&network_config)?;
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {}", token.token.secret())
+                .parse()
+                .map_err(|e| CrosstacheError::azure_api(format!("Invalid token format: {e}")))?,
+        );
+
+        // Make the REST API call
+        let response = client
+            .get(&secret_url)
+            .headers(headers)
+            .send()
+            .await
+            .map_err(|e| classify_network_error(&e, &secret_url))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            if status == 404 {
+                return Err(CrosstacheError::SecretNotFound {
+                    name: secret_name.to_string(),
+                    suggestion: None,
+                });
+            }
+            let error_text = read_error_body(response).await;
+            return Err(CrosstacheError::azure_api(format!(
+                "Failed to get secret: HTTP {status} - {error_text}"
+            )));
+        }
+
+        // Parse the response
+        let json: serde_json::Value =
+            read_json_body(response, crate::utils::MAX_RESPONSE_BYTES).await?;
+
+        parse_secret_properties_bundle(&json, &sanitized_name, "")
+    }
+
+    async fn get_secret_version_bundle(
+        &self,
+        vault_name: &str,
+        secret_name: &str,
+        version: &str,
+    ) -> Result<(SecretMetadata, Option<SecretValue>)> {
+        let vault_name = self.validated_vault_name(vault_name)?;
+        let sanitized_name = sanitize_secret_name(secret_name)?;
+        let secret_url =
+            self.key_vault_api_url(&vault_name, &["secrets", &sanitized_name, version])?;
+
+        // Get an access token for Key Vault
+        let token = self
+            .auth_provider
+            .get_token(&["https://vault.azure.net/.default"])
+            .await?;
+
+        // Create HTTP client with proper timeout configuration
+        let network_config = NetworkConfig::default();
+        let http_client = create_http_client(&network_config)?;
+
+        // Make the REST API call
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {}", token.token.secret())
+                .parse()
+                .map_err(|e| CrosstacheError::azure_api(format!("Invalid token format: {e}")))?,
+        );
+
+        get_secret_version_http(
+            http_client.get(&secret_url).headers(headers),
+            &secret_url,
+            secret_name,
+            version,
+        )
+        .await
+    }
+
+    async fn list_secrets_impl(
+        &self,
+        vault_name: &str,
+        group_filter: Option<&str>,
+    ) -> Result<Vec<SecretSummary>> {
+        let vault_name = self.validated_vault_name(vault_name)?;
+        // The Azure Key Vault SDK crate list shape omits the tag details this CLI
+        // displays, so use REST directly
+        let list_url = self.key_vault_api_url(&vault_name, &["secrets"])?;
+
+        // Get an access token for Key Vault
+        let token = self
+            .auth_provider
+            .get_token(&["https://vault.azure.net/.default"])
+            .await?;
+
+        // Create HTTP client with proper timeout configuration
+        let network_config = NetworkConfig::default();
+        let client = create_http_client(&network_config)?;
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {}", token.token.secret())
+                .parse()
+                .map_err(|e| CrosstacheError::azure_api(format!("Invalid token format: {e}")))?,
+        );
+
+        // Bounded concurrency for the per-secret detail fetch below. Azure Key
+        // Vault's list response does NOT include tags, so the original_name /
+        // groups / folder / note (all stored in tags) require a per-secret GET.
+        // We collect the lightweight per-item fields during pagination, then
+        // fetch the tag-bearing details concurrently instead of serially — the
+        // old code awaited get_secret once per secret in sequence (N+1 latency).
+        const LIST_DETAIL_CONCURRENCY: usize = 10;
+
+        // (name, enabled, updated_on) gathered cheaply from the list response.
+        let mut pending: Vec<(String, bool, String)> = Vec::new();
+        let mut next_url: Option<String> = Some(list_url);
+        let mut page_count: usize = 0;
+
+        while let Some(current_url) = next_url.take() {
+            page_count += 1;
+            if page_count > crate::utils::MAX_PAGES {
+                return Err(CrosstacheError::azure_api(format!(
+                    "Pagination exceeded maximum of {} pages",
+                    crate::utils::MAX_PAGES
+                )));
+            }
+
+            let response = client
+                .get(&current_url)
+                .headers(headers.clone())
+                .send()
+                .await
+                .map_err(|e| classify_network_error(&e, &current_url))?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let error_text = read_error_body(response).await;
+                return Err(CrosstacheError::azure_api(format!(
+                    "Failed to list secrets: HTTP {status} - {error_text}"
+                )));
+            }
+
+            let json: serde_json::Value =
+                read_json_body(response, crate::utils::MAX_RESPONSE_BYTES).await?;
+
+            if let Some(values) = json.get("value").and_then(|v| v.as_array()) {
+                for secret_value in values {
+                    if let Some(id) = secret_value.get("id").and_then(|v| v.as_str()) {
+                        let name = id.rsplit('/').next().unwrap_or(id).to_string();
+
+                        let attributes = secret_value
+                            .get("attributes")
+                            .unwrap_or(&serde_json::Value::Null);
+                        let enabled = attributes
+                            .get("enabled")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(true);
+                        let updated = attributes
+                            .get("updated")
+                            .and_then(|v| v.as_i64())
+                            .map(|ts| {
+                                chrono::DateTime::from_timestamp(ts, 0)
+                                    .map(|dt| dt.to_string())
+                                    .unwrap_or_else(|| "Unknown".to_string())
+                            })
+                            .unwrap_or_else(|| "Unknown".to_string());
+
+                        // Defer the tag-bearing get_secret to a bounded-concurrency
+                        // pass after pagination, instead of awaiting it serially here.
+                        pending.push((name, enabled, updated));
+                    }
+                }
+            }
+
+            // Follow pagination nextLink if present
+            next_url = json
+                .get("nextLink")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+        }
+
+        // Fetch per-secret details (tags → original_name/groups/folder/note)
+        // concurrently with a bounded number of in-flight requests, preserving
+        // the original per-secret error degradation (a failed detail fetch
+        // falls back to the bare list fields with a warning).
+        use futures::stream::StreamExt;
+        let vault_for_fetch = vault_name.clone();
+        let mut secret_summaries: Vec<SecretSummary> = futures::stream::iter(pending)
+            .map(|(name, enabled, updated)| {
+                let vault = vault_for_fetch.clone();
+                async move {
+                    match self.get_secret_metadata(vault.as_str(), &name).await {
+                        Ok(secret_details) => {
+                            let original_name = self.get_original_name(&name, &secret_details.tags);
+                            let folder = self.get_folder(&secret_details.tags);
+                            let group = self.get_group_name(&original_name, &secret_details.tags);
+                            let note = self.get_note(&secret_details.tags);
+
+                            SecretSummary {
+                                name: original_name.clone(),
+                                original_name,
+                                note,
+                                folder,
+                                groups: group,
+                                updated_on: updated,
+                                enabled,
+                                expires_on: secret_details.expires_on,
+                                content_type: secret_details.content_type,
+                                tags: secret_details.tags,
+                            }
+                        }
+                        Err(e) => {
+                            crate::utils::output::warn(&format!(
+                                "Failed to get details for secret '{name}': {e}"
+                            ));
+                            SecretSummary {
+                                name: name.clone(),
+                                original_name: name,
+                                note: None,
+                                folder: None,
+                                groups: None,
+                                updated_on: updated,
+                                enabled,
+                                expires_on: None,
+                                content_type: "text/plain".to_string(),
+                                tags: HashMap::new(),
+                            }
+                        }
+                    }
+                }
+            })
+            .buffer_unordered(LIST_DETAIL_CONCURRENCY)
+            .collect()
+            .await;
+        // buffer_unordered yields completion-order; restore a stable name order
+        // so output is deterministic regardless of network timing.
+        secret_summaries.sort_by(|a, b| a.name.cmp(&b.name));
+
+        // Apply group filter if specified
+        let filtered_summaries: Vec<SecretSummary> = if let Some(filter) = group_filter {
+            secret_summaries
+                .into_iter()
+                .filter(|secret| {
+                    match &secret.groups {
+                        Some(groups) => {
+                            // Check if the filter matches any of the groups in the comma-separated list
+                            groups.split(',').any(|g| g.trim() == filter)
+                        }
+                        None if filter.is_empty() => true,
+                        _ => false,
+                    }
+                })
+                .collect()
+        } else {
+            secret_summaries
+        };
+
+        // Sort by name for consistent output
+        let mut result = filtered_summaries;
+        result.sort_by(|a, b| a.original_name.cmp(&b.original_name));
+
+        Ok(result)
     }
 }
 
@@ -1729,11 +1786,11 @@ mod tests {
             }
         });
 
-        let props = parse_secret_properties_bundle(&json, "", false, "").unwrap();
+        let (props, value) = parse_secret_properties_bundle(&json, "", "").unwrap();
         assert_eq!(props.name, "my-secret");
         assert_eq!(props.original_name, "My Secret");
         assert_eq!(props.version, "abc123def456");
-        assert!(props.value.is_none());
+        assert!(value.is_none());
         assert!(props.enabled);
         assert_eq!(props.created_timestamp, 1_700_000_000);
         assert_eq!(
@@ -1749,13 +1806,69 @@ mod tests {
         assert_eq!(props.tags.get("groups").map(String::as_str), Some("alpha"));
     }
 
+    /// The Azure adapter's "provider returned no value" branch. One parsed
+    /// bundle feeds both halves of the split: the metadata getters take
+    /// `.map(|(metadata, _)| metadata)` and succeed on a value-free bundle,
+    /// while the value getters run it through `require_bundle_value`, which
+    /// must refuse rather than invent an empty `SecretValue`.
+    ///
+    /// A regression that made `Secret.value` optional again, or that defaulted
+    /// a missing value to `""`, would turn this `unwrap_err` into an `Ok`.
+    #[test]
+    fn require_bundle_value_refuses_a_value_free_bundle_the_metadata_path_accepts() {
+        let json = serde_json::json!({
+            "id": "https://myvault.vault.azure.net/secrets/no-value/abc123",
+            "contentType": "text/plain",
+            "attributes": { "enabled": true, "created": 1_700_000_000 },
+            "tags": { "original_name": "No Value" }
+        });
+
+        // The metadata getters' exact expression, on the exact same input.
+        let metadata = parse_secret_properties_bundle(&json, "", "")
+            .map(|(metadata, _)| metadata)
+            .unwrap();
+        assert_eq!(metadata.name, "no-value");
+        assert_eq!(metadata.original_name, "No Value");
+        assert_eq!(metadata.version, "abc123");
+
+        // The value getters' exact expression: hard error, naming the secret.
+        let error = require_bundle_value(parse_secret_properties_bundle(&json, "", "").unwrap())
+            .unwrap_err();
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("provider returned no value") && rendered.contains("no-value"),
+            "{rendered}"
+        );
+    }
+
+    /// Companion positive case: when Azure does return the value (which it does
+    /// on every successful secret GET/PUT), `require_bundle_value` pairs it with
+    /// the same metadata the metadata path produced.
+    #[test]
+    fn require_bundle_value_pairs_the_value_with_the_same_metadata() {
+        let json = serde_json::json!({
+            "id": "https://myvault.vault.azure.net/secrets/with-value/abc123",
+            "value": "s3cr3t",
+            "attributes": { "enabled": true }
+        });
+
+        let metadata = parse_secret_properties_bundle(&json, "", "")
+            .map(|(metadata, _)| metadata)
+            .unwrap();
+        let secret =
+            require_bundle_value(parse_secret_properties_bundle(&json, "", "").unwrap()).unwrap();
+        assert_eq!(secret.value.expose_secret(), "s3cr3t");
+        assert_eq!(secret.metadata.name, metadata.name);
+        assert_eq!(secret.metadata.version, metadata.version);
+    }
+
     #[test]
     fn test_parse_secret_properties_bundle_minimal_without_value() {
         let json = serde_json::json!({
             "id": "https://myvault.vault.azure.net/secrets/plain/v1"
         });
 
-        let props = parse_secret_properties_bundle(&json, "", false, "").unwrap();
+        let (props, _) = parse_secret_properties_bundle(&json, "", "").unwrap();
         assert_eq!(props.name, "plain");
         assert_eq!(props.original_name, "plain");
         assert_eq!(props.version, "v1");

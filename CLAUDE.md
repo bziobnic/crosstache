@@ -95,7 +95,18 @@ the shared resolvers; do not reproduce precedence locally in a command handler.
 
 - `src/secret/domain/` — backend-neutral secret model: `SecretValue`
   (plaintext, no serde/Display, redacted Debug, read only via
-  `expose_secret`), `SecretMetadata`, `SecretProperties`, requests, summaries
+  `expose_secret`), `SecretMetadata` (value-free), `Secret` (`{ metadata,
+  value: SecretValue }`, always has a value, derefs to `SecretMetadata`),
+  requests, summaries. `SecretBackend`/`SecretOperations` split their getters
+  by value disclosure: `get_secret_metadata`/`get_secret_version_metadata`
+  return `SecretMetadata`; `get_secret`/`get_secret_version` return `Secret`
+  and always carry a value; every write and `list_versions` return
+  `SecretMetadata`. `get_secret_snapshot(vault, name, SnapshotValue::{Omit,
+  Include})` selects disclosure explicitly, no boolean flag. Backends keep
+  provider-call parity: local's metadata path never decrypts, AWS's metadata
+  path is `DescribeSecret` only, Azure's HTTP calls are unchanged. Web
+  `GET /secrets/{name}` is served by the metadata getter; only
+  `POST /secrets/{name}/value` can return a value.
 - `src/records/` — type definitions, encrypted envelopes, conversions, Keeper
   import/export
 - `src/totp.rs` and `src/cli/totp_ops.rs` — RFC 6238 code generation

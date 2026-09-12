@@ -10,7 +10,7 @@ use crate::secret::attachment_key::{
     self as key, AttachmentKeyId, AttachmentKeyRef, KeySlot, PointerKind, SecretVersion,
 };
 use crate::secret::domain::SecretValue;
-use crate::secret::domain::{SecretProperties, SecretRequest};
+use crate::secret::domain::{Secret, SecretRequest};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -70,13 +70,10 @@ fn request(name: &str, value: Zeroizing<String>, marked: bool) -> SecretRequest 
         folder: None,
     }
 }
-async fn pointer(keys: &dyn AttachmentKeyStore, vault: &str) -> Result<Option<SecretProperties>> {
-    match keys
-        .get_secret(vault, key::ACTIVE_POINTER_SECRET, true)
-        .await
-    {
+async fn pointer(keys: &dyn AttachmentKeyStore, vault: &str) -> Result<Option<Secret>> {
+    match keys.get_secret(vault, key::ACTIVE_POINTER_SECRET).await {
         Ok(p) => {
-            if !p.enabled || p.value.is_none() {
+            if !p.enabled {
                 return Err(AttachmentError::PointerInvalid.into());
             }
             if p.version.is_empty() {
@@ -88,7 +85,7 @@ async fn pointer(keys: &dyn AttachmentKeyStore, vault: &str) -> Result<Option<Se
         Err(e) => Err(e.into()),
     }
 }
-fn same_pointer(a: &Option<SecretProperties>, b: &Option<SecretProperties>) -> bool {
+fn same_pointer(a: &Option<Secret>, b: &Option<Secret>) -> bool {
     match (a, b) {
         (None, None) => true,
         (Some(a), Some(b)) => {
@@ -110,7 +107,7 @@ async fn exact(
         return Err(AttachmentError::KeyVersionInvalid.into());
     }
     let p = keys
-        .get_secret_version(vault, &name, reference.provider_version.as_str(), true)
+        .get_secret_version(vault, &name, reference.provider_version.as_str())
         .await?;
     if p.version != reference.provider_version.as_str() {
         return Err(AttachmentError::KeyVersionInvalid.into());
@@ -122,7 +119,6 @@ async fn exact(
     }
     let identity = p
         .value
-        .ok_or(AttachmentError::KeyInvalid)?
         .expose_secret()
         .trim()
         .parse::<age::x25519::Identity>()
@@ -139,7 +135,7 @@ async fn retained(
 ) -> Result<Option<AttachmentKeyRef>> {
     let key_id = id(key_id)?;
     let p = match keys
-        .get_secret(vault, &key::retained_record_name(&key_id), false)
+        .get_secret_metadata(vault, &key::retained_record_name(&key_id))
         .await
     {
         Ok(p) => p,
@@ -310,7 +306,7 @@ pub(crate) async fn restore(
     let pointer_outcome = match before_pointer.as_ref() {
         None => "create",
         Some(p) => {
-            let raw = p.value.as_ref().ok_or(AttachmentError::PointerInvalid)?;
+            let raw = &p.value;
             // The shared classifier recognizes V1 by prefix alone. Only a
             // valid private identity is a V1 binding that repair must preserve.
             let kind = match key::parse_pointer_value(raw.expose_secret()) {
@@ -490,7 +486,7 @@ pub(crate) async fn restore(
                 .ok_or(AttachmentError::CommitUnconfirmed)?;
             if written.version.is_empty()
                 || confirmed.version != written.version
-                || confirmed.value.as_ref().map(SecretValue::expose_secret) != Some(value.as_str())
+                || confirmed.value.expose_secret() != value.as_str()
             {
                 return Err(AttachmentError::CommitUnconfirmed.into());
             }

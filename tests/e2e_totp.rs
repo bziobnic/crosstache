@@ -56,7 +56,7 @@ fn overwrite_record_envelope(temp: &Path, name: &str, envelope: &str) {
         let backend = LocalBackend::new(Some(&local_config)).expect("open local backend");
         let existing = backend
             .secrets()
-            .get_secret("default", name, false)
+            .get_secret_metadata("default", name)
             .await
             .expect("get existing record");
         backend
