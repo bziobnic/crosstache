@@ -4417,3 +4417,66 @@ fn migrate_dry_run_leaves_cache_intact() {
     ]);
     assert!(dest.exists(), "dry run must not invalidate");
 }
+
+/// A04-03: an applied transfer rewrites the destination (and, for a move,
+/// the source) so both listing caches must be dropped; a preview must not.
+#[test]
+fn transfer_apply_drops_endpoint_listing_caches_but_preview_does_not() {
+    let env = WorkspaceEnv::with_cache_enabled(300);
+    env.ok(&["set", "cert", "--value", "private-secret-value"]);
+    let proof = env.home.join("proof.txt");
+    std::fs::write(&proof, b"private-attachment-content").unwrap();
+    env.ok(&["attach", "cert", proof.to_str().unwrap()]);
+    env.ok(&["ls"]);
+    env.ok(&["file", "list"]);
+    let secrets = env.cache_entry("local", "default", "secrets-list-v5.json");
+    let files = env.cache_entry("local", "default", "files-list-v5.json");
+    assert!(secrets.exists() && files.exists());
+
+    let recovery = env.home.join("recovery");
+    let base = [
+        "transfer",
+        "cert",
+        "--from",
+        "default",
+        "--to",
+        "default",
+        "--new-name",
+        "renamed",
+        "--move",
+    ];
+    // Preview: no invalidation.
+    env.ok(&base);
+    assert!(
+        secrets.exists() && files.exists(),
+        "preview must not invalidate"
+    );
+
+    let out = env
+        .xv()
+        .args(base)
+        .args(["--apply", "--offline", "--recovery-dir"])
+        .arg(&recovery)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !secrets.exists(),
+        "applied transfer must drop the secret listing"
+    );
+    assert!(
+        !files.exists(),
+        "applied transfer must drop the file listing"
+    );
+
+    let after = env.ok(&["ls"]);
+    assert!(
+        after.contains("renamed") && !after.contains("cert"),
+        "{after}"
+    );
+}
