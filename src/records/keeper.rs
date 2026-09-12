@@ -59,8 +59,8 @@ use crate::records::{
     check_tag_budget, encode_envelope, find_type, parse_envelope, predicted_reserved_tag_count,
     RecordType, FIELD_TAG_PREFIX, RECORD_CONTENT_TYPE, TYPE_TAG,
 };
-use crate::secret::manager::SecretRequest;
-use zeroize::Zeroizing;
+use crate::secret::domain::SecretRequest;
+use crate::secret::domain::SecretValue;
 
 /// Keeper nests folder paths with a backslash (`Customer1\Folder2`); xv uses
 /// `/`.
@@ -703,7 +703,7 @@ fn plan_record(
 
     Ok(Some(SecretRequest {
         name,
-        value: Zeroizing::new(envelope_value),
+        value: SecretValue::new(envelope_value),
         content_type: Some(RECORD_CONTENT_TYPE.to_string()),
         enabled: Some(true),
         expires_on: None,
@@ -1167,7 +1167,7 @@ mod tests {
         );
 
         // The password is envelope material, never a tag.
-        let envelope = parse_envelope(&dev.value).unwrap();
+        let envelope = parse_envelope(dev.value.expose_secret()).unwrap();
         assert_eq!(
             envelope.get("password").map(String::as_str),
             Some("123123123")
@@ -1195,7 +1195,7 @@ mod tests {
             .find(|r| r.name == "Facebook")
             .expect("Facebook record");
 
-        let envelope = parse_envelope(&fb.value).unwrap();
+        let envelope = parse_envelope(fb.value.expose_secret()).unwrap();
         assert!(
             envelope
                 .get(ONE_TIME_CODE_FIELD)
@@ -1286,7 +1286,7 @@ mod tests {
             req.tags.as_ref().unwrap().get(TYPE_TAG).map(String::as_str),
             Some("secure-note")
         );
-        let env = parse_envelope(&req.value).unwrap();
+        let env = parse_envelope(req.value.expose_secret()).unwrap();
         assert_eq!(env.get("content").map(String::as_str), Some("hunter2"));
         assert_eq!(req.note.as_deref(), Some("guest network"));
     }
@@ -1298,7 +1298,7 @@ mod tests {
         ]}"#;
         let plan = plan_for(json, local_caps(), BackendKind::Local);
         assert_eq!(plan.requests.len(), 1, "{:?}", plan.rejected);
-        let env = parse_envelope(&plan.requests[0].value).unwrap();
+        let env = parse_envelope(plan.requests[0].value.expose_secret()).unwrap();
         assert_eq!(
             env.get("content").map(String::as_str),
             Some("call the bank first")
@@ -1327,7 +1327,7 @@ mod tests {
 
         assert_eq!(plan.requests.len(), 1, "{:?}", plan.rejected);
         let req = &plan.requests[0];
-        let env = parse_envelope(&req.value).unwrap();
+        let env = parse_envelope(req.value.expose_secret()).unwrap();
         assert!(
             env.values().any(|v| v.contains("JBSWY3DPEHPK3PXP")),
             "seed must survive in the envelope: {env:?}"
@@ -1348,7 +1348,7 @@ mod tests {
         let plan = plan_for(json, local_caps(), BackendKind::Local);
 
         assert_eq!(plan.requests.len(), 1, "{:?}", plan.rejected);
-        let env = parse_envelope(&plan.requests[0].value).unwrap();
+        let env = parse_envelope(plan.requests[0].value.expose_secret()).unwrap();
         assert!(env.values().any(|v| v.contains("secret=ABC")), "{env:?}");
     }
 
@@ -1358,7 +1358,7 @@ mod tests {
           "custom_fields":{"Category":"personal"}}]}"#;
         let plan = plan_for(json, local_caps(), BackendKind::Local);
         assert_eq!(plan.requests.len(), 1, "{:?}", plan.rejected);
-        let env = parse_envelope(&plan.requests[0].value).unwrap();
+        let env = parse_envelope(plan.requests[0].value.expose_secret()).unwrap();
         assert_eq!(env.get("content").map(String::as_str), Some("just text"));
         // A plain user field stays listable metadata.
         assert_eq!(
@@ -1393,7 +1393,7 @@ mod tests {
                     );
                 }
                 assert!(
-                    !req.value.as_str().contains(seed)
+                    !req.value.expose_secret().contains(seed)
                         || req.content_type.as_deref() == Some(RECORD_CONTENT_TYPE),
                     "seed stored outside a record envelope for shape {shape}"
                 );
@@ -1410,7 +1410,7 @@ mod tests {
           "$oneTimeCode":"otpauth://totp/x?secret=ABC"}}]}"#;
         let plan = plan_for(json, local_caps(), BackendKind::Local);
         assert_eq!(plan.requests.len(), 1, "{:?}", plan.rejected);
-        let env = parse_envelope(&plan.requests[0].value).unwrap();
+        let env = parse_envelope(plan.requests[0].value.expose_secret()).unwrap();
         assert_eq!(env.get("content").map(String::as_str), Some("p"));
         assert!(
             env.get(ONE_TIME_CODE_FIELD)
@@ -1538,7 +1538,7 @@ mod tests {
         assert_eq!(tags.get("active").map(String::as_str), Some("true"));
         // An object is no longer dropped: its sub-keys become envelope fields.
         assert!(!tags.contains_key("nested"));
-        let env = parse_envelope(&req.value).unwrap();
+        let env = parse_envelope(req.value.expose_secret()).unwrap();
         assert_eq!(env.get("nested-a").map(String::as_str), Some("1"));
     }
 
@@ -1614,7 +1614,7 @@ mod tests {
         let tags = req.tags.as_ref().unwrap();
         assert_eq!(tags.get(TYPE_TAG).map(String::as_str), Some("ssh-key"));
 
-        let env = parse_envelope(&req.value).unwrap();
+        let env = parse_envelope(req.value.expose_secret()).unwrap();
         assert!(env
             .get("private-key")
             .is_some_and(|v| v.contains("BEGIN OPENSSH")));
@@ -1639,7 +1639,7 @@ mod tests {
           "custom_fields":{"$keyPair::1":{"publicKey":"ssh-rsa AAAA"}}}]}"#;
         let plan = plan_for(json, local_caps(), BackendKind::Local);
         assert_eq!(plan.requests.len(), 1, "{:?}", plan.rejected);
-        let env = parse_envelope(&plan.requests[0].value).unwrap();
+        let env = parse_envelope(plan.requests[0].value.expose_secret()).unwrap();
         assert!(env.values().any(|v| v.contains("ssh-rsa")), "{env:?}");
     }
 
@@ -1657,7 +1657,7 @@ mod tests {
         let tags = req.tags.as_ref().unwrap();
         assert_eq!(tags.get(TYPE_TAG).map(String::as_str), Some("payment-card"));
 
-        let env = parse_envelope(&req.value).unwrap();
+        let env = parse_envelope(req.value.expose_secret()).unwrap();
         assert_eq!(
             env.get("card-number").map(String::as_str),
             Some("4111111111111111")
@@ -1718,7 +1718,7 @@ mod tests {
                            "$host:Server:1":"host.example.com"}}]}"#;
         let plan = plan_for(json, local_caps(), BackendKind::Local);
         let req = &plan.requests[0];
-        let env = parse_envelope(&req.value).unwrap();
+        let env = parse_envelope(req.value.expose_secret()).unwrap();
         assert!(env.contains_key("private-pem-key"), "{env:?}");
         assert!(env.contains_key("traffic-encryption-seed"), "{env:?}");
         // A host is ordinary metadata.
@@ -1745,7 +1745,7 @@ mod tests {
             req.note.is_none(),
             "oversized note must not be sent as a tag"
         );
-        let env = parse_envelope(&req.value).unwrap();
+        let env = parse_envelope(req.value.expose_secret()).unwrap();
         assert_eq!(env.get("note").map(String::len), Some(1495));
         assert!(plan
             .warnings
@@ -1774,7 +1774,7 @@ mod tests {
         assert_eq!(plan.requests.len(), 1, "{:?}", plan.rejected);
         let req = &plan.requests[0];
         assert!(!req.tags.as_ref().unwrap().contains_key("f.url"));
-        let env = parse_envelope(&req.value).unwrap();
+        let env = parse_envelope(req.value.expose_secret()).unwrap();
         assert!(env.get("url").is_some_and(|v| v.len() > 4000));
     }
 
@@ -1789,7 +1789,7 @@ mod tests {
 
         assert_eq!(plan.requests.len(), 1, "{:?}", plan.rejected);
         let req = &plan.requests[0];
-        let env = parse_envelope(&req.value).unwrap();
+        let env = parse_envelope(req.value.expose_secret()).unwrap();
         assert_eq!(
             env.get("content").map(String::as_str),
             Some("license key: ABC-123"),
@@ -2030,7 +2030,7 @@ mod tests {
                 build_keeper_record(
                     &exported(
                         &req.name,
-                        req.value.as_str(),
+                        req.value.expose_secret(),
                         req.content_type.as_deref().unwrap_or("text/plain"),
                         &tags,
                     ),

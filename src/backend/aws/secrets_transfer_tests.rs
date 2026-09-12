@@ -1,4 +1,5 @@
 use super::*;
+use crate::secret::domain::SecretValue;
 use aws_smithy_runtime_api::client::http::{
     HttpClient, HttpConnector, HttpConnectorFuture, HttpConnectorSettings, SharedHttpConnector,
 };
@@ -69,7 +70,11 @@ async fn aws_transfer_snapshot_rechecks_folder_metadata_without_claiming_cas() {
         .await
         .unwrap();
     assert_eq!(
-        snapshot.properties.value.as_deref().map(|v| v.as_str()),
+        snapshot
+            .properties
+            .value
+            .as_ref()
+            .map(SecretValue::expose_secret),
         Some("value")
     );
     assert_eq!(snapshot.properties.tags["folder"], "original");
@@ -82,11 +87,10 @@ async fn aws_transfer_snapshot_rechecks_folder_metadata_without_claiming_cas() {
 
 #[tokio::test]
 async fn aws_transfer_metadata_preflight_refuses_lossy_fields_and_invalid_names() {
-    use zeroize::Zeroizing;
     let backend = backend(false);
     let request = SecretRequest {
         name: "destination".into(),
-        value: Zeroizing::new("value".into()),
+        value: SecretValue::new("value"),
         content_type: None,
         enabled: Some(true),
         expires_on: None,
@@ -145,7 +149,7 @@ async fn aws_transfer_metadata_preflight_checks_provider_limits() {
     let backend = backend(false);
     let base = SecretRequest {
         name: "destination".into(),
-        value: zeroize::Zeroizing::new("value".into()),
+        value: SecretValue::new("value"),
         content_type: None,
         enabled: Some(true),
         expires_on: None,
@@ -157,10 +161,10 @@ async fn aws_transfer_metadata_preflight_checks_provider_limits() {
     };
     let mut cases = Vec::new();
     let mut request = base.clone();
-    request.value = zeroize::Zeroizing::new("x".repeat(65537));
+    request.value = SecretValue::new("x".repeat(65537));
     cases.push(request);
     let mut request = base.clone();
-    request.value = zeroize::Zeroizing::new(String::new());
+    request.value = SecretValue::new(String::new());
     cases.push(request);
     let mut request = base.clone();
     request.note = Some("x".repeat(2049));
@@ -190,7 +194,7 @@ async fn aws_transfer_metadata_preflight_checks_provider_limits() {
         );
     }
     let mut valid = base;
-    valid.value = zeroize::Zeroizing::new("x".repeat(65536));
+    valid.value = SecretValue::new("x".repeat(65536));
     valid.note = Some("x".repeat(2048));
     valid.folder = Some("x".repeat(256));
     backend
@@ -204,7 +208,7 @@ async fn aws_transfer_metadata_preflight_rejects_invalid_generated_tags_before_i
     let backend = backend(false);
     let base = SecretRequest {
         name: "destination".into(),
-        value: zeroize::Zeroizing::new("value".into()),
+        value: SecretValue::new("value"),
         content_type: None,
         enabled: Some(true),
         expires_on: None,

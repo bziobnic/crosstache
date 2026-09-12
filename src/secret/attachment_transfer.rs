@@ -4,6 +4,7 @@
 //! authority through progress flags or plaintext-value hashes.
 use crate::backend::{error::BackendError, local::crypto, Backend, SecretBackend};
 use crate::error::{CrosstacheError, Result};
+use crate::secret::domain::SecretValue;
 use crate::secret::{attachment_key as key, attachment_rewrap as rewrap};
 use age::secrecy::ExposeSecret;
 use hmac::{Hmac, Mac};
@@ -329,7 +330,7 @@ pub async fn plan(
         let pointer = keys
             .get_secret(&i.source.vault, key::ACTIVE_POINTER_SECRET, true)
             .await?;
-        let active = match pointer.value.as_deref().and_then(|v| key::parse_pointer_value(v)) {
+        let active = match pointer.value.as_ref().map(SecretValue::expose_secret).and_then(key::parse_pointer_value) {
             Some(key::PointerKind::V2 { active, .. }) => active,
             _ => return Err(BackendError::Unsupported("transfer preview requires a healthy V2 attachment key ring; upgrade the key ring first".into()).into()),
         };

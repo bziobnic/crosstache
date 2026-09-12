@@ -20,7 +20,8 @@ use crate::secret::attachment_key::{
     self as key, AttachmentKeyRef, KeySlot, PointerKind, SecretVersion,
 };
 use crate::secret::attachment_rewrap::{self as maintenance, Ring};
-use crate::secret::manager::SecretProperties;
+use crate::secret::domain::SecretProperties;
+use crate::secret::domain::SecretValue;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
@@ -112,8 +113,9 @@ pub async fn retire(
         .await?;
     let active = match pointer
         .value
-        .as_deref()
-        .and_then(|v| key::parse_pointer_value(v))
+        .as_ref()
+        .map(SecretValue::expose_secret)
+        .and_then(key::parse_pointer_value)
     {
         Some(PointerKind::V2 { active, .. }) => active,
         _ => return Err(conflict()),

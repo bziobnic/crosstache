@@ -4,19 +4,19 @@ use crate::backend::{
     Backend,
 };
 use crate::config::settings::LocalConfig;
-use crate::secret::manager::SecretRequest;
+use crate::secret::domain::SecretRequest;
+use crate::secret::domain::SecretValue;
 use crate::secret::{
     attachment_key::{self as key, AttachmentKeyRef, KeySlot, SecretVersion},
     attachment_rewrap, attachment_rotation,
 };
 use age::secrecy::ExposeSecret;
 use std::collections::HashMap;
-use zeroize::Zeroizing;
 
 fn request(name: String, value: String) -> SecretRequest {
     SecretRequest {
         name,
-        value: Zeroizing::new(value),
+        value: SecretValue::new(value),
         content_type: Some(key::KEY_RECORD_CONTENT_TYPE.into()),
         enabled: Some(true),
         expires_on: None,
@@ -149,9 +149,14 @@ async fn active_legacy_missing_invalid_and_disabled_candidates_are_refused() {
             .get_secret("default", key::ACTIVE_POINTER_SECRET, true)
             .await
             .unwrap();
-        let key::PointerKind::V2 { active, .. } =
-            key::parse_pointer_value(pointer.value.as_deref().unwrap()).unwrap()
-        else {
+        let key::PointerKind::V2 { active, .. } = key::parse_pointer_value(
+            pointer
+                .value
+                .as_ref()
+                .map(SecretValue::expose_secret)
+                .unwrap(),
+        )
+        .unwrap() else {
             panic!()
         };
         let candidate = match mode {
@@ -174,9 +179,9 @@ async fn active_legacy_missing_invalid_and_disabled_candidates_are_refused() {
                     .get_secret("default", &key::retained_record_name(&id), true)
                     .await
                     .unwrap();
-                let mut r = request(p.name, p.value.unwrap().to_string());
+                let mut r = request(p.name, p.value.unwrap().expose_secret().to_string());
                 if mode == "invalid" {
-                    r.value = Zeroizing::new("invalid".into());
+                    r.value = SecretValue::new("invalid");
                 }
                 if mode == "disabled" {
                     r.enabled = Some(false);
@@ -295,7 +300,7 @@ async fn current_references_and_invalid_managed_files_block_retirement() {
 }
 
 use crate::backend::BackendError;
-use crate::secret::manager::SecretProperties;
+use crate::secret::domain::SecretProperties;
 use std::sync::atomic::{AtomicUsize, Ordering};
 struct FaultKeys<'a> {
     inner: Box<dyn AttachmentKeyStore + 'a>,
@@ -377,11 +382,10 @@ impl AttachmentKeyStore for FaultKeys<'_> {
                 "exact-disabled" => p.enabled = false,
                 "exact-unmarked" => p.content_type = "ordinary".into(),
                 "exact-wrong-key" => {
-                    p.value = Some(Zeroizing::new(
+                    p.value = Some(SecretValue::new(
                         age::x25519::Identity::generate()
                             .to_string()
-                            .expose_secret()
-                            .into(),
+                            .expose_secret(),
                     ))
                 }
                 _ => {}
@@ -635,7 +639,8 @@ async fn tampered_current_files_and_new_candidate_references_block_already_retir
                 .await
                 .unwrap();
             let key::PointerKind::V2 { active, .. } =
-                key::parse_pointer_value(p.value.as_deref().unwrap()).unwrap()
+                key::parse_pointer_value(p.value.as_ref().map(SecretValue::expose_secret).unwrap())
+                    .unwrap()
             else {
                 panic!()
             };
@@ -856,7 +861,14 @@ async fn retirement_keeps_all_existing_provider_versions_and_both_exact_identiti
         .secrets()
         .set_secret(
             "default",
-            request(name.clone(), old.value.as_deref().unwrap().to_string()),
+            request(
+                name.clone(),
+                old.value
+                    .as_ref()
+                    .map(SecretValue::expose_secret)
+                    .unwrap()
+                    .to_string(),
+            ),
         )
         .await
         .unwrap();

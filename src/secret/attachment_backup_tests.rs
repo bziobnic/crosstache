@@ -78,7 +78,7 @@ async fn export_of_missing_pointer_does_not_initialize_keys() {
 
 #[tokio::test]
 async fn export_canonicalizes_whitespace_identities_without_changing_source() {
-    use crate::secret::manager::SecretRequest;
+    use crate::secret::domain::SecretRequest;
     use age::secrecy::ExposeSecret;
     let (_dir, backend) = fixture();
     let identity = age::x25519::Identity::generate();
@@ -89,7 +89,7 @@ async fn export_canonicalizes_whitespace_identities_without_changing_source() {
         "default",
         SecretRequest {
             name: key::ACTIVE_POINTER_SECRET.into(),
-            value: zeroize::Zeroizing::new(raw.clone()),
+            value: SecretValue::new(raw.clone()),
             enabled: Some(true),
             content_type: None,
             expires_on: None,
@@ -115,7 +115,7 @@ async fn export_canonicalizes_whitespace_identities_without_changing_source() {
             .unwrap()
             .value
             .unwrap()
-            .as_str(),
+            .expose_secret(),
         raw
     );
 }
@@ -134,7 +134,8 @@ fn upload(name: &str, content: Vec<u8>) -> FileUploadRequest {
 #[tokio::test]
 async fn source_v1_history_and_v2_current_files_restore_with_new_versions() {
     use crate::backend::local::crypto;
-    use crate::secret::{attachment_lifecycle, attachment_restore, manager::SecretRequest};
+    use crate::secret::domain::SecretRequest;
+    use crate::secret::{attachment_lifecycle, attachment_restore};
     use age::secrecy::ExposeSecret;
     let (_source_dir, source) = fixture();
     let (_target_dir, target) = fixture();
@@ -144,7 +145,7 @@ async fn source_v1_history_and_v2_current_files_restore_with_new_versions() {
     let original = age::x25519::Identity::generate();
     let req = |name: &str, identity: &age::x25519::Identity, marked: bool| SecretRequest {
         name: name.into(),
-        value: zeroize::Zeroizing::new(identity.to_string().expose_secret().clone()),
+        value: SecretValue::new(identity.to_string().expose_secret().clone()),
         content_type: marked.then(|| key::KEY_RECORD_CONTENT_TYPE.into()),
         enabled: Some(true),
         expires_on: None,
@@ -156,7 +157,7 @@ async fn source_v1_history_and_v2_current_files_restore_with_new_versions() {
     };
     for backend in [&source, &target] {
         let mut owner = req("s", &original, false);
-        owner.value = zeroize::Zeroizing::new("owner".into());
+        owner.value = SecretValue::new("owner");
         backend
             .secrets()
             .set_secret("default", owner)

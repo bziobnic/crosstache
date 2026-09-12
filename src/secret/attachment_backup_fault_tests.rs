@@ -6,7 +6,8 @@ use crate::backend::{
 };
 use crate::blob::models::{FileInfo, FileUploadRequest};
 use crate::config::settings::LocalConfig;
-use crate::secret::{attachments, manager::SecretRequest};
+use crate::secret::attachments;
+use crate::secret::domain::SecretRequest;
 use crate::utils::progress::ProgressReporter;
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicUsize, Ordering};

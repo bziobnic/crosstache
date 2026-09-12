@@ -61,8 +61,10 @@ workspace backends. Built-in backend adapters live under:
 - `src/backend/local/`
 
 Azure still delegates some operations to older implementation modules under
-`src/secret/`, `src/vault/`, and `src/blob/`. Do not add new Azure-only business
-logic there when the operation belongs on a backend trait.
+`src/secret/`, `src/vault/`, and `src/blob/`. `src/secret/manager.rs` is
+Azure-only implementation; domain types live in `src/secret/domain/`. Do not
+add new Azure-only business logic there when the operation belongs on a
+backend trait.
 
 ### Workspace and project resolution
 
@@ -91,6 +93,9 @@ the shared resolvers; do not reproduce precedence locally in a command handler.
 
 ### Records, secrets, and attachments
 
+- `src/secret/domain/` — backend-neutral secret model: `SecretValue`
+  (plaintext, no serde/Display, redacted Debug, read only via
+  `expose_secret`), `SecretMetadata`, `SecretProperties`, requests, summaries
 - `src/records/` — type definitions, encrypted envelopes, conversions, Keeper
   import/export
 - `src/totp.rs` and `src/cli/totp_ops.rs` — RFC 6238 code generation

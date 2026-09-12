@@ -310,7 +310,7 @@ impl std::str::FromStr for CharsetType {
 ///
 /// Flattened into both commands with `#[command(flatten)]` so they expose an
 /// identical metadata surface and can never drift apart. Both build a single
-/// [`crate::secret::manager::SecretRequest`] from these fields through the same
+/// [`crate::secret::domain::SecretRequest`] from these fields through the same
 /// backend trait path.
 #[derive(Debug, Clone, Default, clap::Args)]
 pub struct SecretWriteArgs {
@@ -356,15 +356,15 @@ impl SecretWriteArgs {
         }
     }
 
-    /// Build a [`crate::secret::manager::SecretRequest`] for a single secret
+    /// Build a [`crate::secret::domain::SecretRequest`] for a single secret
     /// from these write-time flags, parsing the `--expires` / `--not-before`
     /// date strings. Shared by `set` (single-secret path) and `gen --save`
     /// so both produce byte-identical requests from the same flags.
     pub fn to_secret_request(
         &self,
         name: &str,
-        value: zeroize::Zeroizing<String>,
-    ) -> Result<crate::secret::manager::SecretRequest> {
+        value: crate::secret::domain::SecretValue,
+    ) -> Result<crate::secret::domain::SecretRequest> {
         use crate::utils::datetime::parse_datetime_or_duration;
 
         let expires_on = match self.expires.as_deref() {
@@ -387,7 +387,7 @@ impl SecretWriteArgs {
             )
         };
 
-        Ok(crate::secret::manager::SecretRequest {
+        Ok(crate::secret::domain::SecretRequest {
             name: name.to_string(),
             value,
             content_type: None,
@@ -3248,10 +3248,10 @@ mod tests {
             tag: vec![("owner".into(), "team-data".into())],
         };
         let req = meta
-            .to_secret_request("name", zeroize::Zeroizing::new("val".to_string()))
+            .to_secret_request("name", crate::secret::domain::SecretValue::new("val"))
             .unwrap();
         assert_eq!(req.name, "name");
-        assert_eq!(req.value.as_str(), "val");
+        assert_eq!(req.value.expose_secret(), "val");
         assert_eq!(req.groups, Some(vec!["db".to_string()]));
         assert_eq!(req.note.as_deref(), Some("note"));
         assert_eq!(req.folder.as_deref(), Some("f"));
@@ -3282,7 +3282,7 @@ mod tests {
             expires: Some("not-a-date".into()),
             ..Default::default()
         };
-        let res = meta.to_secret_request("n", zeroize::Zeroizing::new("v".to_string()));
+        let res = meta.to_secret_request("n", crate::secret::domain::SecretValue::new("v"));
         assert!(res.is_err(), "invalid --expires should be rejected");
     }
 

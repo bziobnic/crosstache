@@ -16,7 +16,7 @@ use crate::backend::{
     AuditBackend, Backend, BackendCapabilities, BackendError, BackendKind, SecretBackend,
     VaultBackend,
 };
-use crate::secret::manager::{
+use crate::secret::domain::{
     DeletedSecretSummary, SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest,
 };
 
@@ -597,7 +597,7 @@ impl SecretBackend for PolicyEnforcedBackend {
         vault: &str,
         name: &str,
         include_value: bool,
-    ) -> Result<crate::backend::secret::SecretSnapshot, BackendError> {
+    ) -> Result<crate::secret::domain::SecretSnapshot, BackendError> {
         self.checked(
             vault,
             name,
@@ -615,7 +615,7 @@ impl SecretBackend for PolicyEnforcedBackend {
         vault: &str,
         name: &str,
         include_value: bool,
-    ) -> Result<crate::backend::secret::SecretSnapshot, BackendError> {
+    ) -> Result<crate::secret::domain::SecretSnapshot, BackendError> {
         self.checked(
             vault,
             name,
@@ -871,6 +871,7 @@ fn validate_audit_text(label: &str, value: &str, max_bytes: usize) -> Result<(),
 
 #[cfg(test)]
 mod tests {
+    use crate::secret::domain::SecretValue;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
@@ -1093,7 +1094,7 @@ mod tests {
         ));
         let request = SecretRequest {
             name: "xv-attachment-key".into(),
-            value: zeroize::Zeroizing::new("DO-NOT-LOG-KEY".into()),
+            value: SecretValue::new("DO-NOT-LOG-KEY"),
             content_type: None,
             enabled: None,
             expires_on: None,
@@ -1139,9 +1140,9 @@ mod tests {
         raw.secrets()
             .set_secret(
                 "default",
-                crate::secret::manager::SecretRequest {
+                crate::secret::domain::SecretRequest {
                     name: "db".into(),
-                    value: zeroize::Zeroizing::new("database password".into()),
+                    value: SecretValue::new("database password"),
                     content_type: None,
                     enabled: None,
                     expires_on: None,

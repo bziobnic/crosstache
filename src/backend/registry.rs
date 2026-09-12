@@ -580,6 +580,7 @@ impl BackendRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::secret::domain::SecretValue;
 
     fn invalid_enforced_local_config(tmp: &tempfile::TempDir) -> Config {
         Config {
@@ -792,9 +793,9 @@ mod tests {
             .secrets()
             .set_secret(
                 "default",
-                crate::secret::manager::SecretRequest {
+                crate::secret::domain::SecretRequest {
                     name: "db".into(),
-                    value: zeroize::Zeroizing::new("database password".into()),
+                    value: SecretValue::new("database password"),
                     content_type: None,
                     enabled: None,
                     expires_on: None,
@@ -815,7 +816,7 @@ mod tests {
                 .unwrap()
                 .value
                 .unwrap()
-                .as_str(),
+                .expose_secret(),
             "database password"
         );
         let keys = backend.attachment_keys();

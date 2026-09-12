@@ -159,7 +159,7 @@ async fn refuses_v1_mismatch_and_invalid_or_disabled_records() {
                 if case == "invalid" {
                     Zeroizing::new("invalid".into())
                 } else {
-                    original.value.unwrap()
+                    Zeroizing::new(original.value.unwrap().expose_secret().to_owned())
                 },
                 case != "unmarked",
             );
@@ -256,7 +256,7 @@ impl AttachmentKeyStore for FaultKeys<'_> {
                 props.version = "other-version".into();
             }
             if self.mode == "publication-value" && self.writes.load(Ordering::SeqCst) == 2 {
-                props.value = Some(Zeroizing::new("changed".into()));
+                props.value = Some(SecretValue::new("changed"));
             }
         }
         if name == self.old_name

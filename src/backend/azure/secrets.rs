@@ -12,10 +12,12 @@ use std::collections::HashMap;
 
 use crate::backend::error::BackendError;
 use crate::backend::secret::SecretBackend;
-use crate::secret::manager::{
-    DeletedSecretSummary, FieldUpdate, SecretAttributesUpdate, SecretOperations, SecretProperties,
-    SecretRequest, SecretSummary, SecretUpdateRequest,
+use crate::secret::domain::SecretValue;
+use crate::secret::domain::{
+    DeletedSecretSummary, FieldUpdate, SecretAttributesUpdate, SecretProperties, SecretRequest,
+    SecretSummary, SecretUpdateRequest,
 };
+use crate::secret::manager::SecretOperations;
 
 use super::map_error;
 
@@ -227,7 +229,7 @@ impl SecretBackend for AzureSecretBackend {
         vault: &str,
         name: &str,
         include_value: bool,
-    ) -> Result<crate::backend::secret::SecretSnapshot, BackendError> {
+    ) -> Result<crate::secret::domain::SecretSnapshot, BackendError> {
         let properties = self.get_secret(vault, name, include_value).await?;
         if properties.version.is_empty() {
             return Err(BackendError::Unsupported(
@@ -241,7 +243,7 @@ impl SecretBackend for AzureSecretBackend {
                 "Azure secret metadata/version changed during transfer read".into(),
             ));
         }
-        Ok(crate::backend::secret::SecretSnapshot {
+        Ok(crate::secret::domain::SecretSnapshot {
             properties,
             revision,
         })
@@ -367,7 +369,7 @@ impl SecretBackend for AzureSecretBackend {
             None => current
                 .as_ref()
                 .and_then(|c| c.value.clone())
-                .unwrap_or_else(|| zeroize::Zeroizing::new(String::new())),
+                .unwrap_or_else(|| SecretValue::new(String::new())),
         };
 
         // Resolve tags: honor replace_tags semantics.
@@ -514,7 +516,7 @@ impl SecretBackend for AzureSecretBackend {
 #[cfg(test)]
 mod build_patched_tags_tests {
     use super::*;
-    use crate::secret::manager::FieldUpdate;
+    use crate::secret::domain::FieldUpdate;
 
     fn base_request(name: &str) -> SecretUpdateRequest {
         SecretUpdateRequest {
@@ -740,7 +742,6 @@ mod atomic_conversion_update_tests {
     use chrono::{TimeZone, Utc};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
-    use zeroize::Zeroizing;
 
     struct AtomicUpdateMock {
         reads: AtomicUsize,
@@ -931,7 +932,7 @@ mod atomic_conversion_update_tests {
             } else {
                 p.name.clone()
             };
-            p.value = Some(Zeroizing::new(identity.to_string().expose_secret().into()));
+            p.value = Some(SecretValue::new(identity.to_string().expose_secret()));
             p.content_type = key::KEY_RECORD_CONTENT_TYPE.into();
             p.tags = HashMap::from([
                 ("groups".into(), "one, two".into()),
@@ -975,7 +976,7 @@ mod atomic_conversion_update_tests {
         let request = SecretUpdateRequest {
             name: "secret".into(),
             expected_revision: None,
-            value: Some(Zeroizing::new("converted-envelope".into())),
+            value: Some(SecretValue::new("converted-envelope")),
             content_type: Some("application/vnd.xv.record+json".into()),
             enabled: Some(false),
             expires_on: FieldUpdate::Set(expires),

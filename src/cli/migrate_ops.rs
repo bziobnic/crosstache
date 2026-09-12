@@ -6,11 +6,11 @@
 use crate::backend::{Backend, BackendError, BackendRef, BackendRegistry};
 use crate::config::settings::Config;
 use crate::error::{CrosstacheError, Result};
-use crate::secret::manager::SecretRequest;
+use crate::secret::domain::SecretRequest;
+use crate::secret::domain::SecretValue;
 use crate::utils::output;
 use futures::stream::{self, StreamExt};
 use std::sync::Arc;
-use zeroize::Zeroizing;
 
 const TAG_MIGRATED_FROM: &str = "xv:migrated_from";
 const TAG_MIGRATED_AT: &str = "xv:migrated_at";
@@ -132,7 +132,7 @@ fn print_diff_summary(
 }
 
 fn build_request_from_props(
-    props: &crate::secret::manager::SecretProperties,
+    props: &crate::secret::domain::SecretProperties,
     source_name: &str,
     vault: &str,
 ) -> SecretRequest {
@@ -155,11 +155,11 @@ fn build_request_from_props(
 
     SecretRequest {
         name: props.original_name.clone(),
-        value: Zeroizing::new(
+        value: SecretValue::new(
             props
                 .value
                 .as_ref()
-                .map(|v| v.as_str().to_string())
+                .map(|v| v.expose_secret().to_string())
                 .unwrap_or_default(),
         ),
         content_type: if props.content_type.is_empty() {
@@ -846,10 +846,10 @@ mod tests {
         tags.insert("folder".to_string(), "infra/database".to_string());
         tags.insert("owner".to_string(), "platform".to_string());
 
-        let props = crate::secret::manager::SecretProperties {
+        let props = crate::secret::domain::SecretProperties {
             name: "db-password".to_string(),
             original_name: "db-password".to_string(),
-            value: Some(Zeroizing::new("secret-value".to_string())),
+            value: Some(SecretValue::new("secret-value".to_string())),
             version: "v7".to_string(),
             version_number: Some(7),
             created_timestamp: 0,
@@ -927,7 +927,7 @@ mod tests {
                 "default",
                 SecretRequest {
                     name: "existing".into(),
-                    value: Zeroizing::new("would-leak-if-delegated".into()),
+                    value: SecretValue::new("would-leak-if-delegated"),
                     content_type: None,
                     enabled: Some(true),
                     expires_on: None,
@@ -1030,7 +1030,7 @@ mod tests {
         for name in ["db-password", "api-key", "cache-token"] {
             let req = SecretRequest {
                 name: name.to_string(),
-                value: Zeroizing::new(format!("value-for-{name}")),
+                value: SecretValue::new(format!("value-for-{name}")),
                 content_type: None,
                 enabled: Some(true),
                 expires_on: None,
@@ -1069,7 +1069,9 @@ mod tests {
                 .unwrap();
             let req = SecretRequest {
                 name: props.original_name.clone(),
-                value: props.value.unwrap_or_else(|| Zeroizing::new(String::new())),
+                value: props
+                    .value
+                    .unwrap_or_else(|| SecretValue::new(String::new())),
                 content_type: None,
                 enabled: Some(props.enabled),
                 expires_on: None,
@@ -1153,7 +1155,7 @@ mod tests {
                     "source",
                     SecretRequest {
                         name: lookup.into(),
-                        value: Zeroizing::new(format!("value-{lookup}")),
+                        value: SecretValue::new(format!("value-{lookup}")),
                         content_type: None,
                         enabled: None,
                         expires_on: None,
@@ -1270,7 +1272,7 @@ mod tests {
                     .unwrap()
                     .value
                     .unwrap()
-                    .as_str(),
+                    .expose_secret(),
                 format!("value-{lookup}")
             );
             assert_eq!(
@@ -1312,7 +1314,7 @@ mod tests {
                     "source",
                     SecretRequest {
                         name: lookup.into(),
-                        value: Zeroizing::new(format!("value-{lookup}")),
+                        value: SecretValue::new(format!("value-{lookup}")),
                         content_type: None,
                         enabled: None,
                         expires_on: None,
@@ -1381,7 +1383,10 @@ mod tests {
                     .get_secret("target", destination, true)
                     .await
                     .unwrap();
-                assert_eq!(actual.value.unwrap().as_str(), format!("value-{lookup}"));
+                assert_eq!(
+                    actual.value.unwrap().expose_secret(),
+                    format!("value-{lookup}")
+                );
             }
         }
         for lookup in ["provider-one", "provider-two"] {
@@ -1390,7 +1395,10 @@ mod tests {
                 .get_secret("source", lookup, true)
                 .await
                 .unwrap();
-            assert_eq!(actual.value.unwrap().as_str(), format!("value-{lookup}"));
+            assert_eq!(
+                actual.value.unwrap().expose_secret(),
+                format!("value-{lookup}")
+            );
         }
     }
 
@@ -1419,7 +1427,7 @@ mod tests {
                     "source",
                     SecretRequest {
                         name: name.into(),
-                        value: Zeroizing::new("value".into()),
+                        value: SecretValue::new("value"),
                         content_type: None,
                         enabled: None,
                         expires_on: None,
@@ -1515,7 +1523,7 @@ mod tests {
         let reserved = crate::secret::attachments::ATTACHMENT_KEY_SECRET;
         let seed = |value: &str| SecretRequest {
             name: reserved.to_string(),
-            value: Zeroizing::new(value.to_string()),
+            value: SecretValue::new(value.to_string()),
             content_type: None,
             enabled: Some(true),
             expires_on: None,
@@ -1562,7 +1570,7 @@ mod tests {
             .get_secret("default", reserved, true)
             .await
             .unwrap();
-        assert_eq!(tgt.value.unwrap().as_str(), "target-key");
+        assert_eq!(tgt.value.unwrap().expose_secret(), "target-key");
 
         // force_replace=false should also skip and preserve the target's key.
         let outcome = migrate_one(
@@ -1584,7 +1592,7 @@ mod tests {
             .get_secret("default", reserved, true)
             .await
             .unwrap();
-        assert_eq!(tgt.value.unwrap().as_str(), "target-key");
+        assert_eq!(tgt.value.unwrap().expose_secret(), "target-key");
     }
 
     #[test]

@@ -60,7 +60,8 @@ fn rejects_invalid_intent_and_unknown_schema() {
 async fn fixture() -> (tempfile::TempDir, crate::backend::local::LocalBackend) {
     use crate::backend::{Backend, SecretBackend};
     use crate::config::settings::LocalConfig;
-    use crate::secret::manager::SecretRequest;
+    use crate::secret::domain::SecretRequest;
+    use crate::secret::domain::SecretValue;
     let dir = tempfile::tempdir().unwrap();
     let b = crate::backend::local::LocalBackend::new(Some(&LocalConfig {
         store_path: Some(dir.path().join("store").display().to_string()),
@@ -74,7 +75,7 @@ async fn fixture() -> (tempfile::TempDir, crate::backend::local::LocalBackend) {
             "default",
             SecretRequest {
                 name: "db".into(),
-                value: Zeroizing::new("secret-value-canary".into()),
+                value: SecretValue::new("secret-value-canary"),
                 content_type: None,
                 enabled: Some(true),
                 expires_on: None,
@@ -163,7 +164,8 @@ async fn preview_is_read_only_and_authenticates_source() {
 #[tokio::test]
 async fn orphan_destination_blocks_but_sibling_prefix_does_not() {
     use crate::backend::{Backend, SecretBackend};
-    use crate::secret::manager::SecretRequest;
+    use crate::secret::domain::SecretRequest;
+    use crate::secret::domain::SecretValue;
     let (dir, b) = fixture().await;
     for name in ["db-newer", "db-new"] {
         let secret_dir = dir.path().join("store/vaults/default/secrets");
@@ -176,7 +178,7 @@ async fn orphan_destination_blocks_but_sibling_prefix_does_not() {
                 "default",
                 SecretRequest {
                     name: name.into(),
-                    value: Zeroizing::new("x".into()),
+                    value: SecretValue::new("x"),
                     content_type: None,
                     enabled: Some(true),
                     expires_on: None,
@@ -278,7 +280,7 @@ async fn cross_vault_requires_exact_destination_key_and_secret_collision_blocks(
         .await
         .unwrap();
     let Some(key::PointerKind::V2 { active, .. }) =
-        key::parse_pointer_value(pointer.value.as_ref().unwrap())
+        key::parse_pointer_value(pointer.value.as_ref().unwrap().expose_secret())
     else {
         panic!("fixture ring is V2")
     };
@@ -300,7 +302,7 @@ async fn cross_vault_requires_exact_destination_key_and_secret_collision_blocks(
         .guarded_secrets()
         .set_secret(
             "default",
-            crate::secret::manager::SecretRequest {
+            crate::secret::domain::SecretRequest {
                 name: "db-new".into(),
                 value: original.value.unwrap(),
                 content_type: None,
@@ -340,9 +342,9 @@ async fn legacy_pointer_is_refused_without_upgrading_it() {
     let private = age::x25519::Identity::generate().to_string();
     keys.set_secret(
         "default",
-        crate::secret::manager::SecretRequest {
+        crate::secret::domain::SecretRequest {
             name: key::ACTIVE_POINTER_SECRET.into(),
-            value: Zeroizing::new(private.expose_secret().clone()),
+            value: SecretValue::new(private.expose_secret().clone()),
             content_type: None,
             enabled: Some(true),
             expires_on: None,
@@ -457,9 +459,9 @@ async fn azure_alias_planner_source_refuses_third_spelling() {
     b.guarded_secrets()
         .set_secret(
             "default",
-            crate::secret::manager::SecretRequest {
+            crate::secret::domain::SecretRequest {
                 name: "__DB__".into(),
-                value: Zeroizing::new("fixture".into()),
+                value: SecretValue::new("fixture"),
                 content_type: None,
                 enabled: Some(true),
                 expires_on: None,

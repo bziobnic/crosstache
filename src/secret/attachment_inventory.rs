@@ -7,6 +7,8 @@ use crate::backend::error::BackendError;
 use crate::backend::file::FileBackend;
 use crate::blob::models::FileListRequest;
 use crate::error::{AttachmentError, Result};
+use zeroize::Zeroizing;
+
 use crate::secret::attachment_key::{
     self, AttachmentKeyMaterial, DownloadPlan, KeySlot, PointerKind, SecretVersion,
     ACTIVE_POINTER_SECRET,
@@ -75,7 +77,7 @@ pub async fn key_status(keys: &dyn AttachmentKeyStore, vault: &str) -> Result<Ke
     let Some(value) = pointer.value else {
         return Ok(invalid_status(AttachmentError::PointerInvalid));
     };
-    match attachment_key::parse_pointer_value(&value) {
+    match attachment_key::parse_pointer_value(value.expose_secret()) {
         Some(PointerKind::V1RawIdentity) => {
             if pointer.version.is_empty() {
                 return Ok(invalid_status(AttachmentError::KeyVersionInvalid));
@@ -83,7 +85,7 @@ pub async fn key_status(keys: &dyn AttachmentKeyStore, vault: &str) -> Result<Ke
             let Some(material) = AttachmentKeyMaterial::from_identity(
                 KeySlot::Legacy,
                 SecretVersion::new(pointer.version.clone()),
-                value,
+                Zeroizing::new(value.expose_secret().to_owned()),
             ) else {
                 return Ok(invalid_status(AttachmentError::KeyInvalid));
             };
@@ -114,7 +116,7 @@ pub async fn key_status(keys: &dyn AttachmentKeyStore, vault: &str) -> Result<Ke
             let Some(material) = AttachmentKeyMaterial::from_identity(
                 KeySlot::Retained,
                 SecretVersion::new(record.version.clone()),
-                identity,
+                Zeroizing::new(identity.expose_secret().to_owned()),
             ) else {
                 return Ok(invalid_status(AttachmentError::KeyInvalid));
             };
@@ -189,18 +191,17 @@ mod tests {
     use chrono::Utc;
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use zeroize::Zeroizing;
 
     use crate::backend::file::FileDownloadSnapshot;
     use crate::blob::models::{FileInfo, FileUploadRequest};
-    use crate::secret::manager::{SecretProperties, SecretRequest};
+    use crate::secret::domain::{SecretProperties, SecretRequest, SecretValue};
     use crate::utils::progress::ProgressReporter;
 
     fn secret(name: &str, value: Option<String>, version: &str) -> SecretProperties {
         SecretProperties {
             name: name.into(),
             original_name: name.into(),
-            value: value.map(Zeroizing::new),
+            value: value.map(SecretValue::new),
             version: version.into(),
             version_number: None,
             created_timestamp: 0,

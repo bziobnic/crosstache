@@ -31,12 +31,13 @@ use std::sync::Arc;
 use crate::secret::attachment_key::{
     generic_mutation_blocked_canonical, hidden_from_generic_listing_canonical,
 };
-use crate::secret::manager::{
-    DeletedSecretSummary, SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest,
+use crate::secret::domain::{
+    DeletedSecretSummary, SecretProperties, SecretRequest, SecretSnapshot, SecretSummary,
+    SecretUpdateRequest,
 };
 
 use super::error::BackendError;
-use super::secret::{SecretBackend, SecretSnapshot};
+use super::secret::SecretBackend;
 
 /// A generic-facade wrapper around a raw [`SecretBackend`] that enforces the
 /// reserved attachment-key custody boundary structurally.
@@ -475,9 +476,9 @@ impl SecretBackend for GuardedSecretBackend<'_> {
 mod tests {
     use super::*;
     use crate::secret::attachment_key::KEY_RECORD_CONTENT_TYPE;
+    use crate::secret::domain::SecretValue;
     use std::collections::HashMap;
     use std::sync::Mutex;
-    use zeroize::Zeroizing;
 
     const STRICT: &str =
         "xv-attachment-key-ak1-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -634,7 +635,7 @@ mod tests {
     fn req(name: &str) -> SecretRequest {
         SecretRequest {
             name: name.to_string(),
-            value: Zeroizing::new("v".to_string()),
+            value: SecretValue::new("v".to_string()),
             content_type: None,
             enabled: Some(true),
             expires_on: None,

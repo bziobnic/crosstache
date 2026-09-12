@@ -2,6 +2,7 @@
 
 mod common;
 
+use crosstache::secret::domain::SecretValue;
 use data_encoding::BASE32_NOPAD;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -50,7 +51,7 @@ fn overwrite_record_envelope(temp: &Path, name: &str, envelope: &str) {
     runtime.block_on(async {
         use crosstache::backend::local::LocalBackend;
         use crosstache::backend::Backend;
-        use crosstache::secret::manager::SecretRequest;
+        use crosstache::secret::domain::SecretRequest;
 
         let backend = LocalBackend::new(Some(&local_config)).expect("open local backend");
         let existing = backend
@@ -64,7 +65,7 @@ fn overwrite_record_envelope(temp: &Path, name: &str, envelope: &str) {
                 "default",
                 SecretRequest {
                     name: name.to_string(),
-                    value: zeroize::Zeroizing::new(envelope.to_string()),
+                    value: SecretValue::new(envelope.to_string()),
                     content_type: Some("application/vnd.xv.record".to_string()),
                     enabled: Some(true),
                     expires_on: None,

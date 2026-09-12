@@ -7,7 +7,6 @@ use crate::cli::helpers::format_cache_size;
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
 use crate::utils::output;
-use zeroize::Zeroizing;
 
 // ── Config ───────────────────────────────────────────────────────────────────
 
@@ -2440,7 +2439,7 @@ async fn execute_env_pull(
                 .iter()
                 .filter_map(|s| {
                     s.value.as_ref().map(
-                        |v| serde_json::json!({ "name": s.original_name, "value": v.as_str() }),
+                        |v| serde_json::json!({ "name": s.original_name, "value": v.expose_secret() }),
                     )
                 })
                 .collect();
@@ -2453,7 +2452,7 @@ async fn execute_env_pull(
                 .iter()
                 .filter_map(|s| {
                     s.value.as_ref().map(
-                        |v| serde_json::json!({ "name": s.original_name, "value": v.as_str() }),
+                        |v| serde_json::json!({ "name": s.original_name, "value": v.expose_secret() }),
                     )
                 })
                 .collect();
@@ -2471,7 +2470,7 @@ async fn execute_env_pull(
                     writer
                         .write_record([
                             neutralize_spreadsheet_formula(&s.original_name),
-                            neutralize_spreadsheet_formula(v),
+                            neutralize_spreadsheet_formula(v.expose_secret()),
                         ])
                         .map_err(|e| {
                             CrosstacheError::serialization(format!("CSV serialization failed: {e}"))
@@ -2499,7 +2498,7 @@ async fn execute_env_pull(
                     dotenv_content.push_str(&format!(
                         "{}={}\n",
                         key,
-                        quote_posix_shell_value(value)
+                        quote_posix_shell_value(value.expose_secret())
                     ));
                 }
             }
@@ -2531,7 +2530,8 @@ async fn execute_env_push(
     config: &Config,
     registry: Option<&crate::backend::BackendRegistry>,
 ) -> Result<()> {
-    use crate::secret::manager::SecretRequest;
+    use crate::secret::domain::SecretRequest;
+    use crate::secret::domain::SecretValue;
     use std::collections::HashMap;
     use std::io::Read;
 
@@ -2658,7 +2658,7 @@ async fn execute_env_push(
         }
         let secret_request = SecretRequest {
             name: key.clone(),
-            value: Zeroizing::new(value.clone()),
+            value: SecretValue::new(value.clone()),
             content_type: Some("text/plain".to_string()),
             enabled: Some(true),
             expires_on: None,

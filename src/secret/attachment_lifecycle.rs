@@ -7,7 +7,8 @@ use crate::error::{AttachmentError, CrosstacheError, Result};
 use crate::secret::attachment_key::{
     self as key, AttachmentKeyId, AttachmentKeyMaterial, KeySlot, PointerKind, SecretVersion,
 };
-use crate::secret::manager::{SecretProperties, SecretRequest};
+use crate::secret::domain::SecretValue;
+use crate::secret::domain::{SecretProperties, SecretRequest};
 use serde::Serialize;
 use zeroize::Zeroizing;
 
@@ -155,7 +156,7 @@ async fn pointer(keys: &dyn AttachmentKeyStore, vault: &str) -> Result<Option<Se
 }
 
 fn value(props: &SecretProperties) -> Option<&str> {
-    props.value.as_ref().map(|v| v.as_str())
+    props.value.as_ref().map(SecretValue::expose_secret)
 }
 
 async fn unchanged(
@@ -201,7 +202,13 @@ async fn exact_identity(
     let material = AttachmentKeyMaterial::from_identity(
         slot,
         SecretVersion::new(version),
-        props.value.ok_or(AttachmentError::KeyInvalid)?,
+        Zeroizing::new(
+            props
+                .value
+                .ok_or(AttachmentError::KeyInvalid)?
+                .expose_secret()
+                .to_owned(),
+        ),
     )
     .ok_or(AttachmentError::KeyInvalid)?;
     if !material.verify_id(id) {
@@ -234,7 +241,7 @@ async fn retained(
 fn write_request(name: &str, value: Zeroizing<String>, marked: bool) -> SecretRequest {
     SecretRequest {
         name: name.into(),
-        value,
+        value: SecretValue::new(value.as_str()),
         content_type: marked.then(|| key::KEY_RECORD_CONTENT_TYPE.into()),
         enabled: Some(true),
         expires_on: None,
@@ -282,7 +289,7 @@ pub async fn upgrade(
         .value
         .as_ref()
         .ok_or(AttachmentError::PointerInvalid)?;
-    match key::parse_pointer_value(raw) {
+    match key::parse_pointer_value(raw.expose_secret()) {
         Some(PointerKind::V2 { active, legacy }) => {
             let material = retained(keys, vault, &active)
                 .await?
@@ -307,7 +314,7 @@ pub async fn upgrade(
             let original = AttachmentKeyMaterial::from_identity(
                 KeySlot::Legacy,
                 SecretVersion::new(props.version.clone()),
-                raw.clone(),
+                Zeroizing::new(raw.expose_secret().to_owned()),
             )
             .ok_or(AttachmentError::KeyInvalid)?;
             let id = &original.reference().key_id;
@@ -335,7 +342,10 @@ pub async fn upgrade(
             if kept.is_none() {
                 let name = key::retained_record_name(id);
                 match keys
-                    .commit_retained_key(vault, write_request(&name, raw.clone(), true))
+                    .commit_retained_key(
+                        vault,
+                        write_request(&name, Zeroizing::new(raw.expose_secret().to_owned()), true),
+                    )
                     .await
                 {
                     Ok(committed) => {
@@ -455,11 +465,11 @@ mod tests {
     use crate::backend::{local::LocalBackend, Backend};
     use crate::blob::models::FileUploadRequest;
     use crate::config::settings::LocalConfig;
-    use crate::secret::manager::SecretRequest;
+    use crate::secret::domain::SecretRequest;
+    use crate::secret::domain::SecretValue;
     use crate::secret::{attachment_key as key, attachments};
     use age::secrecy::ExposeSecret;
     use std::collections::HashMap;
-    use zeroize::Zeroizing;
 
     fn fixture() -> (tempfile::TempDir, LocalBackend) {
         let dir = tempfile::tempdir().unwrap();
@@ -476,7 +486,7 @@ mod tests {
     fn request(name: &str, value: &str, marked: bool) -> SecretRequest {
         SecretRequest {
             name: name.into(),
-            value: Zeroizing::new(value.into()),
+            value: SecretValue::new(value),
             content_type: marked.then(|| key::KEY_RECORD_CONTENT_TYPE.into()),
             enabled: Some(true),
             expires_on: None,
@@ -782,7 +792,7 @@ mod tests {
             .unwrap()
             .value
             .unwrap()
-            .as_str(),
+            .expose_secret(),
             identity.to_string().expose_secret()
         );
     }
@@ -834,7 +844,7 @@ mod tests {
                 .unwrap()
                 .value
                 .unwrap()
-                .as_str(),
+                .expose_secret(),
             "ordinary-user-secret"
         );
     }
@@ -1055,7 +1065,7 @@ mod tests {
                 .unwrap()
                 .value
                 .unwrap()
-                .as_str(),
+                .expose_secret(),
             identity.to_string().expose_secret()
         );
         assert_eq!(

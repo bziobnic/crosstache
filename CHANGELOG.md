@@ -87,6 +87,17 @@
   the rotation log, unrelated files and any foreign artifact; a retained
   outcome from a prior installation is labeled `(previous install)` until a
   new run completes under the current manifest.
+- **Secret plaintext is now a dedicated `SecretValue` type.** Every
+  value-bearing internal model (`SecretProperties`, `SecretRequest`,
+  `SecretUpdateRequest`, `SecretSnapshot`) lost its serde derives and prints
+  `SecretValue([REDACTED])` under `{:?}`; the only plaintext read is
+  `expose_secret()`. Web metadata responses (`GET/PUT/PATCH /secrets/{name}`,
+  rename, move, restore, conversion) now return a value-free
+  `SecretMetadata` body — the `value` key is absent instead of `null`;
+  `POST /secrets/{name}/value` is unchanged. The domain types moved from the
+  Azure-era `secret::manager` into `secret::domain`. `xv history --format
+  json|yaml` likewise no longer emits the always-`null` `value` key; csv,
+  table, plain, raw, and template output are unchanged.
 
 ### Fixed
 

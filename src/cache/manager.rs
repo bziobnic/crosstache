@@ -757,7 +757,7 @@ mod tests {
 
         // The new code path never looks at the old filename — a cache
         // miss, not a hit with an empty `tags` map masking a typed secret.
-        let result: Option<Vec<crate::secret::manager::SecretSummary>> = mgr.get(&key);
+        let result: Option<Vec<crate::secret::domain::SecretSummary>> = mgr.get(&key);
         assert!(
             result.is_none(),
             "legacy pre-v2 cache entry must miss, not silently deserialize: {result:?}"
@@ -765,7 +765,7 @@ mod tests {
 
         // The current writer never touches the legacy path either.
         let data = vec![];
-        mgr.set::<Vec<crate::secret::manager::SecretSummary>>(&key, &data);
+        mgr.set::<Vec<crate::secret::domain::SecretSummary>>(&key, &data);
         assert!(
             legacy_path.exists(),
             "set() must not overwrite/consume the legacy file"
@@ -807,7 +807,7 @@ mod tests {
         });
         std::fs::write(&legacy_path, legacy_json.to_string()).unwrap();
 
-        let result: Option<Vec<crate::secret::manager::SecretSummary>> = mgr.get(&key);
+        let result: Option<Vec<crate::secret::domain::SecretSummary>> = mgr.get(&key);
         assert!(
             result.is_none(),
             "legacy pre-v3 cache entry must miss, not be read as the new (backend, vault) schema: {result:?}"
@@ -853,7 +853,7 @@ mod tests {
         });
         std::fs::write(&legacy_path, legacy_json.to_string()).unwrap();
 
-        let result: Option<Vec<crate::secret::manager::SecretSummary>> = mgr.get(&key);
+        let result: Option<Vec<crate::secret::domain::SecretSummary>> = mgr.get(&key);
         assert!(
             result.is_none(),
             "pre-expiry v3 cache entry must miss instead of classifying expiry as absent"

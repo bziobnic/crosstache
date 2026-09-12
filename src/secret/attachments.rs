@@ -24,7 +24,7 @@ use crate::secret::attachment_key::{
     SecretVersion,
 };
 #[cfg(any(test, feature = "file-ops"))]
-use crate::secret::manager::SecretRequest;
+use crate::secret::domain::{SecretRequest, SecretValue};
 
 /// Reserved per-vault secret holding the age identity for attachments.
 pub const ATTACHMENT_KEY_SECRET: &str = "xv-attachment-key";
@@ -97,7 +97,7 @@ pub async fn get_identity(
             let value = props
                 .value
                 .ok_or(CrosstacheError::from(AttachmentError::KeyInvalid))?;
-            parse_identity(&value)
+            parse_identity(value.expose_secret())
         }
         Err(BackendError::NotFound { .. }) => {
             Err(CrosstacheError::from(AttachmentError::KeyMissing))
@@ -138,10 +138,12 @@ async fn resolve_upload_material(
             let value = props
                 .value
                 .ok_or(CrosstacheError::from(AttachmentError::PointerInvalid))?;
-            match attachment_key::parse_pointer_value(&value) {
-                Some(PointerKind::V1RawIdentity) => {
-                    material_from_identity_value(KeySlot::Legacy, value, version)
-                }
+            match attachment_key::parse_pointer_value(value.expose_secret()) {
+                Some(PointerKind::V1RawIdentity) => material_from_identity_value(
+                    KeySlot::Legacy,
+                    Zeroizing::new(value.expose_secret().to_owned()),
+                    version,
+                ),
                 Some(PointerKind::V2 { active, .. }) => {
                     resolve_active_retained(secrets, vault, &active).await
                 }
@@ -195,7 +197,11 @@ async fn resolve_active_retained(
     let value = props
         .value
         .ok_or(CrosstacheError::from(AttachmentError::KeyInvalid))?;
-    let material = material_from_identity_value(KeySlot::Retained, value, version)?;
+    let material = material_from_identity_value(
+        KeySlot::Retained,
+        Zeroizing::new(value.expose_secret().to_owned()),
+        version,
+    )?;
     if !material.verify_id(active_id) {
         return Err(CrosstacheError::from(AttachmentError::KeyMismatch));
     }
@@ -212,7 +218,7 @@ async fn publish_v2_pointer(
 ) -> Result<()> {
     let request = SecretRequest {
         name: ATTACHMENT_KEY_SECRET.to_string(),
-        value: Zeroizing::new(attachment_key::format_v2_pointer(active_id, None)),
+        value: SecretValue::new(attachment_key::format_v2_pointer(active_id, None)),
         content_type: Some("text/x-xv-attachment-key-pointer".to_string()),
         enabled: Some(true),
         expires_on: None,
@@ -232,8 +238,10 @@ async fn publish_v2_pointer(
             }
             other => other.into(),
         })?;
-    let value = props.value.unwrap_or_default();
-    match attachment_key::parse_pointer_value(&value) {
+    let value = props
+        .value
+        .unwrap_or_else(|| SecretValue::new(String::new()));
+    match attachment_key::parse_pointer_value(value.expose_secret()) {
         Some(PointerKind::V2 { .. }) => Ok(()),
         _ => Err(CrosstacheError::from(AttachmentError::CommitUnconfirmed)),
     }
@@ -278,7 +286,7 @@ pub(crate) async fn initialize_v2(
                 // Commit the marked immutable retained record.
                 let request = SecretRequest {
                     name: retained_name.clone(),
-                    value: candidate.clone(),
+                    value: SecretValue::new(candidate.as_str()),
                     content_type: Some(attachment_key::KEY_RECORD_CONTENT_TYPE.to_string()),
                     enabled: Some(true),
                     expires_on: None,
@@ -316,7 +324,7 @@ pub(crate) async fn initialize_v2(
                     .ok_or(CrosstacheError::from(AttachmentError::KeyInvalid))?;
                 let material = material_from_identity_value(
                     KeySlot::Retained,
-                    value,
+                    Zeroizing::new(value.expose_secret().to_owned()),
                     committed.version.clone(),
                 )?;
                 if !material.verify_id(&key_id) {
@@ -357,9 +365,12 @@ async fn resolve_referenced_material(
     let value = props
         .value
         .ok_or(CrosstacheError::from(AttachmentError::KeyInvalid))?;
-    let material =
-        AttachmentKeyMaterial::from_identity(key_ref.slot, key_ref.provider_version.clone(), value)
-            .ok_or(CrosstacheError::from(AttachmentError::KeyInvalid))?;
+    let material = AttachmentKeyMaterial::from_identity(
+        key_ref.slot,
+        key_ref.provider_version.clone(),
+        Zeroizing::new(value.expose_secret().to_owned()),
+    )
+    .ok_or(CrosstacheError::from(AttachmentError::KeyInvalid))?;
     if !material.verify_id(&key_ref.key_id) {
         return Err(CrosstacheError::from(AttachmentError::KeyMismatch));
     }
@@ -381,8 +392,8 @@ async fn legacy_download_identity(
             other => other.into(),
         })?;
     let value = props.value.ok_or(AttachmentError::PointerInvalid)?;
-    match attachment_key::parse_pointer_value(&value) {
-        Some(PointerKind::V1RawIdentity) => parse_identity(&value),
+    match attachment_key::parse_pointer_value(value.expose_secret()) {
+        Some(PointerKind::V1RawIdentity) => parse_identity(value.expose_secret()),
         Some(PointerKind::V2 {
             legacy: Some(id), ..
         }) => {
@@ -518,7 +529,7 @@ mod tests {
     use crate::backend::file::FileBackend;
     #[cfg(feature = "file-ops")]
     use crate::blob::models::{FileInfo, FileListRequest, FileUploadRequest};
-    use crate::secret::manager::{
+    use crate::secret::domain::{
         SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest,
     };
     #[cfg(feature = "file-ops")]
@@ -580,7 +591,7 @@ mod tests {
         SecretProperties {
             name: name.to_string(),
             original_name: name.to_string(),
-            value: value.map(|v| Zeroizing::new(v.to_string())),
+            value: value.map(SecretValue::new),
             version: version.to_string(),
             version_number: version.parse().ok(),
             created_timestamp: 0,
@@ -606,7 +617,7 @@ mod tests {
             let mut map = self.secrets.lock().unwrap();
             let versions = map.entry(request.name.clone()).or_default();
             let ct = request.content_type.clone().unwrap_or_default();
-            versions.push((request.value.to_string(), ct.clone()));
+            versions.push((request.value.expose_secret().to_string(), ct.clone()));
             let version = versions.len().to_string();
             Ok(props(&request.name, None, &version, &ct))
         }
@@ -627,7 +638,7 @@ mod tests {
             let ct = request.content_type.unwrap_or_default();
             map.insert(
                 request.name.clone(),
-                vec![(request.value.to_string(), ct.clone())],
+                vec![(request.value.expose_secret().to_string(), ct.clone())],
             );
             *count += 1;
             Ok(props(&request.name, None, "1", &ct))
@@ -1307,6 +1318,7 @@ mod tests {
             &props
                 .value
                 .unwrap()
+                .expose_secret()
                 .trim()
                 .parse::<age::x25519::Identity>()
                 .unwrap()

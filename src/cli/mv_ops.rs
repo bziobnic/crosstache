@@ -11,7 +11,7 @@ use crate::cli::ls_view::{display_name, qualified_display_name};
 use crate::cli::secret_ops::{confirm_reserved_key_write, invalidate_trait_secret_cache};
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
-use crate::secret::manager::{FieldUpdate, SecretSummary, SecretUpdateRequest};
+use crate::secret::domain::{FieldUpdate, SecretSummary, SecretUpdateRequest};
 use crate::utils::output;
 use crate::utils::suggestions::closest_match;
 
@@ -1427,7 +1427,8 @@ mod tests {
 
     use crate::backend::error::BackendError;
     use crate::backend::{Backend, BackendCapabilities, BackendKind, NameCharset, SecretBackend};
-    use crate::secret::manager::SecretProperties;
+    use crate::secret::domain::SecretProperties;
+    use crate::secret::domain::SecretValue;
     use std::sync::{Arc, Mutex};
 
     fn fake_secret_properties(name: &str) -> SecretProperties {
@@ -1506,7 +1507,7 @@ mod tests {
         async fn set_secret(
             &self,
             _vault: &str,
-            _request: crate::secret::manager::SecretRequest,
+            _request: crate::secret::domain::SecretRequest,
         ) -> std::result::Result<SecretProperties, BackendError> {
             Err(BackendError::Unsupported("test backend".into()))
         }
@@ -1747,7 +1748,7 @@ mod tests {
         async fn set_secret(
             &self,
             _vault: &str,
-            _request: crate::secret::manager::SecretRequest,
+            _request: crate::secret::domain::SecretRequest,
         ) -> std::result::Result<SecretProperties, BackendError> {
             panic!("set_secret must never be called: the tag-budget check must reject BEFORE any write");
         }
@@ -1836,13 +1837,13 @@ mod tests {
         }
     }
 
-    fn secret_request_with_tags(n: usize) -> crate::secret::manager::SecretRequest {
+    fn secret_request_with_tags(n: usize) -> crate::secret::domain::SecretRequest {
         let tags: std::collections::HashMap<String, String> = (0..n)
             .map(|i| (format!("tag{i}"), format!("v{i}")))
             .collect();
-        crate::secret::manager::SecretRequest {
+        crate::secret::domain::SecretRequest {
             name: "CREDS".to_string(),
-            value: zeroize::Zeroizing::new("hunter2".to_string()),
+            value: SecretValue::new("hunter2".to_string()),
             content_type: None,
             enabled: None,
             expires_on: None,
@@ -1883,13 +1884,13 @@ mod tests {
     /// not once as a structured field AND again as a raw tag.
     fn secret_request_with_full_metadata(
         user_tag_count: usize,
-    ) -> crate::secret::manager::SecretRequest {
+    ) -> crate::secret::domain::SecretRequest {
         let tags: std::collections::HashMap<String, String> = (0..user_tag_count)
             .map(|i| (format!("tag{i}"), format!("v{i}")))
             .collect();
-        crate::secret::manager::SecretRequest {
+        crate::secret::domain::SecretRequest {
             name: "CREDS".to_string(),
-            value: zeroize::Zeroizing::new("hunter2".to_string()),
+            value: SecretValue::new("hunter2".to_string()),
             content_type: None,
             enabled: None,
             expires_on: None,

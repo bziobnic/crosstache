@@ -148,7 +148,7 @@ pub(crate) struct ActivateContextResponse {
 #[derive(Debug, Serialize)]
 pub(crate) struct ActivateWorkspaceResponse {
     context: EffectiveUiContext,
-    secrets: Vec<crate::secret::manager::SecretSummary>,
+    secrets: Vec<crate::secret::domain::SecretSummary>,
 }
 
 async fn resolve_activation_candidate(
@@ -780,14 +780,14 @@ vaults = [
     async fn scoped_destructive_write_uses_the_requested_attached_backend() {
         use std::sync::Arc;
 
-        use crate::secret::manager::SecretRequest;
+        use crate::secret::domain::SecretRequest;
+        use crate::secret::domain::SecretValue;
         use crate::web::testutil::stub::StubBackend;
-        use zeroize::Zeroizing;
 
         fn request(name: &str) -> SecretRequest {
             SecretRequest {
                 name: name.into(),
-                value: Zeroizing::new("protected".into()),
+                value: SecretValue::new("protected"),
                 content_type: None,
                 enabled: Some(true),
                 expires_on: None,

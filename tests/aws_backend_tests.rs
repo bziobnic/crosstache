@@ -16,6 +16,7 @@ use aws_smithy_runtime_api::client::orchestrator::HttpResponse;
 use aws_smithy_runtime_api::client::runtime_components::RuntimeComponents;
 use aws_smithy_runtime_api::http::StatusCode;
 use crosstache::backend::aws::{secrets::AwsSecretBackend, vaults::AwsVaultBackend};
+use crosstache::secret::domain::SecretValue;
 use std::sync::Arc;
 
 fn secrets_manager_error_response(error_type: &str, message: &str) -> HttpResponse {
@@ -90,8 +91,7 @@ async fn smoke_health_check_with_empty_list() {
 async fn set_secret_create_writes_to_aws() {
     use aws_sdk_secretsmanager::operation::create_secret::CreateSecretOutput;
     use crosstache::backend::SecretBackend;
-    use crosstache::secret::manager::SecretRequest;
-    use zeroize::Zeroizing;
+    use crosstache::secret::domain::SecretRequest;
 
     let rule = mock!(Client::create_secret)
         .match_requests(|req| req.name() == Some("myproj-kv/db-password"))
@@ -107,7 +107,7 @@ async fn set_secret_create_writes_to_aws() {
 
     let request = SecretRequest {
         name: "db-password".to_string(),
-        value: Zeroizing::new("super-secret".to_string()),
+        value: SecretValue::new("super-secret".to_string()),
         content_type: None,
         enabled: None,
         expires_on: None,
@@ -131,9 +131,8 @@ async fn set_secret_create_writes_to_aws() {
 async fn set_secret_preserves_migration_idempotency_tags() {
     use aws_sdk_secretsmanager::operation::create_secret::CreateSecretOutput;
     use crosstache::backend::SecretBackend;
-    use crosstache::secret::manager::SecretRequest;
+    use crosstache::secret::domain::SecretRequest;
     use std::collections::HashMap;
-    use zeroize::Zeroizing;
 
     let rule = mock!(Client::create_secret)
         .match_requests(|req| {
@@ -160,7 +159,7 @@ async fn set_secret_preserves_migration_idempotency_tags() {
 
     let request = SecretRequest {
         name: "db-password".to_string(),
-        value: Zeroizing::new("super-secret".to_string()),
+        value: SecretValue::new("super-secret".to_string()),
         content_type: None,
         enabled: None,
         expires_on: None,
@@ -296,7 +295,7 @@ async fn get_secret_with_value_includes_value() {
     let value = result
         .value
         .expect("value should be present when include_value=true");
-    assert_eq!(value.as_str(), "super-secret-value");
+    assert_eq!(value.expose_secret(), "super-secret-value");
 }
 
 #[tokio::test]
@@ -441,8 +440,7 @@ async fn set_secret_update_path_when_already_exists() {
     use aws_sdk_secretsmanager::operation::tag_resource::TagResourceOutput;
     use aws_sdk_secretsmanager::operation::update_secret::UpdateSecretOutput;
     use crosstache::backend::SecretBackend;
-    use crosstache::secret::manager::SecretRequest;
-    use zeroize::Zeroizing;
+    use crosstache::secret::domain::SecretRequest;
 
     // create_secret returns ResourceExistsException — triggers update path.
     let create_err = mock!(Client::create_secret).then_http_response(|| {
@@ -476,7 +474,7 @@ async fn set_secret_update_path_when_already_exists() {
 
     let request = SecretRequest {
         name: "db-password".to_string(),
-        value: Zeroizing::new("new-secret-value".to_string()),
+        value: SecretValue::new("new-secret-value".to_string()),
         content_type: None,
         enabled: None,
         expires_on: None,
@@ -500,7 +498,7 @@ async fn set_secret_update_path_when_already_exists() {
 async fn update_secret_enabled_flag_is_unsupported() {
     use aws_sdk_secretsmanager::operation::list_secrets::ListSecretsOutput;
     use crosstache::backend::{BackendError, SecretBackend};
-    use crosstache::secret::manager::{FieldUpdate, SecretUpdateRequest};
+    use crosstache::secret::domain::{FieldUpdate, SecretUpdateRequest};
 
     // AWS has no enable/disable concept; the flag must fail loudly before
     // any API call is made (no mock rules are consumed).
@@ -552,9 +550,8 @@ async fn update_secret_with_value_writes_value_and_content_type_tag() {
     use aws_sdk_secretsmanager::operation::untag_resource::UntagResourceOutput;
     use aws_sdk_secretsmanager::types::Tag;
     use crosstache::backend::SecretBackend;
-    use crosstache::secret::manager::{FieldUpdate, SecretUpdateRequest};
+    use crosstache::secret::domain::{FieldUpdate, SecretUpdateRequest};
     use std::collections::HashMap;
-    use zeroize::Zeroizing;
 
     // Step 1: the new envelope value must actually be written.
     let put_value = mock!(Client::put_secret_value)
@@ -626,7 +623,7 @@ async fn update_secret_with_value_writes_value_and_content_type_tag() {
     let request = SecretUpdateRequest {
         name: "cred".to_string(),
         expected_revision: None,
-        value: Some(Zeroizing::new(r#"{"password":"hunter2"}"#.to_string())),
+        value: Some(SecretValue::new(r#"{"password":"hunter2"}"#.to_string())),
         content_type: Some("application/vnd.xv.record".to_string()),
         enabled: None,
         expires_on: FieldUpdate::Unchanged,
@@ -657,7 +654,7 @@ async fn update_secret_untype_replace_tags_removes_dropped_keys() {
     use aws_sdk_secretsmanager::operation::untag_resource::UntagResourceOutput;
     use aws_sdk_secretsmanager::types::Tag;
     use crosstache::backend::SecretBackend;
-    use crosstache::secret::manager::{FieldUpdate, SecretUpdateRequest};
+    use crosstache::secret::domain::{FieldUpdate, SecretUpdateRequest};
     use std::collections::HashMap;
 
     // Untyping drops xv-type and every f.* tag entirely — the caller sends

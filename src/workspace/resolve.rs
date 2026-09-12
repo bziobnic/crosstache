@@ -319,10 +319,10 @@ mod stale_entry_tests {
 mod tests {
     use super::*;
     use crate::config::settings::{Config, LocalConfig, NamedBackendEntry};
-    use crate::secret::manager::SecretRequest;
+    use crate::secret::domain::SecretRequest;
+    use crate::secret::domain::SecretValue;
     use crate::workspace::WorkspaceSource;
     use std::collections::HashMap;
-    use zeroize::Zeroizing;
 
     /// Build a `BackendRegistry` with two hermetic local stores
     /// ("local-a"/"local-b") registered for lazy construction, plus a
@@ -386,7 +386,7 @@ mod tests {
     fn req(name: &str, value: &str) -> SecretRequest {
         SecretRequest {
             name: name.to_string(),
-            value: Zeroizing::new(value.to_string()),
+            value: SecretValue::new(value.to_string()),
             content_type: None,
             enabled: None,
             expires_on: None,
@@ -512,7 +512,7 @@ mod tests {
             .await
             .expect("must be written to work");
         assert_eq!(
-            written.value.as_deref().map(|s| s.as_str()),
+            written.value.as_ref().map(SecretValue::expose_secret),
             Some("work-value")
         );
 
@@ -523,7 +523,7 @@ mod tests {
             .await
             .expect("stage copy untouched");
         assert_eq!(
-            stage_copy.value.as_deref().map(|s| s.as_str()),
+            stage_copy.value.as_ref().map(SecretValue::expose_secret),
             Some("stage-original")
         );
     }

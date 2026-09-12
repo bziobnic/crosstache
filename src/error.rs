@@ -1455,9 +1455,10 @@ mod tests {
                 allowed_value_like_fields: &[],
             },
             // Common structured output/cache payloads are metadata summaries.
-            // SecretSummary intentionally contains only names/properties; full
-            // SecretProperties/SecretRequest can carry values and must never be
-            // added here as cache-safe or leak-scan-safe payloads.
+            // SecretSummary and SecretMetadata are value-free by construction:
+            // the plaintext type `SecretValue` has no serde impls, so the
+            // value-bearing SecretProperties/SecretRequest cannot be
+            // serialized at all and never need an entry here.
             SecuritySurface {
                 category: "structured output",
                 name: "SecretSummary",
@@ -1471,6 +1472,26 @@ mod tests {
                     "enabled",
                     "expires_on",
                     "content_type",
+                ],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "structured output",
+                name: "SecretMetadata",
+                fields: &[
+                    "name",
+                    "original_name",
+                    "version",
+                    "version_number",
+                    "created_timestamp",
+                    "created_on",
+                    "updated_on",
+                    "enabled",
+                    "expires_on",
+                    "not_before",
+                    "tags",
+                    "content_type",
+                    "recovery_level",
                 ],
                 allowed_value_like_fields: &[],
             },

@@ -234,10 +234,12 @@ fn resolve_configured_path(
     outside_git(data.join("crosstache/transfer-recovery"))
 }
 
-use super::{attachment_rewrap as rewrap, manager::SecretProperties};
+use super::attachment_rewrap as rewrap;
+use super::domain::SecretProperties;
 use crate::backend::{
     error::BackendError, secret::rename_request_from_properties, TransferLocation,
 };
+use crate::secret::domain::SecretValue;
 use age::secrecy::ExposeSecret;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
@@ -594,7 +596,7 @@ fn commitment(
 }
 fn request_commitment(
     identity: &age::x25519::Identity,
-    request: &super::manager::SecretRequest,
+    request: &super::domain::SecretRequest,
 ) -> Result<String> {
     // A fixed tuple plus sorted user tags makes the commitment independent of
     // HashMap iteration and serde_json's optional preserve_order feature.
@@ -602,7 +604,7 @@ fn request_commitment(
         request.tags.as_ref().into_iter().flatten().collect();
     let canonical = (
         &request.name,
-        request.value.as_str(),
+        request.value.expose_secret(),
         &request.content_type,
         request.enabled,
         request.expires_on,
@@ -821,7 +823,7 @@ async fn supported_route(
 fn destination_request(
     source: &SecretProperties,
     intent: &TransferIntent,
-) -> Result<super::manager::SecretRequest> {
+) -> Result<super::domain::SecretRequest> {
     let mut request = rename_request_from_properties(&intent.destination_name, source)?;
     if let Some(folder) = &intent.destination_folder {
         request.folder = if folder == "/" {
@@ -961,8 +963,9 @@ async fn load_destination_ring(
         .await?;
     let active = match pointer
         .value
-        .as_deref()
-        .and_then(|v| super::attachment_key::parse_pointer_value(v))
+        .as_ref()
+        .map(SecretValue::expose_secret)
+        .and_then(super::attachment_key::parse_pointer_value)
     {
         Some(super::attachment_key::PointerKind::V2 { active, .. }) => active,
         _ => return Err(conflict()),

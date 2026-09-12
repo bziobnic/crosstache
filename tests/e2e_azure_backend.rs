@@ -28,10 +28,10 @@ use crosstache::auth::provider::DefaultAzureCredentialProvider;
 use crosstache::backend::azure::AzureBackend;
 use crosstache::backend::{Backend, BackendError};
 use crosstache::config::settings::Config;
-use crosstache::secret::manager::{FieldUpdate, SecretRequest, SecretUpdateRequest};
+use crosstache::secret::domain::SecretValue;
+use crosstache::secret::domain::{FieldUpdate, SecretRequest, SecretUpdateRequest};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use zeroize::Zeroizing;
 
 /// The test vault. `heythere` is the configured safe-for-testing vault.
 fn test_vault() -> String {
@@ -69,7 +69,7 @@ fn unique_name(tag: &str) -> String {
 fn make_request(name: &str, value: &str) -> SecretRequest {
     SecretRequest {
         name: name.to_string(),
-        value: Zeroizing::new(value.to_string()),
+        value: SecretValue::new(value.to_string()),
         content_type: None,
         enabled: None,
         expires_on: None,
@@ -124,7 +124,7 @@ async fn e2e_azure_secret_full_lifecycle() {
         .await
         .expect("get_secret with value should succeed");
     assert_eq!(
-        got.value.as_ref().map(|v| v.as_str()),
+        got.value.as_ref().map(SecretValue::expose_secret),
         Some(v1_value),
         "round-tripped value must match"
     );
@@ -178,7 +178,10 @@ async fn e2e_azure_secret_full_lifecycle() {
         .get_secret(&vault, &secret, true)
         .await
         .expect("get after update should succeed");
-    assert_eq!(got2.value.as_ref().map(|v| v.as_str()), Some(v2_value));
+    assert_eq!(
+        got2.value.as_ref().map(SecretValue::expose_secret),
+        Some(v2_value)
+    );
 
     // --- GET SPECIFIC VERSION (v1 still readable by id) ---
     // `version` is the bare Key Vault version segment, which is exactly
@@ -189,7 +192,7 @@ async fn e2e_azure_secret_full_lifecycle() {
         .await
         .expect("get_secret_version for v1 should succeed");
     assert_eq!(
-        v1_again.value.as_ref().map(|v| v.as_str()),
+        v1_again.value.as_ref().map(SecretValue::expose_secret),
         Some(v1_value),
         "the original version should still serve its original value"
     );
@@ -251,7 +254,7 @@ async fn e2e_azure_secret_full_lifecycle() {
         .await
         .expect("get after rollback should succeed");
     assert_eq!(
-        rolled.value.as_ref().map(|v| v.as_str()),
+        rolled.value.as_ref().map(SecretValue::expose_secret),
         Some(v1_value),
         "rollback should restore the v1 value"
     );
@@ -323,7 +326,10 @@ async fn e2e_azure_rename_fails_closed() {
         .get_secret(&vault, &source, true)
         .await
         .expect("source must remain after rejected rename");
-    assert_eq!(got.value.as_ref().map(|v| v.as_str()), Some("rename-me"));
+    assert_eq!(
+        got.value.as_ref().map(SecretValue::expose_secret),
+        Some("rename-me")
+    );
     assert_eq!(got.tags.get("note").map(String::as_str), Some("rename e2e"));
     assert_eq!(got.tags.get("groups").map(String::as_str), Some("e2e"));
 
@@ -391,7 +397,10 @@ async fn e2e_azure_mv_sequence_fails_closed_at_rename() {
         .get_secret(&vault, &source, true)
         .await
         .expect("source must remain after rejected rename");
-    assert_eq!(got.value.as_ref().map(|v| v.as_str()), Some("mv-me"));
+    assert_eq!(
+        got.value.as_ref().map(SecretValue::expose_secret),
+        Some("mv-me")
+    );
     assert_eq!(got.tags.get("folder").map(String::as_str), Some("app"));
 
     assert!(!backend
@@ -433,7 +442,7 @@ async fn e2e_azure_bulk_set_and_get() {
             .await
             .unwrap_or_else(|e| panic!("get_secret {name} failed: {e:?}"));
         assert_eq!(
-            got.value.as_ref().map(|v| v.as_str()),
+            got.value.as_ref().map(SecretValue::expose_secret),
             Some(value),
             "value mismatch for {name}"
         );

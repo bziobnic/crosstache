@@ -28,10 +28,10 @@
 use crosstache::backend::aws::AwsBackend;
 use crosstache::backend::Backend;
 use crosstache::config::settings::AwsConfig;
-use crosstache::secret::manager::{FieldUpdate, SecretRequest, SecretUpdateRequest};
+use crosstache::secret::domain::SecretValue;
+use crosstache::secret::domain::{FieldUpdate, SecretRequest, SecretUpdateRequest};
 use crosstache::vault::models::VaultCreateRequest;
 use std::time::{SystemTime, UNIX_EPOCH};
-use zeroize::Zeroizing;
 
 /// The live, pre-existing secret that tests must never disturb.
 const PROTECTED_SECRET: &str = "claude-api-key";
@@ -108,7 +108,7 @@ fn unique_vault(tag: &str) -> String {
 fn make_request(name: &str, value: &str) -> SecretRequest {
     SecretRequest {
         name: name.to_string(),
-        value: Zeroizing::new(value.to_string()),
+        value: SecretValue::new(value.to_string()),
         content_type: None,
         enabled: None,
         expires_on: None,
@@ -228,7 +228,7 @@ async fn e2e_aws_secret_full_lifecycle() {
         .await
         .expect("get_secret with value should succeed");
     assert_eq!(
-        got.value.as_ref().map(|v| v.as_str()),
+        got.value.as_ref().map(SecretValue::expose_secret),
         Some(v1_value),
         "round-tripped value must match"
     );
@@ -288,7 +288,10 @@ async fn e2e_aws_secret_full_lifecycle() {
         .get_secret(&vault, secret, true)
         .await
         .expect("get after update should succeed");
-    assert_eq!(got2.value.as_ref().map(|v| v.as_str()), Some(v2_value));
+    assert_eq!(
+        got2.value.as_ref().map(SecretValue::expose_secret),
+        Some(v2_value)
+    );
 
     // --- LIST VERSIONS ---
     let versions = backend
@@ -361,7 +364,7 @@ async fn e2e_aws_secret_full_lifecycle() {
         .await
         .expect("get after rollback should succeed");
     assert_eq!(
-        rolled.value.as_ref().map(|v| v.as_str()),
+        rolled.value.as_ref().map(SecretValue::expose_secret),
         Some(v1_value),
         "rollback should restore the v1 value"
     );
@@ -435,7 +438,10 @@ async fn e2e_aws_bulk_set_and_list() {
             .get_secret(&vault, name, true)
             .await
             .unwrap_or_else(|e| panic!("get_secret {name} failed: {e:?}"));
-        assert_eq!(got.value.as_ref().map(|v| v.as_str()), Some(value));
+        assert_eq!(
+            got.value.as_ref().map(SecretValue::expose_secret),
+            Some(value)
+        );
     }
 
     // List should report exactly the 3 secrets — eventually consistent.

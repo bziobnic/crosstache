@@ -9,7 +9,8 @@ use crate::secret::attachment_backup_codec::{self as codec, Bundle, ManifestFile
 use crate::secret::attachment_key::{
     self as key, AttachmentKeyId, AttachmentKeyRef, KeySlot, PointerKind, SecretVersion,
 };
-use crate::secret::manager::{SecretProperties, SecretRequest};
+use crate::secret::domain::SecretValue;
+use crate::secret::domain::{SecretProperties, SecretRequest};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -58,7 +59,7 @@ fn id(value: &str) -> Result<AttachmentKeyId> {
 fn request(name: &str, value: Zeroizing<String>, marked: bool) -> SecretRequest {
     SecretRequest {
         name: name.into(),
-        value,
+        value: SecretValue::new(value.as_str()),
         content_type: marked.then(|| key::KEY_RECORD_CONTENT_TYPE.into()),
         enabled: Some(true),
         expires_on: None,
@@ -122,6 +123,7 @@ async fn exact(
     let identity = p
         .value
         .ok_or(AttachmentError::KeyInvalid)?
+        .expose_secret()
         .trim()
         .parse::<age::x25519::Identity>()
         .map_err(|_| AttachmentError::KeyInvalid)?;
@@ -311,9 +313,13 @@ pub(crate) async fn restore(
             let raw = p.value.as_ref().ok_or(AttachmentError::PointerInvalid)?;
             // The shared classifier recognizes V1 by prefix alone. Only a
             // valid private identity is a V1 binding that repair must preserve.
-            let kind = match key::parse_pointer_value(raw) {
+            let kind = match key::parse_pointer_value(raw.expose_secret()) {
                 Some(PointerKind::V1RawIdentity)
-                    if raw.trim().parse::<age::x25519::Identity>().is_err() =>
+                    if raw
+                        .expose_secret()
+                        .trim()
+                        .parse::<age::x25519::Identity>()
+                        .is_err() =>
                 {
                     None
                 }
@@ -484,7 +490,7 @@ pub(crate) async fn restore(
                 .ok_or(AttachmentError::CommitUnconfirmed)?;
             if written.version.is_empty()
                 || confirmed.version != written.version
-                || confirmed.value.as_deref().map(String::as_str) != Some(value.as_str())
+                || confirmed.value.as_ref().map(SecretValue::expose_secret) != Some(value.as_str())
             {
                 return Err(AttachmentError::CommitUnconfirmed.into());
             }

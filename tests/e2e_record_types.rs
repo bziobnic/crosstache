@@ -806,7 +806,7 @@ fn get_corrupt_envelope_fails_loud() {
     rt.block_on(async {
         use crosstache::backend::local::LocalBackend;
         use crosstache::backend::Backend;
-        use crosstache::secret::manager::SecretRequest;
+        use crosstache::secret::domain::{SecretRequest, SecretValue};
 
         let backend = LocalBackend::new(Some(&local_config)).expect("open local backend");
         let existing = backend
@@ -817,7 +817,7 @@ fn get_corrupt_envelope_fails_loud() {
 
         let request = SecretRequest {
             name: "cred".to_string(),
-            value: zeroize::Zeroizing::new("not-json".to_string()),
+            value: SecretValue::new("not-json".to_string()),
             content_type: Some("application/vnd.xv.record".to_string()),
             enabled: Some(true),
             expires_on: None,
@@ -890,7 +890,7 @@ fn get_unknown_type_degrades() {
     rt.block_on(async {
         use crosstache::backend::local::LocalBackend;
         use crosstache::backend::Backend;
-        use crosstache::secret::manager::SecretRequest;
+        use crosstache::secret::domain::SecretRequest;
 
         let backend = LocalBackend::new(Some(&local_config)).expect("open local backend");
         let existing = backend
@@ -2807,7 +2807,7 @@ fn update_positional_value_on_corrupt_envelope_fails_loud_without_writing() {
     rt.block_on(async {
         use crosstache::backend::local::LocalBackend;
         use crosstache::backend::Backend;
-        use crosstache::secret::manager::SecretRequest;
+        use crosstache::secret::domain::{SecretRequest, SecretValue};
 
         let backend = LocalBackend::new(Some(&local_config)).expect("open local backend");
         let existing = backend
@@ -2818,7 +2818,7 @@ fn update_positional_value_on_corrupt_envelope_fails_loud_without_writing() {
 
         let request = SecretRequest {
             name: "cred".to_string(),
-            value: zeroize::Zeroizing::new("not-json".to_string()),
+            value: SecretValue::new("not-json".to_string()),
             content_type: Some("application/vnd.xv.record".to_string()),
             enabled: Some(true),
             expires_on: None,
@@ -2896,7 +2896,7 @@ fn update_positional_value_on_unknown_type_record_errors_without_writing() {
     rt.block_on(async {
         use crosstache::backend::local::LocalBackend;
         use crosstache::backend::Backend;
-        use crosstache::secret::manager::SecretRequest;
+        use crosstache::secret::domain::SecretRequest;
 
         let backend = LocalBackend::new(Some(&local_config)).expect("open local backend");
         let existing = backend

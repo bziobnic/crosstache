@@ -14,9 +14,9 @@ use std::collections::HashMap;
 
 use crate::backend::local::LocalBackend;
 use crate::config::settings::LocalConfig;
-use crate::secret::manager::SecretRequest;
+use crate::secret::domain::SecretRequest;
+use crate::secret::domain::SecretValue;
 use crate::secret::rotation::{TAG_ROTATED_AT, TAG_ROTATE_EVERY};
-use zeroize::Zeroizing;
 
 /// Vault name used by every test. Deliberately not "default": the rotation
 /// helper touches the *user's* context file only when the context's vault name
@@ -58,7 +58,7 @@ async fn seed(backend: &Arc<dyn Backend>, name: &str, policy_tags: HashMap<Strin
             VAULT,
             SecretRequest {
                 name: name.to_string(),
-                value: Zeroizing::new(format!("initial-value-for-{name}")),
+                value: SecretValue::new(format!("initial-value-for-{name}")),
                 content_type: None,
                 enabled: Some(true),
                 expires_on: None,
@@ -107,7 +107,8 @@ async fn value_of(backend: &Arc<dyn Backend>, name: &str) -> String {
         .await
         .unwrap()
         .value
-        .as_deref()
+        .as_ref()
+        .map(SecretValue::expose_secret)
         .unwrap()
         .to_string()
 }

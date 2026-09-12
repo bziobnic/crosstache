@@ -851,7 +851,7 @@ async fn save_generated_secret(
         return Ok(());
     }
 
-    let request = meta.to_secret_request(name, zeroize::Zeroizing::new(value.to_string()))?;
+    let request = meta.to_secret_request(name, crate::secret::domain::SecretValue::new(value))?;
 
     // Trait path: any backend exposed through the registry (local, aws, and
     // Azure once it has a registry). A --vault flag overrides the resolved
@@ -910,7 +910,7 @@ mod tests {
         AuditBackend, AuditEvent, Backend, BackendCapabilities, BackendError, BackendKind,
         BackendRegistry, NameCharset, SecretBackend,
     };
-    use crate::secret::manager::{
+    use crate::secret::domain::{
         SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest,
     };
 
