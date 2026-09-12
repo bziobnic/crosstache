@@ -74,6 +74,16 @@ async fn main() {
         print_user_friendly_error(&e, format);
         std::process::exit(e.exit_code());
     }
+
+    // Machine mode: the command parked its single stdout document instead of
+    // printing it, so `main` owns the emission. Nothing is pending outside
+    // machine mode, which leaves every other command's stdout untouched.
+    if let Some(report) = crate::utils::machine::take_pending() {
+        println!(
+            "{}",
+            crate::utils::machine::render_success(format.resolve_for_stdout(), &report)
+        );
+    }
 }
 
 async fn run_complete_secrets() -> Result<()> {
@@ -488,13 +498,26 @@ fn print_user_friendly_error(error: &CrosstacheError, format: crate::utils::form
         if let Some(s) = error.suggestion() {
             envelope["error"]["suggestion"] = serde_json::Value::String(s.to_string());
         }
-        let rendered = match format {
-            OutputFormat::Json => serde_json::to_string(&envelope).unwrap_or_default(),
-            OutputFormat::Yaml => serde_yaml::to_string(&envelope).unwrap_or_default(),
-            _ => unreachable!(),
-        };
-        println!("{rendered}");
+        // A command that produced a structured result before failing (partial
+        // success, scan findings, rotation due) attaches it under `report`;
+        // with nothing pending the envelope is byte-identical to before.
+        let report = crate::utils::machine::take_pending();
+        println!(
+            "{}",
+            crate::utils::machine::render_failure(format, envelope, report)
+        );
         return;
+    }
+
+    // CSV cannot carry an error object, so stdout stays rows-only: emit the
+    // rows the command produced (if any) and report the error on stderr below.
+    if matches!(format, OutputFormat::Csv) {
+        if let Some(report) = crate::utils::machine::take_pending() {
+            println!(
+                "{}",
+                crate::utils::machine::render_success(OutputFormat::Csv, &report)
+            );
+        }
     }
 
     // Plain-text path: one primary line (`Display` is the message), optional
