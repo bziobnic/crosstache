@@ -101,10 +101,9 @@ separate metadata-only and value-returning getters (`get_secret_metadata`/
 `get_secret_version` return `Secret`; `get_secret_snapshot` takes
 `SnapshotValue::{Omit, Include}`), and the old combined value/metadata struct
 is gone. What remains (PR 3): introduce explicit disclosure DTOs
-(`DisclosedSecret`) for
-the handful of export routes that legitimately return plaintext, with a
-both-direction canary suite across CLI, web, cache, and errors proving every
-other route stays value-free.
+(`DisclosedSecret`) for the handful of export routes that legitimately return
+plaintext, with a both-direction canary suite across CLI, web, cache, and
+errors proving every other route stays value-free.
 
 ## Product and platform work
 

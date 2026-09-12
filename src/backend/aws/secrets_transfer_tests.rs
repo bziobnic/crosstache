@@ -12,6 +12,7 @@ use std::sync::Mutex;
 #[derive(Debug)]
 struct State {
     reads: usize,
+    values: usize,
     drift: bool,
 }
 #[derive(Clone, Debug)]
@@ -27,7 +28,10 @@ impl HttpConnector for Transport {
             json!({"ARN":"arn:aws:secretsmanager:us-east-1:123456789012:secret:prod/source-abcdef", "Name":"prod/source", "Description":"note", "VersionIdsToStages":{"version-one":["AWSCURRENT"]}, "Tags":[{"Key":"xv:folder","Value": if state.drift && state.reads > 1 { "changed" } else { "original" }}]})
         } else {
             assert!(operation.ends_with("GetSecretValue"));
-            assert_eq!(body["VersionId"], "version-one");
+            state.values += 1;
+            if !body["VersionId"].is_null() {
+                assert_eq!(body["VersionId"], "version-one");
+            }
             json!({"VersionId":"version-one", "SecretString":"value", "VersionStages":["AWSCURRENT"]})
         };
         let mut response = HttpResponse::new(
@@ -49,16 +53,51 @@ impl HttpClient for Transport {
         SharedHttpConnector::new(self.clone())
     }
 }
-fn backend(drift: bool) -> AwsSecretBackend {
+fn backend_with_state(drift: bool) -> (AwsSecretBackend, Arc<Mutex<State>>) {
+    let state = Arc::new(Mutex::new(State {
+        reads: 0,
+        values: 0,
+        drift,
+    }));
     let config = aws_sdk_secretsmanager::Config::builder()
         .behavior_version(aws_sdk_secretsmanager::config::BehaviorVersion::latest())
         .region(aws_sdk_secretsmanager::config::Region::new("us-east-1"))
         .credentials_provider(aws_sdk_secretsmanager::config::Credentials::new(
             "test", "test", None, None, "test",
         ))
-        .http_client(Transport(Arc::new(Mutex::new(State { reads: 0, drift }))))
+        .http_client(Transport(state.clone()))
         .build();
-    AwsSecretBackend::new(Arc::new(SecretsManagerClient::from_conf(config)))
+    (
+        AwsSecretBackend::new(Arc::new(SecretsManagerClient::from_conf(config))),
+        state,
+    )
+}
+
+fn backend(drift: bool) -> AwsSecretBackend {
+    backend_with_state(drift).0
+}
+
+/// The metadata getter must never reach for a value: one `DescribeSecret`,
+/// zero `GetSecretValue`.
+#[tokio::test]
+async fn metadata_getter_issues_describe_only() {
+    let (backend, state) = backend_with_state(false);
+    let metadata = backend.get_secret_metadata("prod", "source").await.unwrap();
+    assert_eq!(metadata.name, "source");
+    let state = state.lock().unwrap();
+    assert_eq!(state.reads, 1, "expected exactly one DescribeSecret");
+    assert_eq!(state.values, 0, "metadata path fetched a value");
+}
+
+/// The value getter still makes both calls (concurrently, via `tokio::join!`).
+#[tokio::test]
+async fn value_getter_issues_describe_and_get_value() {
+    let (backend, state) = backend_with_state(false);
+    let secret = backend.get_secret("prod", "source").await.unwrap();
+    assert_eq!(secret.value.expose_secret(), "value");
+    let state = state.lock().unwrap();
+    assert_eq!(state.reads, 1, "expected exactly one DescribeSecret");
+    assert_eq!(state.values, 1, "expected exactly one GetSecretValue");
 }
 #[tokio::test]
 async fn aws_transfer_snapshot_rechecks_folder_metadata_without_claiming_cas() {

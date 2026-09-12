@@ -139,11 +139,11 @@ pub async fn fetch_secret_values(
                     .await
                     .map_err(|e| format!("secret fetch semaphore closed: {e}"))?;
                 match backend.secrets().get_secret(&vault, &backend_name).await {
-                    Ok(props) => Ok(Some(SecretRef {
+                    Ok(props) => Ok(SecretRef {
                         name: secret_name,
                         vault,
                         value: Zeroizing::new(props.value.expose_secret().to_owned()),
-                    })),
+                    }),
                     Err(e) => Err(format!(
                         "secret '{vault}/{backend_name}' value could not be read: {e}"
                     )),
@@ -155,8 +155,7 @@ pub async fn fetch_secret_values(
     let mut refs = Vec::new();
     for h in handles {
         match h.await {
-            Ok(Ok(Some(secret))) => refs.push(secret),
-            Ok(Ok(None)) => {}
+            Ok(Ok(secret)) => refs.push(secret),
             Ok(Err(e)) => failures.push(e),
             Err(e) => failures.push(format!("secret fetch task failed: {e}")),
         }

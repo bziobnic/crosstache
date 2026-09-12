@@ -1,8 +1,8 @@
 //! Secret backend trait.
 //!
 //! [`SecretBackend`] defines the contract for secret CRUD operations.
-//! Every backend must implement the 6 required methods; the 8 optional
-//! methods have default implementations that return [`BackendError::Unsupported`].
+//! Every backend must implement the required methods; the optional methods
+//! have default implementations that return [`BackendError::Unsupported`].
 
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -82,7 +82,10 @@ pub trait SecretBackend: Send + Sync {
     /// The pre-split signature took a third `include_value: bool` argument, so
     /// a caller chose disclosure with a literal at the call site. That boolean
     /// is gone: disclosure is now the choice of *which method* to call, and the
-    /// old three-argument form no longer type-checks.
+    /// old three-argument form no longer type-checks. rustdoc on stable does
+    /// not check the error code of a `compile_fail` block, so the passing
+    /// companion below — which exercises the identical path — is the actual
+    /// guard, and the pair must stay together.
     ///
     /// ```compile_fail,E0061
     /// fn value_read(backend: &dyn crosstache::backend::SecretBackend) {
