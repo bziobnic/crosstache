@@ -95,9 +95,9 @@
   rename, move, restore, conversion) now return a value-free
   `SecretMetadata` body — the `value` key is absent instead of `null`;
   `POST /secrets/{name}/value` is unchanged. The domain types moved from the
-  Azure-era `secret::manager` into `secret::domain`. `xv versions --output
-  json|yaml|csv` likewise no longer emits a `value` column/key (it was always
-  `null`); table, plain, raw, and template output are unchanged.
+  Azure-era `secret::manager` into `secret::domain`. `xv history --format
+  json|yaml` likewise no longer emits the always-`null` `value` key; csv,
+  table, plain, raw, and template output are unchanged.
 
 ### Fixed
 

@@ -13,12 +13,12 @@ use zeroize::Zeroizing;
 ///   `Debug` and contains one stays safe to log.
 /// - The buffer is zeroized on drop.
 ///
-/// ```compile_fail
+/// ```compile_fail,E0277
 /// let v = crosstache::secret::domain::SecretValue::new("x");
 /// let _ = serde_json::to_string(&v);
 /// ```
 ///
-/// ```compile_fail
+/// ```compile_fail,E0277
 /// let v = crosstache::secret::domain::SecretValue::new("x");
 /// let _ = format!("{v}");
 /// ```

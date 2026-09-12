@@ -2820,3 +2820,25 @@ fn keeper_import_keeps_a_note_only_record() {
     ]);
     assert_eq!(env.get_raw("Adaxes License"), "license key ABC-123");
 }
+
+/// `SecretProperties` lost its serde derives; `xv history --format json`
+/// renders `SecretMetadata`, so the always-null `value` key is gone and no
+/// value can ever appear here.
+#[test]
+fn history_json_has_no_value_key() {
+    let env = TestEnv::new();
+    env.set_secret("VERSIONED", "first-value-canary");
+    env.set_secret("VERSIONED", "second-value-canary");
+    let out = env.xv_ok(&["history", "VERSIONED", "--format", "json"]);
+    let json: serde_json::Value = serde_json::from_str(&out).expect("json output");
+    let rows = json.as_array().expect("array of versions");
+    assert!(rows.len() >= 2, "{out}");
+    for row in rows {
+        assert!(
+            row.get("value").is_none(),
+            "value key must be absent: {row}"
+        );
+        assert!(row.get("name").is_some(), "{row}");
+    }
+    assert!(!out.contains("value-canary"), "{out}");
+}
