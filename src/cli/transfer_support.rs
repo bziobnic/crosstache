@@ -104,18 +104,29 @@ pub(crate) fn folder_override(folder: &str) -> Result<String> {
 }
 
 #[cfg(feature = "file-ops")]
+/// Preview or execute one attachment-carrying transfer.
+///
+/// Returns the preview (dry run) or the execution report as a JSON value so
+/// the caller owns emission. In human mode the value is still pretty-printed
+/// on stdout exactly as before; in machine mode nothing is printed here —
+/// stdout must hold the run's single parked document instead.
 pub(crate) async fn run_attached(
+    config: &crate::config::Config,
     source: &dyn Backend,
     destination: &dyn Backend,
     intent: crate::secret::attachment_transfer::TransferIntent,
     options: &AttachmentTransferOptions,
     dry_run: bool,
-) -> Result<()> {
+) -> Result<serde_json::Value> {
     use crate::secret::attachment_transfer_execution::{self as execution, RecoveryStore};
+    let machine_mode = crate::utils::machine::is_machine_mode(config);
     let preview = execution::preflight(source, destination, intent.clone()).await?;
     if dry_run {
-        println!("{}", serde_json::to_string_pretty(&preview)?);
-        return Ok(());
+        let value = serde_json::to_value(&preview)?;
+        if !machine_mode {
+            println!("{}", serde_json::to_string_pretty(&preview)?);
+        }
+        return Ok(value);
     }
     if !options.offline {
         return Err(CrosstacheError::invalid_argument("attachment execution requires --offline after stopping other writers; use --dry-run to preview"));
@@ -125,6 +136,9 @@ pub(crate) async fn run_attached(
         None => RecoveryStore::default_path()?,
     });
     let report = execution::apply(source, destination, intent, options.offline, &recovery).await?;
-    println!("{}", serde_json::to_string_pretty(&report)?);
-    Ok(())
+    let value = serde_json::to_value(&report)?;
+    if !machine_mode {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    }
+    Ok(value)
 }

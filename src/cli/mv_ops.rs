@@ -12,8 +12,23 @@ use crate::cli::secret_ops::{confirm_reserved_key_write, invalidate_trait_secret
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
 use crate::secret::domain::{FieldUpdate, SecretSummary, SecretUpdateRequest};
+use crate::utils::machine::{self, ItemReport};
 use crate::utils::output;
 use crate::utils::suggestions::closest_match;
+
+/// Park a dry run's plan as the single machine document:
+/// `{ "planned": [ { "from": …, "to": … } ] }`. No-op in human mode, where the
+/// preview lines say the same thing on stderr.
+fn report_planned(config: &Config, planned: &[(String, String)]) {
+    if !machine::is_machine_mode(config) {
+        return;
+    }
+    let rows: Vec<serde_json::Value> = planned
+        .iter()
+        .map(|(from, to)| serde_json::json!({ "from": from, "to": to }))
+        .collect();
+    machine::report(config, &serde_json::json!({ "planned": rows }));
+}
 
 /// Plan for moving secrets or folders.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -571,7 +586,10 @@ async fn execute_cross_vault_alias_mv(
                     dest_folder.as_deref().unwrap_or("/"),
                 )?),
             };
-            crate::cli::transfer_support::run_attached(
+            // The transfer preview/report is this run's single machine
+            // document; in human mode `run_attached` already printed it.
+            let document = crate::cli::transfer_support::run_attached(
+                config,
                 src_backend.as_ref(),
                 dst_backend.as_ref(),
                 intent,
@@ -579,6 +597,7 @@ async fn execute_cross_vault_alias_mv(
                 dry_run,
             )
             .await?;
+            machine::report(config, &document);
             if dry_run {
                 return Ok(());
             }
@@ -620,8 +639,11 @@ async fn execute_cross_vault_alias_mv(
     };
 
     if dry_run {
-        println!("{qualified_src} -> {qualified_dst}");
-        output::info("1 secret would move across vaults (dry run)");
+        report_planned(config, &[(qualified_src.clone(), qualified_dst.clone())]);
+        if !crate::utils::machine::is_machine_mode(config) {
+            output::info(&format!("{qualified_src} -> {qualified_dst}"));
+            output::info("1 secret would move across vaults (dry run)");
+        }
         return Ok(());
     }
 
@@ -762,7 +784,9 @@ async fn execute_secret_mv(
                     dest_folder.as_deref().unwrap_or("/"),
                 )?),
             };
-            crate::cli::transfer_support::run_attached(
+            // As in the cross-vault path: one document per run, parked here.
+            let document = crate::cli::transfer_support::run_attached(
+                config,
                 backend.as_ref(),
                 backend.as_ref(),
                 intent,
@@ -770,6 +794,7 @@ async fn execute_secret_mv(
                 dry_run,
             )
             .await?;
+            machine::report(config, &document);
             if dry_run {
                 return Ok(());
             }
@@ -801,8 +826,11 @@ async fn execute_secret_mv(
             Some(f) if !f.is_empty() => format!("{f}/{dest_name}"),
             _ => dest_name.clone(),
         };
-        println!("{source} -> {dest_qualified}");
-        output::info("1 secret would move (dry run)");
+        report_planned(config, &[(source.to_string(), dest_qualified.clone())]);
+        if !crate::utils::machine::is_machine_mode(config) {
+            output::info(&format!("{source} -> {dest_qualified}"));
+            output::info("1 secret would move (dry run)");
+        }
         return Ok(());
     }
 
@@ -930,25 +958,37 @@ async fn execute_folder_mv(
     }
 
     if dry_run {
-        for (old, new, _, _) in &moves {
-            println!("{old} -> {new}");
+        let planned: Vec<(String, String)> = moves
+            .iter()
+            .map(|(old, new, _, _)| (old.clone(), new.clone()))
+            .collect();
+        report_planned(config, &planned);
+        if !crate::utils::machine::is_machine_mode(config) {
+            for (old, new) in &planned {
+                output::info(&format!("{old} -> {new}"));
+            }
+            output::info(&format!("{} secrets would move (dry run)", moves.len()));
         }
-        output::info(&format!("{} secrets would move (dry run)", moves.len()));
         return Ok(());
     }
 
     let dest_label = dest_prefix
         .as_deref()
         .map_or("/".to_string(), |d| format!("{d}/"));
-    eprintln!(
-        "Moving {} secrets from '{src_prefix}/' to '{dest_label}':",
-        moves.len()
-    );
-    for (old, new, _, _) in moves.iter().take(10) {
-        eprintln!("  {old} -> {new}");
-    }
-    if moves.len() > 10 {
-        eprintln!("  ... ({} more; --dry-run to list all)", moves.len() - 10);
+    // Machine mode replaces the plan listing and the per-failure warnings with
+    // the single `ItemReport` document below.
+    let machine_mode = machine::is_machine_mode(config);
+    if !machine_mode {
+        eprintln!(
+            "Moving {} secrets from '{src_prefix}/' to '{dest_label}':",
+            moves.len()
+        );
+        for (old, new, _, _) in moves.iter().take(10) {
+            eprintln!("  {old} -> {new}");
+        }
+        if moves.len() > 10 {
+            eprintln!("  ... ({} more; --dry-run to list all)", moves.len() - 10);
+        }
     }
     if !confirm_proceed(yes, &format!("Move {} secrets?", moves.len()), "--yes")? {
         output::info("Aborted; nothing moved.");
@@ -956,6 +996,7 @@ async fn execute_folder_mv(
     }
 
     let mut failures = 0usize;
+    let mut item_report = ItemReport::new();
     for (old, new, name, new_folder) in &moves {
         let request = SecretUpdateRequest {
             name: name.clone(),
@@ -975,26 +1016,37 @@ async fn execute_folder_mv(
             replace_tags: false,
             replace_groups: false,
         };
-        if let Err(e) = backend
+        match backend
             .secrets()
             .update_secret(vault_name, name, request)
             .await
         {
-            failures += 1;
-            output::warn(&format!("failed to move '{old}' to '{new}': {e}"));
+            Ok(_) => item_report.ok(old, Some(new)),
+            Err(e) => {
+                failures += 1;
+                if !machine_mode {
+                    output::warn(&format!("failed to move '{old}' to '{new}': {e}"));
+                }
+                item_report.failed(old, &e.to_string());
+            }
         }
     }
     invalidate_trait_secret_cache(config, backend_name, vault_name);
     let moved = moves.len() - failures;
+    // Parked before the failure split so a partial move carries its per-secret
+    // detail under the envelope's `report` key.
+    machine::report(config, &item_report);
     if failures > 0 {
         return Err(CrosstacheError::unknown(format!(
             "moved {moved} of {} secrets; {failures} failed (see warnings above)",
             moves.len()
         )));
     }
-    output::success(&format!(
-        "Moved {moved} secrets from '{src_prefix}/' to '{dest_label}'"
-    ));
+    if !machine_mode {
+        output::success(&format!(
+            "Moved {moved} secrets from '{src_prefix}/' to '{dest_label}'"
+        ));
+    }
     Ok(())
 }
 
@@ -1134,30 +1186,40 @@ async fn execute_filter_mv(
         .collect();
 
     if dry_run {
-        for (old, new, _) in &moves {
-            println!("{old} -> {new}");
+        let planned: Vec<(String, String)> = moves
+            .iter()
+            .map(|(old, new, _)| (old.clone(), new.clone()))
+            .collect();
+        report_planned(config, &planned);
+        if !crate::utils::machine::is_machine_mode(config) {
+            for (old, new) in &planned {
+                output::info(&format!("{old} -> {new}"));
+            }
+            if skipped > 0 {
+                output::info(&format!(
+                    "{skipped} secret(s) already in '{dest_label}' (skipped)"
+                ));
+            }
+            output::info(&format!("{} secrets would move (dry run)", moves.len()));
         }
-        if skipped > 0 {
-            output::info(&format!(
-                "{skipped} secret(s) already in '{dest_label}' (skipped)"
-            ));
-        }
-        output::info(&format!("{} secrets would move (dry run)", moves.len()));
         return Ok(());
     }
 
-    eprintln!(
-        "Moving {} secrets matching --filter '{pattern}' to '{dest_label}':",
-        moves.len()
-    );
-    for (old, new, _) in moves.iter().take(10) {
-        eprintln!("  {old} -> {new}");
-    }
-    if moves.len() > 10 {
-        eprintln!("  ... ({} more; --dry-run to list all)", moves.len() - 10);
-    }
-    if skipped > 0 {
-        eprintln!("  ({skipped} secret(s) already in '{dest_label}', skipped)");
+    let machine_mode = machine::is_machine_mode(config);
+    if !machine_mode {
+        eprintln!(
+            "Moving {} secrets matching --filter '{pattern}' to '{dest_label}':",
+            moves.len()
+        );
+        for (old, new, _) in moves.iter().take(10) {
+            eprintln!("  {old} -> {new}");
+        }
+        if moves.len() > 10 {
+            eprintln!("  ... ({} more; --dry-run to list all)", moves.len() - 10);
+        }
+        if skipped > 0 {
+            eprintln!("  ({skipped} secret(s) already in '{dest_label}', skipped)");
+        }
     }
     if !confirm_proceed(yes, &format!("Move {} secrets?", moves.len()), "--yes")? {
         output::info("Aborted; nothing moved.");
@@ -1165,6 +1227,7 @@ async fn execute_filter_mv(
     }
 
     let mut failures = 0usize;
+    let mut item_report = ItemReport::new();
     for (old, new, name) in &moves {
         let request = SecretUpdateRequest {
             name: name.clone(),
@@ -1184,26 +1247,37 @@ async fn execute_filter_mv(
             replace_tags: false,
             replace_groups: false,
         };
-        if let Err(e) = backend
+        match backend
             .secrets()
             .update_secret(vault_name, name, request)
             .await
         {
-            failures += 1;
-            output::warn(&format!("failed to move '{old}' to '{new}': {e}"));
+            Ok(_) => item_report.ok(old, Some(new)),
+            Err(e) => {
+                failures += 1;
+                if !machine_mode {
+                    output::warn(&format!("failed to move '{old}' to '{new}': {e}"));
+                }
+                item_report.failed(old, &e.to_string());
+            }
         }
     }
     invalidate_trait_secret_cache(config, backend_name, vault_name);
     let moved = moves.len() - failures;
+    // Parked before the failure split so a partial move carries its per-secret
+    // detail under the envelope's `report` key.
+    machine::report(config, &item_report);
     if failures > 0 {
         return Err(CrosstacheError::unknown(format!(
             "moved {moved} of {} secrets; {failures} failed (see warnings above)",
             moves.len()
         )));
     }
-    output::success(&format!(
-        "Moved {moved} secrets matching --filter '{pattern}' to '{dest_label}'"
-    ));
+    if !machine_mode {
+        output::success(&format!(
+            "Moved {moved} secrets matching --filter '{pattern}' to '{dest_label}'"
+        ));
+    }
     Ok(())
 }
 

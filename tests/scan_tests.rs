@@ -276,3 +276,125 @@ fn scan_install_round_trip() {
         "hook should be removed"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Machine-output contract: one document on stdout when findings fail the run
+// ---------------------------------------------------------------------------
+
+/// Fixture: an isolated local backend with a file that trips a built-in
+/// pattern, so `xv scan` deterministically reaches content scanning and
+/// exits 50 with one finding.
+fn leaking_scan_dir() -> (std::process::Command, tempfile::TempDir) {
+    let (cmd, temp) = common::xv_isolated_local();
+    std::fs::write(temp.path().join("leak.txt"), "aws=AKIAIOSFODNN7EXAMPLE\n").unwrap();
+    (cmd, temp)
+}
+
+/// Parse stdout as exactly one JSON document — the machine-output contract.
+fn single_json_doc(stdout: &str) -> serde_json::Value {
+    let docs: Vec<serde_json::Value> = serde_json::Deserializer::from_str(stdout)
+        .into_iter::<serde_json::Value>()
+        .map(|doc| doc.unwrap_or_else(|e| panic!("invalid JSON on stdout ({e}): {stdout}")))
+        .collect();
+    assert_eq!(
+        docs.len(),
+        1,
+        "stdout must hold exactly one JSON document: {stdout}"
+    );
+    docs.into_iter().next().expect("checked above")
+}
+
+#[test]
+fn scan_json_emits_one_document_with_the_findings_under_report() {
+    let (mut cmd, _temp) = leaking_scan_dir();
+    let out = cmd.args(["scan", "--format", "json"]).output().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(50),
+        "stderr: {}",
+        common::stderr_str(&out)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let doc = single_json_doc(&stdout);
+    assert_eq!(doc["error"]["code"], "xv-scan-leak-detected", "{stdout}");
+    assert_eq!(doc["error"]["exit_code"], 50, "{stdout}");
+
+    let findings = doc["report"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the findings must be attached under report: {stdout}"));
+    assert!(
+        findings.iter().any(
+            |f| f["file"].as_str().is_some_and(|p| p.ends_with("leak.txt"))
+                && f["kind"] == "pattern"
+        ),
+        "the leak.txt finding must be present: {stdout}"
+    );
+    assert!(
+        !stdout.contains("AKIAIOSFODNN7EXAMPLE"),
+        "a finding must never carry the matched value: {stdout}"
+    );
+}
+
+#[test]
+fn scan_yaml_emits_one_document_with_the_findings_under_report() {
+    let (mut cmd, _temp) = leaking_scan_dir();
+    let out = cmd.args(["scan", "--format", "yaml"]).output().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(50),
+        "stderr: {}",
+        common::stderr_str(&out)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // A second document would make the whole stdout unparseable as one value.
+    let doc: serde_yaml::Value = serde_yaml::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("stdout must be one YAML document ({e}): {stdout}"));
+    assert_eq!(doc["error"]["code"], "xv-scan-leak-detected");
+    assert_eq!(doc["error"]["exit_code"], serde_yaml::Value::from(50));
+
+    let findings = doc["report"]
+        .as_sequence()
+        .unwrap_or_else(|| panic!("the findings must be attached under report: {stdout}"));
+    assert!(
+        findings.iter().any(
+            |f| f["file"].as_str().is_some_and(|p| p.ends_with("leak.txt"))
+                && f["kind"] == "pattern"
+        ),
+        "the leak.txt finding must be present: {stdout}"
+    );
+}
+
+#[test]
+fn scan_csv_keeps_stdout_rows_only_and_reports_the_error_on_stderr() {
+    let (mut cmd, _temp) = leaking_scan_dir();
+    let out = cmd.args(["scan", "--format", "csv"]).output().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(50),
+        "stderr: {}",
+        common::stderr_str(&out)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert!(
+        lines[0].starts_with("file,line,col"),
+        "the header row must be present: {stdout}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("leak.txt,1,")),
+        "the finding row must be present: {stdout}"
+    );
+    assert!(
+        !stdout.contains("xv-scan-leak-detected"),
+        "no error envelope on a CSV stdout: {stdout}"
+    );
+
+    let stderr = common::stderr_str(&out);
+    assert!(
+        stderr.contains("error[xv-scan-leak-detected]"),
+        "the plain error belongs on stderr: {stderr}"
+    );
+}

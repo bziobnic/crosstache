@@ -383,9 +383,12 @@ fn every_top_level_command_supports_help() {
             "{args:?} --help should exit 0; stderr: {}",
             String::from_utf8_lossy(&out.stderr)
         );
+        // `--help` is requested output, so clap writes it to stdout; stderr is
+        // for status and errors and must stay out of it.
         assert!(
-            !out.stdout.is_empty() || !out.stderr.is_empty(),
-            "{args:?} --help produced empty output"
+            !out.stdout.is_empty(),
+            "{args:?} --help must write its help text to stdout; stderr:\n{}",
+            String::from_utf8_lossy(&out.stderr)
         );
     }
 }
@@ -460,16 +463,16 @@ fn migrate_dry_run_against_local_to_aws_shows_summary() {
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stdout.contains("Source:") || stderr.contains("Source:"),
-        "expected 'Source:' in output; stdout:\n{stdout}\nstderr:\n{stderr}"
-    );
-    assert!(
-        stdout.contains("Target:") || stderr.contains("Target:"),
-        "expected 'Target:' in output; stdout:\n{stdout}\nstderr:\n{stderr}"
-    );
-    assert!(
-        stdout.contains("to migrate") || stderr.contains("to migrate"),
-        "expected 'to migrate' counts; stdout:\n{stdout}\nstderr:\n{stderr}"
-    );
+    // The plan banner is narration, so it belongs on stderr and nowhere else:
+    // stdout is reserved for the run's data document.
+    for expected in ["Source:", "Target:", "to migrate"] {
+        assert!(
+            stderr.contains(expected),
+            "expected '{expected}' on stderr; stdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            !stdout.contains(expected),
+            "'{expected}' must not reach stdout; stdout:\n{stdout}"
+        );
+    }
 }

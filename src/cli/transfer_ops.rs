@@ -128,7 +128,13 @@ pub(crate) async fn execute(
             )
             .await?
         };
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        // Machine mode: park the apply report so `main` renders it once in the
+        // resolved format. Human mode keeps today's pretty JSON on stdout.
+        if crate::utils::machine::is_machine_mode(&config) {
+            crate::utils::machine::report(&config, &report);
+        } else {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         let (dest_backend, dest_vault) = &cache_destination;
         crate::cache::invalidation::on_secret_mutation(&config, dest_backend, dest_vault);
         crate::cache::invalidation::on_file_mutation(&config, dest_backend, dest_vault);
@@ -139,7 +145,11 @@ pub(crate) async fn execute(
         }
     } else {
         let preview = execution::preview(source.as_ref(), destination.as_ref(), intent).await?;
-        println!("{}", serde_json::to_string_pretty(&preview)?);
+        if crate::utils::machine::is_machine_mode(&config) {
+            crate::utils::machine::report(&config, &preview);
+        } else {
+            println!("{}", serde_json::to_string_pretty(&preview)?);
+        }
     }
     Ok(())
 }

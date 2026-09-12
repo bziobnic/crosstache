@@ -13,6 +13,7 @@ use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
 use crate::secret::attachments;
 use crate::utils::format::format_size;
+use crate::utils::machine;
 use crate::utils::output;
 use crate::workspace::TargetMode;
 
@@ -154,11 +155,33 @@ pub(crate) async fn execute_attachments(
     }
 
     let listed = attachments::list_attachments(files, &vault, &secret_name).await?;
+    let machine_mode = machine::is_machine_mode(&config);
     if listed.is_empty() {
-        output::info(&format!("No attachments on secret '{secret_name}'"));
+        if machine_mode {
+            // An empty listing is still this run's one document.
+            machine::report(&config, &Vec::<serde_json::Value>::new());
+        } else {
+            output::info(&format!("No attachments on secret '{secret_name}'"));
+        }
         return Ok(());
     }
     let prefix = attachments::attachment_prefix(&secret_name);
+    if machine_mode {
+        // The rows the TSV carried, as the run's single stdout document.
+        let rows: Vec<serde_json::Value> = listed
+            .iter()
+            .map(|f| {
+                let short = f.name.strip_prefix(&prefix).unwrap_or(&f.name);
+                serde_json::json!({
+                    "name": short,
+                    "size": f.size,
+                    "last_modified": f.last_modified.to_rfc3339(),
+                })
+            })
+            .collect();
+        machine::report(&config, &rows);
+        return Ok(());
+    }
     for f in &listed {
         let short = f.name.strip_prefix(&prefix).unwrap_or(&f.name);
         println!(
@@ -167,7 +190,11 @@ pub(crate) async fn execute_attachments(
             f.last_modified.format("%Y-%m-%d %H:%M")
         );
     }
-    println!("{} attachment(s) on '{secret_name}'", listed.len());
+    // Status chrome, not data: the TSV rows above are the scriptable output.
+    output::info(&format!(
+        "{} attachment(s) on '{secret_name}'",
+        listed.len()
+    ));
     Ok(())
 }
 

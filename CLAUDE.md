@@ -27,6 +27,16 @@ embedded localhost web UI, and a Tauri desktop shell.
 - `main` is protected. Do not commit or push unless explicitly asked.
 - Preserve scripting contracts: stdout is data, stderr is human status/error
   chrome, and structured output must remain parseable.
+- Machine mode (`--format json|yaml|csv` given explicitly) owes stdout exactly
+  one document per run. A new command that can partially fail must build its
+  result — a `machine::ItemReport` for per-item work — and call
+  `machine::report` exactly **once** before returning; `main` renders it, alone
+  on success or attached to the error envelope under `report` on failure.
+  Never `println!` human text: status, plan banners, per-item lines and
+  summaries go through `output::*` (stderr), gated on
+  `machine::is_machine_mode(config)` when a report replaces them. Raw values
+  (`--raw`) and `--names-only` stay bare on stdout and are never machine
+  documents. `tests/e2e_machine_output.rs` enforces the contract.
 - Never log, debug-print, cache, or serialize a plaintext secret accidentally.
 - Use backend capability checks instead of assuming every provider supports an
   operation.

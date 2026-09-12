@@ -426,13 +426,28 @@ async fn execute_secret_info_from_root(
     Ok(())
 }
 
-pub(crate) async fn execute_version_command() -> Result<()> {
+pub(crate) async fn execute_version_command(config: &Config) -> Result<()> {
     let build_info = super::commands::get_build_info();
 
     // P0.3: List compiled-in backends so users can see whether aws is available.
     let mut backends = vec!["azure", "local"];
     if cfg!(feature = "aws") {
         backends.push("aws");
+    }
+
+    // Machine mode gets one object; human mode keeps the banner, word for
+    // word, on stdout — `version` is data-like, not narration.
+    if crate::utils::machine::is_machine_mode(config) {
+        crate::utils::machine::report(
+            config,
+            &serde_json::json!({
+                "version": build_info.version,
+                "git_hash": build_info.git_hash,
+                "git_ref": build_info.git_ref,
+                "backends": backends,
+            }),
+        );
+        return Ok(());
     }
 
     println!("crosstache Rust CLI");

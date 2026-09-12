@@ -24,19 +24,32 @@ fn xv_cmd_for(store: &std::path::Path) -> std::process::Command {
     cmd
 }
 
-/// Parse the first JSON document on stdout.
+/// Parse stdout as exactly one JSON document.
 ///
-/// With an explicit `--format json`, `xv` also writes a machine-readable error
-/// envelope to stdout when the command exits non-zero (see
-/// `print_user_friendly_error`). So a `--check` run that finds due secrets emits
-/// the rows *and* the envelope — the same shape `xv scan --format json` has
-/// produced since it shipped. Read only the leading document.
+/// The machine-output contract: with an explicit `--format json|yaml`, stdout
+/// holds one document for the whole run. A `--check` run that finds due secrets
+/// emits the error envelope with the rows attached under `report` — never the
+/// rows followed by a second envelope document.
 fn first_json_doc(stdout: &str) -> serde_json::Value {
-    let mut stream = serde_json::Deserializer::from_str(stdout).into_iter::<serde_json::Value>();
-    stream
-        .next()
-        .unwrap_or_else(|| panic!("expected a JSON document on stdout: {stdout}"))
-        .unwrap_or_else(|e| panic!("invalid JSON on stdout ({e}): {stdout}"))
+    let docs: Vec<serde_json::Value> = serde_json::Deserializer::from_str(stdout)
+        .into_iter::<serde_json::Value>()
+        .map(|doc| doc.unwrap_or_else(|e| panic!("invalid JSON on stdout ({e}): {stdout}")))
+        .collect();
+    assert_eq!(
+        docs.len(),
+        1,
+        "stdout must hold exactly one JSON document: {stdout}"
+    );
+    docs.into_iter().next().expect("checked above")
+}
+
+/// The rows a `--check` run produced, from either a bare success document or
+/// the `report` attached to a failure envelope.
+fn rows_of(doc: &serde_json::Value) -> Vec<serde_json::Value> {
+    let rows = doc.get("report").unwrap_or(doc);
+    rows.as_array()
+        .unwrap_or_else(|| panic!("--check must emit an array of rows: {doc}"))
+        .clone()
 }
 
 /// `xv rotate --check --format json` rows plus whether the command succeeded.
@@ -46,11 +59,7 @@ fn check_rows(store: &std::path::Path) -> (bool, Vec<serde_json::Value>) {
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let rows = first_json_doc(&stdout);
-    let rows = rows
-        .as_array()
-        .unwrap_or_else(|| panic!("--check must emit an array: {stdout}"))
-        .clone();
+    let rows = rows_of(&first_json_doc(&stdout));
     (out.status.success(), rows)
 }
 
@@ -246,8 +255,98 @@ fn check_exits_51_when_a_secret_is_due() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let rows = first_json_doc(&String::from_utf8_lossy(&out.stdout));
+    let rows = rows_of(&first_json_doc(&String::from_utf8_lossy(&out.stdout)));
     assert_eq!(rows[0]["status"], "due");
+}
+
+/// The machine-output contract for the failing `--check`: stdout is exactly one
+/// document — the error envelope — and the rows ride along under `report`.
+#[test]
+fn check_emits_one_json_document_with_the_rows_under_report() {
+    let (mut cmd, _tmp, store) = xv_isolated_local_with_opts(false, false);
+    cmd.args(["set", "STALE", "--value", "v"]).status().unwrap();
+    make_due(&store, "STALE");
+
+    let out = xv_cmd_for(&store)
+        .args(["rotate", "--check", "--format", "json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(51));
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let doc = first_json_doc(&stdout);
+    assert_eq!(doc["error"]["code"], "xv-rotation-due", "{stdout}");
+    assert_eq!(doc["error"]["exit_code"], 51, "{stdout}");
+
+    let rows = doc["report"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the rows must be attached under report: {stdout}"));
+    assert_eq!(rows.len(), 1, "{stdout}");
+    assert_eq!(rows[0]["name"], "STALE");
+    assert_eq!(rows[0]["status"], "due");
+}
+
+#[test]
+fn check_emits_one_yaml_document_with_the_rows_under_report() {
+    let (mut cmd, _tmp, store) = xv_isolated_local_with_opts(false, false);
+    cmd.args(["set", "STALE", "--value", "v"]).status().unwrap();
+    make_due(&store, "STALE");
+
+    let out = xv_cmd_for(&store)
+        .args(["rotate", "--check", "--format", "yaml"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(51));
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // A second document would make the whole stdout unparseable as one value.
+    let doc: serde_yaml::Value = serde_yaml::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("stdout must be one YAML document ({e}): {stdout}"));
+    assert_eq!(doc["error"]["code"], "xv-rotation-due");
+    assert_eq!(doc["error"]["exit_code"], serde_yaml::Value::from(51));
+
+    let rows = doc["report"]
+        .as_sequence()
+        .unwrap_or_else(|| panic!("the rows must be attached under report: {stdout}"));
+    assert_eq!(rows.len(), 1, "{stdout}");
+    assert_eq!(rows[0]["name"], "STALE");
+    assert_eq!(rows[0]["status"], "due");
+}
+
+/// CSV cannot carry an error object, so stdout stays rows-only and the failure
+/// is reported on stderr in plain text.
+#[test]
+fn check_csv_keeps_stdout_rows_only_and_reports_the_error_on_stderr() {
+    let (mut cmd, _tmp, store) = xv_isolated_local_with_opts(false, false);
+    cmd.args(["set", "STALE", "--value", "v"]).status().unwrap();
+    make_due(&store, "STALE");
+
+    let out = xv_cmd_for(&store)
+        .args(["rotate", "--check", "--format", "csv"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(51));
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert!(
+        lines[0].starts_with("name,status"),
+        "the header row must be present: {stdout}"
+    );
+    assert!(
+        lines.iter().any(|l| l.starts_with("STALE,due")),
+        "the due row must be present: {stdout}"
+    );
+    assert!(
+        !stdout.contains("xv-rotation-due"),
+        "no error envelope on a CSV stdout: {stdout}"
+    );
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("error[xv-rotation-due]"),
+        "the plain error belongs on stderr: {stderr}"
+    );
 }
 
 #[test]

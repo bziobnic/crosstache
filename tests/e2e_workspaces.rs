@@ -1596,17 +1596,20 @@ fn no_workspace_byte_identical() {
 
     let set_result = env.run(&["set", "PLAIN_SECRET", "--value", "plain-value"]);
     assert!(set_result.status.success(), "{}", combined(&set_result));
-    // `output::success`/`hint` go to stderr; the "Vault:"/"Version:" lines
-    // are plain `println!` and land on stdout — both streams are pinned so
-    // a future change that moves a line between them would fail loud here.
+    // Every line `set` prints is human narration, so under the machine-output
+    // contract all of it — the Vault/Version detail included — goes to stderr
+    // and stdout stays empty. Both streams are pinned so a future change that
+    // moves a line between them would fail loud here.
     assert_eq!(
         stdout_str(&set_result),
-        "   Vault: default\n   Version: v1\n",
-        "set's Vault/Version lines must be byte-identical to the pre-workspace golden"
+        "",
+        "set writes no machine document, so stdout must be empty"
     );
     assert_eq!(
         stderr_str(&set_result),
         "[ok] Successfully set secret 'PLAIN_SECRET'\n\
+         [info] Vault: default\n\
+         [info] Version: v1\n\
          [hint] Verify with 'xv get PLAIN_SECRET'\n",
         "set's human-readable confirmation output must be byte-identical to the pre-workspace golden"
     );
@@ -1625,13 +1628,12 @@ fn no_workspace_byte_identical() {
     // colon-address parser is never even consulted for this command.
     let colon_set = env.run(&["set", "literal:with:colons", "--value", "colon-value"]);
     assert!(colon_set.status.success(), "{}", combined(&colon_set));
-    assert_eq!(
-        stdout_str(&colon_set),
-        "   Vault: default\n   Version: v1\n",
-    );
+    assert_eq!(stdout_str(&colon_set), "");
     assert_eq!(
         stderr_str(&colon_set),
         "[ok] Successfully set secret 'literal:with:colons'\n\
+         [info] Vault: default\n\
+         [info] Version: v1\n\
          [hint] Verify with 'xv get literal:with:colons'\n",
     );
     let colon_get = env.run(&["get", "literal:with:colons", "--raw"]);

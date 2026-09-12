@@ -113,6 +113,28 @@ default_vault = "default"
         stdout
     }
 
+    /// Run `xv` with args and assert success. Returns stderr — for the human
+    /// narration (previews, plans, summaries), which the machine-output
+    /// contract keeps off stdout.
+    fn xv_ok_stderr(&self, args: &[&str]) -> String {
+        let output = self.xv().args(args).output().expect("execute xv binary");
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        assert!(
+            output.status.success(),
+            "xv {:?} failed (exit {:?}):\nstdout: {}\nstderr: {}",
+            args,
+            output.status.code(),
+            stdout,
+            stderr,
+        );
+        assert!(
+            stdout.trim().is_empty(),
+            "xv {args:?} must keep narration off stdout:\n{stdout}"
+        );
+        stderr
+    }
+
     /// Run `xv` and assert it fails (non-zero exit). Returns (stdout, stderr).
     fn xv_fail(&self, args: &[&str]) -> (String, String) {
         let output = self.xv().args(args).output().expect("execute xv binary");
@@ -1737,7 +1759,7 @@ fn mv_secret_dry_run_does_not_mutate() {
     let env = TestEnv::new();
     env.set_secret_with_args("pass", "v1", &["--folder", "db"]);
 
-    let out = env.xv_ok(&["mv", "db/pass", "app/", "--dry-run"]);
+    let out = env.xv_ok_stderr(&["mv", "db/pass", "app/", "--dry-run"]);
     assert!(out.contains("db/pass") && out.contains("app/pass"), "{out}");
 
     let json = env.xv_ok(&["ls", "--format", "json"]);
@@ -1802,8 +1824,9 @@ fn mv_folder_bulk_dry_run_and_apply() {
     env.set_secret_with_args("c", "3", &["--folder", "approved"]); // boundary trap
     env.set_secret_with_args("d", "4", &[]);
 
-    // Dry run: full plan on stdout, nothing changed.
-    let plan = env.xv_ok(&["mv", "app/", "svc/", "--dry-run"]);
+    // Dry run: full plan on stderr (stdout is reserved for machine
+    // documents), nothing changed.
+    let plan = env.xv_ok_stderr(&["mv", "app/", "svc/", "--dry-run"]);
     assert!(plan.contains("app/a") && plan.contains("svc/a"), "{plan}");
     assert!(
         plan.contains("app/db/b") && plan.contains("svc/db/b"),
