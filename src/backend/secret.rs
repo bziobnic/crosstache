@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 
 use crate::secret::domain::{
-    DeletedSecretSummary, SecretProperties, SecretRequest, SecretSnapshot, SecretSummary,
-    SecretUpdateRequest,
+    DeletedSecretSummary, Secret, SecretMetadata, SecretRequest, SecretSnapshot, SecretSummary,
+    SecretUpdateRequest, SnapshotValue,
 };
 
 use super::error::BackendError;
@@ -62,29 +62,39 @@ pub trait SecretBackend: Send + Sync {
         ))
     }
 
-    /// Create or update a secret. Returns the new version's properties.
+    /// Create or update a secret. Returns the new version's metadata; a write
+    /// never echoes the value back.
     async fn set_secret(
         &self,
         vault: &str,
         request: SecretRequest,
-    ) -> Result<SecretProperties, BackendError>;
+    ) -> Result<SecretMetadata, BackendError>;
 
-    /// Get a secret by name, optionally including the plaintext value.
-    async fn get_secret(
+    /// Get a secret's metadata by name. The provider value is not fetched.
+    async fn get_secret_metadata(
         &self,
         vault: &str,
         name: &str,
-        include_value: bool,
-    ) -> Result<SecretProperties, BackendError>;
+    ) -> Result<SecretMetadata, BackendError>;
 
-    /// Get a specific version of a secret.
+    /// Get a secret by name, including the plaintext value.
+    async fn get_secret(&self, vault: &str, name: &str) -> Result<Secret, BackendError>;
+
+    /// Get a specific version's metadata. The provider value is not fetched.
+    async fn get_secret_version_metadata(
+        &self,
+        vault: &str,
+        name: &str,
+        version: &str,
+    ) -> Result<SecretMetadata, BackendError>;
+
+    /// Get a specific version of a secret, including the plaintext value.
     async fn get_secret_version(
         &self,
         vault: &str,
         name: &str,
         version: &str,
-        include_value: bool,
-    ) -> Result<SecretProperties, BackendError>;
+    ) -> Result<Secret, BackendError>;
 
     /// List all secrets in a vault, optionally filtered by group.
     async fn list_secrets(
@@ -102,7 +112,7 @@ pub trait SecretBackend: Send + Sync {
         vault: &str,
         name: &str,
         request: SecretUpdateRequest,
-    ) -> Result<SecretProperties, BackendError>;
+    ) -> Result<SecretMetadata, BackendError>;
 
     /// Whether the backend can atomically compare an opaque source revision
     /// and commit a complete secret update.
@@ -123,7 +133,7 @@ pub trait SecretBackend: Send + Sync {
         &self,
         _vault: &str,
         _name: &str,
-        _include_value: bool,
+        _with_value: SnapshotValue,
     ) -> Result<SecretSnapshot, BackendError> {
         Err(BackendError::Unsupported(
             "conditional secret snapshots".into(),
@@ -137,9 +147,9 @@ pub trait SecretBackend: Send + Sync {
         &self,
         vault: &str,
         name: &str,
-        include_value: bool,
+        with_value: SnapshotValue,
     ) -> Result<SecretSnapshot, BackendError> {
-        self.get_secret_snapshot(vault, name, include_value).await
+        self.get_secret_snapshot(vault, name, with_value).await
     }
 
     /// Commit an update only while `expected_revision` still names the active
@@ -151,7 +161,7 @@ pub trait SecretBackend: Send + Sync {
         _name: &str,
         _expected_revision: &str,
         _request: SecretUpdateRequest,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         Err(BackendError::Unsupported(
             "conditional secret update".into(),
         ))
@@ -165,7 +175,7 @@ pub trait SecretBackend: Send + Sync {
         _vault: &str,
         _name: &str,
         _expected_revision: &str,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         Err(BackendError::Unsupported(
             "conditional secret revision validation".into(),
         ))
@@ -180,7 +190,7 @@ pub trait SecretBackend: Send + Sync {
         &self,
         _vault: &str,
         _request: SecretRequest,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         Err(BackendError::Unsupported(
             "atomic create-if-absent required for rename".into(),
         ))
@@ -201,7 +211,7 @@ pub trait SecretBackend: Send + Sync {
         _name: &str,
         _new_name: &str,
         _expected_revision: &str,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         Err(BackendError::Unsupported("atomic secret rename".into()))
     }
 
@@ -214,7 +224,7 @@ pub trait SecretBackend: Send + Sync {
         _vault: &str,
         _name: &str,
         _new_name: &str,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         Err(BackendError::Unsupported("atomic secret rename".into()))
     }
 
@@ -227,7 +237,7 @@ pub trait SecretBackend: Send + Sync {
         &self,
         _vault: &str,
         _name: &str,
-    ) -> Result<Vec<SecretProperties>, BackendError> {
+    ) -> Result<Vec<SecretMetadata>, BackendError> {
         Err(BackendError::Unsupported("version history".into()))
     }
 
@@ -237,7 +247,7 @@ pub trait SecretBackend: Send + Sync {
         _vault: &str,
         _name: &str,
         _version: &str,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         Err(BackendError::Unsupported("rollback".into()))
     }
 
@@ -246,7 +256,7 @@ pub trait SecretBackend: Send + Sync {
         &self,
         _vault: &str,
         _name: &str,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         Err(BackendError::Unsupported("restore".into()))
     }
 
@@ -255,9 +265,10 @@ pub trait SecretBackend: Send + Sync {
         Err(BackendError::Unsupported("purge".into()))
     }
 
-    /// Check if a secret exists (default: try `get_secret` and map the result).
+    /// Check if a secret exists (default: try `get_secret_metadata` and map
+    /// the result). Existence never needs the plaintext.
     async fn secret_exists(&self, vault: &str, name: &str) -> Result<bool, BackendError> {
-        match self.get_secret(vault, name, false).await {
+        match self.get_secret_metadata(vault, name).await {
             Ok(_) => Ok(true),
             Err(BackendError::NotFound { .. }) => Ok(false),
             Err(e) => Err(e),
@@ -282,7 +293,7 @@ pub trait SecretBackend: Send + Sync {
         &self,
         _vault: &str,
         _backup: &[u8],
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         Err(BackendError::Unsupported("restore from backup".into()))
     }
 
@@ -300,8 +311,8 @@ pub trait SecretBackend: Send + Sync {
 /// (in place) and returns them, and strips the bookkeeping tags
 /// (`original_name`, `created_by`) that a fresh write regenerates.
 ///
-/// Every backend's `get_secret` folds groups/note/folder into plain tag
-/// keys on `SecretProperties.tags` for display convenience — Azure stores
+/// Every backend's secret read folds groups/note/folder into plain tag
+/// keys on `SecretMetadata.tags` for display convenience — Azure stores
 /// them as literal tags natively (so this "just works" there), while AWS's
 /// `props_from_describe` explicitly lifts `xv:groups`/the description
 /// field/`xv:folder` into the same plain `"groups"`/`"note"`/`"folder"`
@@ -336,28 +347,21 @@ pub(crate) fn split_denormalized_tags(
 }
 
 /// Build the create-under-the-new-name request for a rename from the source
-/// secret's properties. Groups/note/folder live under canonical tag keys in
-/// `SecretProperties.tags` on every backend; lift them into the first-class
+/// secret. Groups/note/folder live under canonical tag keys in
+/// `SecretMetadata.tags` on every backend; lift them into the first-class
 /// `SecretRequest` fields so each backend re-encodes them natively, and strip
 /// the bookkeeping tags (`original_name`, `created_by`) that `set_secret`
 /// regenerates for the new name.
-pub(crate) fn rename_request_from_properties(
-    new_name: &str,
-    current: &SecretProperties,
-) -> Result<SecretRequest, BackendError> {
-    let value = current.value.clone().ok_or_else(|| {
-        BackendError::Internal(format!(
-            "backend returned no value for '{}'; rename aborted before creating anything",
-            current.name
-        ))
-    })?;
-
+///
+/// A [`Secret`] always carries its value, so the "backend returned no value"
+/// abort this used to perform is now impossible by construction.
+pub(crate) fn rename_request_from_properties(new_name: &str, current: &Secret) -> SecretRequest {
     let mut tags = current.tags.clone();
     let (groups, note, folder) = split_denormalized_tags(&mut tags);
 
-    Ok(SecretRequest {
+    SecretRequest {
         name: new_name.to_string(),
-        value,
+        value: current.value.clone(),
         content_type: (!current.content_type.is_empty()).then(|| current.content_type.clone()),
         enabled: Some(current.enabled),
         expires_on: current.expires_on,
@@ -366,7 +370,7 @@ pub(crate) fn rename_request_from_properties(
         groups,
         note,
         folder,
-    })
+    }
 }
 
 /// Validate the final destination request before any transfer mutation.
@@ -395,7 +399,7 @@ pub(crate) fn validate_transfer_request(
 /// Deterministic value-free cloud drift evidence. All mutable semantic metadata
 /// participates, including folder/note/groups in the sorted tag map.
 pub(crate) fn transfer_metadata_revision(
-    properties: &SecretProperties,
+    properties: &SecretMetadata,
 ) -> Result<String, BackendError> {
     use sha2::{Digest, Sha256};
     let tags: std::collections::BTreeMap<_, _> = properties.tags.iter().collect();
@@ -441,8 +445,8 @@ mod tests {
     }
 
     /// Mirror how real backends surface metadata: groups/note/folder appear
-    /// under canonical tag keys in `SecretProperties.tags`.
-    fn props_from_request(req: &SecretRequest, include_value: bool) -> SecretProperties {
+    /// under canonical tag keys in `SecretMetadata.tags`.
+    fn metadata_from_request(req: &SecretRequest) -> SecretMetadata {
         let mut tags = req.tags.clone().unwrap_or_default();
         if let Some(groups) = req.groups.as_ref().filter(|g| !g.is_empty()) {
             tags.insert("groups".to_string(), groups.join(","));
@@ -455,10 +459,9 @@ mod tests {
         }
         tags.insert("original_name".to_string(), req.name.clone());
         tags.insert("created_by".to_string(), "crosstache".to_string());
-        SecretProperties {
+        SecretMetadata {
             name: req.name.clone(),
             original_name: req.name.clone(),
-            value: include_value.then(|| req.value.clone()),
             version: "v1".to_string(),
             version_number: Some(1),
             created_timestamp: 0,
@@ -473,26 +476,33 @@ mod tests {
         }
     }
 
+    fn secret_from_request(req: &SecretRequest) -> Secret {
+        Secret {
+            metadata: metadata_from_request(req),
+            value: req.value.clone(),
+        }
+    }
+
     #[async_trait]
     impl SecretBackend for StubBackend {
         async fn set_secret(
             &self,
             _vault: &str,
             request: SecretRequest,
-        ) -> Result<SecretProperties, BackendError> {
-            let props = props_from_request(&request, false);
+        ) -> Result<SecretMetadata, BackendError> {
+            let metadata = metadata_from_request(&request);
             self.secrets
                 .lock()
                 .unwrap()
                 .insert(request.name.clone(), request);
-            Ok(props)
+            Ok(metadata)
         }
 
         async fn create_secret_if_absent(
             &self,
             _vault: &str,
             request: SecretRequest,
-        ) -> Result<SecretProperties, BackendError> {
+        ) -> Result<SecretMetadata, BackendError> {
             let mut secrets = self.secrets.lock().unwrap();
             if secrets.contains_key(&request.name) {
                 return Err(BackendError::Conflict(format!(
@@ -500,26 +510,46 @@ mod tests {
                     request.name
                 )));
             }
-            let props = props_from_request(&request, false);
+            let metadata = metadata_from_request(&request);
             secrets.insert(request.name.clone(), request);
-            Ok(props)
+            Ok(metadata)
         }
 
-        async fn get_secret(
+        async fn get_secret_metadata(
             &self,
             _vault: &str,
             name: &str,
-            include_value: bool,
-        ) -> Result<SecretProperties, BackendError> {
+        ) -> Result<SecretMetadata, BackendError> {
             self.secrets
                 .lock()
                 .unwrap()
                 .get(name)
-                .map(|r| props_from_request(r, include_value))
+                .map(metadata_from_request)
                 .ok_or_else(|| BackendError::NotFound {
                     name: name.to_string(),
                     suggestion: None,
                 })
+        }
+
+        async fn get_secret(&self, _vault: &str, name: &str) -> Result<Secret, BackendError> {
+            self.secrets
+                .lock()
+                .unwrap()
+                .get(name)
+                .map(secret_from_request)
+                .ok_or_else(|| BackendError::NotFound {
+                    name: name.to_string(),
+                    suggestion: None,
+                })
+        }
+
+        async fn get_secret_version_metadata(
+            &self,
+            _vault: &str,
+            _name: &str,
+            _version: &str,
+        ) -> Result<SecretMetadata, BackendError> {
+            Err(BackendError::Unsupported("versions".into()))
         }
 
         async fn get_secret_version(
@@ -527,8 +557,7 @@ mod tests {
             _vault: &str,
             _name: &str,
             _version: &str,
-            _include_value: bool,
-        ) -> Result<SecretProperties, BackendError> {
+        ) -> Result<Secret, BackendError> {
             Err(BackendError::Unsupported("versions".into()))
         }
 
@@ -557,7 +586,7 @@ mod tests {
             _vault: &str,
             _name: &str,
             _request: SecretUpdateRequest,
-        ) -> Result<SecretProperties, BackendError> {
+        ) -> Result<SecretMetadata, BackendError> {
             Err(BackendError::Unsupported("update".into()))
         }
     }
@@ -606,9 +635,9 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, BackendError::Unsupported(_)), "{error:?}");
-        assert!(backend.get_secret("v", "old-name", true).await.is_ok());
+        assert!(backend.get_secret("v", "old-name").await.is_ok());
         assert!(matches!(
-            backend.get_secret("v", "new-name", false).await,
+            backend.get_secret_metadata("v", "new-name").await,
             Err(BackendError::NotFound { .. })
         ));
     }
@@ -632,24 +661,26 @@ mod tests {
         tags.insert("original_name".to_string(), "old".to_string());
         tags.insert("created_by".to_string(), "crosstache".to_string());
         tags.insert("custom".to_string(), "kept".to_string());
-        let props = SecretProperties {
-            name: "old".to_string(),
-            original_name: "old".to_string(),
-            value: Some(SecretValue::new("v".to_string())),
-            version: "v3".to_string(),
-            version_number: Some(3),
-            created_timestamp: 0,
-            created_on: String::new(),
-            updated_on: String::new(),
-            enabled: false,
-            expires_on: None,
-            not_before: None,
-            tags,
-            content_type: "text/plain".to_string(),
-            recovery_level: None,
+        let secret = Secret {
+            metadata: SecretMetadata {
+                name: "old".to_string(),
+                original_name: "old".to_string(),
+                version: "v3".to_string(),
+                version_number: Some(3),
+                created_timestamp: 0,
+                created_on: String::new(),
+                updated_on: String::new(),
+                enabled: false,
+                expires_on: None,
+                not_before: None,
+                tags,
+                content_type: "text/plain".to_string(),
+                recovery_level: None,
+            },
+            value: SecretValue::new("v".to_string()),
         };
 
-        let req = rename_request_from_properties("new", &props).unwrap();
+        let req = rename_request_from_properties("new", &secret);
         assert_eq!(req.name, "new");
         assert_eq!(req.value.expose_secret(), "v");
         assert_eq!(req.groups, Some(vec!["a".to_string(), "b".to_string()]));
@@ -661,27 +692,5 @@ mod tests {
         assert_eq!(t.get("custom").map(String::as_str), Some("kept"));
         assert!(!t.contains_key("original_name") && !t.contains_key("created_by"));
         assert!(!t.contains_key("groups") && !t.contains_key("note") && !t.contains_key("folder"));
-    }
-
-    #[test]
-    fn rename_request_aborts_without_a_value() {
-        let props = SecretProperties {
-            name: "old".to_string(),
-            original_name: "old".to_string(),
-            value: None,
-            version: "v1".to_string(),
-            version_number: None,
-            created_timestamp: 0,
-            created_on: String::new(),
-            updated_on: String::new(),
-            enabled: true,
-            expires_on: None,
-            not_before: None,
-            tags: HashMap::new(),
-            content_type: String::new(),
-            recovery_level: None,
-        };
-        let err = rename_request_from_properties("new", &props).unwrap_err();
-        assert!(matches!(err, BackendError::Internal(_)), "{err:?}");
     }
 }

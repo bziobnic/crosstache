@@ -3,6 +3,7 @@ use crate::backend::{local::LocalBackend, Backend};
 use crate::blob::models::FileUploadRequest;
 use crate::config::settings::LocalConfig;
 use crate::secret::attachments;
+use crate::secret::domain::{SecretMetadata, SecretValue};
 use std::collections::HashMap;
 
 fn fixture() -> (tempfile::TempDir, LocalBackend) {
@@ -68,7 +69,7 @@ async fn preview_has_no_writes_and_apply_changes_once_preserving_readability() {
         .await
         .unwrap();
         let before = keys
-            .get_secret("default", key::ACTIVE_POINTER_SECRET, true)
+            .get_secret("default", key::ACTIVE_POINTER_SECRET)
             .await
             .unwrap();
         let preview = rotate(keys.as_ref(), "default", &id, false).await.unwrap();
@@ -76,7 +77,7 @@ async fn preview_has_no_writes_and_apply_changes_once_preserving_readability() {
         assert!(preview.new_key_id.is_none());
         assert_eq!(keys.list_retained_keys("default").await.unwrap().len(), 1);
         assert_eq!(
-            keys.get_secret("default", key::ACTIVE_POINTER_SECRET, true)
+            keys.get_secret("default", key::ACTIVE_POINTER_SECRET)
                 .await
                 .unwrap()
                 .version,
@@ -153,13 +154,13 @@ async fn refuses_v1_mismatch_and_invalid_or_disabled_records() {
             keys.set_secret("default", req).await.unwrap();
         } else if case != "mismatch" {
             let name = key::retained_record_name(&id);
-            let original = keys.get_secret("default", &name, true).await.unwrap();
+            let original = keys.get_secret("default", &name).await.unwrap();
             let mut req = request(
                 &name,
                 if case == "invalid" {
                     Zeroizing::new("invalid".into())
                 } else {
-                    Zeroizing::new(original.value.unwrap().expose_secret().to_owned())
+                    Zeroizing::new(original.value.expose_secret().to_owned())
                 },
                 case != "unmarked",
             );
@@ -167,7 +168,7 @@ async fn refuses_v1_mismatch_and_invalid_or_disabled_records() {
             backend.secrets().set_secret("default", req).await.unwrap();
         }
         let before = keys
-            .get_secret("default", key::ACTIVE_POINTER_SECRET, false)
+            .get_secret_metadata("default", key::ACTIVE_POINTER_SECRET)
             .await
             .unwrap()
             .version;
@@ -180,7 +181,7 @@ async fn refuses_v1_mismatch_and_invalid_or_disabled_records() {
             );
         }
         assert_eq!(
-            keys.get_secret("default", key::ACTIVE_POINTER_SECRET, false)
+            keys.get_secret_metadata("default", key::ACTIVE_POINTER_SECRET)
                 .await
                 .unwrap()
                 .version,
@@ -232,22 +233,52 @@ impl AttachmentKeyStore for FaultKeys<'_> {
         }
         self.inner.preflight_set_secret(vault, name).await
     }
-    async fn get_secret(
+    async fn get_secret_metadata(
         &self,
         vault: &str,
         name: &str,
-        include_value: bool,
-    ) -> std::result::Result<SecretProperties, BackendError> {
+    ) -> std::result::Result<SecretMetadata, BackendError> {
         let candidate = self.candidate.lock().unwrap().clone();
         if self.mode == "collision" && candidate.as_deref() == Some(name) {
             let mut p = self
                 .inner
-                .get_secret(vault, &self.old_name, include_value)
+                .get_secret_metadata(vault, &self.old_name)
                 .await?;
             p.content_type = "ordinary".into();
             return Ok(p);
         }
-        let mut props = self.inner.get_secret(vault, name, include_value).await?;
+        let mut props = self.inner.get_secret_metadata(vault, name).await?;
+        if name == key::ACTIVE_POINTER_SECRET {
+            let read = self.pointer_reads.fetch_add(1, Ordering::SeqCst);
+            if (self.mode == "pointer-drift" && read == 1)
+                || (self.mode == "publication-version" && self.writes.load(Ordering::SeqCst) == 2)
+            {
+                props.version = "other-version".into();
+            }
+            // The publication-value fault substitutes the pointer value; it has
+            // no metadata-path equivalent.
+        }
+        if name == self.old_name
+            && self.mode == "ref-drift"
+            && self.writes.load(Ordering::SeqCst) > 0
+        {
+            props.version = "changed".into();
+        }
+        Ok(props)
+    }
+
+    async fn get_secret(
+        &self,
+        vault: &str,
+        name: &str,
+    ) -> std::result::Result<Secret, BackendError> {
+        let candidate = self.candidate.lock().unwrap().clone();
+        if self.mode == "collision" && candidate.as_deref() == Some(name) {
+            let mut p = self.inner.get_secret(vault, &self.old_name).await?;
+            p.content_type = "ordinary".into();
+            return Ok(p);
+        }
+        let mut props = self.inner.get_secret(vault, name).await?;
         if name == key::ACTIVE_POINTER_SECRET {
             let read = self.pointer_reads.fetch_add(1, Ordering::SeqCst);
             if (self.mode == "pointer-drift" && read == 1)
@@ -256,7 +287,7 @@ impl AttachmentKeyStore for FaultKeys<'_> {
                 props.version = "other-version".into();
             }
             if self.mode == "publication-value" && self.writes.load(Ordering::SeqCst) == 2 {
-                props.value = Some(SecretValue::new("changed"));
+                props.value = SecretValue::new("changed");
             }
         }
         if name == self.old_name
@@ -267,21 +298,43 @@ impl AttachmentKeyStore for FaultKeys<'_> {
         }
         Ok(props)
     }
-    async fn get_secret_version(
+    async fn get_secret_version_metadata(
         &self,
         vault: &str,
         name: &str,
         version: &str,
-        include_value: bool,
-    ) -> std::result::Result<SecretProperties, BackendError> {
+    ) -> std::result::Result<SecretMetadata, BackendError> {
         let is_candidate = self.candidate.lock().unwrap().as_deref() == Some(name);
         if self.mode == "readback" && is_candidate {
             return Err(BackendError::Network("readback interrupted".into()));
         }
         let mut props = self
             .inner
-            .get_secret_version(vault, name, version, include_value)
+            .get_secret_version_metadata(vault, name, version)
             .await?;
+        if self.mode == "exact-version" {
+            props.version = "wrong-version".into();
+        }
+        if self.mode == "exact-disabled" {
+            props.enabled = false;
+        }
+        if self.mode == "exact-unmarked" {
+            props.content_type = "ordinary".into();
+        }
+        Ok(props)
+    }
+
+    async fn get_secret_version(
+        &self,
+        vault: &str,
+        name: &str,
+        version: &str,
+    ) -> std::result::Result<Secret, BackendError> {
+        let is_candidate = self.candidate.lock().unwrap().as_deref() == Some(name);
+        if self.mode == "readback" && is_candidate {
+            return Err(BackendError::Network("readback interrupted".into()));
+        }
+        let mut props = self.inner.get_secret_version(vault, name, version).await?;
         if self.mode == "exact-version" {
             props.version = "wrong-version".into();
         }
@@ -297,7 +350,7 @@ impl AttachmentKeyStore for FaultKeys<'_> {
         &self,
         vault: &str,
         req: SecretRequest,
-    ) -> std::result::Result<SecretProperties, BackendError> {
+    ) -> std::result::Result<SecretMetadata, BackendError> {
         self.writes.fetch_add(1, Ordering::SeqCst);
         if self.mode == "commit" {
             return Err(BackendError::Network("commit interrupted".into()));
@@ -308,7 +361,7 @@ impl AttachmentKeyStore for FaultKeys<'_> {
         &self,
         vault: &str,
         req: SecretRequest,
-    ) -> std::result::Result<SecretProperties, BackendError> {
+    ) -> std::result::Result<SecretMetadata, BackendError> {
         self.writes.fetch_add(1, Ordering::SeqCst);
         if self.mode == "interrupted" && !self.triggered.swap(true, Ordering::SeqCst) {
             return Err(BackendError::Network("publication interrupted".into()));
@@ -354,7 +407,7 @@ async fn failures_do_not_publish_before_commit_verification_or_after_drift() {
         let inner = backend.attachment_keys();
         let id = seed(inner.as_ref(), true).await;
         let before = inner
-            .get_secret("default", key::ACTIVE_POINTER_SECRET, true)
+            .get_secret("default", key::ACTIVE_POINTER_SECRET)
             .await
             .unwrap();
         let keys = FaultKeys::new(&backend, &id, mode);
@@ -362,7 +415,7 @@ async fn failures_do_not_publish_before_commit_verification_or_after_drift() {
         assert_eq!(keys.writes.load(Ordering::SeqCst), 1, "{mode}");
         assert_eq!(
             inner
-                .get_secret("default", key::ACTIVE_POINTER_SECRET, true)
+                .get_secret("default", key::ACTIVE_POINTER_SECRET)
                 .await
                 .unwrap()
                 .version,
@@ -406,7 +459,7 @@ async fn interrupted_retry_preserves_orphan_but_success_cannot_rotate_twice() {
     let orphan = keys.candidate.lock().unwrap().clone().unwrap();
     let retained_orphan = backend
         .attachment_keys()
-        .get_secret("default", &orphan, true)
+        .get_secret("default", &orphan)
         .await
         .unwrap();
     let report = rotate(&keys, "default", &id, true).await.unwrap();
@@ -420,7 +473,7 @@ async fn interrupted_retry_preserves_orphan_but_success_cannot_rotate_twice() {
     assert_eq!(
         backend
             .attachment_keys()
-            .get_secret("default", &orphan, true)
+            .get_secret("default", &orphan)
             .await
             .unwrap()
             .version,
@@ -498,7 +551,7 @@ async fn policy_wrapper_denies_pointer_write_and_candidate_raw_readback_before_m
         let raw = std::sync::Arc::new(backend);
         let original = raw
             .attachment_keys()
-            .get_secret("default", key::ACTIVE_POINTER_SECRET, true)
+            .get_secret("default", key::ACTIVE_POINTER_SECRET)
             .await
             .unwrap();
         let rule = |name: &str, secrets: Vec<String>, operations: Vec<String>, raw_disclosure| {
@@ -569,7 +622,7 @@ async fn policy_wrapper_denies_pointer_write_and_candidate_raw_readback_before_m
         );
         assert_eq!(
             raw.attachment_keys()
-                .get_secret("default", key::ACTIVE_POINTER_SECRET, true)
+                .get_secret("default", key::ACTIVE_POINTER_SECRET)
                 .await
                 .unwrap()
                 .version,

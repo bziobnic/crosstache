@@ -1,8 +1,8 @@
 use super::*;
 use crate::backend::{local::LocalBackend, Backend};
 use crate::config::settings::LocalConfig;
-use crate::secret::domain::SecretRequest;
 use crate::secret::domain::SecretValue;
+use crate::secret::domain::{SecretMetadata, SecretRequest};
 use crate::secret::{attachment_lifecycle, attachment_rotation, attachments};
 use age::secrecy::ExposeSecret;
 use std::collections::HashMap;
@@ -438,13 +438,35 @@ struct FaultKeys<'a> {
 }
 #[async_trait::async_trait]
 impl AttachmentKeyStore for FaultKeys<'_> {
-    async fn get_secret(
+    async fn get_secret_metadata(
         &self,
         v: &str,
         n: &str,
-        include: bool,
-    ) -> std::result::Result<SecretProperties, BackendError> {
-        let mut p = self.inner.get_secret(v, n, include).await?;
+    ) -> std::result::Result<SecretMetadata, BackendError> {
+        let mut p = self.inner.get_secret_metadata(v, n).await?;
+        if n == key::ACTIVE_POINTER_SECRET {
+            let read = self.reads.fetch_add(1, Ordering::SeqCst);
+            if self.mode == "pointer-drift" && read >= 2 {
+                p.version = "changed".into();
+            }
+            if self.mode == "pointer-disabled" {
+                p.enabled = false;
+            }
+            // The "v1" and "no-legacy" faults substitute the pointer value;
+            // neither has a metadata-path equivalent.
+        } else {
+            if self.mode == "current-unmarked" {
+                p.content_type = "ordinary".into();
+            }
+            if self.mode == "target-drift" && self.reads.load(Ordering::SeqCst) >= 2 {
+                p.version = "changed".into();
+            }
+        }
+        Ok(p)
+    }
+
+    async fn get_secret(&self, v: &str, n: &str) -> std::result::Result<Secret, BackendError> {
+        let mut p = self.inner.get_secret(v, n).await?;
         if n == key::ACTIVE_POINTER_SECRET {
             let read = self.reads.fetch_add(1, Ordering::SeqCst);
             if self.mode == "pointer-drift" && read >= 2 {
@@ -454,20 +476,17 @@ impl AttachmentKeyStore for FaultKeys<'_> {
                 p.enabled = false;
             }
             if self.mode == "v1" {
-                p.value = Some(SecretValue::new(
+                p.value = SecretValue::new(
                     age::x25519::Identity::generate()
                         .to_string()
                         .expose_secret(),
-                ));
+                );
             }
             if self.mode == "no-legacy" {
-                if let Some(PointerKind::V2 { active, .. }) = p
-                    .value
-                    .as_ref()
-                    .map(SecretValue::expose_secret)
-                    .and_then(key::parse_pointer_value)
+                if let Some(PointerKind::V2 { active, .. }) =
+                    key::parse_pointer_value(p.value.expose_secret())
                 {
-                    p.value = Some(SecretValue::new(key::format_v2_pointer(&active, None)));
+                    p.value = SecretValue::new(key::format_v2_pointer(&active, None));
                 }
             }
         } else {
@@ -480,27 +499,44 @@ impl AttachmentKeyStore for FaultKeys<'_> {
         }
         Ok(p)
     }
-    async fn get_secret_version(
+    async fn get_secret_version_metadata(
         &self,
         v: &str,
         n: &str,
         version: &str,
-        include: bool,
-    ) -> std::result::Result<SecretProperties, BackendError> {
+    ) -> std::result::Result<SecretMetadata, BackendError> {
         let mut p = self
             .inner
-            .get_secret_version(v, n, version, include)
+            .get_secret_version_metadata(v, n, version)
             .await?;
         match self.mode {
             "exact-version" => p.version = "wrong".into(),
             "exact-disabled" => p.enabled = false,
             "exact-unmarked" => p.content_type = "ordinary".into(),
+            // The wrong-identity fault is a value substitution; it has no
+            // metadata-path equivalent.
+            _ => {}
+        }
+        Ok(p)
+    }
+
+    async fn get_secret_version(
+        &self,
+        v: &str,
+        n: &str,
+        version: &str,
+    ) -> std::result::Result<Secret, BackendError> {
+        let mut p = self.inner.get_secret_version(v, n, version).await?;
+        match self.mode {
+            "exact-version" => p.version = "wrong".into(),
+            "exact-disabled" => p.enabled = false,
+            "exact-unmarked" => p.content_type = "ordinary".into(),
             "exact-wrong-identity" => {
-                p.value = Some(SecretValue::new(
+                p.value = SecretValue::new(
                     age::x25519::Identity::generate()
                         .to_string()
                         .expose_secret(),
-                ))
+                )
             }
             _ => {}
         }
@@ -510,14 +546,14 @@ impl AttachmentKeyStore for FaultKeys<'_> {
         &self,
         _: &str,
         _: SecretRequest,
-    ) -> std::result::Result<SecretProperties, BackendError> {
+    ) -> std::result::Result<SecretMetadata, BackendError> {
         panic!("rewrap must never mutate custody")
     }
     async fn commit_retained_key(
         &self,
         _: &str,
         _: SecretRequest,
-    ) -> std::result::Result<SecretProperties, BackendError> {
+    ) -> std::result::Result<SecretMetadata, BackendError> {
         panic!("rewrap must never mutate custody")
     }
 }

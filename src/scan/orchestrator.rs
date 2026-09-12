@@ -138,15 +138,11 @@ pub async fn fetch_secret_values(
                     .acquire_owned()
                     .await
                     .map_err(|e| format!("secret fetch semaphore closed: {e}"))?;
-                match backend
-                    .secrets()
-                    .get_secret(&vault, &backend_name, true)
-                    .await
-                {
-                    Ok(props) => Ok(props.value.map(|v| SecretRef {
+                match backend.secrets().get_secret(&vault, &backend_name).await {
+                    Ok(props) => Ok(Some(SecretRef {
                         name: secret_name,
                         vault,
-                        value: Zeroizing::new(v.expose_secret().to_owned()),
+                        value: Zeroizing::new(props.value.expose_secret().to_owned()),
                     })),
                     Err(e) => Err(format!(
                         "secret '{vault}/{backend_name}' value could not be read: {e}"

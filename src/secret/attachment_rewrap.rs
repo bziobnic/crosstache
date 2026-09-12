@@ -8,8 +8,7 @@ use crate::error::{AttachmentError, CrosstacheError, Result};
 use crate::secret::attachment_key::{
     self as key, AttachmentKeyId, AttachmentKeyRef, KeySlot, PointerKind, SecretVersion,
 };
-use crate::secret::domain::SecretProperties;
-use crate::secret::domain::SecretValue;
+use crate::secret::domain::Secret;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -47,7 +46,7 @@ pub(crate) async fn exact_identity(
         KeySlot::Retained => key::retained_record_name(&reference.key_id),
     };
     let p = keys
-        .get_secret_version(vault, &name, reference.provider_version.as_str(), true)
+        .get_secret_version(vault, &name, reference.provider_version.as_str())
         .await?;
     if p.version != reference.provider_version.as_str() {
         return Err(AttachmentError::KeyVersionInvalid.into());
@@ -59,7 +58,6 @@ pub(crate) async fn exact_identity(
     }
     let identity = p
         .value
-        .ok_or(AttachmentError::KeyInvalid)?
         .expose_secret()
         .trim()
         .parse::<age::x25519::Identity>()
@@ -75,7 +73,7 @@ async fn retained(
     id: &AttachmentKeyId,
 ) -> Result<AttachmentKeyRef> {
     let p = keys
-        .get_secret(vault, &key::retained_record_name(id), false)
+        .get_secret_metadata(vault, &key::retained_record_name(id))
         .await?;
     if !p.enabled || !key::is_marked_key_record(&p.content_type) {
         return Err(AttachmentError::KeyInvalid.into());
@@ -88,11 +86,9 @@ async fn retained(
     exact_identity(keys, vault, &reference).await?;
     Ok(reference)
 }
-async fn pointer(keys: &dyn AttachmentKeyStore, vault: &str) -> Result<SecretProperties> {
-    let p = keys
-        .get_secret(vault, key::ACTIVE_POINTER_SECRET, true)
-        .await?;
-    if !p.enabled || p.value.is_none() {
+async fn pointer(keys: &dyn AttachmentKeyStore, vault: &str) -> Result<Secret> {
+    let p = keys.get_secret(vault, key::ACTIVE_POINTER_SECRET).await?;
+    if !p.enabled {
         return Err(AttachmentError::PointerInvalid.into());
     }
     if p.version.is_empty() {
@@ -136,7 +132,7 @@ impl SavedRingBinding {
 }
 /// Pinned current and exact bindings, including the explicit pre-schema legacy ID.
 pub(crate) struct Ring {
-    pointer: SecretProperties,
+    pointer: Secret,
     pub(crate) target: AttachmentKeyRef,
     pub(crate) legacy: Option<AttachmentKeyRef>,
 }
@@ -155,12 +151,7 @@ impl Ring {
         expected: &AttachmentKeyId,
     ) -> Result<Self> {
         let pointer = pointer(keys, vault).await?;
-        let (active, legacy) = match pointer
-            .value
-            .as_ref()
-            .map(SecretValue::expose_secret)
-            .and_then(key::parse_pointer_value)
-        {
+        let (active, legacy) = match key::parse_pointer_value(pointer.value.expose_secret()) {
             Some(PointerKind::V2 { active, legacy }) if &active == expected => (active, legacy),
             _ => return Err(conflict()),
         };

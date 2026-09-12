@@ -43,7 +43,7 @@ pub(crate) async fn reject_self_target(
     }
     let source_props = source
         .secrets()
-        .get_secret(source_vault, source_name, false)
+        .get_secret_metadata(source_vault, source_name)
         .await?;
     if source_props.name != source_name && source_props.original_name != source_name {
         return Err(CrosstacheError::conflict(
@@ -52,7 +52,7 @@ pub(crate) async fn reject_self_target(
     }
     let destination_props = match destination
         .secrets()
-        .get_secret(destination_vault, destination_name, false)
+        .get_secret_metadata(destination_vault, destination_name)
         .await
     {
         Ok(props) => Some(props),

@@ -22,7 +22,7 @@ fn skip_unless_enabled() -> bool {
     std::env::var("AWS_INTEGRATION_TESTS").is_err() || std::env::var("AWS_ENDPOINT_URL").is_err()
 }
 
-/// Extract groups from a `SecretProperties.tags` map (mirrors `SecretInfo::extract_groups`).
+/// Extract groups from a `Secret.tags` map (mirrors `SecretInfo::extract_groups`).
 fn groups_from_tags(tags: &std::collections::HashMap<String, String>) -> Vec<String> {
     tags.get("groups")
         .map(|g| {
@@ -90,17 +90,11 @@ async fn local_to_aws_round_trip() {
 
     // ---- read from local, write to AWS ----
     for n in ["a", "b", "c"] {
-        let props = local.secrets().get_secret(&vault, n, true).await.unwrap();
+        let props = local.secrets().get_secret(&vault, n).await.unwrap();
         let groups_vec = groups_from_tags(&props.tags);
         let request = SecretRequest {
             name: props.name.clone(),
-            value: SecretValue::new(
-                props
-                    .value
-                    .as_ref()
-                    .map(|v| v.expose_secret().to_string())
-                    .unwrap_or_default(),
-            ),
+            value: SecretValue::new(props.value.expose_secret().to_string()),
             content_type: None,
             enabled: None,
             expires_on: None,
@@ -119,9 +113,9 @@ async fn local_to_aws_round_trip() {
 
     // ---- verify on AWS side ----
     for (n, expected) in [("a", "1"), ("b", "2"), ("c", "3")] {
-        let got = aws.secrets().get_secret(&vault, n, true).await.unwrap();
+        let got = aws.secrets().get_secret(&vault, n).await.unwrap();
         assert_eq!(
-            got.value.as_ref().map(|v| v.expose_secret().to_string()),
+            Some(got.value.expose_secret().to_string()),
             Some(expected.to_string()),
             "value mismatch for secret {n}"
         );

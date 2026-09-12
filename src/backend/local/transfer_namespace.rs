@@ -291,14 +291,11 @@ mod tests {
         assert!(error.to_string().contains("same physical secret"));
         let after = inner
             .secrets()
-            .get_secret("default", "source", true)
+            .get_secret("default", "source")
             .await
             .unwrap();
         assert_eq!(after.version, original.version);
-        assert_eq!(
-            after.value.as_ref().map(SecretValue::expose_secret),
-            Some("keep-me")
-        );
+        assert_eq!(Some(after.value.expose_secret()), Some("keep-me"));
         assert!(!temp.path().join("store-a/vaults/default/files").exists());
         assert!(fs::read_dir(temp.path().join("store-b/vaults/default"))
             .unwrap()

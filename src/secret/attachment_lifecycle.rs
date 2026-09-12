@@ -7,8 +7,10 @@ use crate::error::{AttachmentError, CrosstacheError, Result};
 use crate::secret::attachment_key::{
     self as key, AttachmentKeyId, AttachmentKeyMaterial, KeySlot, PointerKind, SecretVersion,
 };
+#[cfg(test)]
+use crate::secret::domain::SecretMetadata;
 use crate::secret::domain::SecretValue;
-use crate::secret::domain::{SecretProperties, SecretRequest};
+use crate::secret::domain::{Secret, SecretRequest};
 use serde::Serialize;
 use zeroize::Zeroizing;
 
@@ -41,7 +43,7 @@ pub async fn initialize(
                 "The attachment pointer is unhealthy; use attachment-key recover instead of initialize.",
             ));
         }
-        let active = match value(existing).and_then(key::parse_pointer_value) {
+        let active = match key::parse_pointer_value(value(existing)) {
             Some(PointerKind::V2 { active, .. }) => active,
             Some(PointerKind::V1RawIdentity) => return Err(CrosstacheError::conflict(
                 "A legacy attachment identity exists; use attachment-key upgrade instead of initialize.",
@@ -144,25 +146,22 @@ fn report(
     }
 }
 
-async fn pointer(keys: &dyn AttachmentKeyStore, vault: &str) -> Result<Option<SecretProperties>> {
-    match keys
-        .get_secret(vault, key::ACTIVE_POINTER_SECRET, true)
-        .await
-    {
+async fn pointer(keys: &dyn AttachmentKeyStore, vault: &str) -> Result<Option<Secret>> {
+    match keys.get_secret(vault, key::ACTIVE_POINTER_SECRET).await {
         Ok(value) => Ok(Some(value)),
         Err(BackendError::NotFound { .. }) => Ok(None),
         Err(error) => Err(error.into()),
     }
 }
 
-fn value(props: &SecretProperties) -> Option<&str> {
-    props.value.as_ref().map(SecretValue::expose_secret)
+fn value(props: &Secret) -> &str {
+    props.value.expose_secret()
 }
 
 async fn unchanged(
     keys: &dyn AttachmentKeyStore,
     vault: &str,
-    expected: &Option<SecretProperties>,
+    expected: &Option<Secret>,
 ) -> Result<()> {
     let current = pointer(keys, vault).await?;
     let matches = match (expected, &current) {
@@ -190,7 +189,7 @@ async fn exact_identity(
         return Err(AttachmentError::KeyVersionInvalid.into());
     }
     let props = keys
-        .get_secret_version(vault, name, version, true)
+        .get_secret_version(vault, name, version)
         .await
         .map_err(|e| match e {
             BackendError::NotFound { .. } => CrosstacheError::from(AttachmentError::KeyMissing),
@@ -202,13 +201,7 @@ async fn exact_identity(
     let material = AttachmentKeyMaterial::from_identity(
         slot,
         SecretVersion::new(version),
-        Zeroizing::new(
-            props
-                .value
-                .ok_or(AttachmentError::KeyInvalid)?
-                .expose_secret()
-                .to_owned(),
-        ),
+        Zeroizing::new(props.value.expose_secret().to_owned()),
     )
     .ok_or(AttachmentError::KeyInvalid)?;
     if !material.verify_id(id) {
@@ -223,7 +216,7 @@ async fn retained(
     id: &AttachmentKeyId,
 ) -> Result<Option<AttachmentKeyMaterial>> {
     let name = key::retained_record_name(id);
-    let props = match keys.get_secret(vault, &name, false).await {
+    let props = match keys.get_secret_metadata(vault, &name).await {
         Ok(props) => props,
         Err(BackendError::NotFound { .. }) => return Ok(None),
         Err(e) => return Err(e.into()),
@@ -270,7 +263,7 @@ async fn publish(
     )
     .await?;
     let confirmed = pointer(keys, vault).await?;
-    if confirmed.as_ref().and_then(value) != Some(expected.as_str()) {
+    if confirmed.as_ref().map(value) != Some(expected.as_str()) {
         return Err(AttachmentError::CommitUnconfirmed.into());
     }
     Ok(())
@@ -285,10 +278,7 @@ pub async fn upgrade(
 ) -> Result<LifecycleReport> {
     let source = pointer(keys, vault).await?;
     let props = source.as_ref().ok_or(AttachmentError::KeyMissing)?;
-    let raw = props
-        .value
-        .as_ref()
-        .ok_or(AttachmentError::PointerInvalid)?;
+    let raw = &props.value;
     match key::parse_pointer_value(raw.expose_secret()) {
         Some(PointerKind::V2 { active, legacy }) => {
             let material = retained(keys, vault, &active)
@@ -406,7 +396,7 @@ pub async fn recover(
 ) -> Result<LifecycleReport> {
     let source = pointer(keys, vault).await?;
     if let Some(props) = &source {
-        match value(props).and_then(key::parse_pointer_value) {
+        match key::parse_pointer_value(value(props)) {
             Some(PointerKind::V1RawIdentity) => return Err(CrosstacheError::conflict(
                 "A V1 pointer must be preserved with attachment-key upgrade, not replaced by recovery.",
             )),
@@ -440,7 +430,7 @@ pub async fn recover(
             .ok_or(AttachmentError::KeyMissing)?;
     }
     let expected = key::format_v2_pointer(active, legacy);
-    let outcome = if source.as_ref().and_then(value) == Some(expected.as_str()) {
+    let outcome = if source.as_ref().map(value) == Some(expected.as_str()) {
         "unchanged"
     } else if apply {
         unchanged(keys, vault, &source).await?;
@@ -646,8 +636,7 @@ mod tests {
         let mut disabled = crate::backend::secret::rename_request_from_properties(
             key::ACTIVE_POINTER_SECRET,
             &pointer(keys.as_ref(), "default").await.unwrap().unwrap(),
-        )
-        .unwrap();
+        );
         disabled.enabled = Some(false);
         let original = keys.set_secret("default", disabled).await.unwrap();
         assert!(
@@ -708,7 +697,7 @@ mod tests {
         let preview = upgrade(keys.as_ref(), "default", false).await.unwrap();
         assert_eq!(preview.outcome, "ready");
         assert_eq!(
-            keys.get_secret("default", key::ACTIVE_POINTER_SECRET, false)
+            keys.get_secret_metadata("default", key::ACTIVE_POINTER_SECRET)
                 .await
                 .unwrap()
                 .version,
@@ -716,7 +705,7 @@ mod tests {
             "preview must not change pointer"
         );
         assert!(keys
-            .get_secret("default", &key::retained_record_name(&id), false)
+            .get_secret_metadata("default", &key::retained_record_name(&id))
             .await
             .is_err());
         let applied = upgrade(keys.as_ref(), "default", true).await.unwrap();
@@ -764,7 +753,7 @@ mod tests {
             b"new"
         );
         let pointer = keys
-            .get_secret("default", key::ACTIVE_POINTER_SECRET, false)
+            .get_secret_metadata("default", key::ACTIVE_POINTER_SECRET)
             .await
             .unwrap();
         assert_eq!(
@@ -775,24 +764,18 @@ mod tests {
             "unchanged"
         );
         assert_eq!(
-            keys.get_secret("default", key::ACTIVE_POINTER_SECRET, false)
+            keys.get_secret_metadata("default", key::ACTIVE_POINTER_SECRET)
                 .await
                 .unwrap()
                 .version,
             pointer.version
         );
         assert_eq!(
-            keys.get_secret_version(
-                "default",
-                key::ACTIVE_POINTER_SECRET,
-                &original.version,
-                true
-            )
-            .await
-            .unwrap()
-            .value
-            .unwrap()
-            .expose_secret(),
+            keys.get_secret_version("default", key::ACTIVE_POINTER_SECRET, &original.version)
+                .await
+                .unwrap()
+                .value
+                .expose_secret(),
             identity.to_string().expose_secret()
         );
     }
@@ -830,7 +813,7 @@ mod tests {
         assert_eq!(
             backend
                 .secrets()
-                .get_secret("default", key::ACTIVE_POINTER_SECRET, false)
+                .get_secret_metadata("default", key::ACTIVE_POINTER_SECRET)
                 .await
                 .unwrap()
                 .version,
@@ -839,11 +822,10 @@ mod tests {
         assert_eq!(
             backend
                 .secrets()
-                .get_secret("default", &name, true)
+                .get_secret("default", &name)
                 .await
                 .unwrap()
                 .value
-                .unwrap()
                 .expose_secret(),
             "ordinary-user-secret"
         );
@@ -890,12 +872,11 @@ mod tests {
             }
             self.inner.preflight_set_secret(vault, name).await
         }
-        async fn get_secret(
+        async fn get_secret_metadata(
             &self,
             vault: &str,
             name: &str,
-            include_value: bool,
-        ) -> std::result::Result<SecretProperties, BackendError> {
+        ) -> std::result::Result<SecretMetadata, BackendError> {
             if name == key::ACTIVE_POINTER_SECRET {
                 let read = self
                     .pointer_reads
@@ -906,19 +887,49 @@ mod tests {
                         .await?;
                 }
             }
-            self.inner.get_secret(vault, name, include_value).await
+            self.inner.get_secret_metadata(vault, name).await
         }
+
+        async fn get_secret(
+            &self,
+            vault: &str,
+            name: &str,
+        ) -> std::result::Result<Secret, BackendError> {
+            if name == key::ACTIVE_POINTER_SECRET {
+                let read = self
+                    .pointer_reads
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if self.drift_at == Some(read) {
+                    self.inner
+                        .set_secret(vault, request(name, "concurrent-pointer", false))
+                        .await?;
+                }
+            }
+            self.inner.get_secret(vault, name).await
+        }
+        async fn get_secret_version_metadata(
+            &self,
+            vault: &str,
+            name: &str,
+            version: &str,
+        ) -> std::result::Result<SecretMetadata, BackendError> {
+            let mut props = self
+                .inner
+                .get_secret_version_metadata(vault, name, version)
+                .await?;
+            if self.wrong_version && name != key::ACTIVE_POINTER_SECRET {
+                props.version = "different-version".into();
+            }
+            Ok(props)
+        }
+
         async fn get_secret_version(
             &self,
             vault: &str,
             name: &str,
             version: &str,
-            include_value: bool,
-        ) -> std::result::Result<SecretProperties, BackendError> {
-            let mut props = self
-                .inner
-                .get_secret_version(vault, name, version, include_value)
-                .await?;
+        ) -> std::result::Result<Secret, BackendError> {
+            let mut props = self.inner.get_secret_version(vault, name, version).await?;
             if self.wrong_version && name != key::ACTIVE_POINTER_SECRET {
                 props.version = "different-version".into();
             }
@@ -928,14 +939,14 @@ mod tests {
             &self,
             vault: &str,
             req: SecretRequest,
-        ) -> std::result::Result<SecretProperties, BackendError> {
+        ) -> std::result::Result<SecretMetadata, BackendError> {
             self.inner.commit_retained_key(vault, req).await
         }
         async fn set_secret(
             &self,
             vault: &str,
             req: SecretRequest,
-        ) -> std::result::Result<SecretProperties, BackendError> {
+        ) -> std::result::Result<SecretMetadata, BackendError> {
             if self
                 .fail_publish
                 .swap(false, std::sync::atomic::Ordering::SeqCst)
@@ -1054,17 +1065,16 @@ mod tests {
         let name = key::retained_record_name(&id);
         let committed = backend
             .attachment_keys()
-            .get_secret("default", &name, false)
+            .get_secret_metadata("default", &name)
             .await
             .unwrap();
         assert_eq!(
             backend
                 .attachment_keys()
-                .get_secret("default", key::ACTIVE_POINTER_SECRET, true)
+                .get_secret("default", key::ACTIVE_POINTER_SECRET)
                 .await
                 .unwrap()
                 .value
-                .unwrap()
                 .expose_secret(),
             identity.to_string().expose_secret()
         );
@@ -1075,7 +1085,7 @@ mod tests {
         assert_eq!(
             backend
                 .attachment_keys()
-                .get_secret("default", &name, false)
+                .get_secret_metadata("default", &name)
                 .await
                 .unwrap()
                 .version,
@@ -1125,7 +1135,7 @@ mod tests {
             assert!(
                 backend
                     .attachment_keys()
-                    .get_secret("default", &key::retained_record_name(&id), false)
+                    .get_secret_metadata("default", &key::retained_record_name(&id))
                     .await
                     .is_ok(),
                 "a failed publication never removes committed custody"
@@ -1134,7 +1144,7 @@ mod tests {
                 assert_eq!(
                     backend
                         .attachment_keys()
-                        .get_secret("default", key::ACTIVE_POINTER_SECRET, false)
+                        .get_secret_metadata("default", key::ACTIVE_POINTER_SECRET)
                         .await
                         .unwrap()
                         .version,
@@ -1172,7 +1182,7 @@ mod tests {
             "ready"
         );
         assert!(keys
-            .get_secret("default", key::ACTIVE_POINTER_SECRET, false)
+            .get_secret_metadata("default", key::ACTIVE_POINTER_SECRET)
             .await
             .is_err());
         assert_eq!(
@@ -1183,7 +1193,7 @@ mod tests {
             "applied"
         );
         let original = keys
-            .get_secret("default", key::ACTIVE_POINTER_SECRET, false)
+            .get_secret_metadata("default", key::ACTIVE_POINTER_SECRET)
             .await
             .unwrap();
         assert_eq!(
@@ -1208,7 +1218,7 @@ mod tests {
             "xv-conflict"
         );
         assert_eq!(
-            keys.get_secret("default", key::ACTIVE_POINTER_SECRET, false)
+            keys.get_secret_metadata("default", key::ACTIVE_POINTER_SECRET)
                 .await
                 .unwrap()
                 .version,
@@ -1263,7 +1273,7 @@ mod tests {
             "xv-conflict"
         );
         assert!(keys
-            .get_secret("default", key::ACTIVE_POINTER_SECRET, false)
+            .get_secret_metadata("default", key::ACTIVE_POINTER_SECRET)
             .await
             .is_err());
     }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::secret::domain::SecretValue;
 fn intent() -> TransferIntent {
     TransferIntent {
         source: TransferEndpoint {
@@ -118,7 +119,7 @@ async fn preview_is_read_only_and_authenticates_source() {
         .unwrap();
     let secret_before = b
         .guarded_secrets()
-        .get_secret("default", "db", false)
+        .get_secret_metadata("default", "db")
         .await
         .unwrap();
     let planned = plan(&b, &b, intent()).await.unwrap();
@@ -139,14 +140,14 @@ async fn preview_is_read_only_and_authenticates_source() {
     assert_eq!(
         secret_before.version,
         b.guarded_secrets()
-            .get_secret("default", "db", false)
+            .get_secret_metadata("default", "db")
             .await
             .unwrap()
             .version
     );
     assert!(b
         .guarded_secrets()
-        .get_secret("default", "db-new", false)
+        .get_secret_metadata("default", "db-new")
         .await
         .is_err());
     let mut tampered = upload("attachments/db/file");
@@ -276,11 +277,11 @@ async fn cross_vault_requires_exact_destination_key_and_secret_collision_blocks(
     assert!(plan(&source, &destination, i.clone()).await.is_err());
     let pointer = destination
         .attachment_keys()
-        .get_secret("default", key::ACTIVE_POINTER_SECRET, true)
+        .get_secret("default", key::ACTIVE_POINTER_SECRET)
         .await
         .unwrap();
     let Some(key::PointerKind::V2 { active, .. }) =
-        key::parse_pointer_value(pointer.value.as_ref().unwrap().expose_secret())
+        key::parse_pointer_value(pointer.value.expose_secret())
     else {
         panic!("fixture ring is V2")
     };
@@ -295,7 +296,7 @@ async fn cross_vault_requires_exact_destination_key_and_secret_collision_blocks(
     assert!(plan(&source, &destination, i).await.is_err());
     let original = source
         .guarded_secrets()
-        .get_secret("default", "db", true)
+        .get_secret("default", "db")
         .await
         .unwrap();
     source
@@ -304,7 +305,7 @@ async fn cross_vault_requires_exact_destination_key_and_secret_collision_blocks(
             "default",
             crate::secret::domain::SecretRequest {
                 name: "db-new".into(),
-                value: original.value.unwrap(),
+                value: original.value,
                 content_type: None,
                 enabled: Some(true),
                 expires_on: None,
@@ -358,12 +359,12 @@ async fn legacy_pointer_is_refused_without_upgrading_it() {
     .await
     .unwrap();
     let before = keys
-        .get_secret("default", key::ACTIVE_POINTER_SECRET, true)
+        .get_secret("default", key::ACTIVE_POINTER_SECRET)
         .await
         .unwrap();
     assert!(plan(&backend, &backend, intent()).await.is_err());
     let after = keys
-        .get_secret("default", key::ACTIVE_POINTER_SECRET, true)
+        .get_secret("default", key::ACTIVE_POINTER_SECRET)
         .await
         .unwrap();
     assert_eq!(before.version, after.version);
@@ -453,7 +454,7 @@ async fn azure_alias_planner_source_refuses_third_spelling() {
     };
     let secret = b
         .guarded_secrets()
-        .get_secret("default", "db", false)
+        .get_secret_metadata("default", "db")
         .await
         .unwrap();
     b.guarded_secrets()
@@ -485,7 +486,7 @@ async fn azure_alias_planner_source_refuses_third_spelling() {
     assert!(error.to_string().contains("attachment"));
     assert_eq!(
         b.guarded_secrets()
-            .get_secret("default", "db", false)
+            .get_secret_metadata("default", "db")
             .await
             .unwrap()
             .version,

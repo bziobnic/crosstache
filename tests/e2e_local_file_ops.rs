@@ -1091,14 +1091,11 @@ fn attachment_key_status_reports_broken_pointer_without_exposing_or_replacing_it
         .block_on(
             backend
                 .attachment_keys()
-                .get_secret("default", "xv-attachment-key", true),
+                .get_secret("default", "xv-attachment-key"),
         )
         .unwrap();
     assert_eq!(after.version, original.version);
-    assert_eq!(
-        after.value.unwrap().expose_secret(),
-        "PRIVATE-BROKEN-POINTER"
-    );
+    assert_eq!(after.value.expose_secret(), "PRIVATE-BROKEN-POINTER");
 }
 
 #[test]

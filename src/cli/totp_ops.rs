@@ -5,7 +5,6 @@ use crate::cli::helpers::{
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
 use crate::records::{parse_sensitive_envelope, FIELD_TAG_PREFIX, RECORD_CONTENT_TYPE};
-use crate::secret::domain::SecretValue;
 use crate::totp::{generate_current, GeneratedTotp, DEFAULT_TOTP_FIELD};
 use crate::utils::output;
 use crate::workspace::TargetMode;
@@ -135,13 +134,13 @@ pub(crate) async fn execute_totp(
         resolve_workspace_or_default(name, &config, TargetMode::Read).await?;
     let secret = backend
         .secrets()
-        .get_secret(&vault_name, &resolved_name, true)
+        .get_secret(&vault_name, &resolved_name)
         .await?;
     let field = field.unwrap_or(DEFAULT_TOTP_FIELD);
     let material = extract_totp_material(
         &resolved_name,
         &secret.content_type,
-        secret.value.as_ref().map(SecretValue::expose_secret),
+        Some(secret.value.expose_secret()),
         &secret.tags,
         field,
     )?;

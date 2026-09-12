@@ -811,7 +811,7 @@ fn get_corrupt_envelope_fails_loud() {
         let backend = LocalBackend::new(Some(&local_config)).expect("open local backend");
         let existing = backend
             .secrets()
-            .get_secret("default", "cred", false)
+            .get_secret_metadata("default", "cred")
             .await
             .expect("get existing record");
 
@@ -895,7 +895,7 @@ fn get_unknown_type_degrades() {
         let backend = LocalBackend::new(Some(&local_config)).expect("open local backend");
         let existing = backend
             .secrets()
-            .get_secret("default", "cred", true)
+            .get_secret("default", "cred")
             .await
             .expect("get existing record");
         let mut tags = existing.tags.clone();
@@ -903,7 +903,7 @@ fn get_unknown_type_degrades() {
 
         let request = SecretRequest {
             name: "cred".to_string(),
-            value: existing.value.clone().unwrap(),
+            value: existing.value.clone(),
             content_type: Some("application/vnd.xv.record".to_string()),
             enabled: Some(true),
             expires_on: None,
@@ -1062,7 +1062,7 @@ fn update_secret_field_writes_new_envelope() {
     assert_eq!(common::stdout_str(&out4), "hunter2");
 }
 
-/// Bugbot MEDIUM review, round 3: `SecretProperties.tags` (as returned by
+/// Bugbot MEDIUM review, round 3: `Secret.tags` (as returned by
 /// `get_secret`) is DENORMALIZED for display — groups/note/folder are
 /// folded into plain tag keys. The record write-back paths built their
 /// `replace_tags: true` map directly from `secret.tags.clone()`, so those
@@ -2812,7 +2812,7 @@ fn update_positional_value_on_corrupt_envelope_fails_loud_without_writing() {
         let backend = LocalBackend::new(Some(&local_config)).expect("open local backend");
         let existing = backend
             .secrets()
-            .get_secret("default", "cred", false)
+            .get_secret_metadata("default", "cred")
             .await
             .expect("get existing record");
 
@@ -2901,7 +2901,7 @@ fn update_positional_value_on_unknown_type_record_errors_without_writing() {
         let backend = LocalBackend::new(Some(&local_config)).expect("open local backend");
         let existing = backend
             .secrets()
-            .get_secret("default", "cred", true)
+            .get_secret("default", "cred")
             .await
             .expect("get existing record");
         let mut tags = existing.tags.clone();
@@ -2909,7 +2909,7 @@ fn update_positional_value_on_unknown_type_record_errors_without_writing() {
 
         let request = SecretRequest {
             name: "cred".to_string(),
-            value: existing.value.clone().unwrap(),
+            value: existing.value.clone(),
             content_type: Some("application/vnd.xv.record".to_string()),
             enabled: Some(true),
             expires_on: None,

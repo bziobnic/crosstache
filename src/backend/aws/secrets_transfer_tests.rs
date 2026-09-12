@@ -66,21 +66,17 @@ async fn aws_transfer_snapshot_rechecks_folder_metadata_without_claiming_cas() {
     assert!(stable.supports_atomic_create());
     assert!(!stable.supports_conditional_delete());
     let snapshot = stable
-        .get_transfer_snapshot("prod", "source", true)
+        .get_transfer_snapshot("prod", "source", SnapshotValue::Include)
         .await
         .unwrap();
     assert_eq!(
-        snapshot
-            .properties
-            .value
-            .as_ref()
-            .map(SecretValue::expose_secret),
+        snapshot.value.as_ref().map(SecretValue::expose_secret),
         Some("value")
     );
-    assert_eq!(snapshot.properties.tags["folder"], "original");
+    assert_eq!(snapshot.metadata.tags["folder"], "original");
     assert!(!snapshot.revision.is_empty());
     assert!(backend(true)
-        .get_transfer_snapshot("prod", "source", true)
+        .get_transfer_snapshot("prod", "source", SnapshotValue::Include)
         .await
         .is_err());
 }

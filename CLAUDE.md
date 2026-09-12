@@ -95,7 +95,7 @@ the shared resolvers; do not reproduce precedence locally in a command handler.
 
 - `src/secret/domain/` — backend-neutral secret model: `SecretValue`
   (plaintext, no serde/Display, redacted Debug, read only via
-  `expose_secret`), `SecretMetadata`, `SecretProperties`, requests, summaries
+  `expose_secret`), `SecretMetadata`, `Secret`, requests, summaries
 - `src/records/` — type definitions, encrypted envelopes, conversions, Keeper
   import/export
 - `src/totp.rs` and `src/cli/totp_ops.rs` — RFC 6238 code generation

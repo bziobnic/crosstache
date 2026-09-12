@@ -14,8 +14,8 @@ use crate::backend::error::BackendError;
 use crate::backend::secret::SecretBackend;
 use crate::secret::domain::SecretValue;
 use crate::secret::domain::{
-    DeletedSecretSummary, FieldUpdate, SecretAttributesUpdate, SecretProperties, SecretRequest,
-    SecretSummary, SecretUpdateRequest,
+    DeletedSecretSummary, FieldUpdate, Secret, SecretAttributesUpdate, SecretMetadata,
+    SecretRequest, SecretSummary, SecretUpdateRequest, SnapshotValue,
 };
 use crate::secret::manager::SecretOperations;
 
@@ -45,7 +45,7 @@ impl AzureSecretBackend {
         vault: &str,
         name: &str,
     ) -> Result<HashMap<String, String>, BackendError> {
-        let get_err = match self.inner.get_secret(vault, name, false).await {
+        let get_err = match self.inner.get_secret_metadata(vault, name).await {
             Ok(current) => return Ok(current.tags),
             Err(e) => e,
         };
@@ -205,48 +205,72 @@ impl SecretBackend for AzureSecretBackend {
         &self,
         vault: &str,
         request: SecretRequest,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         self.inner
             .set_secret(vault, &request)
             .await
             .map_err(map_error)
     }
 
-    async fn get_secret(
+    async fn get_secret_metadata(
         &self,
         vault: &str,
         name: &str,
-        include_value: bool,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         self.inner
-            .get_secret(vault, name, include_value)
+            .get_secret_metadata(vault, name)
             .await
             .map_err(map_error)
+    }
+
+    async fn get_secret(&self, vault: &str, name: &str) -> Result<Secret, BackendError> {
+        self.inner.get_secret(vault, name).await.map_err(map_error)
     }
 
     async fn get_transfer_snapshot(
         &self,
         vault: &str,
         name: &str,
-        include_value: bool,
+        with_value: SnapshotValue,
     ) -> Result<crate::secret::domain::SecretSnapshot, BackendError> {
-        let properties = self.get_secret(vault, name, include_value).await?;
-        if properties.version.is_empty() {
+        // Both arms issue the same provider read (`GET {vault}/secrets/{name}`)
+        // as the pre-split value flag did; only the disclosure differs.
+        let (metadata, value) = match with_value {
+            SnapshotValue::Include => {
+                let (metadata, value) = self.get_secret(vault, name).await?.into_parts();
+                (metadata, Some(value))
+            }
+            SnapshotValue::Omit => (self.get_secret_metadata(vault, name).await?, None),
+        };
+        if metadata.version.is_empty() {
             return Err(BackendError::Unsupported(
                 "Azure transfer requires a provider version".into(),
             ));
         }
-        let revision = crate::backend::secret::transfer_metadata_revision(&properties)?;
-        let after = self.get_secret(vault, name, false).await?;
+        let revision = crate::backend::secret::transfer_metadata_revision(&metadata)?;
+        let after = self.get_secret_metadata(vault, name).await?;
         if crate::backend::secret::transfer_metadata_revision(&after)? != revision {
             return Err(BackendError::Conflict(
                 "Azure secret metadata/version changed during transfer read".into(),
             ));
         }
         Ok(crate::secret::domain::SecretSnapshot {
-            properties,
+            metadata,
+            value,
             revision,
         })
+    }
+
+    async fn get_secret_version_metadata(
+        &self,
+        vault: &str,
+        name: &str,
+        version: &str,
+    ) -> Result<SecretMetadata, BackendError> {
+        self.inner
+            .get_secret_version_metadata(vault, name, version)
+            .await
+            .map_err(map_error)
     }
 
     async fn get_secret_version(
@@ -254,10 +278,9 @@ impl SecretBackend for AzureSecretBackend {
         vault: &str,
         name: &str,
         version: &str,
-        include_value: bool,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<Secret, BackendError> {
         self.inner
-            .get_secret_version(vault, name, version, include_value)
+            .get_secret_version(vault, name, version)
             .await
             .map_err(map_error)
     }
@@ -285,7 +308,7 @@ impl SecretBackend for AzureSecretBackend {
         vault: &str,
         name: &str,
         request: SecretUpdateRequest,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         // Attributes/tags-only updates (no value change) go
         // through `PATCH {vault}/secrets/{name}` instead of the full-write
         // path below: the full write must read the current value first and
@@ -355,7 +378,7 @@ impl SecretBackend for AzureSecretBackend {
         let current = if needs_current {
             Some(
                 self.inner
-                    .get_secret(vault, name, true)
+                    .get_secret(vault, name)
                     .await
                     .map_err(map_error)?,
             )
@@ -368,7 +391,7 @@ impl SecretBackend for AzureSecretBackend {
             Some(v) => v,
             None => current
                 .as_ref()
-                .and_then(|c| c.value.clone())
+                .map(|c| c.value.clone())
                 .unwrap_or_else(|| SecretValue::new(String::new())),
         };
 
@@ -437,7 +460,7 @@ impl SecretBackend for AzureSecretBackend {
         &self,
         vault: &str,
         name: &str,
-    ) -> Result<Vec<SecretProperties>, BackendError> {
+    ) -> Result<Vec<SecretMetadata>, BackendError> {
         self.inner
             .get_secret_versions(vault, name)
             .await
@@ -449,7 +472,7 @@ impl SecretBackend for AzureSecretBackend {
         vault: &str,
         name: &str,
         version: &str,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         // Azure's rollback API needs the underlying version GUID; resolve a
         // friendly "v6"/"6" first (raw GUIDs pass through unchanged).
         let resolved = self.resolve_version_guid(vault, name, version).await?;
@@ -463,7 +486,7 @@ impl SecretBackend for AzureSecretBackend {
         &self,
         vault: &str,
         name: &str,
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         self.inner
             .restore_secret(vault, name)
             .await
@@ -505,7 +528,7 @@ impl SecretBackend for AzureSecretBackend {
         &self,
         vault: &str,
         backup: &[u8],
-    ) -> Result<SecretProperties, BackendError> {
+    ) -> Result<SecretMetadata, BackendError> {
         self.inner
             .restore_secret_from_backup(vault, backup)
             .await
@@ -746,7 +769,7 @@ mod atomic_conversion_update_tests {
     struct AtomicUpdateMock {
         reads: AtomicUsize,
         updates: Mutex<Vec<SecretRequest>>,
-        retirement: Option<Mutex<SecretProperties>>,
+        retirement: Option<Mutex<Secret>>,
         patches: AtomicUsize,
         transfer_drift: bool,
     }
@@ -763,11 +786,10 @@ mod atomic_conversion_update_tests {
         }
     }
 
-    fn properties() -> SecretProperties {
-        SecretProperties {
+    fn properties() -> SecretMetadata {
+        SecretMetadata {
             name: "secret".into(),
             original_name: "secret".into(),
-            value: None,
             version: "1".into(),
             version_number: Some(1),
             created_timestamp: 0,
@@ -784,19 +806,10 @@ mod atomic_conversion_update_tests {
 
     #[async_trait]
     impl SecretOperations for AtomicUpdateMock {
-        async fn get_secret(
-            &self,
-            _vault: &str,
-            _name: &str,
-            _include_value: bool,
-        ) -> Result<SecretProperties> {
+        async fn get_secret_metadata(&self, _vault: &str, _name: &str) -> Result<SecretMetadata> {
             let read = self.reads.fetch_add(1, Ordering::SeqCst);
             if let Some(state) = &self.retirement {
-                let mut p = state.lock().unwrap().clone();
-                if !_include_value {
-                    p.value = None;
-                }
-                return Ok(p);
+                return Ok(state.lock().unwrap().metadata.clone());
             }
             let mut p = properties();
             if self.transfer_drift && read > 0 {
@@ -805,12 +818,27 @@ mod atomic_conversion_update_tests {
             Ok(p)
         }
 
+        async fn get_secret(&self, _vault: &str, _name: &str) -> Result<Secret> {
+            let read = self.reads.fetch_add(1, Ordering::SeqCst);
+            if let Some(state) = &self.retirement {
+                return Ok(state.lock().unwrap().clone());
+            }
+            let mut p = properties();
+            if self.transfer_drift && read > 0 {
+                p.tags.insert("folder".into(), "changed".into());
+            }
+            Ok(Secret {
+                metadata: p,
+                value: SecretValue::new("value"),
+            })
+        }
+
         async fn update_secret_attributes(
             &self,
             _v: &str,
             _n: &str,
             update: &SecretAttributesUpdate,
-        ) -> Result<SecretProperties> {
+        ) -> Result<SecretMetadata> {
             assert!(update.enabled.is_none());
             assert!(update.content_type.is_none());
             assert!(update.expires_on.is_none());
@@ -824,7 +852,7 @@ mod atomic_conversion_update_tests {
             assert_eq!(update.tags.as_ref(), Some(&expected));
             p.tags = expected;
             self.patches.fetch_add(1, Ordering::SeqCst);
-            Ok(p.clone())
+            Ok(p.metadata.clone())
         }
 
         async fn update_secret(
@@ -832,26 +860,27 @@ mod atomic_conversion_update_tests {
             _vault: &str,
             _name: &str,
             request: &SecretRequest,
-        ) -> Result<SecretProperties> {
+        ) -> Result<SecretMetadata> {
             self.updates.lock().unwrap().push(request.clone());
             Ok(properties())
         }
 
-        async fn set_secret(&self, _v: &str, _r: &SecretRequest) -> Result<SecretProperties> {
+        async fn set_secret(&self, _v: &str, _r: &SecretRequest) -> Result<SecretMetadata> {
             unimplemented!()
         }
-        async fn get_secret_version(
+        async fn get_secret_version_metadata(
             &self,
             _v: &str,
             _n: &str,
             version: &str,
-            include: bool,
-        ) -> Result<SecretProperties> {
-            let mut p = self.retirement.as_ref().unwrap().lock().unwrap().clone();
+        ) -> Result<SecretMetadata> {
+            let p = self.retirement.as_ref().unwrap().lock().unwrap().clone();
             assert_eq!(p.version, version);
-            if !include {
-                p.value = None;
-            }
+            Ok(p.into_metadata())
+        }
+        async fn get_secret_version(&self, _v: &str, _n: &str, version: &str) -> Result<Secret> {
+            let p = self.retirement.as_ref().unwrap().lock().unwrap().clone();
+            assert_eq!(p.version, version);
             Ok(p)
         }
         async fn list_secrets(&self, _v: &str, _g: Option<&str>) -> Result<Vec<SecretSummary>> {
@@ -860,7 +889,7 @@ mod atomic_conversion_update_tests {
         async fn delete_secret(&self, _v: &str, _n: &str) -> Result<()> {
             unimplemented!()
         }
-        async fn restore_secret(&self, _v: &str, _n: &str) -> Result<SecretProperties> {
+        async fn restore_secret(&self, _v: &str, _n: &str) -> Result<SecretMetadata> {
             unimplemented!()
         }
         async fn purge_secret(&self, _v: &str, _n: &str) -> Result<()> {
@@ -872,7 +901,7 @@ mod atomic_conversion_update_tests {
         async fn secret_exists(&self, _v: &str, _n: &str) -> Result<bool> {
             unimplemented!()
         }
-        async fn get_secret_versions(&self, _v: &str, _n: &str) -> Result<Vec<SecretProperties>> {
+        async fn get_secret_versions(&self, _v: &str, _n: &str) -> Result<Vec<SecretMetadata>> {
             unimplemented!()
         }
         async fn rollback_secret(
@@ -880,17 +909,13 @@ mod atomic_conversion_update_tests {
             _v: &str,
             _n: &str,
             _version: &str,
-        ) -> Result<SecretProperties> {
+        ) -> Result<SecretMetadata> {
             unimplemented!()
         }
         async fn backup_secret(&self, _v: &str, _n: &str) -> Result<Vec<u8>> {
             unimplemented!()
         }
-        async fn restore_secret_from_backup(
-            &self,
-            _v: &str,
-            _b: &[u8],
-        ) -> Result<SecretProperties> {
+        async fn restore_secret_from_backup(&self, _v: &str, _b: &[u8]) -> Result<SecretMetadata> {
             unimplemented!()
         }
     }
@@ -900,7 +925,7 @@ mod atomic_conversion_update_tests {
         let stable = Arc::new(AtomicUpdateMock::new());
         let adapter = AzureSecretBackend::new(stable.clone());
         let before = adapter
-            .get_transfer_snapshot("vault", "secret", false)
+            .get_transfer_snapshot("vault", "secret", SnapshotValue::Omit)
             .await
             .unwrap();
         assert_eq!(stable.reads.load(Ordering::SeqCst), 2);
@@ -910,7 +935,7 @@ mod atomic_conversion_update_tests {
         let mut drift = AtomicUpdateMock::new();
         drift.transfer_drift = true;
         assert!(AzureSecretBackend::new(Arc::new(drift))
-            .get_transfer_snapshot("vault", "secret", false)
+            .get_transfer_snapshot("vault", "secret", SnapshotValue::Omit)
             .await
             .is_err());
     }
@@ -925,24 +950,25 @@ mod atomic_conversion_update_tests {
         for custom in [false, true] {
             let identity = age::x25519::Identity::generate();
             let id = AttachmentKeyId::derive(&identity.to_public().to_string());
-            let mut p = properties();
+            let mut p = Secret {
+                metadata: properties(),
+                value: SecretValue::new(identity.to_string().expose_secret()),
+            };
             p.name = key::retained_record_name(&id);
             p.original_name = if custom {
                 "imported spelling".into()
             } else {
                 p.name.clone()
             };
-            p.value = Some(SecretValue::new(identity.to_string().expose_secret()));
             p.content_type = key::KEY_RECORD_CONTENT_TYPE.into();
             p.tags = HashMap::from([
                 ("groups".into(), "one, two".into()),
                 ("custom".into(), "preserved".into()),
             ]);
             if custom {
-                p.tags.insert(
-                    crate::backend::TAG_ORIGINAL_NAME.into(),
-                    p.original_name.clone(),
-                );
+                let original_name = p.original_name.clone();
+                p.tags
+                    .insert(crate::backend::TAG_ORIGINAL_NAME.into(), original_name);
                 p.tags
                     .insert(crate::backend::TAG_CREATED_BY.into(), "external".into());
             }
@@ -957,7 +983,6 @@ mod atomic_conversion_update_tests {
             let backend = AzureSecretBackend::new(inner.clone());
             let keys = RawAttachmentKeyStore::versioned(&backend);
             let after = keys.mark_retired("vault", &reference).await.unwrap();
-            assert_eq!(after.value, p.value);
             assert_eq!(after.version, p.version);
             assert_eq!(after.enabled, p.enabled);
             assert_eq!(after.original_name, p.original_name);
@@ -1017,17 +1042,16 @@ mod rollback_version_resolver_tests {
     //! Exercised through the public `SecretBackend::rollback` against a hand
     //! -rolled `SecretOperations` mock — no live Azure. The mock's
     //! `rollback_secret` echoes the resolved version back as the returned
-    //! `SecretProperties.version`, so each test can assert exactly which
+    //! `SecretMetadata.version`, so each test can assert exactly which
     //! version string the resolver handed to Azure's rollback API.
 
     use super::*;
     use crate::error::Result;
 
-    fn sp(version_number: Option<u32>, version: &str) -> SecretProperties {
-        SecretProperties {
+    fn sp(version_number: Option<u32>, version: &str) -> SecretMetadata {
+        SecretMetadata {
             name: "s".into(),
             original_name: "s".into(),
-            value: None,
             version: version.into(),
             version_number,
             created_timestamp: 0,
@@ -1043,7 +1067,7 @@ mod rollback_version_resolver_tests {
     }
 
     struct VersionResolverMock {
-        versions: Vec<SecretProperties>,
+        versions: Vec<SecretMetadata>,
     }
 
     #[async_trait]
@@ -1052,7 +1076,7 @@ mod rollback_version_resolver_tests {
             &self,
             _vault: &str,
             _name: &str,
-        ) -> Result<Vec<SecretProperties>> {
+        ) -> Result<Vec<SecretMetadata>> {
             Ok(self.versions.clone())
         }
 
@@ -1061,26 +1085,31 @@ mod rollback_version_resolver_tests {
             _vault: &str,
             _name: &str,
             version: &str,
-        ) -> Result<SecretProperties> {
+        ) -> Result<SecretMetadata> {
             // Echo the resolved version GUID back so the caller can assert
             // exactly what `resolve_version_guid` passed to the rollback API.
             Ok(sp(None, version))
         }
 
         // ── Unused in these tests ──────────────────────────────────────
-        async fn set_secret(&self, _v: &str, _r: &SecretRequest) -> Result<SecretProperties> {
+        async fn set_secret(&self, _v: &str, _r: &SecretRequest) -> Result<SecretMetadata> {
             unimplemented!()
         }
-        async fn get_secret(&self, _v: &str, _n: &str, _i: bool) -> Result<SecretProperties> {
+        async fn get_secret_metadata(&self, _v: &str, _n: &str) -> Result<SecretMetadata> {
             unimplemented!()
         }
-        async fn get_secret_version(
+        async fn get_secret(&self, _v: &str, _n: &str) -> Result<Secret> {
+            unimplemented!()
+        }
+        async fn get_secret_version_metadata(
             &self,
             _v: &str,
             _n: &str,
             _ver: &str,
-            _i: bool,
-        ) -> Result<SecretProperties> {
+        ) -> Result<SecretMetadata> {
+            unimplemented!()
+        }
+        async fn get_secret_version(&self, _v: &str, _n: &str, _ver: &str) -> Result<Secret> {
             unimplemented!()
         }
         async fn list_secrets(&self, _v: &str, _g: Option<&str>) -> Result<Vec<SecretSummary>> {
@@ -1094,10 +1123,10 @@ mod rollback_version_resolver_tests {
             _v: &str,
             _n: &str,
             _r: &SecretRequest,
-        ) -> Result<SecretProperties> {
+        ) -> Result<SecretMetadata> {
             unimplemented!()
         }
-        async fn restore_secret(&self, _v: &str, _n: &str) -> Result<SecretProperties> {
+        async fn restore_secret(&self, _v: &str, _n: &str) -> Result<SecretMetadata> {
             unimplemented!()
         }
         async fn purge_secret(&self, _v: &str, _n: &str) -> Result<()> {
@@ -1112,16 +1141,12 @@ mod rollback_version_resolver_tests {
         async fn backup_secret(&self, _v: &str, _n: &str) -> Result<Vec<u8>> {
             unimplemented!()
         }
-        async fn restore_secret_from_backup(
-            &self,
-            _v: &str,
-            _b: &[u8],
-        ) -> Result<SecretProperties> {
+        async fn restore_secret_from_backup(&self, _v: &str, _b: &[u8]) -> Result<SecretMetadata> {
             unimplemented!()
         }
     }
 
-    fn backend(versions: Vec<SecretProperties>) -> AzureSecretBackend {
+    fn backend(versions: Vec<SecretMetadata>) -> AzureSecretBackend {
         AzureSecretBackend::new(Arc::new(VersionResolverMock { versions }))
     }
 

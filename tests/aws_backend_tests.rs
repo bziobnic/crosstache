@@ -217,15 +217,11 @@ async fn get_secret_no_value_returns_metadata_only() {
     let backend = aws_secret_backend(client);
 
     let result = backend
-        .get_secret("myproj-kv", "api-key", false)
+        .get_secret_metadata("myproj-kv", "api-key")
         .await
         .expect("get_secret should succeed");
 
     assert_eq!(result.name, "api-key");
-    assert!(
-        result.value.is_none(),
-        "value should be absent when include_value=false"
-    );
     assert_eq!(
         result.tags.get("xv:migrated_from").map(String::as_str),
         Some("local:myproj-kv:v1")
@@ -287,14 +283,12 @@ async fn get_secret_with_value_includes_value() {
     let backend = aws_secret_backend(client);
 
     let result = backend
-        .get_secret("myproj-kv", "db-password", true)
+        .get_secret("myproj-kv", "db-password")
         .await
         .expect("get_secret with value should succeed");
 
     assert_eq!(result.name, "db-password");
-    let value = result
-        .value
-        .expect("value should be present when include_value=true");
+    let value = result.value;
     assert_eq!(value.expose_secret(), "super-secret-value");
 }
 
@@ -311,7 +305,7 @@ async fn get_secret_not_found_maps_to_backend_not_found() {
     let backend = aws_secret_backend(client);
 
     let result = backend
-        .get_secret("myproj-kv", "missing-secret", false)
+        .get_secret_metadata("myproj-kv", "missing-secret")
         .await;
 
     assert!(
@@ -596,7 +590,7 @@ async fn update_secret_with_value_writes_value_and_content_type_tag() {
         })
         .then_output(|| TagResourceOutput::builder().build());
 
-    // Final `self.get_secret(vault, name, false)` at the end of update_secret.
+    // Final `self.get_secret_metadata(vault, name)` at the end of update_secret.
     let describe_final = mock!(Client::describe_secret).then_output(|| {
         DescribeSecretOutput::builder()
             .name("myproj-kv/cred")

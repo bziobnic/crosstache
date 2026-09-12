@@ -94,11 +94,8 @@ async fn test_full_secret_lifecycle() {
     assert_eq!(list[0].name, "DB_PASSWORD");
 
     // Get secret (with value)
-    let got = secrets
-        .get_secret("default", "DB_PASSWORD", true)
-        .await
-        .unwrap();
-    assert_eq!(got.value.unwrap().expose_secret(), "hunter2");
+    let got = secrets.get_secret("default", "DB_PASSWORD").await.unwrap();
+    assert_eq!(got.value.expose_secret(), "hunter2");
 
     // Update secret (new value via set_secret)
     let updated = secrets
@@ -108,11 +105,8 @@ async fn test_full_secret_lifecycle() {
     assert_eq!(updated.version, "v2");
 
     // Get updated value
-    let got = secrets
-        .get_secret("default", "DB_PASSWORD", true)
-        .await
-        .unwrap();
-    assert_eq!(got.value.unwrap().expose_secret(), "new-password");
+    let got = secrets.get_secret("default", "DB_PASSWORD").await.unwrap();
+    assert_eq!(got.value.expose_secret(), "new-password");
 
     // Delete secret
     secrets
@@ -125,7 +119,7 @@ async fn test_full_secret_lifecycle() {
     assert!(list.is_empty());
 
     // Get should return NotFound
-    let err = secrets.get_secret("default", "DB_PASSWORD", false).await;
+    let err = secrets.get_secret_metadata("default", "DB_PASSWORD").await;
     assert!(matches!(err, Err(BackendError::NotFound { .. })));
 }
 
@@ -165,11 +159,8 @@ async fn test_version_history_and_rollback() {
     assert!(rolled.version.starts_with('v'));
 
     // Get current value — should be v1's content
-    let got = secrets
-        .get_secret("default", "API_KEY", true)
-        .await
-        .unwrap();
-    assert_eq!(got.value.unwrap().expose_secret(), "v1-value");
+    let got = secrets.get_secret("default", "API_KEY").await.unwrap();
+    assert_eq!(got.value.expose_secret(), "v1-value");
 }
 
 #[tokio::test]
@@ -193,7 +184,7 @@ async fn test_soft_delete_restore_purge() {
     assert_eq!(deleted[0].name, "TEMP_KEY");
 
     // Get should return NotFound
-    let err = secrets.get_secret("default", "TEMP_KEY", false).await;
+    let err = secrets.get_secret_metadata("default", "TEMP_KEY").await;
     assert!(matches!(err, Err(BackendError::NotFound { .. })));
 
     // Restore
@@ -201,11 +192,8 @@ async fn test_soft_delete_restore_purge() {
     assert_eq!(restored.name, "TEMP_KEY");
 
     // Get should work now
-    let got = secrets
-        .get_secret("default", "TEMP_KEY", true)
-        .await
-        .unwrap();
-    assert_eq!(got.value.unwrap().expose_secret(), "secret-value");
+    let got = secrets.get_secret("default", "TEMP_KEY").await.unwrap();
+    assert_eq!(got.value.expose_secret(), "secret-value");
 
     // Delete again
     secrets.delete_secret("default", "TEMP_KEY").await.unwrap();
@@ -385,10 +373,10 @@ async fn test_special_characters_in_names() {
         .await
         .unwrap();
     let got = secrets
-        .get_secret("default", "my/secret@test", true)
+        .get_secret("default", "my/secret@test")
         .await
         .unwrap();
-    assert_eq!(got.value.unwrap().expose_secret(), "slash-value");
+    assert_eq!(got.value.expose_secret(), "slash-value");
     assert_eq!(got.name, "my/secret@test");
 
     // Secret with spaces
@@ -396,11 +384,8 @@ async fn test_special_characters_in_names() {
         .set_secret("default", secret_req("has spaces", "space-value"))
         .await
         .unwrap();
-    let got = secrets
-        .get_secret("default", "has spaces", true)
-        .await
-        .unwrap();
-    assert_eq!(got.value.unwrap().expose_secret(), "space-value");
+    let got = secrets.get_secret("default", "has spaces").await.unwrap();
+    assert_eq!(got.value.expose_secret(), "space-value");
     assert_eq!(got.name, "has spaces");
 
     // Secret with unicode/emoji
@@ -408,8 +393,8 @@ async fn test_special_characters_in_names() {
         .set_secret("default", secret_req("key-🔑", "emoji-value"))
         .await
         .unwrap();
-    let got = secrets.get_secret("default", "key-🔑", true).await.unwrap();
-    assert_eq!(got.value.unwrap().expose_secret(), "emoji-value");
+    let got = secrets.get_secret("default", "key-🔑").await.unwrap();
+    assert_eq!(got.value.expose_secret(), "emoji-value");
 
     // List should show all three
     let list = secrets.list_secrets("default", None).await.unwrap();
@@ -450,17 +435,11 @@ async fn test_multiple_vaults() {
     assert_eq!(staging_secrets[0].name, "DB_URL");
 
     // Values should be different (vault isolation)
-    let prod_val = secrets.get_secret("prod", "DB_URL", true).await.unwrap();
-    assert_eq!(
-        prod_val.value.unwrap().expose_secret(),
-        "prod-db.example.com"
-    );
+    let prod_val = secrets.get_secret("prod", "DB_URL").await.unwrap();
+    assert_eq!(prod_val.value.expose_secret(), "prod-db.example.com");
 
-    let staging_val = secrets.get_secret("staging", "DB_URL", true).await.unwrap();
-    assert_eq!(
-        staging_val.value.unwrap().expose_secret(),
-        "staging-db.example.com"
-    );
+    let staging_val = secrets.get_secret("staging", "DB_URL").await.unwrap();
+    assert_eq!(staging_val.value.expose_secret(), "staging-db.example.com");
 
     // Default vault should be empty (no secrets set there)
     let default_secrets = secrets.list_secrets("default", None).await.unwrap();
@@ -479,7 +458,7 @@ async fn test_error_cases() {
     let vaults = backend.vaults().unwrap();
 
     // Get non-existent secret → NotFound
-    let err = secrets.get_secret("default", "nonexistent", false).await;
+    let err = secrets.get_secret_metadata("default", "nonexistent").await;
     assert!(matches!(err, Err(BackendError::NotFound { .. })));
 
     // Delete non-existent secret → NotFound
@@ -551,11 +530,8 @@ async fn test_empty_and_large_values() {
         .set_secret("default", secret_req("empty-secret", ""))
         .await
         .unwrap();
-    let got = secrets
-        .get_secret("default", "empty-secret", true)
-        .await
-        .unwrap();
-    assert_eq!(got.value.unwrap().expose_secret(), "");
+    let got = secrets.get_secret("default", "empty-secret").await.unwrap();
+    assert_eq!(got.value.expose_secret(), "");
 
     // Large value (64KB)
     let large = "x".repeat(65536);
@@ -563,11 +539,8 @@ async fn test_empty_and_large_values() {
         .set_secret("default", secret_req("large-secret", &large))
         .await
         .unwrap();
-    let got = secrets
-        .get_secret("default", "large-secret", true)
-        .await
-        .unwrap();
-    assert_eq!(got.value.unwrap().len(), 65536);
+    let got = secrets.get_secret("default", "large-secret").await.unwrap();
+    assert_eq!(got.value.len(), 65536);
 }
 
 #[tokio::test]

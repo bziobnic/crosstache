@@ -1,8 +1,8 @@
 use super::*;
 use crate::backend::local::LocalBackend;
 use crate::config::settings::LocalConfig;
-use crate::secret::domain::SecretRequest;
 use crate::secret::domain::SecretValue;
+use crate::secret::domain::{SecretMetadata, SecretRequest};
 use std::collections::HashMap;
 fn intent() -> TransferIntent {
     use transfer::TransferEndpoint;
@@ -81,16 +81,16 @@ async fn moves_exact_ciphertext_metadata_and_secret_semantics() {
     assert!(report.complete);
     assert!(b
         .guarded_secrets()
-        .get_secret("default", "db", true)
+        .get_secret("default", "db")
         .await
         .is_err());
     let dest = b
         .guarded_secrets()
-        .get_secret("default", "db-new", true)
+        .get_secret("default", "db-new")
         .await
         .unwrap();
     assert_eq!(
-        dest.value.as_ref().map(SecretValue::expose_secret),
+        Some(dest.value.expose_secret()),
         Some("secret-value-canary")
     );
     assert!(!dest.enabled);
@@ -170,10 +170,10 @@ async fn altered_journal_and_source_drift_are_rejected_before_destination_write(
     let id = recovery.list().unwrap()[0].id.clone();
     let snapshot = b
         .guarded_secrets()
-        .get_secret("default", "db", true)
+        .get_secret("default", "db")
         .await
         .unwrap();
-    let mut request = rename_request_from_properties("db", &snapshot).unwrap();
+    let mut request = rename_request_from_properties("db", &snapshot);
     request.value = SecretValue::new("changed");
     b.guarded_secrets()
         .set_secret("default", request)
@@ -184,7 +184,7 @@ async fn altered_journal_and_source_drift_are_rejected_before_destination_write(
         .is_err());
     assert!(b
         .guarded_secrets()
-        .get_secret("default", "db-new", true)
+        .get_secret("default", "db-new")
         .await
         .is_err());
     let path = recovery.root.join(format!("{id}.age"));
@@ -279,7 +279,7 @@ async fn new_source_attachment_and_unexplained_absence_block_cleanup() {
             .is_err());
         assert!(b
             .guarded_secrets()
-            .get_secret("default", "db", false)
+            .get_secret_metadata("default", "db")
             .await
             .is_ok());
         assert!(b
@@ -295,7 +295,7 @@ async fn recreated_source_after_final_delete_is_never_removed() {
     let (_dir, b, recovery) = fixture().await;
     let original = b
         .guarded_secrets()
-        .get_secret("default", "db", true)
+        .get_secret("default", "db")
         .await
         .unwrap();
     FAIL_AT.with(|f| f.set(Some(24)));
@@ -303,14 +303,11 @@ async fn recreated_source_after_final_delete_is_never_removed() {
     let id = recovery.list().unwrap()[0].id.clone();
     assert!(b
         .guarded_secrets()
-        .get_secret("default", "db", false)
+        .get_secret_metadata("default", "db")
         .await
         .is_err());
     b.guarded_secrets()
-        .create_secret_if_absent(
-            "default",
-            rename_request_from_properties("db", &original).unwrap(),
-        )
+        .create_secret_if_absent("default", rename_request_from_properties("db", &original))
         .await
         .unwrap();
     assert!(resume(&b, &b, intent(), &id, true, &recovery)
@@ -318,7 +315,7 @@ async fn recreated_source_after_final_delete_is_never_removed() {
         .is_err());
     assert!(b
         .guarded_secrets()
-        .get_secret("default", "db", true)
+        .get_secret("default", "db")
         .await
         .is_ok());
 }
@@ -337,12 +334,8 @@ async fn unreadable_current_key_blocks_cleanup_even_with_pinned_ciphertext() {
     )
     .unwrap();
     let name = super::super::attachment_key::retained_record_name(&key_id);
-    let props = b
-        .secrets()
-        .get_secret("default", &name, true)
-        .await
-        .unwrap();
-    let mut request = rename_request_from_properties(&name, &props).unwrap();
+    let props = b.secrets().get_secret("default", &name).await.unwrap();
+    let mut request = rename_request_from_properties(&name, &props);
     request.enabled = Some(false);
     b.secrets().set_secret("default", request).await.unwrap();
     assert!(resume(&b, &b, intent(), &id, true, &recovery)
@@ -419,7 +412,7 @@ async fn copy_preserves_source_and_completed_resume() {
     assert!(report.complete);
     assert!(b
         .guarded_secrets()
-        .get_secret("default", "db", true)
+        .get_secret("default", "db")
         .await
         .is_ok());
     let copied = rewrap::snapshot(b.files().unwrap(), "default", "attachments/db-new/first")
@@ -444,16 +437,11 @@ async fn cross_key_copy_and_move_authenticate_under_destination_key() {
             .get_secret(
                 "default",
                 super::super::attachment_key::ACTIVE_POINTER_SECRET,
-                true,
             )
             .await
             .unwrap();
         let active = match super::super::attachment_key::parse_pointer_value(
-            pointer
-                .value
-                .as_ref()
-                .map(SecretValue::expose_secret)
-                .unwrap(),
+            pointer.value.expose_secret(),
         ) {
             Some(super::super::attachment_key::PointerKind::V2 { active, .. }) => active,
             _ => panic!("healthy fixture"),
@@ -494,7 +482,7 @@ async fn cross_key_copy_and_move_authenticate_under_destination_key() {
         assert_eq!(
             source
                 .guarded_secrets()
-                .get_secret("default", "db", true)
+                .get_secret("default", "db")
                 .await
                 .is_ok(),
             operation == TransferOperation::Copy
@@ -518,7 +506,7 @@ async fn distinct_logical_aliases_refuse_same_physical_keyspace_without_writes()
     assert!(!recovery.root.exists());
     assert!(b
         .guarded_secrets()
-        .get_secret("default", "db-new", false)
+        .get_secret_metadata("default", "db-new")
         .await
         .is_err());
     assert_eq!(b.attachment_names("default", "db").await.unwrap().len(), 2);
@@ -535,16 +523,11 @@ async fn cross_key_restarts_after_pending_and_lost_upload_responses() {
             .get_secret(
                 "default",
                 super::super::attachment_key::ACTIVE_POINTER_SECRET,
-                true,
             )
             .await
             .unwrap();
         let active = match super::super::attachment_key::parse_pointer_value(
-            pointer
-                .value
-                .as_ref()
-                .map(SecretValue::expose_secret)
-                .unwrap(),
+            pointer.value.expose_secret(),
         ) {
             Some(super::super::attachment_key::PointerKind::V2 { active, .. }) => active,
             _ => panic!("healthy fixture"),
@@ -594,19 +577,14 @@ async fn destination_pointer_republication_blocks_cross_key_resume() {
     let key = super::super::attachment_key::ACTIVE_POINTER_SECRET;
     let pointer = destination
         .attachment_keys()
-        .get_secret("default", key, true)
+        .get_secret("default", key)
         .await
         .unwrap();
-    let active = match super::super::attachment_key::parse_pointer_value(
-        pointer
-            .value
-            .as_ref()
-            .map(SecretValue::expose_secret)
-            .unwrap(),
-    ) {
-        Some(super::super::attachment_key::PointerKind::V2 { active, .. }) => active,
-        _ => panic!("healthy fixture"),
-    };
+    let active =
+        match super::super::attachment_key::parse_pointer_value(pointer.value.expose_secret()) {
+            Some(super::super::attachment_key::PointerKind::V2 { active, .. }) => active,
+            _ => panic!("healthy fixture"),
+        };
     let mut cross = intent();
     cross.destination.identity = "local:b".into();
     cross.destination_key_id = Some(active.as_str().into());
@@ -619,7 +597,7 @@ async fn destination_pointer_republication_blocks_cross_key_resume() {
     let temporary = age::x25519::Identity::generate();
     let temporary_id =
         super::super::attachment_key::AttachmentKeyId::derive(&temporary.to_public().to_string());
-    let mut away = rename_request_from_properties(key, &pointer).unwrap();
+    let mut away = rename_request_from_properties(key, &pointer);
     away.value = SecretValue::new(super::super::attachment_key::format_v2_pointer(
         &temporary_id,
         None,
@@ -631,10 +609,7 @@ async fn destination_pointer_republication_blocks_cross_key_resume() {
         .unwrap();
     destination
         .secrets()
-        .set_secret(
-            "default",
-            rename_request_from_properties(key, &pointer).unwrap(),
-        )
+        .set_secret("default", rename_request_from_properties(key, &pointer))
         .await
         .unwrap();
     assert!(resume(&source, &destination, cross, &id, true, &recovery)
@@ -642,7 +617,7 @@ async fn destination_pointer_republication_blocks_cross_key_resume() {
         .is_err());
     assert!(destination
         .guarded_secrets()
-        .get_secret("default", "db-new", false)
+        .get_secret_metadata("default", "db-new")
         .await
         .is_err());
     assert_eq!(
@@ -679,7 +654,7 @@ async fn folder_override_is_durable_and_wrong_resume_intent_refuses() {
         );
         let destination = b
             .guarded_secrets()
-            .get_secret("default", "db-new", true)
+            .get_secret("default", "db-new")
             .await
             .unwrap();
         assert_eq!(
@@ -760,10 +735,10 @@ async fn source_folder_drift_is_not_masked_by_destination_override() {
     let id = recovery.list().unwrap()[0].id.clone();
     let source = b
         .guarded_secrets()
-        .get_secret("default", "db", true)
+        .get_secret("default", "db")
         .await
         .unwrap();
-    let mut request = rename_request_from_properties("db", &source).unwrap();
+    let mut request = rename_request_from_properties("db", &source);
     request.folder = Some("changed".into());
     b.guarded_secrets()
         .set_secret("default", request)
@@ -774,7 +749,7 @@ async fn source_folder_drift_is_not_masked_by_destination_override() {
         .is_err());
     assert!(b
         .guarded_secrets()
-        .get_secret("default", "db-new", false)
+        .get_secret_metadata("default", "db-new")
         .await
         .is_err());
 }
@@ -792,10 +767,10 @@ async fn interrupted_secret_create_rejects_wrong_destination_folder() {
     let id = recovery.list().unwrap()[0].id.clone();
     let source = b
         .guarded_secrets()
-        .get_secret("default", "db", true)
+        .get_secret("default", "db")
         .await
         .unwrap();
-    let mut request = rename_request_from_properties("db-new", &source).unwrap();
+    let mut request = rename_request_from_properties("db-new", &source);
     request.folder = Some("wrong".into());
     b.guarded_secrets()
         .create_secret_if_absent("default", request)
@@ -900,22 +875,14 @@ async fn original_v2_recovery_accepts_republished_retained_identity() {
         super::super::attachment_key::KeySlot::Retained
     );
     let name = super::super::attachment_key::retained_record_name(&reference.key_id);
-    let current = b
-        .secrets()
-        .get_secret("default", &name, true)
-        .await
-        .unwrap();
-    let request = rename_request_from_properties(&name, &current).unwrap();
+    let current = b.secrets().get_secret("default", &name).await.unwrap();
+    let request = rename_request_from_properties(&name, &current);
     b.secrets().set_secret("default", request).await.unwrap();
-    let newer = b
-        .secrets()
-        .get_secret("default", &name, true)
-        .await
-        .unwrap();
+    let newer = b.secrets().get_secret("default", &name).await.unwrap();
     assert_ne!(newer.version, binding.provider_version);
     let historical = b
         .secrets()
-        .get_secret_version("default", &name, &binding.provider_version, true)
+        .get_secret_version("default", &name, &binding.provider_version)
         .await
         .unwrap();
     assert!(historical.value == newer.value);
@@ -950,22 +917,14 @@ async fn v3_recovery_refuses_republished_retained_identity() {
         super::super::attachment_key::KeySlot::Retained
     );
     let name = super::super::attachment_key::retained_record_name(&reference.key_id);
-    let current = b
-        .secrets()
-        .get_secret("default", &name, true)
-        .await
-        .unwrap();
-    let request = rename_request_from_properties(&name, &current).unwrap();
+    let current = b.secrets().get_secret("default", &name).await.unwrap();
+    let request = rename_request_from_properties(&name, &current);
     b.secrets().set_secret("default", request).await.unwrap();
-    let newer = b
-        .secrets()
-        .get_secret("default", &name, true)
-        .await
-        .unwrap();
+    let newer = b.secrets().get_secret("default", &name).await.unwrap();
     assert_ne!(newer.version, binding.provider_version);
     let historical = b
         .secrets()
-        .get_secret_version("default", &name, &binding.provider_version, true)
+        .get_secret_version("default", &name, &binding.provider_version)
         .await
         .unwrap();
     assert!(historical.value == newer.value);
@@ -975,7 +934,7 @@ async fn v3_recovery_refuses_republished_retained_identity() {
         .is_err());
     assert!(b
         .secrets()
-        .get_secret("default", "db-new", false)
+        .get_secret_metadata("default", "db-new")
         .await
         .is_err());
     assert_eq!(b.attachment_names("default", "db").await.unwrap().len(), 2);
@@ -1032,9 +991,12 @@ impl SecretBackend for CapabilityBackend<'_> {
         &self,
         vault: &str,
         name: &str,
-        value: bool,
+        value: crate::secret::domain::SnapshotValue,
     ) -> std::result::Result<crate::secret::domain::SecretSnapshot, BackendError> {
-        if self.deny_transfer_read && value && name == "db-new" {
+        if self.deny_transfer_read
+            && value == crate::secret::domain::SnapshotValue::Include
+            && name == "db-new"
+        {
             return Err(BackendError::PermissionDenied(
                 "raw destination read denied".into(),
             ));
@@ -1048,7 +1010,7 @@ impl SecretBackend for CapabilityBackend<'_> {
         &self,
         vault: &str,
         request: SecretRequest,
-    ) -> std::result::Result<SecretProperties, BackendError> {
+    ) -> std::result::Result<SecretMetadata, BackendError> {
         assert!(
             self.create,
             "engine must refuse unsupported creation before mutation"
@@ -1077,27 +1039,45 @@ impl SecretBackend for CapabilityBackend<'_> {
         &self,
         vault: &str,
         request: SecretRequest,
-    ) -> std::result::Result<SecretProperties, BackendError> {
+    ) -> std::result::Result<SecretMetadata, BackendError> {
         self.inner.secrets().set_secret(vault, request).await
     }
+    async fn get_secret_metadata(
+        &self,
+        vault: &str,
+        name: &str,
+    ) -> std::result::Result<SecretMetadata, BackendError> {
+        self.inner.secrets().get_secret_metadata(vault, name).await
+    }
+
     async fn get_secret(
         &self,
         vault: &str,
         name: &str,
-        value: bool,
-    ) -> std::result::Result<SecretProperties, BackendError> {
-        self.inner.secrets().get_secret(vault, name, value).await
+    ) -> std::result::Result<Secret, BackendError> {
+        self.inner.secrets().get_secret(vault, name).await
     }
+    async fn get_secret_version_metadata(
+        &self,
+        vault: &str,
+        name: &str,
+        version: &str,
+    ) -> std::result::Result<SecretMetadata, BackendError> {
+        self.inner
+            .secrets()
+            .get_secret_version_metadata(vault, name, version)
+            .await
+    }
+
     async fn get_secret_version(
         &self,
         vault: &str,
         name: &str,
         version: &str,
-        value: bool,
-    ) -> std::result::Result<SecretProperties, BackendError> {
+    ) -> std::result::Result<Secret, BackendError> {
         self.inner
             .secrets()
-            .get_secret_version(vault, name, version, value)
+            .get_secret_version(vault, name, version)
             .await
     }
     async fn list_secrets(
@@ -1119,7 +1099,7 @@ impl SecretBackend for CapabilityBackend<'_> {
         vault: &str,
         name: &str,
         request: crate::secret::domain::SecretUpdateRequest,
-    ) -> std::result::Result<SecretProperties, BackendError> {
+    ) -> std::result::Result<SecretMetadata, BackendError> {
         self.inner
             .secrets()
             .update_secret(vault, name, request)
@@ -1174,20 +1154,14 @@ async fn cross_intent(destination: &LocalBackend, operation: TransferOperation) 
         .get_secret(
             "default",
             super::super::attachment_key::ACTIVE_POINTER_SECRET,
-            true,
         )
         .await
         .unwrap();
-    let active = match super::super::attachment_key::parse_pointer_value(
-        pointer
-            .value
-            .as_ref()
-            .map(SecretValue::expose_secret)
-            .unwrap(),
-    ) {
-        Some(super::super::attachment_key::PointerKind::V2 { active, .. }) => active,
-        _ => panic!("healthy fixture"),
-    };
+    let active =
+        match super::super::attachment_key::parse_pointer_value(pointer.value.expose_secret()) {
+            Some(super::super::attachment_key::PointerKind::V2 { active, .. }) => active,
+            _ => panic!("healthy fixture"),
+        };
     let mut cross = intent();
     cross.destination.identity = "other".into();
     cross.destination_key_id = Some(active.as_str().into());
@@ -1309,17 +1283,10 @@ async fn destination_file_collisions_within_plan_precede_recovery_and_secret_wri
     // Both source keys hash to distinct stems; the shorter destination keys
     // encode to stems differing only by ASCII case. This uses real Local I/O.
     let owner = "s".repeat(220);
-    let props = source
-        .secrets()
-        .get_secret("default", "db", true)
-        .await
-        .unwrap();
+    let props = source.secrets().get_secret("default", "db").await.unwrap();
     source
         .secrets()
-        .set_secret(
-            "default",
-            rename_request_from_properties(&owner, &props).unwrap(),
-        )
+        .set_secret("default", rename_request_from_properties(&owner, &props))
         .await
         .unwrap();
     for suffix in ["proof.txt", "PROOF.txt"] {
@@ -1362,7 +1329,7 @@ async fn destination_file_collisions_within_plan_precede_recovery_and_secret_wri
             .is_err());
         assert!(destination
             .secrets()
-            .get_secret("default", "cert", false)
+            .get_secret_metadata("default", "cert")
             .await
             .is_err());
         assert!(!parent.join("files").exists());
@@ -1675,17 +1642,16 @@ mod s3_request_preflight {
         for name in ["good", "s"] {
             assert!(destination
                 .secrets()
-                .get_secret("destination-vault", name, false)
+                .get_secret_metadata("destination-vault", name)
                 .await
                 .is_err());
             assert_eq!(
                 source
                     .secrets()
-                    .get_secret("a", name, true)
+                    .get_secret("a", name)
                     .await
                     .unwrap()
                     .value
-                    .unwrap()
                     .expose_secret(),
                 format!("value-{name}")
             );
@@ -1742,7 +1708,7 @@ async fn capability_matrix_refuses_cloud_move_and_unsafe_destination_before_writ
         assert!(!recovery.root.exists());
         assert!(destination
             .guarded_secrets()
-            .get_secret("default", "db-new", false)
+            .get_secret_metadata("default", "db-new")
             .await
             .is_err());
         assert_eq!(
@@ -1804,7 +1770,7 @@ async fn capability_matrix_allows_local_to_cloud_move_and_cloud_to_local_copy() 
         assert_eq!(
             source
                 .guarded_secrets()
-                .get_secret("default", "db", true)
+                .get_secret("default", "db")
                 .await
                 .is_ok(),
             source_cloud
@@ -1980,7 +1946,7 @@ async fn copy_journal_rejects_cleanup_authority_and_v3_under_v2_magic() {
     assert!(journal.validate().is_err());
     assert!(b
         .guarded_secrets()
-        .get_secret("default", "db", true)
+        .get_secret("default", "db")
         .await
         .is_ok());
 }
@@ -2012,7 +1978,7 @@ async fn oversized_source_is_refused_before_ciphertext_download() {
     assert!(!recovery.root.exists());
     assert!(b
         .guarded_secrets()
-        .get_secret("default", "db-new", false)
+        .get_secret_metadata("default", "db-new")
         .await
         .is_err());
 }
@@ -2048,7 +2014,7 @@ async fn strict_preflight_reserves_all_future_journal_metadata_before_writes() {
     assert!(!recovery.root.exists());
     assert!(b
         .guarded_secrets()
-        .get_secret("default", "db-new", false)
+        .get_secret_metadata("default", "db-new")
         .await
         .is_err());
 }
@@ -2068,7 +2034,7 @@ async fn original_v2_empty_alias_move_resumes_through_original_v2() {
     let plan = transfer::plan(&b, &b, alias.clone()).await.unwrap();
     let source = b
         .guarded_secrets()
-        .get_transfer_snapshot("default", "db", true)
+        .get_transfer_snapshot("default", "db", SnapshotValue::Include)
         .await
         .unwrap();
     let id = uuid::Uuid::new_v4().to_string();
@@ -2079,8 +2045,13 @@ async fn original_v2_empty_alias_move_resumes_through_original_v2() {
             id: id.clone(),
             plan,
             location: b.transfer_location("default").await.unwrap(),
-            source_revision: source.revision,
-            secret_commitment: commitment(&session.identity, &source.properties, "db-new").unwrap(),
+            source_revision: source.revision.clone(),
+            secret_commitment: commitment(
+                &session.identity,
+                &snapshot_secret(&source).unwrap(),
+                "db-new",
+            )
+            .unwrap(),
             destination_revision: None,
             phase: Phase::Prepared,
             files: vec![],
@@ -2116,12 +2087,12 @@ async fn original_v2_empty_alias_move_resumes_through_original_v2() {
     );
     assert!(b
         .guarded_secrets()
-        .get_secret("default", "db", true)
+        .get_secret("default", "db")
         .await
         .is_err());
     assert!(b
         .guarded_secrets()
-        .get_secret("default", "db-new", true)
+        .get_secret("default", "db-new")
         .await
         .is_ok());
 }
@@ -2146,7 +2117,7 @@ async fn strict_preflight_refuses_unrepresentable_destination_metadata_before_wr
     assert!(!recovery.root.exists());
     assert!(destination
         .guarded_secrets()
-        .get_secret("default", "db-new", false)
+        .get_secret_metadata("default", "db-new")
         .await
         .is_err());
     assert_eq!(
@@ -2248,7 +2219,7 @@ async fn denied_policy_preflight(deny_delete: bool) {
     assert!(!recovery.root.exists());
     assert!(destination
         .guarded_secrets()
-        .get_secret("default", "db-new", false)
+        .get_secret_metadata("default", "db-new")
         .await
         .is_err());
     assert_eq!(
@@ -2493,7 +2464,7 @@ async fn s3_file_group_preflight_refuses_loss_before_writes() {
     assert!(!recovery.root.exists());
     assert!(destination
         .secrets()
-        .get_secret("default", "db-new", false)
+        .get_secret_metadata("default", "db-new")
         .await
         .is_err());
     assert!(destination

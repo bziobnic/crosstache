@@ -500,7 +500,7 @@ impl Backend for LocalBackend {
                 ))
             }
         }
-        match self.secret_backend.get_secret(vault, name, false).await {
+        match self.secret_backend.get_secret_metadata(vault, name).await {
             Ok(properties) => ensure_exact_attachment_owner(name, &properties.name)?,
             Err(BackendError::NotFound { .. }) => {}
             Err(error) => return Err(error),
@@ -728,7 +728,7 @@ fn persisted_attachment_names(
 
 #[cfg(test)]
 mod tests {
-    use crate::secret::domain::SecretValue;
+    use crate::secret::domain::{SecretValue, SnapshotValue};
     #[test]
     fn transfer_recovery_path_rejects_store_and_git_overlap_without_creation() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1027,10 +1027,10 @@ mod tests {
         // Get secret
         let props = backend
             .secrets()
-            .get_secret("default", "e2e-test", true)
+            .get_secret("default", "e2e-test")
             .await
             .unwrap();
-        assert_eq!(props.value.unwrap().expose_secret(), "my-secret-value");
+        assert_eq!(props.value.expose_secret(), "my-secret-value");
 
         // List secrets
         let list = backend
@@ -1085,7 +1085,7 @@ mod tests {
             .unwrap();
         let snapshot = backend
             .secrets()
-            .get_secret_snapshot("default", "source", false)
+            .get_secret_snapshot("default", "source", SnapshotValue::Omit)
             .await
             .unwrap();
         let barrier = Arc::new(Barrier::new(3));

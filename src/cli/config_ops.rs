@@ -2399,7 +2399,7 @@ async fn execute_env_pull(
             .map_err(CrosstacheError::from)?;
         for secret_summary in secrets {
             match secrets_backend
-                .get_secret(&vault_name, &secret_summary.name, true)
+                .get_secret(&vault_name, &secret_summary.name)
                 .await
             {
                 Ok(secret) => all_secrets.push(secret),
@@ -2418,7 +2418,7 @@ async fn execute_env_pull(
                 .map_err(CrosstacheError::from)?;
             for secret_summary in secrets {
                 match secrets_backend
-                    .get_secret(&vault_name, &secret_summary.name, true)
+                    .get_secret(&vault_name, &secret_summary.name)
                     .await
                 {
                     Ok(secret) => all_secrets.push(secret),
@@ -2437,10 +2437,8 @@ async fn execute_env_pull(
             // Build a simple JSON array of {name, value} objects
             let entries: Vec<serde_json::Value> = all_secrets
                 .iter()
-                .filter_map(|s| {
-                    s.value.as_ref().map(
-                        |v| serde_json::json!({ "name": s.original_name, "value": v.expose_secret() }),
-                    )
+                .map(|s| {
+                    serde_json::json!({ "name": s.original_name, "value": s.value.expose_secret() })
                 })
                 .collect();
             serde_json::to_string_pretty(&entries).map_err(|e| {
@@ -2450,10 +2448,8 @@ async fn execute_env_pull(
         OutputFormat::Yaml => {
             let entries: Vec<serde_json::Value> = all_secrets
                 .iter()
-                .filter_map(|s| {
-                    s.value.as_ref().map(
-                        |v| serde_json::json!({ "name": s.original_name, "value": v.expose_secret() }),
-                    )
+                .map(|s| {
+                    serde_json::json!({ "name": s.original_name, "value": s.value.expose_secret() })
                 })
                 .collect();
             serde_yaml::to_string(&entries).map_err(|e| {
@@ -2466,11 +2462,11 @@ async fn execute_env_pull(
                 CrosstacheError::serialization(format!("CSV serialization failed: {e}"))
             })?;
             for s in &all_secrets {
-                if let Some(ref v) = s.value {
+                {
                     writer
                         .write_record([
                             neutralize_spreadsheet_formula(&s.original_name),
-                            neutralize_spreadsheet_formula(v.expose_secret()),
+                            neutralize_spreadsheet_formula(s.value.expose_secret()),
                         ])
                         .map_err(|e| {
                             CrosstacheError::serialization(format!("CSV serialization failed: {e}"))
@@ -2488,7 +2484,8 @@ async fn execute_env_pull(
         _ => {
             let mut dotenv_content = String::new();
             for secret in &all_secrets {
-                if let Some(ref value) = secret.value {
+                {
+                    let value = &secret.value;
                     let key = &secret.original_name;
                     if !is_posix_assignment_name(key) {
                         return Err(CrosstacheError::invalid_argument(format!(
@@ -2620,7 +2617,7 @@ async fn execute_env_push(
         let mut existing_secrets = Vec::new();
         for key in secrets.keys() {
             if secrets_backend
-                .get_secret(&vault_name, key, false)
+                .get_secret_metadata(&vault_name, key)
                 .await
                 .is_ok()
             {

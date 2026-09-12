@@ -636,7 +636,7 @@ async fn execute_cross_vault_alias_mv(
 
     let source_secret = src_backend
         .secrets()
-        .get_secret(&src_entry.vault, &found.name, true)
+        .get_secret(&src_entry.vault, &found.name)
         .await?;
 
     // #315 metadata preservation: reuse the same envelope-preserving request
@@ -644,7 +644,7 @@ async fn execute_cross_vault_alias_mv(
     // groups/note/tags/record envelopes ride along as-is; the folder is
     // overridden to the mv grammar's resolved destination folder.
     let mut secret_request =
-        crate::backend::secret::rename_request_from_properties(&dest_name, &source_secret)?;
+        crate::backend::secret::rename_request_from_properties(&dest_name, &source_secret);
     secret_request.folder = dest_folder.clone();
 
     // Destination tag-budget check BEFORE any write.
@@ -1427,15 +1427,14 @@ mod tests {
 
     use crate::backend::error::BackendError;
     use crate::backend::{Backend, BackendCapabilities, BackendKind, NameCharset, SecretBackend};
-    use crate::secret::domain::SecretProperties;
     use crate::secret::domain::SecretValue;
+    use crate::secret::domain::{Secret, SecretMetadata};
     use std::sync::{Arc, Mutex};
 
-    fn fake_secret_properties(name: &str) -> SecretProperties {
-        SecretProperties {
+    fn fake_secret_properties(name: &str) -> SecretMetadata {
+        SecretMetadata {
             name: name.to_string(),
             original_name: name.to_string(),
-            value: None,
             version: "v1".to_string(),
             version_number: Some(1),
             created_timestamp: 0,
@@ -1508,7 +1507,15 @@ mod tests {
             &self,
             _vault: &str,
             _request: crate::secret::domain::SecretRequest,
-        ) -> std::result::Result<SecretProperties, BackendError> {
+        ) -> std::result::Result<SecretMetadata, BackendError> {
+            Err(BackendError::Unsupported("test backend".into()))
+        }
+
+        async fn get_secret_metadata(
+            &self,
+            _vault: &str,
+            _name: &str,
+        ) -> std::result::Result<SecretMetadata, BackendError> {
             Err(BackendError::Unsupported("test backend".into()))
         }
 
@@ -1516,8 +1523,16 @@ mod tests {
             &self,
             _vault: &str,
             _name: &str,
-            _include_value: bool,
-        ) -> std::result::Result<SecretProperties, BackendError> {
+        ) -> std::result::Result<Secret, BackendError> {
+            Err(BackendError::Unsupported("test backend".into()))
+        }
+
+        async fn get_secret_version_metadata(
+            &self,
+            _vault: &str,
+            _name: &str,
+            _version: &str,
+        ) -> std::result::Result<SecretMetadata, BackendError> {
             Err(BackendError::Unsupported("test backend".into()))
         }
 
@@ -1526,8 +1541,7 @@ mod tests {
             _vault: &str,
             _name: &str,
             _version: &str,
-            _include_value: bool,
-        ) -> std::result::Result<SecretProperties, BackendError> {
+        ) -> std::result::Result<Secret, BackendError> {
             Err(BackendError::Unsupported("test backend".into()))
         }
 
@@ -1552,7 +1566,7 @@ mod tests {
             _vault: &str,
             name: &str,
             _request: SecretUpdateRequest,
-        ) -> std::result::Result<SecretProperties, BackendError> {
+        ) -> std::result::Result<SecretMetadata, BackendError> {
             self.calls.lock().unwrap().push(name.to_string());
             if name == self.fail_name {
                 Err(BackendError::Internal(format!(
@@ -1749,24 +1763,39 @@ mod tests {
             &self,
             _vault: &str,
             _request: crate::secret::domain::SecretRequest,
-        ) -> std::result::Result<SecretProperties, BackendError> {
+        ) -> std::result::Result<SecretMetadata, BackendError> {
             panic!("set_secret must never be called: the tag-budget check must reject BEFORE any write");
         }
+        async fn get_secret_metadata(
+            &self,
+            _vault: &str,
+            _name: &str,
+        ) -> std::result::Result<SecretMetadata, BackendError> {
+            Err(BackendError::Unsupported("test backend".into()))
+        }
+
         async fn get_secret(
             &self,
             _vault: &str,
             _name: &str,
-            _include_value: bool,
-        ) -> std::result::Result<SecretProperties, BackendError> {
+        ) -> std::result::Result<Secret, BackendError> {
             Err(BackendError::Unsupported("test backend".into()))
         }
+        async fn get_secret_version_metadata(
+            &self,
+            _vault: &str,
+            _name: &str,
+            _version: &str,
+        ) -> std::result::Result<SecretMetadata, BackendError> {
+            Err(BackendError::Unsupported("test backend".into()))
+        }
+
         async fn get_secret_version(
             &self,
             _vault: &str,
             _name: &str,
             _version: &str,
-            _include_value: bool,
-        ) -> std::result::Result<SecretProperties, BackendError> {
+        ) -> std::result::Result<Secret, BackendError> {
             Err(BackendError::Unsupported("test backend".into()))
         }
         async fn list_secrets(
@@ -1788,7 +1817,7 @@ mod tests {
             _vault: &str,
             _name: &str,
             _request: SecretUpdateRequest,
-        ) -> std::result::Result<SecretProperties, BackendError> {
+        ) -> std::result::Result<SecretMetadata, BackendError> {
             Err(BackendError::Unsupported("test backend".into()))
         }
     }

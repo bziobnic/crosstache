@@ -70,7 +70,7 @@ async fn preview_mark_retry_preserve_metadata_version_value_and_historical_decry
     let keys = backend.attachment_keys();
     let files = backend.files().unwrap();
     let name = key::retained_record_name(&id);
-    let before = keys.get_secret("default", &name, true).await.unwrap();
+    let before = keys.get_secret("default", &name).await.unwrap();
     assert_eq!(
         retire(keys.as_ref(), files, "default", &id, false)
             .await
@@ -79,7 +79,7 @@ async fn preview_mark_retry_preserve_metadata_version_value_and_historical_decry
         "ready"
     );
     assert_eq!(
-        keys.get_secret("default", &name, true).await.unwrap().tags,
+        keys.get_secret("default", &name).await.unwrap().tags,
         before.tags
     );
     assert_eq!(
@@ -89,14 +89,14 @@ async fn preview_mark_retry_preserve_metadata_version_value_and_historical_decry
             .outcome,
         "retired"
     );
-    let after = keys.get_secret("default", &name, true).await.unwrap();
+    let after = keys.get_secret("default", &name).await.unwrap();
     assert_eq!(after.version, before.version);
     assert_eq!(after.value, before.value);
     assert_eq!(after.enabled, before.enabled);
     assert_eq!(after.content_type, before.content_type);
     assert_eq!(after.expires_on, before.expires_on);
     assert_eq!(after.not_before, before.not_before);
-    for (k, v) in before.tags {
+    for (k, v) in before.tags.clone() {
         assert_eq!(after.tags.get(&k), Some(&v));
     }
     assert_eq!(
@@ -125,7 +125,7 @@ async fn preview_mark_retry_preserve_metadata_version_value_and_historical_decry
     let reference = AttachmentKeyRef {
         key_id: id,
         slot: KeySlot::Retained,
-        provider_version: SecretVersion::new(before.version),
+        provider_version: SecretVersion::new(before.version.clone()),
     };
     let identity = attachment_rewrap::exact_identity(keys.as_ref(), "default", &reference)
         .await
@@ -146,17 +146,12 @@ async fn active_legacy_missing_invalid_and_disabled_candidates_are_refused() {
         let (_dir, backend, id, _) = fixture().await;
         let keys = backend.attachment_keys();
         let pointer = keys
-            .get_secret("default", key::ACTIVE_POINTER_SECRET, true)
+            .get_secret("default", key::ACTIVE_POINTER_SECRET)
             .await
             .unwrap();
-        let key::PointerKind::V2 { active, .. } = key::parse_pointer_value(
-            pointer
-                .value
-                .as_ref()
-                .map(SecretValue::expose_secret)
-                .unwrap(),
-        )
-        .unwrap() else {
+        let key::PointerKind::V2 { active, .. } =
+            key::parse_pointer_value(pointer.value.expose_secret()).unwrap()
+        else {
             panic!()
         };
         let candidate = match mode {
@@ -176,10 +171,10 @@ async fn active_legacy_missing_invalid_and_disabled_candidates_are_refused() {
             "missing" => AttachmentKeyId::derive("missing"),
             "invalid" | "disabled" | "unmarked" => {
                 let p = keys
-                    .get_secret("default", &key::retained_record_name(&id), true)
+                    .get_secret("default", &key::retained_record_name(&id))
                     .await
                     .unwrap();
-                let mut r = request(p.name, p.value.unwrap().expose_secret().to_string());
+                let mut r = request(p.name.clone(), p.value.expose_secret().to_string());
                 if mode == "invalid" {
                     r.value = SecretValue::new("invalid");
                 }
@@ -207,7 +202,7 @@ async fn active_legacy_missing_invalid_and_disabled_candidates_are_refused() {
             "{mode}"
         );
         let p = keys
-            .get_secret("default", &key::retained_record_name(&id), false)
+            .get_secret_metadata("default", &key::retained_record_name(&id))
             .await
             .unwrap();
         assert!(!p.tags.contains_key("xv_attachment_key_retired"), "{mode}");
@@ -227,7 +222,7 @@ async fn current_references_and_invalid_managed_files_block_retirement() {
         let (_dir, backend, id, historical) = fixture().await;
         let keys = backend.attachment_keys();
         let p = keys
-            .get_secret("default", &key::retained_record_name(&id), false)
+            .get_secret_metadata("default", &key::retained_record_name(&id))
             .await
             .unwrap();
         let reference = AttachmentKeyRef {
@@ -291,7 +286,7 @@ async fn current_references_and_invalid_managed_files_block_retirement() {
             "{mode}"
         );
         assert!(!keys
-            .get_secret("default", &key::retained_record_name(&id), false)
+            .get_secret_metadata("default", &key::retained_record_name(&id))
             .await
             .unwrap()
             .tags
@@ -300,7 +295,7 @@ async fn current_references_and_invalid_managed_files_block_retirement() {
 }
 
 use crate::backend::BackendError;
-use crate::secret::domain::SecretProperties;
+use crate::secret::domain::Secret;
 use std::sync::atomic::{AtomicUsize, Ordering};
 struct FaultKeys<'a> {
     inner: Box<dyn AttachmentKeyStore + 'a>,
@@ -331,7 +326,7 @@ impl AttachmentKeyStore for FaultKeys<'_> {
         &self,
         v: &str,
         r: &AttachmentKeyRef,
-    ) -> std::result::Result<SecretProperties, BackendError> {
+    ) -> std::result::Result<SecretMetadata, BackendError> {
         self.writes.fetch_add(1, Ordering::SeqCst);
         if self.mode == "mark-failure" {
             return Err(BackendError::Network("interrupted".into()));
@@ -342,13 +337,12 @@ impl AttachmentKeyStore for FaultKeys<'_> {
         }
         Ok(result)
     }
-    async fn get_secret(
+    async fn get_secret_metadata(
         &self,
         v: &str,
         n: &str,
-        include: bool,
-    ) -> std::result::Result<SecretProperties, BackendError> {
-        let mut p = self.inner.get_secret(v, n, include).await?;
+    ) -> std::result::Result<SecretMetadata, BackendError> {
+        let mut p = self.inner.get_secret_metadata(v, n).await?;
         if n == key::retained_record_name(&self.candidate) {
             let count = self.reads.fetch_add(1, Ordering::SeqCst);
             if (self.mode == "candidate-drift" && count > 0)
@@ -365,28 +359,66 @@ impl AttachmentKeyStore for FaultKeys<'_> {
         }
         Ok(p)
     }
-    async fn get_secret_version(
+
+    async fn get_secret(&self, v: &str, n: &str) -> std::result::Result<Secret, BackendError> {
+        let mut p = self.inner.get_secret(v, n).await?;
+        if n == key::retained_record_name(&self.candidate) {
+            let count = self.reads.fetch_add(1, Ordering::SeqCst);
+            if (self.mode == "candidate-drift" && count > 0)
+                || (self.mode == "final-drift" && self.writes.load(Ordering::SeqCst) > 0)
+            {
+                p.tags.insert("concurrent".into(), "changed".into());
+            }
+        }
+        if n == key::ACTIVE_POINTER_SECRET
+            && self.mode == "pointer-drift"
+            && self.reads.load(Ordering::SeqCst) > 0
+        {
+            p.version = "changed".into();
+        }
+        Ok(p)
+    }
+    async fn get_secret_version_metadata(
         &self,
         v: &str,
         n: &str,
         version: &str,
-        include: bool,
-    ) -> std::result::Result<SecretProperties, BackendError> {
+    ) -> std::result::Result<SecretMetadata, BackendError> {
         let mut p = self
             .inner
-            .get_secret_version(v, n, version, include)
+            .get_secret_version_metadata(v, n, version)
             .await?;
         if n == key::retained_record_name(&self.candidate) {
             match self.mode {
                 "exact-wrong-version" => p.version = "wrong".into(),
                 "exact-disabled" => p.enabled = false,
                 "exact-unmarked" => p.content_type = "ordinary".into(),
+                // The wrong-key fault is a value substitution; it has no
+                // metadata-path equivalent.
+                _ => {}
+            }
+        }
+        Ok(p)
+    }
+
+    async fn get_secret_version(
+        &self,
+        v: &str,
+        n: &str,
+        version: &str,
+    ) -> std::result::Result<Secret, BackendError> {
+        let mut p = self.inner.get_secret_version(v, n, version).await?;
+        if n == key::retained_record_name(&self.candidate) {
+            match self.mode {
+                "exact-wrong-version" => p.version = "wrong".into(),
+                "exact-disabled" => p.enabled = false,
+                "exact-unmarked" => p.content_type = "ordinary".into(),
                 "exact-wrong-key" => {
-                    p.value = Some(SecretValue::new(
+                    p.value = SecretValue::new(
                         age::x25519::Identity::generate()
                             .to_string()
                             .expose_secret(),
-                    ))
+                    )
                 }
                 _ => {}
             }
@@ -397,7 +429,7 @@ impl AttachmentKeyStore for FaultKeys<'_> {
         &self,
         _: &str,
         _: SecretRequest,
-    ) -> std::result::Result<SecretProperties, BackendError> {
+    ) -> std::result::Result<SecretMetadata, BackendError> {
         panic!("retirement cannot write values")
     }
 }
@@ -430,7 +462,7 @@ async fn incomplete_visibility_preflight_exact_identity_and_drift_fail_before_ma
         assert_eq!(keys.writes.load(Ordering::SeqCst), 0, "{mode}");
         assert!(!keys
             .inner
-            .get_secret("default", &key::retained_record_name(&id), false)
+            .get_secret_metadata("default", &key::retained_record_name(&id))
             .await
             .unwrap()
             .tags
@@ -635,12 +667,11 @@ async fn tampered_current_files_and_new_candidate_references_block_already_retir
         .unwrap();
         if mode == "legacy" {
             let p = keys
-                .get_secret("default", key::ACTIVE_POINTER_SECRET, true)
+                .get_secret("default", key::ACTIVE_POINTER_SECRET)
                 .await
                 .unwrap();
             let key::PointerKind::V2 { active, .. } =
-                key::parse_pointer_value(p.value.as_ref().map(SecretValue::expose_secret).unwrap())
-                    .unwrap()
+                key::parse_pointer_value(p.value.expose_secret()).unwrap()
             else {
                 panic!()
             };
@@ -655,7 +686,7 @@ async fn tampered_current_files_and_new_candidate_references_block_already_retir
             .unwrap();
         } else if mode == "candidate" {
             let p = keys
-                .get_secret("default", &key::retained_record_name(&id), false)
+                .get_secret_metadata("default", &key::retained_record_name(&id))
                 .await
                 .unwrap();
             let mut metadata = HashMap::new();
@@ -737,7 +768,7 @@ async fn agent_policy_refuses_complete_visibility_and_narrow_mark_enforces_updat
         let name = key::retained_record_name(&id);
         let before = raw
             .attachment_keys()
-            .get_secret("default", &name, false)
+            .get_secret_metadata("default", &name)
             .await
             .unwrap();
         let reference = AttachmentKeyRef {
@@ -783,7 +814,7 @@ async fn agent_policy_refuses_complete_visibility_and_narrow_mark_enforces_updat
         .is_err());
         assert!(!raw
             .attachment_keys()
-            .get_secret("default", &name, false)
+            .get_secret_metadata("default", &name)
             .await
             .unwrap()
             .tags
@@ -800,7 +831,7 @@ async fn agent_policy_refuses_complete_visibility_and_narrow_mark_enforces_updat
         );
         let after = raw
             .attachment_keys()
-            .get_secret("default", &name, false)
+            .get_secret_metadata("default", &name)
             .await
             .unwrap();
         assert_eq!(
@@ -855,20 +886,13 @@ async fn retirement_keeps_all_existing_provider_versions_and_both_exact_identiti
     let (_dir, backend, id, historical) = fixture().await;
     let keys = backend.attachment_keys();
     let name = key::retained_record_name(&id);
-    let old = keys.get_secret("default", &name, true).await.unwrap();
+    let old = keys.get_secret("default", &name).await.unwrap();
     // Existing retained records may have multiple versions from prior recovery.
     let new = backend
         .secrets()
         .set_secret(
             "default",
-            request(
-                name.clone(),
-                old.value
-                    .as_ref()
-                    .map(SecretValue::expose_secret)
-                    .unwrap()
-                    .to_string(),
-            ),
+            request(name.clone(), old.value.expose_secret().to_string()),
         )
         .await
         .unwrap();
@@ -893,7 +917,7 @@ async fn retirement_keeps_all_existing_provider_versions_and_both_exact_identiti
         .await
         .unwrap();
     assert_eq!(versions_after.len(), versions_before.len());
-    for version in [old.version, new.version] {
+    for version in [old.version.clone(), new.version.clone()] {
         let reference = AttachmentKeyRef {
             key_id: id.clone(),
             slot: KeySlot::Retained,
