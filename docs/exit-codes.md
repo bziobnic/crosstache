@@ -84,3 +84,62 @@ error[xv-vault-not-found]: Vault not found: myproj-prood
 ```
 
 The `hint` line is TTY-only.
+
+## Machine mode: exactly one document on stdout
+
+A run is in **machine mode** when `--format` is given explicitly and resolves
+to `json`, `yaml`, or `csv`. In machine mode stdout holds **exactly one
+document for the whole run** — nothing else is ever written there:
+
+- **Success:** the command's data document, in the requested format.
+- **Failure before any result:** the error envelope above, unchanged.
+- **Failure after the command produced a structured result** (a partial batch,
+  scan findings, secrets due for rotation): the same envelope plus an additive
+  `report` key holding that result.
+
+Human status text — plan banners, per-item `[ok]`/`[error]` lines, batch
+summaries, confirmations, advisories — always goes to stderr and never to
+stdout, and is suppressed entirely in machine mode when a `report` replaces it.
+Every exit code is unchanged by this contract.
+
+### The additive `report` key
+
+`xv scan` finds a leak, exits `50`, and its findings travel inside the one
+envelope instead of being printed as a second document:
+
+```console
+$ xv scan --format json; echo "exit=$?"
+{"error":{"code":"xv-scan-leak-detected","message":"Scan detected 1 potential leak(s)","exit_code":50},"report":[{"file":"./leak.txt","line":1,"col":5,"kind":"pattern","severity":"high"}]}
+exit=50
+```
+
+Scripts that read `.error.code` are unaffected; `.report` is purely additive.
+`xv rotate --check` attaches its due rows the same way under `xv-rotation-due`
+(exit `51`), and batch commands attach an item report:
+
+```json
+{ "summary": { "total": 2, "succeeded": 1, "skipped": 0, "failed": 1 },
+  "items": [ { "name": "GOOD", "status": "ok" },
+             { "name": "xv-attachment-key", "status": "failed",
+               "error": "reserved name" } ] }
+```
+
+### CSV
+
+CSV cannot carry an error object, so in `--format csv`:
+
+- stdout holds **only rows** — the header plus whatever rows the command
+  produced before failing, possibly none at all;
+- the error is rendered as plain text on **stderr**
+  (`error[xv-scan-leak-detected]: …`);
+- therefore **check the exit code**, not stdout, to detect failure. A
+  successful-looking header row is not proof the run succeeded.
+
+### What machine mode does not change
+
+- `--format auto` piped to a non-TTY behaves exactly as before (JSON body,
+  plain-text error on stderr). It is not machine mode.
+- Raw values (`--raw`), `--names-only`, `completion`, `schedule install
+  --print`, and `run` passthrough are never machine documents.
+- `xv doctor` still refuses `--format json|yaml` with exit `2` before
+  diagnosis, so its human report can never mix into an envelope.

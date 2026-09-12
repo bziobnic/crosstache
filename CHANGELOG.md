@@ -48,6 +48,38 @@
 
 ### Changed
 
+- **Machine mode now writes exactly one document to stdout.** An explicit
+  `--format json|yaml|csv` puts the run in machine mode, and stdout holds one
+  document for the whole run: the command's data on success, the error envelope
+  on failure, or — new — that envelope plus an additive `report` key holding
+  whatever structured result the command produced before failing. Scripts
+  reading `.error.code` are unaffected and every exit code is unchanged.
+  `xv scan` (exit `50`) and `xv rotate --check` (exit `51`) now attach their
+  findings and due rows under `report` instead of printing a second document,
+  and batch commands (`migrate`, bulk `set`, `mv`, `vault import`,
+  `file upload|download|delete`, `rotate --due`) attach a shared
+  `{summary{total,succeeded,skipped,failed}, items[{name,status,detail?,error?}]}`
+  item report. Consequently, human narration that used to share stdout now goes
+  to stderr in every mode, and is suppressed entirely in machine mode where a
+  report replaces it: `migrate`'s plan banner and per-item `[ok]/[skip]/[error]`
+  lines; `copy`/`move` narration and their source/target detail; `mv`'s dry-run
+  previews; single `set`'s `Vault:`/`Version:` lines; `rotate NAME`'s labels;
+  `rotate --native`'s cancellation message; `inject`'s status messages;
+  `vault export --output`'s confirmation; `vault import --dry-run`'s per-record
+  list; `vault update` and `vault share`'s resolution lines;
+  `file upload|download|delete` batch narration and summaries; and
+  `share grant|revoke`'s confirmation lines. `rotate --check --format csv` now
+  emits the serde field names as its header row and `scan --format csv` emits
+  finding rows at all; in CSV mode stdout is rows-only and the error is plain
+  text on stderr, so scripts must check the exit code. `file sync` keys its
+  narration suppression on machine mode rather than JSON alone, so YAML and CSV
+  are quiet too — its piped `--format auto` JSON summary on stdout is unchanged,
+  only the human narration moved to stderr. `transfer` renders its preview and
+  report in the requested format instead of always pretty JSON. One documented
+  exception: `rotate NAME --show-value` writes the requested plaintext to
+  stdout, so that run emits no enclosing machine document. See
+  [`docs/exit-codes.md`](docs/exit-codes.md) and
+  [`docs/FEATURES.md`](docs/FEATURES.md).
 - **No wire changes from the disclosure boundary work.** Routing every
   serializing disclosure through `Secret::disclose` is an internal
   refactor; the web reveal endpoint's response body is byte-identical

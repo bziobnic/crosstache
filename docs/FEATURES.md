@@ -496,6 +496,55 @@ unknown names error and list the available columns. JSON/YAML/template ignore
 it. Global `--no-color` disables colored output (same effect as `NO_COLOR`,
 including stderr chrome).
 
+### Machine mode and the one-document rule
+
+An explicit `--format json|yaml|csv` puts the run in **machine mode**: stdout
+holds exactly one document for the whole run and every human line goes to
+stderr. `--format auto` (including when piped) is *not* machine mode and keeps
+its previous behaviour. See [exit-codes.md](exit-codes.md#machine-mode-exactly-one-document-on-stdout)
+for the envelope and the CSV rule.
+
+Stream rules per command family:
+
+| Family | stdout in machine mode | stderr |
+|---|---|---|
+| List-style (`ls`, `find`, `history`, `audit`, `share list`, …) | the list document | empty-state messages, chrome |
+| Resource views (`get`, `info`, `config show`, `version`) | the object | nothing |
+| Batch commands (`migrate`, bulk `set`, `mv`, `vault import`, `file upload/download/delete`, `rotate --due`) | one `ItemReport` (attached under `report` when the run also fails) | plan banners, per-item lines, summaries — suppressed in machine mode |
+| Dry-run planners (`migrate --dry-run`, `mv --dry-run`, `copy`/`move --dry-run`) | one plan document | the human preview |
+| Policy checks (`scan`, `rotate --check`) | findings / due rows, attached under `report` of the exit-50/51 envelope | the human listing and the plain error |
+| Narrated single operations (`copy`, `move`, single `set`, `rotate NAME`, `inject`, `vault export --output`, `share grant|revoke`) | the result object | `Copying…`, `Vault:`/`Version:`, confirmations |
+| `file sync` | the sync summary | per-file lines and the summary block |
+| `transfer` | the preview or `TransferReport`, in the requested format | narration |
+
+Batch commands share one shape, `ItemReport` — names only, never values:
+
+```json
+{ "summary": { "total": 3, "succeeded": 1, "skipped": 1, "failed": 1 },
+  "items": [
+    { "name": "ALPHA", "status": "ok", "detail": "v2" },
+    { "name": "BETA",  "status": "skipped" },
+    { "name": "xv-attachment-key", "status": "failed", "error": "reserved name" }
+  ] }
+```
+
+`status` is `ok`, `skipped`, or `failed`; `detail` and `error` are optional and
+are sanitized and length-bounded. In CSV the item rows render as
+`name,status,detail,error`.
+
+Dry runs emit a plan document instead of a result: `migrate --dry-run`
+(`source`, `target`, `dry_run`, `on_conflict`, `to_migrate`, `to_skip`,
+`conflicts`, `attachment_previews`), `mv --dry-run` (`planned[]` of
+`{from, to}`), and `copy`/`move --dry-run` (`planned.from`/`planned.to` plus
+`planned.move`).
+
+`xv version --format json` is a document too (`version`, `git_hash`, `git_ref`,
+`backends`); without an explicit machine format it prints its usual text on
+stdout, unchanged.
+
+One narration exception: `rotate NAME --show-value` writes the new plaintext to
+stdout on purpose, so that run emits no enclosing machine document.
+
 ---
 
 ## Build & Distribution

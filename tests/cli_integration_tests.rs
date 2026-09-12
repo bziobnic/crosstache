@@ -383,9 +383,12 @@ fn every_top_level_command_supports_help() {
             "{args:?} --help should exit 0; stderr: {}",
             String::from_utf8_lossy(&out.stderr)
         );
+        // `--help` is requested output, so clap writes it to stdout; stderr is
+        // for status and errors and must stay out of it.
         assert!(
-            !out.stdout.is_empty() || !out.stderr.is_empty(),
-            "{args:?} --help produced empty output"
+            !out.stdout.is_empty(),
+            "{args:?} --help must write its help text to stdout; stderr:\n{}",
+            String::from_utf8_lossy(&out.stderr)
         );
     }
 }

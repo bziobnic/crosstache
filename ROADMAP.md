@@ -187,6 +187,35 @@ validated spikes are recorded there. It is design-ready but no client, relay, or
 public command has shipped. Revalidate dependencies, relay abuse controls,
 identity recovery, and operational ownership before implementation.
 
+### P3 — Machine-output follow-ups
+
+The machine-output contract (`--format json|yaml|csv` given explicitly writes
+exactly one document to stdout) ships with four known gaps, each pinned by the
+contract suite `tests/e2e_machine_output.rs` only insofar as it does not
+regress:
+
+- **`migrate` can fail after partial writes without a `report`.** A failure in
+  the attachment-transfer loop or anywhere in the preflight returns before the
+  `ItemReport` is parked, so the envelope carries no `report` even though the
+  target may already have been written. Fixing it means constructing the report
+  above the preflight and parking it on every error path.
+- **Recursive `file upload` double-counts an over-long blob name.** The
+  validation pass counts such a file as `failed` and then the main loop still
+  uploads it, so one file can appear twice in the report. The same function
+  reads each file with `?`, so an unreadable file aborts the whole run even
+  under `--continue-on-error`, and nothing is parked at all.
+- **Three commands still narrate on stdout.** `vault create`'s detail block
+  (`Resource Group:`, `Location:`, `URI:`), `whoami`'s identity block, and
+  `xv diff`'s comparison listing were outside the OUT04 inventory and still
+  use `println!`. They are single-operation commands with no `report`, so they
+  do not break the one-document rule today, but they should move to `output::*`
+  for consistency.
+- **Per-file narration inside machine-mode batches still reaches stderr.**
+  `execute_file_upload`/`execute_file_download`, called by the batch paths,
+  emit their own per-file lines; suppressing them would also silence the
+  single-file commands, which have no report to replace them. Harmless for the
+  stdout contract, noisy for the operator.
+
 ## Explicitly discarded decisions
 
 These are deliberate non-goals, not deferred backlog:

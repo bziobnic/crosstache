@@ -152,16 +152,106 @@ fn one_yaml_document(stdout: &str) -> serde_json::Value {
     values.into_iter().next().expect("checked above")
 }
 
+/// The one plaintext value every fixture writes. No machine-mode run may leak
+/// it on either stream, so a single `contains` check covers every secret the
+/// suite creates.
+const CANARY: &str = "machine-canary-2b6f";
+
+/// The reserved attachment-key custody name. A bulk `set` refuses it outright,
+/// which is the one deterministic per-item failure the local backend offers.
+const RESERVED_KEY: &str = "xv-attachment-key";
+
+const MIGRATE: [&str; 5] = ["migrate", "--from", "local:default", "--to", "local:other"];
+
+// ---------------------------------------------------------------------------
+// Fixtures. Each one builds the situation a scenario needs and is shared by the
+// targeted test for that scenario and the table-driven contract test below.
+// ---------------------------------------------------------------------------
+
+/// A bare environment with no secrets.
+fn empty_env() -> MachineEnv {
+    MachineEnv::new()
+}
+
 /// Two secrets in `default`, an empty `other` vault to receive them.
 fn seeded_two_secrets() -> MachineEnv {
     let env = MachineEnv::new();
-    env.ok(&["set", "ALPHA", "--value", "a-value"]);
-    env.ok(&["set", "BETA", "--value", "b-value"]);
+    env.ok(&["set", "ALPHA", "--value", CANARY]);
+    env.ok(&["set", "BETA", "--value", CANARY]);
     env.ok(&["vault", "create", "other"]);
     env
 }
 
-const MIGRATE: [&str; 5] = ["migrate", "--from", "local:default", "--to", "local:other"];
+/// `ALPHA` present in both vaults, so `migrate --on-conflict fail` refuses
+/// before any write.
+fn conflicting_vaults() -> MachineEnv {
+    let env = MachineEnv::new();
+    env.ok(&["set", "ALPHA", "--value", CANARY]);
+    env.ok(&["vault", "create", "other"]);
+    env.ok(&["context", "use", "other", "--global"]);
+    env.ok(&["set", "ALPHA", "--value", CANARY]);
+    env.ok(&["context", "use", "default", "--global"]);
+    env
+}
+
+/// Two secrets in one vault, so `mv ALPHA BETA` collides.
+fn two_secrets_one_vault() -> MachineEnv {
+    let env = MachineEnv::new();
+    env.ok(&["set", "ALPHA", "--value", CANARY]);
+    env.ok(&["set", "BETA", "--value", CANARY]);
+    env
+}
+
+/// One secret whose rotation policy is long past due (`rotate --check` → 51).
+fn due_secret() -> MachineEnv {
+    let env = MachineEnv::new();
+    env.ok(&["set", "STALE", "--value", CANARY]);
+    env.ok(&[
+        "update",
+        "STALE",
+        "--tag",
+        "xv:rotate_every=30d",
+        "--tag",
+        "xv:rotated_at=2020-01-01T00:00:00Z",
+    ]);
+    env
+}
+
+/// A working directory holding a file that trips a built-in pattern, so
+/// `xv scan` deterministically finds a leak and exits 50.
+fn leaking_workdir() -> MachineEnv {
+    let env = MachineEnv::new();
+    write_home_file(&env, "leak.txt", b"aws=AKIAIOSFODNN7EXAMPLE\n");
+    env
+}
+
+/// A Keeper export with one unimportable record, one good one, and a shared
+/// folder whose ACL has no xv equivalent.
+fn keeper_import_env() -> MachineEnv {
+    let env = MachineEnv::new();
+    write_home_file(
+        &env,
+        "keeper.json",
+        br#"{"shared_folders":[{"path":"Team","can_edit":true,"permissions":[{"name":"alice@example.com"}]}],
+            "records":[{"title":"Empty"},{"title":"Good","login":"u","password":"p"}]}"#,
+    );
+    env
+}
+
+/// One readable upload path; the batch's second path never exists.
+fn upload_batch_env() -> MachineEnv {
+    let env = MachineEnv::new();
+    write_home_file(&env, "good.txt", b"good");
+    env
+}
+
+/// A local directory for `file sync` to walk.
+fn sync_env() -> MachineEnv {
+    let env = MachineEnv::new();
+    write_home_file(&env, "data/a.txt", b"alpha");
+    write_home_file(&env, "data/b.txt", b"beta");
+    env
+}
 
 #[test]
 fn migrate_clean_run_json_is_one_item_report() {
@@ -280,12 +370,7 @@ fn migrate_clean_run_csv_is_item_rows() {
 
 #[test]
 fn migrate_conflict_fail_is_one_envelope_without_a_report() {
-    let env = MachineEnv::new();
-    env.ok(&["set", "ALPHA", "--value", "a-value"]);
-    env.ok(&["vault", "create", "other"]);
-    env.ok(&["context", "use", "other", "--global"]);
-    env.ok(&["set", "ALPHA", "--value", "other-value"]);
-    env.ok(&["context", "use", "default", "--global"]);
+    let env = conflicting_vaults();
 
     let out = env
         .xv()
@@ -361,10 +446,6 @@ fn migrate_dry_run_json_is_one_plan_document() {
 // Task 4 — bulk and narrated commands
 // ---------------------------------------------------------------------------
 
-/// The reserved attachment-key custody name. A bulk `set` refuses it outright,
-/// which is the one deterministic per-item failure the local backend offers.
-const RESERVED_KEY: &str = "xv-attachment-key";
-
 #[test]
 fn bulk_set_json_is_one_item_report() {
     let env = MachineEnv::new();
@@ -403,8 +484,8 @@ fn bulk_set_partial_failure_is_one_envelope_with_a_report() {
         .xv()
         .args([
             "set",
-            &format!("{RESERVED_KEY}=nope"),
-            "GOOD=fine",
+            &format!("{RESERVED_KEY}={CANARY}"),
+            &format!("GOOD={CANARY}"),
             "--format",
             "json",
         ])
@@ -436,7 +517,7 @@ fn bulk_set_partial_failure_is_one_envelope_with_a_report() {
         "{doc}"
     );
     // Never a value.
-    assert!(!stdout.contains("fine"), "stdout:\n{stdout}");
+    assert!(!stdout.contains(CANARY), "stdout:\n{stdout}");
 }
 
 /// Human mode keeps every word of the bulk summary, on stderr, with nothing
@@ -529,9 +610,7 @@ fn mv_dry_run_human_preview_is_on_stderr() {
 /// is the bare envelope — the same rule `migrate --on-conflict fail` follows.
 #[test]
 fn mv_collision_is_one_envelope_and_no_preview_on_stdout() {
-    let env = MachineEnv::new();
-    env.ok(&["set", "ALPHA", "--value", "a-value"]);
-    env.ok(&["set", "BETA", "--value", "b-value"]);
+    let env = two_secrets_one_vault();
     let out = env
         .xv()
         .args(["mv", "ALPHA", "BETA", "--format", "json"])
@@ -557,17 +636,11 @@ fn mv_collision_is_one_envelope_and_no_preview_on_stdout() {
 
 #[test]
 fn vault_import_dry_run_with_a_rejected_record_is_one_envelope_with_a_report() {
-    let env = MachineEnv::new();
-    let import_path = env.home.join("keeper.json");
     // One unimportable record, one good one, and a shared folder whose ACL has
     // no xv equivalent — the last produces a fidelity-loss advisory that no
     // item can carry, so it must reach stderr even in machine mode.
-    std::fs::write(
-        &import_path,
-        r#"{"shared_folders":[{"path":"Team","can_edit":true,"permissions":[{"name":"alice@example.com"}]}],
-            "records":[{"title":"Empty"},{"title":"Good","login":"u","password":"p"}]}"#,
-    )
-    .expect("write keeper file");
+    let env = keeper_import_env();
+    let import_path = env.home.join("keeper.json");
 
     let out = env
         .xv()
@@ -649,7 +722,7 @@ fn copy_json_is_one_destination_metadata_document() {
     assert!(doc["version"].is_string(), "{doc}");
     assert!(!stdout.contains("Copying"), "stdout:\n{stdout}");
     assert!(!stdout.contains("Source:"), "stdout:\n{stdout}");
-    assert!(!stdout.contains("a-value"), "stdout:\n{stdout}");
+    assert!(!stdout.contains(CANARY), "stdout:\n{stdout}");
 }
 
 /// A dry run writes nothing, so the plan takes the destination metadata's
@@ -687,7 +760,7 @@ fn copy_dry_run_json_is_one_plan_document() {
     assert_eq!(doc["planned"]["to"]["name"], "ALPHA", "{doc}");
     assert_eq!(doc["planned"]["move"], false, "{doc}");
     assert!(!stdout.contains("Copying"), "stdout:\n{stdout}");
-    assert!(!stdout.contains("a-value"), "stdout:\n{stdout}");
+    assert!(!stdout.contains(CANARY), "stdout:\n{stdout}");
 
     // A dry run writes nothing.
     env.ok(&["context", "use", "other", "--global"]);
@@ -741,21 +814,12 @@ fn move_json_is_one_destination_metadata_document() {
     assert_eq!(doc["original_name"], "ALPHA", "{doc}");
     assert!(!stdout.contains("Moving"), "stdout:\n{stdout}");
     assert!(!stdout.contains("Deleting source"), "stdout:\n{stdout}");
-    assert!(!stdout.contains("a-value"), "stdout:\n{stdout}");
+    assert!(!stdout.contains(CANARY), "stdout:\n{stdout}");
 }
 
 #[test]
 fn rotate_due_json_is_one_item_report() {
-    let env = MachineEnv::new();
-    env.ok(&["set", "STALE", "--value", "old-value"]);
-    env.ok(&[
-        "update",
-        "STALE",
-        "--tag",
-        "xv:rotate_every=30d",
-        "--tag",
-        "xv:rotated_at=2020-01-01T00:00:00Z",
-    ]);
+    let env = due_secret();
 
     let out = env
         .xv()
@@ -775,7 +839,7 @@ fn rotate_due_json_is_one_item_report() {
     assert_eq!(doc["summary"]["succeeded"], 1, "{doc}");
     assert_eq!(doc["items"][0]["name"], "STALE", "{doc}");
     assert_eq!(doc["items"][0]["status"], "ok", "{doc}");
-    assert!(!stdout.contains("old-value"), "stdout:\n{stdout}");
+    assert!(!stdout.contains(CANARY), "stdout:\n{stdout}");
 }
 
 #[test]
@@ -828,8 +892,7 @@ fn write_home_file(env: &MachineEnv, relative: &str, contents: &[u8]) -> PathBuf
 /// `ItemReport` attached under `report` — and the run exits non-zero.
 #[test]
 fn file_upload_batch_partial_failure_json_is_one_envelope_with_report() {
-    let env = MachineEnv::new();
-    write_home_file(&env, "good.txt", b"good");
+    let env = upload_batch_env();
 
     let out = env
         .xv()
@@ -895,9 +958,7 @@ fn file_upload_batch_clean_json_is_one_item_report() {
 /// sync summary is the run's single YAML document.
 #[test]
 fn file_sync_dry_run_yaml_is_one_document() {
-    let env = MachineEnv::new();
-    write_home_file(&env, "data/a.txt", b"alpha");
-    write_home_file(&env, "data/b.txt", b"beta");
+    let env = sync_env();
 
     let out = env
         .xv()
@@ -995,9 +1056,7 @@ fn transfer_preview_yaml_is_yaml_not_json() {
 /// did before the machine-output contract.
 #[test]
 fn file_sync_piped_auto_keeps_the_json_summary_on_stdout() {
-    let env = MachineEnv::new();
-    write_home_file(&env, "data/a.txt", b"alpha");
-    write_home_file(&env, "data/b.txt", b"beta");
+    let env = sync_env();
 
     let out = env
         .xv()
@@ -1018,4 +1077,214 @@ fn file_sync_piped_auto_keeps_the_json_summary_on_stdout() {
     assert_eq!(doc["downloaded"], 0, "{doc}");
     assert_eq!(doc["deleted"], 0, "{doc}");
     assert_eq!(doc["skipped"], 0, "{doc}");
+}
+
+// ---------------------------------------------------------------------------
+// The contract itself: every machine-mode run writes exactly one document
+// ---------------------------------------------------------------------------
+
+/// One row of the contract matrix: a fixture that builds the situation and the
+/// command to run in it, minus the `--format` pair the matrix supplies.
+struct Scenario {
+    name: &'static str,
+    setup: fn() -> MachineEnv,
+    args: &'static [&'static str],
+}
+
+/// The command list from the design doc's Verification section. Each one is
+/// run three times, once per machine format.
+const SCENARIOS: &[Scenario] = &[
+    Scenario {
+        name: "scan with findings",
+        setup: leaking_workdir,
+        args: &["scan"],
+    },
+    Scenario {
+        name: "rotate --check with a due secret",
+        setup: due_secret,
+        args: &["rotate", "--check"],
+    },
+    Scenario {
+        name: "vault import --dry-run with a rejected record",
+        setup: keeper_import_env,
+        args: &[
+            "vault",
+            "import",
+            "default",
+            "--fmt",
+            "keeper",
+            "--input",
+            "keeper.json",
+            "--dry-run",
+        ],
+    },
+    Scenario {
+        name: "bulk set with an invalid name",
+        setup: empty_env,
+        args: &[
+            "set",
+            "xv-attachment-key=machine-canary-2b6f",
+            "GOOD=machine-canary-2b6f",
+        ],
+    },
+    Scenario {
+        name: "mv with a collision",
+        setup: two_secrets_one_vault,
+        args: &["mv", "ALPHA", "BETA"],
+    },
+    Scenario {
+        name: "migrate clean",
+        setup: seeded_two_secrets,
+        args: &["migrate", "--from", "local:default", "--to", "local:other"],
+    },
+    Scenario {
+        name: "migrate conflict",
+        setup: conflicting_vaults,
+        args: &[
+            "migrate",
+            "--from",
+            "local:default",
+            "--to",
+            "local:other",
+            "--on-conflict",
+            "fail",
+        ],
+    },
+    Scenario {
+        name: "file upload batch with a missing path",
+        setup: upload_batch_env,
+        args: &["file", "upload", "good.txt", "missing.txt"],
+    },
+    Scenario {
+        name: "copy",
+        setup: seeded_two_secrets,
+        args: &["copy", "ALPHA", "--from", "default", "--to", "other"],
+    },
+    Scenario {
+        name: "move",
+        setup: seeded_two_secrets,
+        args: &[
+            "move", "ALPHA", "--from", "default", "--to", "other", "--force",
+        ],
+    },
+    Scenario {
+        name: "file sync --dry-run",
+        setup: sync_env,
+        args: &["file", "sync", "data", "--direction", "up", "--dry-run"],
+    },
+    Scenario {
+        name: "version",
+        setup: empty_env,
+        args: &["version"],
+    },
+];
+
+/// Human status lines are `[ok] …`/`[warn] …`-shaped, so a bare `[` at the
+/// start of a stderr line is only a violation when it is not one of those
+/// prefixes — an unprefixed `[` (or any `{`) means a JSON document escaped
+/// onto stderr.
+fn stderr_line_is_a_document(line: &str) -> bool {
+    if line.starts_with('{') {
+        return true;
+    }
+    if !line.starts_with('[') {
+        return false;
+    }
+    !["[ok] ", "[error] ", "[warn] ", "[info] ", "[hint] "]
+        .iter()
+        .any(|prefix| line.starts_with(prefix))
+}
+
+/// Assert stdout parses as exactly one CSV document: either it is empty (the
+/// command failed before writing a row) or it has a header row and every
+/// record has the same field count.
+#[track_caller]
+fn one_csv_document(stdout: &str, label: &str) {
+    if stdout.trim().is_empty() {
+        return;
+    }
+    let mut reader = csv::ReaderBuilder::new()
+        .flexible(false)
+        .from_reader(stdout.as_bytes());
+    let headers = reader
+        .headers()
+        .unwrap_or_else(|e| panic!("{label}: CSV stdout has no header row ({e}):\n{stdout}"))
+        .clone();
+    assert!(
+        !headers.is_empty(),
+        "{label}: CSV stdout has an empty header row:\n{stdout}"
+    );
+    for record in reader.records() {
+        record.unwrap_or_else(|e| panic!("{label}: CSV stdout does not parse ({e}):\n{stdout}"));
+    }
+}
+
+/// The whole contract, on every command the design doc names, in every machine
+/// format:
+///
+/// * stdout holds exactly one document (or, for CSV, only rows);
+/// * an envelope's `error.exit_code` is the process's real exit code;
+/// * no document escapes onto stderr;
+/// * no secret value appears on either stream.
+#[test]
+fn every_machine_mode_run_writes_exactly_one_document() {
+    for scenario in SCENARIOS {
+        for format in ["json", "yaml", "csv"] {
+            let label = format!("{} [--format {format}]", scenario.name);
+            let env = (scenario.setup)();
+            let out = env
+                .xv()
+                .args(scenario.args)
+                .args(["--format", format])
+                .output()
+                .unwrap_or_else(|e| panic!("{label}: could not run xv: {e}"));
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+
+            // A signal-terminated run has no code to compare against.
+            let code = out.status.code().unwrap_or_else(|| {
+                panic!("{label}: no exit status\nstdout:\n{stdout}\nstderr:\n{stderr}")
+            });
+
+            match format {
+                "json" => {
+                    let doc = one_json_document(&stdout);
+                    if let Some(error) = doc.get("error").filter(|e| !e.is_null()) {
+                        assert_eq!(
+                            error["exit_code"].as_i64(),
+                            Some(i64::from(code)),
+                            "{label}: the envelope's exit_code must be the process's:\n{doc}"
+                        );
+                    }
+                }
+                "yaml" => {
+                    let doc = one_yaml_document(&stdout);
+                    if let Some(error) = doc.get("error").filter(|e| !e.is_null()) {
+                        assert_eq!(
+                            error["exit_code"].as_i64(),
+                            Some(i64::from(code)),
+                            "{label}: the envelope's exit_code must be the process's:\n{doc}"
+                        );
+                    }
+                }
+                _ => one_csv_document(&stdout, &label),
+            }
+
+            for line in stderr.lines() {
+                assert!(
+                    !stderr_line_is_a_document(line),
+                    "{label}: a document escaped onto stderr: {line}\nstderr:\n{stderr}"
+                );
+            }
+
+            assert!(
+                !stdout.contains(CANARY),
+                "{label}: the canary value reached stdout:\n{stdout}"
+            );
+            assert!(
+                !stderr.contains(CANARY),
+                "{label}: the canary value reached stderr:\n{stderr}"
+            );
+        }
+    }
 }
