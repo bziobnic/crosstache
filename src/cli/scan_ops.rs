@@ -245,7 +245,7 @@ async fn execute_scan_paths(
         }
     }
 
-    render_findings(&outcome.findings, hook, format)
+    render_findings(&outcome.findings, hook, format, config)
 }
 
 async fn execute_scan_staged(
@@ -274,7 +274,7 @@ async fn execute_scan_staged(
     let excludes = build_exclude_set(&effective_excludes(scan_cfg.as_ref()))?;
     let findings = scan_staged(&engine, &excludes)?;
 
-    render_findings(&findings, hook, format)
+    render_findings(&findings, hook, format, config)
 }
 
 async fn execute_scan_head(
@@ -304,7 +304,7 @@ async fn execute_scan_head(
     let engine = MatchEngine::new(&secrets, &patterns, min_value_length);
     let findings = scan_head(&engine, &excludes)?;
 
-    render_findings(&findings, hook, format)
+    render_findings(&findings, hook, format, config)
 }
 
 async fn execute_scan_install(force: bool, _config: &Config) -> Result<()> {
@@ -343,11 +343,17 @@ fn render_findings(
     findings: &[Finding],
     hook: bool,
     format: crate::utils::format::OutputFormat,
+    config: &Config,
 ) -> Result<()> {
     use crate::utils::format::OutputFormat;
     let resolved = format.resolve_for_stdout();
 
-    if matches!(resolved, OutputFormat::Json | OutputFormat::Yaml) {
+    if crate::utils::machine::is_machine_mode(config) {
+        // Machine mode: stdout holds exactly one document for the run. Findings
+        // are parked here and `main` emits them — alone on a clean scan, or
+        // attached to the `xv-scan-leak-detected` envelope under `report`.
+        crate::utils::machine::report(config, &findings);
+    } else if matches!(resolved, OutputFormat::Json | OutputFormat::Yaml) {
         let rendered = match resolved {
             OutputFormat::Json => serde_json::to_string_pretty(findings).unwrap_or_default(),
             OutputFormat::Yaml => serde_yaml::to_string(findings).unwrap_or_default(),
@@ -398,7 +404,7 @@ mod tests {
 
     #[test]
     fn render_no_findings_returns_ok() {
-        let result = render_findings(&[], true, OutputFormat::Plain);
+        let result = render_findings(&[], true, OutputFormat::Plain, &Config::default());
         assert!(result.is_ok());
     }
 
@@ -413,7 +419,7 @@ mod tests {
             kind: FindingKind::SecretValue,
             severity: Severity::Critical,
         };
-        let result = render_findings(&[f], true, OutputFormat::Json);
+        let result = render_findings(&[f], true, OutputFormat::Json, &Config::default());
         match result {
             Err(crate::error::CrosstacheError::ScanLeakDetected { count }) => {
                 assert_eq!(count, 1);

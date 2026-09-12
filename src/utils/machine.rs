@@ -35,8 +35,6 @@ pub fn is_machine_mode(config: &Config) -> bool {
 /// Park `report` as the run's single machine document. No-op outside machine
 /// mode. Nothing is printed here; `main` renders the document once, in the
 /// resolved format, after the command returns.
-// Callers land in Task 2+.
-#[allow(dead_code)]
 pub fn report<T: Serialize>(config: &Config, report: &T) {
     if !is_machine_mode(config) {
         return;

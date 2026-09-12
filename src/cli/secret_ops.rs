@@ -3396,6 +3396,12 @@ async fn execute_rotate_check(
         config.runtime_columns.clone(),
     );
 
+    // In machine mode stdout holds exactly one document for the whole run, so
+    // the rows are parked for `main` to emit — alone when nothing is due, or
+    // attached to the `xv-rotation-due` envelope under `report` when something
+    // is. Outside machine mode the rows are printed here exactly as before.
+    let machine = crate::utils::machine::is_machine_mode(&config);
+
     if rows.is_empty() {
         if human_table_like {
             formatter.validate_columns::<RotationRow>()?;
@@ -3403,13 +3409,19 @@ async fn execute_rotate_check(
                 "No secrets in '{vault_name}' have a rotation policy. Set one with \
                  'xv update <name> --rotate-every 90d'."
             ));
+        } else if machine {
+            crate::utils::machine::report(&config, &rows);
         } else {
             println!("{}", formatter.format_table(&rows)?);
         }
         return Ok(());
     }
 
-    println!("{}", formatter.format_table(&rows)?);
+    if machine {
+        crate::utils::machine::report(&config, &rows);
+    } else {
+        println!("{}", formatter.format_table(&rows)?);
+    }
 
     let due: Vec<&str> = statuses
         .iter()

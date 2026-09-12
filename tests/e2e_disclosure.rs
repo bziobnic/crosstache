@@ -678,8 +678,12 @@ fn boundary_scan_matches_the_value_without_printing_it() {
         .expect("write scan input");
     let target = target.display().to_string();
     let combined = env.output_of(&["--format", "json", "scan", &target]);
+    // A scan that finds something fails, so in machine mode the findings ride
+    // inside the error envelope under `report` (compactly encoded) rather than
+    // as a second, pretty-printed document.
+    let compact = combined.replace("\": \"", "\":\"");
     assert!(
-        combined.contains("\"secret_name\": \"LEAKY\""),
+        compact.contains("\"secret_name\":\"LEAKY\""),
         "scan failed to match the planted value:\n{combined}"
     );
     // The finding names the secret and the file/line; it never echoes what
